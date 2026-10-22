@@ -176,12 +176,21 @@ const FOLD_TRANSCRIPT = [
 
 const sessions = new Map()
 
+/** The workspace registry as this session sees it: a saved Memory handover shows on its workspace. */
+function workspacesPayload(state) {
+  return {
+    workspaces: WORKSPACES.map(w => (state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w)),
+    active: WORKSPACES[0].name,
+    provider_options: [{ value: 'claude', label: 'Claude' }],
+  }
+}
+
 function sessionOf(req) {
   const cookie = req.headers.cookie || ''
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' } }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {} }
     sessions.set(id, state)
   }
   return state
@@ -342,17 +351,30 @@ function terminalEmit(session, ws, text) {
 async function terminalApi(req, res, pathname, url, state) {
   const terminals = terminalSessions(state)
   if (pathname === '/api/terminal/status' && req.method === 'GET') {
+    // No grant until the browser has asked for one: the pane obtains it
+    // by itself, so a spec that opens the terminal exercises that path
+    // rather than finding a live grant waiting for it.
     return sendJson(res, {
       available: true,
       reason: '',
       platform: TERMINAL_PLATFORM,
       host: TERMINAL_HOST,
-      unlock_expires_in: 900,
+      unlock_expires_in: state.terminalUnlocked ? 900 : 0,
       detached_ttl_seconds: 600,
     })
   }
   if (pathname === '/api/terminal/unlock' && req.method === 'POST') {
-    await readBody(req)
+    // The engine's route takes no body: the signed-in session is the
+    // terminal's trust boundary, so a request that carries one is refused.
+    const raw = await readRawBody(req)
+    if (raw.length > 0) {
+      return sendJson(
+        res,
+        { ok: false, reason: 'bad_request', error: 'this route takes no body.' },
+        400,
+      )
+    }
+    state.terminalUnlocked = true
     return sendJson(res, { ok: true, expires_in: 900 })
   }
   if (pathname === '/api/terminal/sessions' && req.method === 'GET') {
@@ -408,11 +430,7 @@ const GET_ROUTES = {
     auth_required: false,
     update_available: false,
   }),
-  '/api/workspaces': () => ({
-    workspaces: WORKSPACES,
-    active: WORKSPACES[0].name,
-    provider_options: [{ value: 'claude', label: 'Claude' }],
-  }),
+  '/api/workspaces': (req) => workspacesPayload(sessionOf(req)),
   // /api/projects, /api/chats and /api/schedules are bare arrays, not envelopes.
   '/api/projects': () => PROJECTS,
   // The chat list carries this session's suggested commands: a chat holds the
@@ -436,6 +454,13 @@ const GET_ROUTES = {
   // rather than replacing these defaults for everybody: the other review specs
   // assert the empty and the plain states, which must stay the default.
   '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
+  // Settings > Workspace > Overview's Memory handover card.
+  '/api/proposals/handover': (req, url) => ({
+    workspace: url.searchParams.get('workspace') || WORKSPACES[0].name,
+    handover: sessionOf(req).handover[url.searchParams.get('workspace') || WORKSPACES[0].name] || 'off',
+    acting_available: true,
+    agreement: { decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9, predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0, suggest_handover: false },
+  }),
   '/api/proposals/history': (req) => (sessionOf(req).verification ? VERIFICATION_HISTORY : { rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
   '/api/vault/graph': (req) => (sessionOf(req).verification
     ? { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
@@ -611,6 +636,13 @@ async function readBody(req) {
   for await (const chunk of req) chunks.push(chunk)
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return {} }
+}
+
+/** The raw request body, as bytes: what the engine's unlock route looks at. */
+async function readRawBody(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  return Buffer.concat(chunks)
 }
 
 // ── Static files ────────────────────────────────────────────────────────
@@ -805,6 +837,17 @@ const server = http.createServer(async (req, res) => {
       }
       state.appearance.revision = `a${Number(state.appearance.revision.slice(1)) + 1}`
       return sendJson(res, state.appearance)
+    }
+    // A workspace PATCH keeps the Memory handover it saves, per session, and
+    // answers with the registry (the store replaces its list from the reply).
+    const workspacePatch = req.method === 'PATCH' ? /^\/api\/workspaces\/([^/]+)$/.exec(pathname) : null
+    if (workspacePatch) {
+      const state = sessionOf(req)
+      const name = decodeURIComponent(workspacePatch[1])
+      if (body && WORKSPACES.some(w => w.name === name) && typeof body.memory_handover === 'string') {
+        state.handover[name] = body.memory_handover
+      }
+      return sendJson(res, workspacesPayload(state))
     }
     if (req.method === 'PATCH') {
       const chatId = chatIdFromPath(pathname)

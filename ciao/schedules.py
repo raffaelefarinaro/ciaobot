@@ -1661,11 +1661,10 @@ class ScheduleStore:
         self._save_system_state(state)
 
     def _serialize_entry(self, entry: ScheduleEntry) -> dict:
-        payload = asdict(entry)
-        # `mode` is a runtime-only binding; `model` is user-configurable
-        # (empty string means "use current default at dispatch time").
-        payload.pop("mode", None)
-        return payload
+        # `mode` is stored as set: "" (every PWA-created row) inherits at
+        # dispatch, and a non-empty value is the ceiling an agent-created
+        # routine was pinned to, which must survive a restart.
+        return asdict(entry)
 
 
 def entry_mode(entry: "ScheduleEntry") -> BridgeMode:

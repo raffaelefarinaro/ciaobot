@@ -1,4 +1,4 @@
-import { SETTINGS_NAV } from './settingsNav'
+import { SETTINGS_HIDDEN_PAGES, SETTINGS_NAV } from './settingsNav'
 
 /**
  * Links that point into the app itself rather than out of it.
@@ -35,11 +35,13 @@ const PAGE_HREFS = [
   '/memory/history',
 ]
 
-// Settings tabs come from the sidebar's own rail, so a renamed tab cannot
-// leave this list behind. `/settings/home` is the General tab by name; the
-// shipped app links to `/settings#install-app` and both spellings land there.
+// Settings tabs come from the sidebar's own rail (plus the pages with no rail
+// item), so a renamed tab cannot leave this list behind. `/settings/home` is
+// the General tab by name; the shipped app links to `/settings#install-app`
+// and both spellings land there.
 const SETTINGS_HREFS = [
   ...SETTINGS_NAV.map(item => item.to),
+  ...SETTINGS_HIDDEN_PAGES.map(item => item.to),
   '/settings/home',
   '/settings/home#install-app',
   '/settings#install-app',

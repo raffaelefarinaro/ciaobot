@@ -34,6 +34,7 @@ const PAGES = [
   '/memory/history',
   '/settings',
   '/settings/home',
+  '/settings/workspace',
   '/settings/workspaces',
   '/settings/providers',
   '/settings/skills',
@@ -81,6 +82,11 @@ describe('isAppRouteHref', () => {
     ]) {
       expect(isAppRouteHref(href), href).toBe(true)
     }
+  })
+
+  it('still treats /settings/workspaces as an app link', () => {
+    expect(isAppRouteHref('/settings/workspaces')).toBe(true)
+    expect(isAppRouteHref('/settings/workspaces#new-workspace')).toBe(true)
   })
 
   it('knows a task address by its full record id only', () => {

@@ -6,7 +6,7 @@ This document is for agents and operators working inside an installed Ciaobot wo
 
 - `CIAO_CUSTOMIZATION.md`: this guide.
 - `.env`: server config (auth, host/port) and runtime paths.
-- `.runtime/workspaces.json`: logical workspaces, managed from Settings → Workspaces.
+- `.runtime/workspaces.json`: logical workspaces, managed from Settings → Manage workspaces.
 - `.claude/agents/`: project agents available to Claude-backed chats.
 - `.claude/commands/`: slash commands available to Claude-backed chats.
 - `.claude/skills/`: skills available to Claude-backed chats.
@@ -23,7 +23,7 @@ Ciaobot has two workspace concepts:
 - `CIAO_WORKSPACE`: the filesystem root for this local Ciaobot instance. It contains `.env`, `.runtime/`, `.claude/`, and usually `memory-vault/`.
 - Logical workspaces: named chat spaces such as `default`, `personal`, `work`, or `client-a`. These appear in the PWA sidebar and route projects, chats, vault roots, model defaults, and integration profiles.
 
-Logical workspaces are managed from Settings → Workspaces and stored in `.runtime/workspaces.json`, the only source of the workspace list. `.env` does not configure them: the retired `CIAO_WORKSPACES` variable is ignored (a server start imports it into the registry once, then warns until it is removed from `.env`).
+Logical workspaces are managed from Settings → Manage workspaces and stored in `.runtime/workspaces.json`, the only source of the workspace list. `.env` does not configure them: the retired `CIAO_WORKSPACES` variable is ignored (a server start imports it into the registry once, then warns until it is removed from `.env`).
 
 Example `.runtime/workspaces.json`:
 
@@ -65,6 +65,8 @@ for new chats, all set on the chat providers card in Settings → Providers. A C
 own defaults from the signed-in account's catalog. The permission mode chooses
 how much a chat may do without asking: manual (ask for every action), auto
 (allow safe work, ask on risky actions), or bypass (allow everything).
+A workspace can override these per provider (its `provider_overrides`); an empty
+override uses the Providers value.
 
 ## API Keys and Secrets
 
@@ -137,7 +139,7 @@ Important fields:
 
 Safe workspace-level changes:
 
-- Manage workspaces in Settings → Workspaces.
+- Manage workspaces in Settings → Manage workspaces.
 - Add project docs, vault references, and memory pages.
 - Add or update canonical `skills/`, `subagents/`, and `commands/` assets, then run `ciao sync-skills`.
 

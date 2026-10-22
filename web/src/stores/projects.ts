@@ -1579,7 +1579,7 @@ export const useProjectStore = defineStore('projects', () => {
       generalProject((payload.workspace as WorkspaceName) || activeWorkspace.value)
     if (!project) throw new Error('No project available to restore into')
     if (project.workspace !== activeWorkspace.value) {
-      await switchWorkspace(project.workspace)
+      if (!(await switchWorkspace(project.workspace))) return
     }
     await createChat(project.project_id, DEFAULT_CHAT_TITLE, payload.text)
     clearChatDraft(payload.originalChatId)
@@ -4020,9 +4020,23 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs(chatId)
   }
 
-  async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }) {
+  // Set by the open Settings workspace editor so a switch away from unsaved
+  // edits asks first. Returns false to keep the current workspace.
+  let workspaceSwitchGuard: ((from: WorkspaceName) => Promise<boolean>) | null = null
+  function setWorkspaceSwitchGuard(guard: ((from: WorkspaceName) => Promise<boolean>) | null): void {
+    workspaceSwitchGuard = guard
+  }
+  function clearWorkspaceSwitchGuard(guard: (from: WorkspaceName) => Promise<boolean>): void {
+    if (workspaceSwitchGuard === guard) workspaceSwitchGuard = null
+  }
+
+  // Resolves true once the workspace is active (or already was), false when the
+  // settings guard declined: a caller that goes on to act in `ws` must stop.
+  async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }): Promise<boolean> {
     const transition = options?.transition !== false
-    if (activeWorkspace.value === ws) return
+    if (activeWorkspace.value === ws) return true
+    if (workspaceSwitchGuard && !(await workspaceSwitchGuard(activeWorkspace.value))) return false
+    if (activeWorkspace.value === ws) return true
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
     // A workspace switch expresses scope, not a request to open an arbitrary
@@ -4036,6 +4050,7 @@ export const useProjectStore = defineStore('projects', () => {
       const { router } = await import('../router')
       await router.push('/')
     }
+    return true
   }
 
   // ── WebSocket ───────────────────────────────────────────────────────
@@ -4999,7 +5014,7 @@ export const useProjectStore = defineStore('projects', () => {
         // A Google Workspace login went dead (revoked/expired token). The
         // server debounces to one event per breakage; surface it as a
         // persistent error toast. The fix is re-authentication in
-        // Settings → Workspaces, so the Fix action navigates there rather
+        // Settings → Manage workspaces, so the Fix action navigates there rather
         // than seeding a chat. The PWA push banner is the other
         // channel (see push.py); this is the live in-app signal.
         pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
@@ -6840,7 +6855,7 @@ export const useProjectStore = defineStore('projects', () => {
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
+    switchChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,

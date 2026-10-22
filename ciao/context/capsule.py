@@ -121,7 +121,7 @@ def _file_access_line(file_roots: Sequence[str]) -> str:
     return (
         f"file_access=workspace only: read and write under {roots}; other paths "
         'are refused by the sandbox ("Operation not permitted"). The owner changes '
-        "this in Settings → Workspaces → Edit → File access."
+        "this in Settings → Overview → File access."
     )
 
 

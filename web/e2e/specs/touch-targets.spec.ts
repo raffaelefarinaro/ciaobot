@@ -12,6 +12,7 @@ const TABS = [
   '/settings/appearance',
   '/settings/access',
   '/settings/advanced',
+  '/settings/workspace',
   '/settings/workspaces',
   '/settings/providers',
   '/settings/skills',
@@ -42,6 +43,7 @@ const MAIN_SURFACES: Array<[string, string]> = [
 const POPUP_SURFACES: Array<[string, string]> = [
   ...MAIN_SURFACES,
   ['/chat/alpha-chat-1', COMPOSER],
+  ['/settings/workspace', '.settings-main'],
   ['/settings/workspaces', '.settings-main'],
   ['/settings/providers', '.settings-main'],
   ['/settings/advanced', '.settings-main'],
@@ -90,14 +92,14 @@ async function measure(page: Page, scope = 'body') {
   }, { min: TOUCH_MIN, scope })
 }
 
-/** Visible popup triggers: menus, popovers, disclosure buttons and Settings' New/Edit forms. */
+/** Visible popup triggers: menus, popovers, disclosure buttons and Settings' New form. */
 const TRIGGER = '[aria-haspopup], [aria-expanded="false"]'
 const TRIGGER_CAP = 80
 // Opening these proves the run reached each kind of popup, not just some DOM change.
 const KNOWN_TRIGGERS = [
   'Model for the new chat',
   '/settings/workspaces › New workspace',
-  '/settings/workspaces › Edit workspace',
+  '/settings/workspaces › Actions for workspace',
   'Show chat details',
 ]
 // Triggers a headless run may legitimately fail to click (covered by another element).
@@ -277,7 +279,7 @@ test.describe('touch targets', () => {
       expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
     }
     expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED)
-    for (const label of ['About Google Workspace integration', 'About GWS profiles']) {
+    for (const label of ['About Google Workspace integration']) {
       expect(measuredPanels.has(label), `panel "${label}" was never measured`).toBe(true)
     }
     expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])

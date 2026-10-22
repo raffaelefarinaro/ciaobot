@@ -12,10 +12,10 @@ Three routes, and the same three gates in the same order on each of them:
   from this engine's own page, over a secure transport when it is remote;
 * **the signed session** — the terminal is in neither middleware allowlist,
   so a local process cannot skip it;
-* **a fresh grant** (``terminal_grant``) — the browser must have unlocked
-  the terminal with the password. No grant is ``403 locked``: a caller that
-  has not unlocked has no session to reach, and nothing about the terminal
-  is readable before the unlock.
+* **a fresh grant** (``terminal_grant``) — the browser must hold a grant
+  for this engine. No grant is ``403 locked``: a caller without one has no
+  session to reach, and nothing about the terminal is readable until the
+  grant exists.
 
 The order is the one the unlock uses, and it is the order that matters: the
 policy comes first, so a request that is not this engine's own page never
@@ -103,7 +103,10 @@ _MANAGER_MESSAGES: dict[str, str] = {
 _DEFAULT_REFUSAL = "the terminal session request was refused."
 
 #: What the locked answer says.
-_LOCKED = "the terminal is locked; unlock it before using it."
+_LOCKED = (
+    "there is no terminal grant for this browser; "
+    "POST /api/terminal/unlock obtains one."
+)
 
 
 # ── the helpers ───────────────────────────────────────────────────────────

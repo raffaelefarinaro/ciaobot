@@ -57,7 +57,7 @@ A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
 PWA. Existing-folder setup preserves the selected notes in place so the
 onboarding agent can inspect them; `ciao os-audit` then offers a model-guided,
-backed-up migration into the standard named folder. Settings → Workspaces →
+backed-up migration into the standard named folder. Settings → Manage workspaces →
 Archive never deletes or merges a workspace: it moves the folder intact to
 `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/` and unregisters it
 (`ciao/workspace_archive.py`); tests for it live in
@@ -649,7 +649,7 @@ For **After this update** changes (Home's update-task group, or the Settings
 history), the separation is the thing to preserve: `HousekeepingStrip.vue` renders
 the operator-action tiles and the update-task group as two sibling sections, and a
 blocking tile must stay above both, unmissable, with no "hide it" button of its
-own. The group and Settings → Update task history read the same
+own. The group and Settings → Overview → Update task history read the same
 `GET /api/update-tasks?workspace=` rows, so a change to one state has to be checked
 in both: `offered` starts, `in_progress` resumes, `waiting_review` offers Review
 proposals (the real queue at `/memory/review?show=suggested`) *and* Resume,

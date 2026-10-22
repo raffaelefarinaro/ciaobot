@@ -3,9 +3,15 @@
  * The browser terminal's pane: the surface a person actually touches.
  *
  * The store owns the wire — the socket, the offsets, the session list, the
- * unlock. This pane owns the screen and the controls around it. The rules
+ * grant. This pane owns the screen and the controls around it. The rules
  * that are easy to get wrong are written down here rather than left to the
  * next reader's memory.
+ *
+ * **There is no unlock form.** The terminal used to ask for the password
+ * again before it showed a shell. It does not any more: the signed-in
+ * session is the terminal's trust boundary, and the store asks the engine
+ * for the grant by itself. The pane has nothing to ask for, so it shows
+ * the shell.
  *
  * **One screen, one session.** A renderer is a physical terminal: it is
  * created for the session the pane is showing and disposed when the pane
@@ -70,10 +76,6 @@ let screenToken = 0
 let measured: { cols: number; rows: number } | null = null
 /** The control that opened the pane, so the keyboard can go back to it. */
 let opener: HTMLElement | null = null
-/** The password, while it is being typed. It is handed over and forgotten. */
-const password = ref('')
-/** The field itself, so what was typed is cleared the moment it is handed over. */
-const passwordEl = ref<HTMLInputElement | null>(null)
 /** A phone-sized pane is a drawer; a wide one docks beside the chat. */
 const isMobile = ref(false)
 /**
@@ -186,16 +188,6 @@ async function create(): Promise<void> {
 
 function openSession(session: TerminalSessionInfo): void {
   store.selectSession(session.session_id)
-}
-
-async function unlock(): Promise<void> {
-  const entered = password.value
-  // The password goes to one request and is not kept: the field and the
-  // component's own copy are cleared before the answer comes back.
-  password.value = ''
-  if (passwordEl.value) passwordEl.value.value = ''
-  const ok = await store.unlock(entered)
-  if (ok) void nextTick(() => focusScreen())
 }
 
 async function takeover(): Promise<void> {
@@ -366,27 +358,7 @@ onBeforeUnmount(() => {
     <p v-if="truncatedMessage" class="tp-truncated" role="status">{{ truncatedMessage }}</p>
     <p v-if="store.error" class="tp-error" role="alert">{{ store.error }}</p>
 
-    <form v-if="store.phase === 'locked' && store.status?.available !== false" class="tp-unlock" @submit.prevent="unlock">
-      <label class="tp-unlock-label" for="tp-terminal-password">Terminal password</label>
-      <input
-        id="tp-terminal-password"
-        ref="passwordEl"
-        v-model="password"
-        class="tp-unlock-input"
-        type="password"
-        autocomplete="current-password"
-        :disabled="store.unlocking"
-      />
-      <button type="submit" class="btn-primary tp-unlock-submit" :disabled="store.unlocking">
-        {{ store.unlocking ? 'Unlocking…' : 'Unlock' }}
-      </button>
-      <p class="tp-unlock-hint">
-        The terminal is locked until the engine's password is entered. The
-        password is handed over once and not kept.
-      </p>
-    </form>
-
-    <div v-else-if="store.status?.available !== false" class="tp-body">
+    <div v-if="store.status?.available !== false" class="tp-body">
       <div class="tp-surface-wrap">
         <div ref="surfaceEl" class="tp-surface" @click="focusScreen"></div>
         <p v-if="store.phase === 'connecting' || store.phase === 'reconnecting'" class="tp-phase" role="status">
@@ -634,33 +606,6 @@ onBeforeUnmount(() => {
   font-size: var(--text-xs);
   color: var(--fg);
 }
-.tp-unlock {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  overflow: auto;
-}
-.tp-unlock-label { font-size: var(--text-sm); }
-.tp-unlock-input {
-  min-width: 220px;
-  padding: 6px 8px;
-  background: var(--bg-elev);
-  color: var(--fg);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  font: inherit;
-}
-.tp-unlock-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.tp-unlock-hint {
-  margin: 0;
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  max-width: 46ch;
-}
 
 /* The drawer: the terminal covers the pane it is in, because a shell needs
    the whole screen to be useful, and a narrow column beside a chat is not.
@@ -699,8 +644,7 @@ onBeforeUnmount(() => {
   .tp-actions :deep(button),
   .tp-session-open,
   .tp-takeover-button,
-  .tp-new,
-  .tp-unlock-submit {
+  .tp-new {
     min-height: var(--touch);
     min-width: var(--touch);
   }

@@ -5599,7 +5599,9 @@ async def schedule_detail(request: Request) -> JSONResponse:
         entry.description = str(body["description"]).strip()
     if "time" in body:
         entry.daily_time_utc = body["time"]
+    text_changed = False
     if "prompt" in body:
+        text_changed = body["prompt"] != entry.prompt
         entry.prompt = body["prompt"]
     if "timezone" in body:
         entry.timezone_name = body["timezone"]
@@ -5659,9 +5661,15 @@ async def schedule_detail(request: Request) -> JSONResponse:
         if "archive_policy" in body:
             entry.archive_policy = normalize_archive_policy(body.get("archive_policy"))
         if "command" in body:
-            entry.command = normalize_schedule_command(body.get("command"))
+            new_command = normalize_schedule_command(body.get("command"))
+            text_changed = text_changed or new_command != entry.command
+            entry.command = new_command
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    if text_changed:
+        # The operator owns the routine's content again, so a mode an agent
+        # pinned when it wrote the old text no longer applies.
+        entry.mode = ""
     if "enabled" in body:
         entry.enabled = bool(body["enabled"])
     # Never store an automation that cannot run. Shared with the MCP write path

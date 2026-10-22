@@ -184,7 +184,7 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       // cleared list, and a cleared list would claim this workspace has no
       // tasks when the truth is that nobody could ask.
       //
-      // Where a failed check *is* reported: Settings → Update task history, which
+      // Where a failed check *is* reported: Settings → Overview → Update task history, which
       // fetches for itself and owns the error, its retry and its empty state.
     }
   }

@@ -64,8 +64,12 @@ web/
                            titleShimmer.css)
     components/settings/  panels split out of SettingsView.vue (the host's start-at-sign-in row is
                            SettingsEngineLogin.vue; SettingsMemoryHandover.vue is the Memory handover card:
-                           agreement rate and the operator-only per-workspace handover choice), plus the
+                           agreement rate and the operator-only per-workspace handover choice;
+                           SettingsWorkspaceOverview.vue is the Workspace > Overview page;
+                           SettingsManageWorkspaces.vue is the Manage workspaces page: boxed
+                           rows, the short New workspace form and Archived), plus the
                            scoped CSS they share with it
+    components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
                            MemoryMapView under the header (so every Memory section shows it). Its open
                            state is the only storage, `ciao.memory.howOpen` ('1'/'0', read and written in
@@ -76,7 +80,7 @@ web/
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
-                          useMcpServers, useModalFocus)
+                          useMcpServers, useModalFocus, useWorkspaceAdmin)
     lib/                  pure helpers (api, time, safeMarkdown, contrast, etc.) — no Vue imports
 ```
 
@@ -166,6 +170,17 @@ is typed. The native host terminal keeps its own button
 (`HostTerminalButton.vue`) for the actions that need a real window on the
 engine's computer: provider sign-in, skill updates, the engine's own update.
 
+- **The signed-in session is the terminal's trust boundary.** There is no
+  password prompt: `stores/terminal.ts` asks the engine for the grant with
+  an empty body when the browser holds none, and the engine issues it to a
+  signed-in, same-origin browser. The grant still binds the browser, still
+  expires after fifteen minutes, and is still revoked by a logout or a
+  password change — it answers *which* browser may hold the socket and
+  *for how long*, not *who knows the password*. The consequence is plain:
+  a workspace that denies the agent `Bash` no longer has a host-shell
+  boundary, because a signed-in browser is enough to reach a shell on the
+  engine.
+
 - **One entry per surface, outside the repository.** A chat's Chat details
   carries a *Terminal* section of its own — under *Repository*, above *Always
   loaded* — and a project page carries one under its *Repository* section. The
@@ -195,10 +210,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   has always had, and the terminal holds the chat column at 360px and the
   tile at 360px.
 - `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
-  bounded renderer backpressure and the replay offsets. The pane
-  (`components/TerminalPane.vue`) owns the screen and the controls around it;
-  the screen itself is `lib/terminalRenderer.ts` (one xterm, bound to one
-  session for life).
+  bounded renderer backpressure and the replay offsets. It also owns the
+  grant: it asks for one with an empty body when the browser holds none,
+  and asks for a new one when the engine ends the stream because the grant
+  expired or was revoked. The pane (`components/TerminalPane.vue`) owns the
+  screen and the controls around it; the screen itself is
+  `lib/terminalRenderer.ts` (one xterm, bound to one session for life).
 - The pane is a chunk of its own, mounted the first time a terminal is asked
   for and kept after that, so the screen survives a hide and a chat page that
   never opens a terminal does not download it. `lib/terminalPanel.ts` carries
@@ -229,11 +246,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   that chat) and **Dismiss** (which names the suggestion it dismisses, so a
   newer one is never dismissed by mistake, and says so when the suggestion
   changed). The card never runs the command and never pastes it into the
-  shell: *Open in Terminal* starts no shell, asks for no grant and asks the
-  engine to run nothing — an already-live session attaches and shows the
-  screen it already holds, exactly like the *Terminal* section's button. The
-  *Terminal* section stays the persistent, manual way into the terminal; the
-  card is the contextual one, and it is shown only for the chat on screen.
+  shell: *Open in Terminal* starts no shell and asks the engine to run
+  nothing — an already-live session attaches and shows the screen it
+  already holds, exactly like the *Terminal* section's button. The
+  *Terminal* section stays the persistent, manual way into the terminal;
+  the card is the contextual one, and it is shown only for the chat on
+  screen.
 
 ### Layout traps
 
@@ -275,7 +293,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters it out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Chat details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind.
 - Project, Memory, and file rows are native buttons or links whenever they perform work. Context menus use `role="menu"` / `role="menuitem"`, open focus on the first action, support Arrow/Home/End/Escape, and restore the trigger. Pointer-only rows and right-click-only actions are not acceptable.
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content. User chat bubbles use `renderUserMarkdown`, which escapes raw HTML (except the comment-context tags) so typed text shows as typed; assistant output uses `renderMarkdown`. A message that names a conversation the reader knows links to it under its human title (`lib/chatLinks.ts`): a bare id or the app's own `@chat/<id>` mention is linked, only for an id in the reader's own openable chat list, the raw id stays in the tooltip and in `data-chat-id`, and the label is built as text, so a title can never become markup.
-- **A link into the app navigates in place.** `lib/appLinks.ts` is the one allowlist: `/`, `/tasks`, `/schedules`, `/automations`, `/memory` and its review/map/categories/import/retired/history sections, `/settings`, `/settings/home` and the tabs in `SETTINGS_NAV`, the documented anchors (`#install-app`, `/settings/providers#chat-providers`, `/settings/workspaces#new-workspace`), one task record by its full 32-hex id, and one conversation by its own id (`/chat/chat-0123abcd`, the shape the engine mints). It also accepts exactly one workspace File access target, `/settings/workspaces?workspace=NAME#file-access`, where `NAME` is an engine-accepted workspace name (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`). `parseWorkspaceFileAccessHref` exports that parse for `SettingsView`, and the whole address is validated: one `workspace` parameter, the literal `#file-access` fragment, no extra or duplicate parameter, no other path, hash or origin. On arrival `SettingsView` expands that row, scrolls the settings pane itself (measured from its `scrollTop`, never `scrollIntoView`), focuses the File access select with `preventScroll`, and briefly tints the row. Reduced motion drops the tint and keeps the focus ring. This is navigation only: it never chooses or saves a value, issues no write, and never switches the active workspace. A missing workspace is named in a status that says nothing changed; a different row with unsaved edits stays open, its single name draft untouched, and the status asks the user to save or discard before the linked workspace is opened. A load failure stays the tab's error, not a missing-workspace claim. Renderers leave those anchors without `target="_blank"`, and the delegated handlers (`ChatPanel`, `PinnedFilePanel`, `FileViewerModal`) push the route in the same window, so Back and an unsent draft survive. A plain click on a task address (`/tasks/<id>`) from a chat, a pinned file, the file viewer or the delegated-chat note opens `TaskPeek` over the current view through `stores/itemPeek.ts`, with no URL change and no history entry; on `/tasks` routes, and for a task already open on the board, it pushes as before. `parseTaskHref` and `isPlainLeftClick` in `lib/appLinks.ts` are the shared parse and modifier check. Modified clicks and the middle button stay the browser's (new tab/window), and a dirty dialog's refused close cancels the navigation. Every other href — an unknown path, an extra query, a different hash, `/api`, `/ws`, a protocol-relative or external URL — stays an ordinary link in a new tab. File links are separate: opening a file still goes through `data-file-path` to the viewer, not through a page address.
+- **A link into the app navigates in place.** `lib/appLinks.ts` is the one allowlist: `/`, `/tasks`, `/schedules`, `/automations`, `/memory` and its review/map/categories/import/retired/history sections, `/settings`, `/settings/home` and the tabs in `SETTINGS_NAV` and `SETTINGS_HIDDEN_PAGES`, the documented anchors (`#install-app`, `/settings/providers#chat-providers`, `/settings/workspaces#new-workspace`), one task record by its full 32-hex id, and one conversation by its own id (`/chat/chat-0123abcd`, the shape the engine mints). It also accepts exactly one workspace File access target, `/settings/workspaces?workspace=NAME#file-access`, where `NAME` is an engine-accepted workspace name (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`). `parseWorkspaceFileAccessHref` exports that parse for `SettingsView`, and the whole address is validated: one `workspace` parameter, the literal `#file-access` fragment, no extra or duplicate parameter, no other path, hash or origin. On arrival `SettingsView` expands that row, scrolls the settings pane itself (measured from its `scrollTop`, never `scrollIntoView`), focuses the File access select with `preventScroll`, and briefly tints the row. Reduced motion drops the tint and keeps the focus ring. This is navigation only: it never chooses or saves a value, issues no write, and never switches the active workspace. A missing workspace is named in a status that says nothing changed; a different row with unsaved edits stays open, its single name draft untouched, and the status asks the user to save or discard before the linked workspace is opened. A load failure stays the tab's error, not a missing-workspace claim. Renderers leave those anchors without `target="_blank"`, and the delegated handlers (`ChatPanel`, `PinnedFilePanel`, `FileViewerModal`) push the route in the same window, so Back and an unsent draft survive. A plain click on a task address (`/tasks/<id>`) from a chat, a pinned file, the file viewer or the delegated-chat note opens `TaskPeek` over the current view through `stores/itemPeek.ts`, with no URL change and no history entry; on `/tasks` routes, and for a task already open on the board, it pushes as before. `parseTaskHref` and `isPlainLeftClick` in `lib/appLinks.ts` are the shared parse and modifier check. Modified clicks and the middle button stay the browser's (new tab/window), and a dirty dialog's refused close cancels the navigation. Every other href — an unknown path, an extra query, a different hash, `/api`, `/ws`, a protocol-relative or external URL — stays an ordinary link in a new tab. File links are separate: opening a file still goes through `data-file-path` to the viewer, not through a page address.
 - Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
 - **`ChatPanel.vue` ownership boundary.** The panel is being split in
@@ -402,13 +420,27 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   existing viewer, never a forced split pane or an auto-opened modal. A remote
   unpin removes the opener and, if its clean shared-pin preview is open, closes
   that preview — a separately opened viewer or a dirty edit is left untouched.
+- **Workspace > Overview (`/settings/workspace`).** The first item of the
+  workspace rail group is the page for `projectStore.activeWorkspace`:
+  `SettingsWorkspaceOverview.vue` draws the Workspace and Google account cards
+  (one editor, one Save changes / Discard row), then Memory handover, Update
+  task history and, for an archivable workspace, Archive this workspace. The
+  editor state is not in the component: `composables/useWorkspaceAdmin.ts` owns
+  the registry forms, drafts, save, archive and restore, `SettingsView.vue` calls
+  it once and `provide`s it (`WORKSPACE_ADMIN_KEY`), and the Overview `inject`s
+  it, so Manage workspaces and Overview share one load. Tab ids differ by one
+  letter: `workspace` is Overview, `workspaces` is the list. A workspace switch
+  drops the previous draft; one started from the UI while the draft is dirty
+  asks first through `projectStore.setWorkspaceSwitchGuard`. A File access link
+  (`/settings/workspaces?workspace=NAME#file-access`) switches to NAME and lands
+  on Overview with the selector focused; it never saves.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General is split
   into four pages. General begins with the Updates section (compact to a title
   and an "Up to date" status when nothing is in progress), then the
   capability-help section linking to the public feature guide, then Use Ciaobot
-  as an app, Notifications, Keyboard shortcuts, the update task history, Start
-  at sign-in, Memory handover, Session insights and Open source. Appearance is
+  as an app, Notifications, Keyboard shortcuts, Start at sign-in and Open
+  source. Appearance is
   the Appearance card alone: Theme and Font size rows in `SettingsView.vue`, and
   `settings/SettingsAppearance.vue` (Text contrast, Body font, Custom colours with `settings/CustomColorsDialog.vue`; `lib/contrast.ts` holds the WCAG maths and refuses unreadable pairs). Appearance is engine-wide:
   `composables/useAppearanceSettings.ts` mirrors `/api/settings/appearance`, applies
@@ -420,9 +452,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `section` prop (`network` or `developer`) so its two cards render on
   different pages.
   The Settings rail has two groups (`SETTINGS_NAV_GROUPS` in `lib/settingsNav.ts`):
-  Ciaobot (General, Appearance, Access & devices, Providers, Advanced,
-  Workspaces) and the active workspace, headed by
-  its name and tinted initial tile. Providers is one card, so its page rail
+  Ciaobot (General, Appearance, Access & devices, Providers, Advanced) and the
+  active workspace, headed by its name and tinted initial tile. Workspaces has
+  no rail item: Manage workspaces (`/settings/workspaces`, named by
+  `SETTINGS_HIDDEN_PAGES`) is reached from the workspace switcher, whose menu
+  ends with Workspace settings, Manage workspaces and New workspace. Providers is one card, so its page rail
   shows Status only, with no "On this page" list.
   The "On this page" navigation is built from the rendered sections in DOM order,
   so it follows that order. The MCP tab shows the provider inventory plus an
@@ -539,4 +573,4 @@ The MCP Settings panel shows provider-native configuration separately from per-c
 - The To decide filter chips are by change type, by reason, and *Needs you* (`decideFilter` in the proposals store, separate from `kindFilter` because History shares that one). *Needs you* keeps rows whose `decider` is not `nightly`, so rows with no decider count, and the chip shows only when at least one row is marked `nightly`. A row shows its `decider` and a one-line `decide_reason`, rendered as text.
 - An optional reason is asked for before every individual accept and dismissal in the queue: the row's accept opens the decision card with the reason on it (`Why keep this? (optional)`), and every Dismiss opens an inline confirmation naming the proposal (`Why dismiss this? (optional)`). Picking the workspace for a re-home is the exception — the destination is the answer — and the batch bar never asks. There is no *Why?* disclosure left on a row or a card. The shared `DecisionReason` with the memory chips from `lib/memoryDecisionReasons.ts` holds the answer per row in the panel (`reasonById`), and it is discarded on Cancel, on a switch to another card, and after a successful decision; a failed dismissal keeps it so the retry does not lose the sentence. It is sent as `reason` only when non-empty, with that row's accept (and the retry of a deferred accept) or its dismissal, never on the batch bar; a refused accept clears it, the deferral keeping its own copy for the retry. With no reason typed the confirmation's button reads *Continue without a reason* and the card names the action above it (*This will save to ciao:memory.*, *This will dismiss the proposal.*); with a reason the accept button names the destination again. History renders a row's `reason` as text (`.ph-reason`), never markup.
 - History shows a row's `prediction` under its text as predicted against decided, with a muted *Matched* or *Missed* badge (a miss is information, never an error) and the prediction `reason` as text. A `[memory]`/`[profile]` row the nightly run settled itself (`via: agent`) reads *Filed by Workspace care* (accepted) or *Dismissed by Workspace care* (dismissed), badges *Acted on prediction*, and offers *Undo* from the row when its change is undoable. The To decide queue never shows a prediction on a pending row, so the agreement rate stays unbiased.
-- Settings → *Memory handover* (`SettingsMemoryHandover.vue`) loads `GET /api/proposals/handover?workspace=` for the active workspace and saves only `{ memory_handover }` through `PATCH /api/workspaces/{name}`. It never saves on its own: the suggestion is text. Choosing *Dismiss and accept* asks for confirmation, and the card says that it lets queued text reach always-loaded memory, with Undo in History and a cap of 5 changes per run. When the response's `acting_available` is false (a Linux/systemd install, where the gate trusts no service definition) the card says handover cannot act on this install and disables the options.
+- Settings → Overview → *Memory handover* (`SettingsMemoryHandover.vue`, a three-way segmented control styled like Theme: arrows select) loads `GET /api/proposals/handover?workspace=` for the active workspace and saves only `{ memory_handover }` through `PATCH /api/workspaces/{name}`. It never saves on its own: the suggestion is text. Choosing *Dismiss and accept* asks for confirmation, and the card says that it lets queued text reach always-loaded memory, with Undo in History and a cap of 5 changes per run. When the response's `acting_available` is false (a Linux/systemd install, where the gate trusts no service definition) the card says handover cannot act on this install and disables the options.

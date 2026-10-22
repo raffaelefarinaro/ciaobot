@@ -6419,6 +6419,42 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).not.toHaveBeenCalled()
   })
 
+  test('switchWorkspace asks the settings guard first and stays when it declines', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(guard)
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(guard).toHaveBeenCalledWith('work')
+    expect(store.activeWorkspace).toBe('work')
+
+    guard.mockResolvedValue(true)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+    expect(store.activeWorkspace).toBe('personal')
+    // Already there counts as switched.
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+
+    store.setWorkspaceSwitchGuard(null)
+    await store.switchWorkspace('work', { transition: false })
+    expect(guard).toHaveBeenCalledTimes(2)
+    expect(store.activeWorkspace).toBe('work')
+  })
+
+  test('clearWorkspaceSwitchGuard only clears the guard that is still installed', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const older = vi.fn().mockResolvedValue(false)
+    const newer = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(older)
+    store.setWorkspaceSwitchGuard(newer)
+    store.clearWorkspaceSwitchGuard(older)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(newer).toHaveBeenCalled()
+    store.clearWorkspaceSwitchGuard(newer)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+  })
+
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
     const store = useProjectStore()
     store.projects = [
@@ -6874,7 +6910,7 @@ describe('update-available notification', () => {
 })
 
 describe('gws health toast', () => {
-  test('surfaces an error toast whose Fix action routes to Settings → Workspaces', () => {
+  test('surfaces an error toast whose Fix action routes to Settings → Manage workspaces', () => {
     const store = useProjectStore()
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
@@ -6885,7 +6921,7 @@ describe('gws health toast', () => {
         token_valid: false,
         token_error: 'expired',
         title: 'Google Workspace login needs attention',
-        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Workspaces.',
+        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Manage workspaces.',
       }),
     })
 
