@@ -155,6 +155,9 @@ async function markDone(resolution: string): Promise<void> {
     noteOpen.value = false
   } catch (e) {
     approveError.value = taskClosureErrorMessage(e, 'mark-done')
+    // The write disabled the field, and a browser drops the focus of an
+    // element it disables: put the keyboard back in the note.
+    nextTick(() => noteField.value?.focus())
   } finally {
     approving.value = false
   }
@@ -173,6 +176,9 @@ async function approve(resolution: string): Promise<void> {
     noteOpen.value = false
   } catch (e) {
     approveError.value = taskClosureErrorMessage(e, 'approve')
+    // The write disabled the field, and a browser drops the focus of an
+    // element it disables: put the keyboard back in the note.
+    nextTick(() => noteField.value?.focus())
   } finally {
     approving.value = false
   }

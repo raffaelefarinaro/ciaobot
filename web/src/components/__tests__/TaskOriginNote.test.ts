@@ -220,6 +220,43 @@ describe('TaskOriginNote', () => {
     wrapper.unmount()
   })
 
+  it('puts focus back on the note after a refused save', async () => {
+    const reviewed = task({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
+    const signals = useTaskSignalsStore()
+    signals.tasks = [reviewed]
+    signals.loadedWorkspace = 'personal'
+    // The save is held open, so the refusal lands while the test watches.
+    let refuse: (reason: unknown) => void = () => {}
+    apiPost.mockImplementation(() => new Promise((_resolve, reject) => { refuse = reject }))
+    apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, revision: 'b'.repeat(64) }] })
+    const wrapper = mount(TaskOriginNote, {
+      props: { chat: CHAT },
+      attachTo: document.body,
+      global: { stubs: { RouterLink: RouterLinkStub } },
+    })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    await wrapper.get('#task-origin-resolution').setValue('Done')
+    await wrapper.findAll('button').find((b) => b.text() === 'Approve Done')!.trigger('click')
+    await flushPromises()
+
+    // The write disables the field, and a browser moves focus off an element
+    // it disables; jsdom keeps the focus on the disabled field, so take it
+    // away by hand — the task link is the next focusable stop.
+    wrapper.get('a').element.focus()
+    expect(document.activeElement).not.toBe(wrapper.get('#task-origin-resolution').element)
+
+    refuse(Object.assign(new Error('conflict'), { status: 409 }))
+    await flushPromises()
+
+    // The prompt stays open with the draft and the error, and the keyboard is
+    // back in the field.
+    expect(wrapper.get('[role="alert"]').text()).toBe('This task changed since it was read. Check it and approve again.')
+    expect((wrapper.get('#task-origin-resolution').element as HTMLTextAreaElement).value).toBe('Done')
+    expect(document.activeElement).toBe(wrapper.get('#task-origin-resolution').element)
+    wrapper.unmount()
+  })
+
   it('answers a stale-revision refusal with a short line and a reload', async () => {
     const reviewed = task({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
     const wrapper = mountNote([reviewed])
