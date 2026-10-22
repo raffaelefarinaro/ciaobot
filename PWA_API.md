@@ -175,7 +175,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
-| POST | `/api/workspaces/reorder` | Persist a new workspace order: body `{order: [name, ...]}` must list every registered (non-archived) workspace exactly once, else 400. The order is the registry's list order: it drives the switcher, the 1-9 shortcuts and every workspace list. Returns the `GET /api/workspaces` payload. A restored workspace is appended last |
+| POST | `/api/workspaces/reorder` | Persist a new workspace order: body `{order: [name, ...]}` must list every registered (non-archived) workspace exactly once, else 400. The order is the registry's list order: it drives the switcher, the 1-9 shortcuts and every workspace list. Returns the `GET /api/workspaces` payload. When no workspace is named `personal` the first one is the main workspace and stays first: an order that would change it is refused with 409. A restored workspace is appended last |
 | POST | `/api/workspaces/{name}/archive` | Archive a workspace: unregister it, archive its chats, take its user schedules, and move its folder intact into `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/`. Refuses the primary or last workspace, a workspace with a running chat, and layouts it cannot move safely (409) |
 | DELETE | `/api/workspaces/{name}` | Alias of `POST /api/workspaces/{name}/archive`, kept for existing scripts; it no longer deletes anything |
 | GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, disallowed_tools, schedules, schedules_dropped, restorable, blocked_reason}]}`. The settings and `schedules` count are what a restore would apply after validation (`archive.json` syncs through git, so it is treated as untrusted); the PWA shows them in the restore confirmation |
@@ -944,7 +944,9 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/works
 
 # Reorder. The order is the registry's list order and drives the switcher, the
 # 1-9 shortcuts and every workspace list. List every active workspace exactly
-# once (400 otherwise). A restored workspace is appended last.
+# once (400 otherwise). When no workspace is named `personal`, the first one is
+# the main workspace and must stay first (409 otherwise). A restored workspace
+# is appended last.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/reorder" \
   -H 'content-type: application/json' \
   -d '{"order":["work","personal"]}'

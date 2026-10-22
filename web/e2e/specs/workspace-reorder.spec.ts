@@ -63,7 +63,7 @@ test.describe('workspace reorder', () => {
   test('the row menu Move up reorders and returns focus to the handle', async ({ page }) => {
     await boot(page, MANAGE, READY)
     await page.getByRole('button', { name: 'Actions for workspace gamma' }).click()
-    await page.getByRole('menuitem', { name: 'Move gamma up' }).click()
+    await page.getByRole('menuitem', { name: 'Move workspace gamma up' }).click()
 
     await expect(page.locator('.settings-main [role="status"][aria-live="polite"]'))
       .toHaveText('Moved Gamma to position 2 of 3')

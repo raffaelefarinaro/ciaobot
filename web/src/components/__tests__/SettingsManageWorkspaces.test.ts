@@ -509,4 +509,108 @@ describe('Settings > Manage workspaces > reorder', () => {
       wrapper.unmount()
     }
   })
+
+  it('a failed move is rolled back before the queued next move is computed', async () => {
+    const { api } = await import('../../lib/api')
+    const { wrapper } = await mountManage()
+    try {
+      const bodies: string[][] = []
+      vi.mocked(api.post).mockImplementation((_path: string, body?: unknown) => {
+        const names = (body as { order: string[] }).order
+        bodies.push(names)
+        if (bodies.length === 1) return Promise.reject(new Error('nope'))
+        state.workspaces = registry(names)
+        return Promise.resolve(state.workspaces)
+      })
+      await handle(wrapper, 'personal').trigger('keydown', { key: 'ArrowDown', altKey: true })
+      await handle(wrapper, 'side').trigger('keydown', { key: 'ArrowUp', altKey: true })
+      await flushPromises()
+
+      expect(bodies).toEqual([['work', 'personal', 'side'], ['personal', 'side', 'work']])
+      expect(order(wrapper)).toEqual(['personal', 'side', 'work'])
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('a successful move keeps an unrelated error on the page', async () => {
+    const { wrapper } = await mountManage()
+    try {
+      const admin = wrapper.findComponent({ name: 'SettingsManageWorkspaces' })
+      expect(admin.exists()).toBe(true)
+      ;(admin.vm as unknown as { workspacesResult: string }).workspacesResult = 'Error: something else'
+      await nextTick()
+      await handle(wrapper, 'personal').trigger('keydown', { key: 'ArrowDown', altKey: true })
+      await flushPromises()
+      expect(wrapper.get('.action-result--error').text()).toBe('Error: something else')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  describe('with a main workspace that is not named personal', () => {
+    beforeEach(() => {
+      state.workspaces = { ...registry(['work', 'side', 'other']), primary: 'work' }
+    })
+
+    it('pins the main row first: spacer instead of a handle, no move items', async () => {
+      const { wrapper } = await mountManage()
+      try {
+        expect(order(wrapper)).toEqual(['work', 'side', 'other'])
+        expect(wrapper.find('[data-workspace-handle="work"]').exists()).toBe(false)
+        expect(rowFor(wrapper, 'work').find('.workspace-row-handle--spacer').exists()).toBe(true)
+        expect(wrapper.findAll('[data-workspace-handle]')).toHaveLength(2)
+        const items = await openMenu(rowFor(wrapper, 'work'))
+        expect(items.map(b => b.text())).toEqual(['Rename'])
+      } finally {
+        wrapper.unmount()
+      }
+    })
+
+    it('cannot move the next row above it', async () => {
+      const { wrapper, store } = await mountManage()
+      try {
+        const spy = vi.spyOn(store, 'reorderWorkspaces')
+        await handle(wrapper, 'side').trigger('keydown', { key: 'ArrowUp', altKey: true })
+        await flushPromises()
+        expect(spy).not.toHaveBeenCalled()
+        const items = await openMenu(rowFor(wrapper, 'side'))
+        expect(items.find(b => b.text() === 'Move up')!.attributes('data-disabled')).toBeDefined()
+        expect(items.find(b => b.text() === 'Move down')!.attributes('data-disabled')).toBeUndefined()
+      } finally {
+        wrapper.unmount()
+      }
+    })
+
+    it('refuses a drop onto the pinned row and allows one below it', async () => {
+      const { wrapper, store } = await mountManage()
+      try {
+        const spy = vi.spyOn(store, 'reorderWorkspaces')
+        const dataTransfer = { setData: vi.fn(), setDragImage: vi.fn(), effectAllowed: '' }
+        await handle(wrapper, 'other').trigger('dragstart', { dataTransfer })
+        await rowFor(wrapper, 'work').trigger('dragover', { dataTransfer })
+        expect(wrapper.find('.workspace-row--drag-over').exists()).toBe(false)
+        await rowFor(wrapper, 'work').trigger('drop', { dataTransfer })
+        await flushPromises()
+        expect(spy).not.toHaveBeenCalled()
+
+        await handle(wrapper, 'other').trigger('dragstart', { dataTransfer })
+        await rowFor(wrapper, 'side').trigger('drop', { dataTransfer })
+        await flushPromises()
+        expect(spy).toHaveBeenCalledWith(['work', 'other', 'side'])
+      } finally {
+        wrapper.unmount()
+      }
+    })
+  })
+
+  it('pins nothing when a workspace is named personal', async () => {
+    const { wrapper } = await mountManage()
+    try {
+      expect(wrapper.findAll('[data-workspace-handle]')).toHaveLength(3)
+      expect(wrapper.find('.workspace-row-handle--spacer').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
 })

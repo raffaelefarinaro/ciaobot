@@ -2251,3 +2251,93 @@ def test_rename_keeps_position_after_reorder(tmp_path):
     expected = ["z", *order[1:]]
     assert list(config.workspaces) == expected
     assert _stored_names(tmp_path) == expected
+
+
+def _no_personal_client(tmp_path: Path, names=("work", "clientA", "other")):
+    """A registry with no workspace named ``personal``: the first is the main one."""
+    from ciao.config import WorkspaceConfig
+
+    client, config, pcm = _client(tmp_path)
+    config.workspaces.clear()
+    for name in names:
+        config.workspaces[name] = WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+    config.persist_workspace_registry()
+    pcm.events = _ReorderEvents()
+    return client, config, pcm
+
+
+def test_reorder_never_moves_the_main_workspace_off_the_top(tmp_path):
+    client, config, pcm = _no_personal_client(tmp_path)
+    assert config.primary_workspace() == "work"
+    stored = _registry_file(tmp_path).read_text()
+    refreshes = pcm.refresh_count
+
+    resp = client.post(
+        "/api/workspaces/reorder", json={"order": ["clientA", "work", "other"]}
+    )
+
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "'work' is the main workspace and stays first"}
+    assert list(config.workspaces) == ["work", "clientA", "other"]
+    assert config.primary_workspace() == "work"
+    assert _registry_file(tmp_path).read_text() == stored
+    assert pcm.refresh_count == refreshes
+    assert pcm.events.published == []
+
+
+def test_reorder_below_the_main_workspace_is_allowed(tmp_path):
+    client, config, _pcm = _no_personal_client(tmp_path)
+
+    resp = client.post(
+        "/api/workspaces/reorder", json={"order": ["work", "other", "clientA"]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert list(config.workspaces) == ["work", "other", "clientA"]
+    assert _stored_names(tmp_path) == ["work", "other", "clientA"]
+    assert resp.json()["primary"] == "work"
+
+
+def test_reorder_with_a_personal_workspace_moves_anything_anywhere(tmp_path):
+    client, config, _pcm = _no_personal_client(tmp_path, names=("work", "personal", "other"))
+    assert config.primary_workspace() == "personal"
+
+    for order in (
+        ["personal", "work", "other"],
+        ["other", "work", "personal"],
+        ["work", "other", "personal"],
+    ):
+        resp = client.post("/api/workspaces/reorder", json={"order": order})
+        assert resp.status_code == 200, resp.json()
+        assert list(config.workspaces) == order
+        assert resp.json()["primary"] == "personal"
+
+
+def test_reorder_workspaces_waits_for_the_registry_lock(tmp_path):
+    import asyncio
+
+    import httpx
+
+    client, config, _pcm = _reorder_client(tmp_path)
+    app = client.app
+    current = list(config.workspaces)
+    wanted = list(reversed(current))
+
+    async def scenario() -> None:
+        lock = asyncio.Lock()
+        app.state.workspace_archive_lock = lock  # type: ignore[attr-defined]
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            await lock.acquire()
+            task = asyncio.create_task(
+                http.post("/api/workspaces/reorder", json={"order": wanted})
+            )
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            assert list(config.workspaces) == current
+            lock.release()
+            resp = await task
+        assert resp.status_code == 200
+        assert list(config.workspaces) == wanted
+
+    asyncio.run(scenario())

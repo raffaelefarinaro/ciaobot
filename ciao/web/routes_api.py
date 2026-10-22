@@ -445,29 +445,40 @@ async def reorder_workspaces(request: Request) -> JSONResponse:
     order = body.get("order") if isinstance(body, dict) else None
     if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
         return JSONResponse({"error": "order[] is required"}, status_code=400)
-    # No await from here to the mutation below: the registry has no lock, and
-    # that keeps the check and the rebuild atomic on the event loop.
-    current = list(config.workspaces)
-    if len(order) != len(set(order)) or set(order) != set(current):
-        return JSONResponse(
-            {"error": "order must list every registered workspace exactly once"},
-            status_code=400,
-        )
-    if order != current:
-        previous = dict(config.workspaces)
-        config.workspaces.clear()
-        config.workspaces.update({name: previous[name] for name in order})
-        try:
-            _persist_workspaces(config)
-        except OSError as exc:
-            config.workspaces.clear()
-            config.workspaces.update(previous)
+    # Under the registry lock, like create/update/archive/restore.
+    async with _workspace_archive_lock(request):
+        current = list(config.workspaces)
+        if len(order) != len(set(order)) or set(order) != set(current):
             return JSONResponse(
-                {"error": f"Failed to save the workspace order: {exc}"},
-                status_code=500,
+                {"error": "order must list every registered workspace exactly once"},
+                status_code=400,
             )
-        _refresh_project_manager_workspaces(request)
-        _publish_workspaces_changed(request)
+        if order != current:
+            before = config.primary_workspace()
+            previous = dict(config.workspaces)
+            rebuilt = {name: previous[name] for name in order}
+            config.workspaces.clear()
+            config.workspaces.update(rebuilt)
+            if config.primary_workspace() != before:
+                # Without a workspace named "personal" the first entry is the
+                # main workspace; a reorder must not hand that role away.
+                config.workspaces.clear()
+                config.workspaces.update(previous)
+                return JSONResponse(
+                    {"error": f"'{before}' is the main workspace and stays first"},
+                    status_code=409,
+                )
+            try:
+                _persist_workspaces(config)
+            except OSError as exc:
+                config.workspaces.clear()
+                config.workspaces.update(previous)
+                return JSONResponse(
+                    {"error": f"Failed to save the workspace order: {exc}"},
+                    status_code=500,
+                )
+            _refresh_project_manager_workspaces(request)
+            _publish_workspaces_changed(request)
     return JSONResponse(_workspaces_payload(config))
 
 
@@ -582,7 +593,7 @@ def _publish_workspaces_changed(
 
 
 def _workspace_archive_lock(request: Request) -> asyncio.Lock:
-    """One registry change at a time per app: archive, restore, create, update.
+    """One registry change at a time per app: archive, restore, create, update, reorder.
 
     Without it a double-submitted archive ran twice: the second pass found the
     folder already gone and recorded an empty "archived" copy, or its failed

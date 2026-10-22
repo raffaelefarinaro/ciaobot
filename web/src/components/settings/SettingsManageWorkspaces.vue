@@ -92,7 +92,9 @@
         @dragover="onRowDragOver(form.name, $event)"
         @drop="onRowDrop(form.name, $event)"
       >
+        <span v-if="form.name === pinnedFirst" class="workspace-row-handle workspace-row-handle--spacer" aria-hidden="true"></span>
         <button
+          v-else
           type="button"
           class="workspace-row-handle"
           draggable="true"
@@ -146,14 +148,20 @@
                     :aria-label="`Rename workspace ${form.name}`"
                   >Rename</button>
                 </DropdownMenuItem>
-                <DropdownMenuItem as-child :disabled="index === 0" @select="moveBy(form.name, -1, true)">
+                <DropdownMenuItem
+                  v-if="form.name !== pinnedFirst"
+                  as-child
+                  :disabled="index === 0 || (pinnedFirst !== null && index === 1)"
+                  @select="moveBy(form.name, -1, true)"
+                >
                   <button
                     type="button"
                     class="settings-menu-item"
-                    :aria-label="`Move ${form.name} up`"
+                    :aria-label="`Move workspace ${form.name} up`"
                   >Move up</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem
+                  v-if="form.name !== pinnedFirst"
                   as-child
                   :disabled="index === orderedForms.length - 1"
                   @select="moveBy(form.name, 1, true)"
@@ -161,7 +169,7 @@
                   <button
                     type="button"
                     class="settings-menu-item"
-                    :aria-label="`Move ${form.name} down`"
+                    :aria-label="`Move workspace ${form.name} down`"
                   >Move down</button>
                 </DropdownMenuItem>
                 <DropdownMenuItem v-if="workspaceArchivable(form.name)" as-child @select="archiveWorkspace(form.name)">
@@ -314,28 +322,42 @@ function focusHandle(name: string): void {
   })
 }
 
-function applyOrder(name: string, next: string[]): void {
+// The main workspace is the first one unless a workspace is named `personal`;
+// the server refuses an order that would change it, so that row is pinned.
+const pinnedFirst = computed<string | null>(() => {
+  const primary = primaryWorkspace.value
+  if (!primary || primary === 'personal') return null
+  return currentOrder()[0] === primary ? primary : null
+})
+
+const ORDER_ERROR_PREFIX = 'Could not save the workspace order'
+
+// Queued so a held Alt+Arrow computes each step from the order the previous
+// one left behind (or restored, when its save failed).
+function enqueueMove(name: string, nextOrder: (names: string[]) => string[]): void {
   moveQueue = moveQueue.then(async () => {
+    const names = currentOrder()
+    const next = nextOrder(names)
+    if (next.join('\u0000') === names.join('\u0000')) return
     try {
       const res = await projectStore.reorderWorkspaces(next)
       if (!res) return
       primaryWorkspace.value = res.primary ?? null
-      workspacesResult.value = ''
+      if (workspacesResult.value.startsWith(ORDER_ERROR_PREFIX)) workspacesResult.value = ''
       announcement.value = moveAnnouncement(workspaceLabel(name), next.indexOf(name) + 1, next.length)
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e)
-      workspacesResult.value = `Could not save the workspace order: ${detail}`
+      workspacesResult.value = `${ORDER_ERROR_PREFIX}: ${detail}`
     }
   })
 }
 
 function moveBy(name: string, delta: -1 | 1, fromMenu = false): void {
-  const names = currentOrder()
-  const from = names.indexOf(name)
-  const to = from + delta
-  if (from < 0 || to < 0 || to >= names.length) return
   if (fromMenu) menuMoveName.value = name
-  applyOrder(name, moveName(names, from, to))
+  enqueueMove(name, (names) => {
+    const from = names.indexOf(name)
+    return moveName(names, from, from + delta, pinnedFirst.value)
+  })
   void moveQueue.then(() => {
     focusHandle(name)
     menuMoveName.value = null
@@ -367,7 +389,7 @@ function onRowDragStart(name: string, event: DragEvent): void {
 function onRowDragOver(name: string, event: DragEvent): void {
   if (!dragName.value) return
   event.preventDefault()
-  dragOverName.value = dragName.value === name ? null : name
+  dragOverName.value = dragName.value === name || name === pinnedFirst.value ? null : name
 }
 
 function onRowDrop(target: string, event: DragEvent): void {
@@ -376,11 +398,11 @@ function onRowDrop(target: string, event: DragEvent): void {
   event.preventDefault()
   onRowDragEnd()
   if (dragged === target) return
-  const names = currentOrder()
-  const from = names.indexOf(dragged)
-  const to = names.indexOf(target)
-  if (from < 0 || to < 0) return
-  applyOrder(dragged, moveName(names, from, to))
+  enqueueMove(dragged, (names) => {
+    const from = names.indexOf(dragged)
+    const to = names.indexOf(target)
+    return moveName(names, from, to, pinnedFirst.value)
+  })
 }
 
 function onRowDragEnd(): void {
@@ -428,8 +450,8 @@ function onRowDragEnd(): void {
   line-height: 1;
   letter-spacing: -2px;
   cursor: grab;
-  touch-action: none;
 }
+.workspace-row-handle--spacer { cursor: default; }
 .workspace-row-handle:hover { background: var(--bg3); color: var(--fg); }
 .workspace-row-handle:focus-visible {
   outline: 2px solid var(--accent);

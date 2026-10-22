@@ -448,7 +448,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   ends with Workspace settings, Manage workspaces and New workspace. The workspace
   order is the server registry's list order: Manage workspaces reorders it with
   `store.reorderWorkspaces` (optimistic, rolled back on failure, `moveName` and
-  `moveAnnouncement` in `lib/workspaceOrder.ts`), and every list, the switcher and the
+  `moveAnnouncement` in `lib/workspaceOrder.ts`; with no workspace named `personal` the main workspace is pinned first), and every list, the switcher and the
   1-9 shortcuts read `store.workspaceOptions` in that order. Providers is one card, so its page rail
   shows Status only, with no "On this page" list.
   The "On this page" navigation is built from the rendered sections in DOM order,

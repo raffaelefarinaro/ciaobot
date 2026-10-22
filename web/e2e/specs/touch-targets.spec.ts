@@ -296,7 +296,7 @@ test.describe('touch targets', () => {
     expect(box!.height).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
 
     await page.getByRole('button', { name: 'Actions for workspace beta' }).click()
-    for (const name of ['Move beta up', 'Move beta down']) {
+    for (const name of ['Move workspace beta up', 'Move workspace beta down']) {
       const item = page.getByRole('menuitem', { name })
       await expect(item).toBeVisible()
       const itemBox = await item.boundingBox()

@@ -33,6 +33,28 @@ describe('moveName', () => {
   })
 })
 
+describe('moveName with a pinned first entry', () => {
+  const names = ['a', 'b', 'c']
+
+  it('refuses to move the pinned entry', () => {
+    expect(moveName(names, 0, 2, 'a')).toEqual(names)
+  })
+
+  it('refuses to move anything to index 0', () => {
+    expect(moveName(names, 1, 0, 'a')).toEqual(names)
+    expect(moveName(names, 2, 0, 'a')).toEqual(names)
+  })
+
+  it('moves the others below it', () => {
+    expect(moveName(names, 1, 2, 'a')).toEqual(['a', 'c', 'b'])
+  })
+
+  it('pins nothing when the pinned name is not first', () => {
+    expect(moveName(names, 1, 0, 'c')).toEqual(['b', 'a', 'c'])
+    expect(moveName(names, 0, 2, null)).toEqual(['b', 'c', 'a'])
+  })
+})
+
 describe('moveAnnouncement', () => {
   it('names the label and the one-based position', () => {
     expect(moveAnnouncement('Work', 2, 3)).toBe('Moved Work to position 2 of 3')
