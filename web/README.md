@@ -54,7 +54,7 @@ web/
   index.html              entry HTML, viewport meta, PWA manifest link
   src/
     main.ts               Vue bootstrap + iOS viewport / keyboard / zoom plumbing
-    App.vue               root component, global CSS tokens (--bg, --fg, --accent; `data-text-contrast="soft"` on `<html>` lowers --fg), wordmark + caret, shared focus utilities
+    App.vue               root component, global CSS tokens (--bg, --fg, --accent; `data-text-contrast="soft"` on `<html>` lowers --fg; `data-body-font` swaps --font), wordmark + caret, shared focus utilities
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /tasks,
                            /memory, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
@@ -84,7 +84,7 @@ web/
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
                           useMcpServers, useModalFocus, useWorkspaceAdmin)
-    lib/                  pure helpers (api, time, safeMarkdown, etc.) — no Vue imports
+    lib/                  pure helpers (api, time, safeMarkdown, contrast, etc.) — no Vue imports
 ```
 
 ## iOS PWA gotchas
@@ -173,6 +173,17 @@ is typed. The native host terminal keeps its own button
 (`HostTerminalButton.vue`) for the actions that need a real window on the
 engine's computer: provider sign-in, skill updates, the engine's own update.
 
+- **The signed-in session is the terminal's trust boundary.** There is no
+  password prompt: `stores/terminal.ts` asks the engine for the grant with
+  an empty body when the browser holds none, and the engine issues it to a
+  signed-in, same-origin browser. The grant still binds the browser, still
+  expires after fifteen minutes, and is still revoked by a logout or a
+  password change — it answers *which* browser may hold the socket and
+  *for how long*, not *who knows the password*. The consequence is plain:
+  a workspace that denies the agent `Bash` no longer has a host-shell
+  boundary, because a signed-in browser is enough to reach a shell on the
+  engine.
+
 - **One entry per surface, outside the repository.** A chat's Chat details
   carries a *Terminal* section of its own — under *Repository*, above *Always
   loaded* — and a project page carries one under its *Repository* section. The
@@ -202,10 +213,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   has always had, and the terminal holds the chat column at 360px and the
   tile at 360px.
 - `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
-  bounded renderer backpressure and the replay offsets. The pane
-  (`components/TerminalPane.vue`) owns the screen and the controls around it;
-  the screen itself is `lib/terminalRenderer.ts` (one xterm, bound to one
-  session for life).
+  bounded renderer backpressure and the replay offsets. It also owns the
+  grant: it asks for one with an empty body when the browser holds none,
+  and asks for a new one when the engine ends the stream because the grant
+  expired or was revoked. The pane (`components/TerminalPane.vue`) owns the
+  screen and the controls around it; the screen itself is
+  `lib/terminalRenderer.ts` (one xterm, bound to one session for life).
 - The pane is a chunk of its own, mounted the first time a terminal is asked
   for and kept after that, so the screen survives a hide and a chat page that
   never opens a terminal does not download it. `lib/terminalPanel.ts` carries
@@ -236,11 +249,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   that chat) and **Dismiss** (which names the suggestion it dismisses, so a
   newer one is never dismissed by mistake, and says so when the suggestion
   changed). The card never runs the command and never pastes it into the
-  shell: *Open in Terminal* starts no shell, asks for no grant and asks the
-  engine to run nothing — an already-live session attaches and shows the
-  screen it already holds, exactly like the *Terminal* section's button. The
-  *Terminal* section stays the persistent, manual way into the terminal; the
-  card is the contextual one, and it is shown only for the chat on screen.
+  shell: *Open in Terminal* starts no shell and asks the engine to run
+  nothing — an already-live session attaches and shows the screen it
+  already holds, exactly like the *Terminal* section's button. The
+  *Terminal* section stays the persistent, manual way into the terminal;
+  the card is the contextual one, and it is shown only for the chat on
+  screen.
 
 ### Layout traps
 
@@ -260,7 +274,7 @@ archive, Needs you and closure logic continue to use delegation alone.
 CSS custom properties live in `App.vue` as `:root` declarations. The system is opinionated:
 
 - **Color**: Deep blue-violet surfaces (`--bg #1a1a2e`, `--bg2 #1f2240`, `--bg3 #2a2e54`, `--bg-elev #23264a`), orange accent (`--accent #fb923c`, `--accent-strong #ea580c`; per-workspace presets override it, and `neutral` grey stands in until the workspace's colour is known; labels on accent fills use `--on-accent #1a1a2e`), violet secondary (`--accent2 #6a47b8`). A clean light theme is supported via `.theme-light` overrides.
-- **Type**: Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
+- **Type**: Body font (Settings > Appearance: System, Serif or Mono) sets `data-body-font` on `<html>`, which swaps `--font`; components use `var(--font)`, never `var(--font-sans)`. Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
 - **Geometry**: 10/6/14px radii (`--radius`, `--radius-sm`, `--radius-lg`). Spacing scale `--space-1` through `--space-6`.
 - **Motion**: `--ease: cubic-bezier(0.2, 0.8, 0.2, 1)`.
 - **Wordmark**: `.wordmark` (with size modifier `--lg|--md|--sm`) renders `› word` with an accent chevron prefix. Used in StartupView, UpdateProgressView, LoginView, ProjectSidebar brand, and empty states.
@@ -431,7 +445,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   as an app, Notifications, Keyboard shortcuts, Start at sign-in and Open
   source. Appearance is
   the Appearance card alone: Theme and Font size rows in `SettingsView.vue`, and
-  `settings/SettingsAppearance.vue` (Text contrast). Appearance is engine-wide:
+  `settings/SettingsAppearance.vue` (Text contrast, Body font, Custom colours with `settings/CustomColorsDialog.vue`; `lib/contrast.ts` holds the WCAG maths and refuses unreadable pairs). Appearance is engine-wide:
   `composables/useAppearanceSettings.ts` mirrors `/api/settings/appearance`, applies
   it through `lib/appearance.ts`, and keeps `ciao-theme`, `ciao-font-scale` and
   `ciao-appearance` as paint caches only. Access & devices holds the PWA password, Other
@@ -499,7 +513,7 @@ establish:
 | `task-board-lanes.spec.ts` | That every board lane is 310px wide at 1440, 1100, 900 and iPhone widths (computed flex included), that a review card's state word and action share one line, and that Done sits collapsed behind a 44px tab that expands, hides, persists across a reload, scrolls the Done lane into view and focuses its Hide button when the tab opens it, and accepts a dropped card (opening the completion sheet). The status filter still lists done tasks at full width. Widths and line boxes only exist in a real layout engine. |
 | `task-card-alignment.spec.ts` | That every text block under a task card's title (meta line, agent note, archived caption, the band's state word) starts at the title's text column, and the band's dot centres under the Done ring, at 1280px and under iPhone touch emulation where the checkbox box is 44px instead of 28px. The hanging indent leans on both netting 20px, which only layout can confirm. |
 | `webhook-actions.spec.ts` | Every trigger control and its delete menu stays within the viewport and passes corner hit-tests at desktop, 390px touch width and 200% page-zoom reflow, with History closed and open. Ancestor clipping can hide controls without causing document overflow. |
-| `appearance-settings.spec.ts` | Settings › Appearance is engine-wide. Soft text contrast resolves `--fg` to `#d2d2de` / `#2e2f46` in dark and light, text contrast and theme survive a reload with the local caches cleared (only the engine can restore them), and under Pixel 5 touch emulation every control in the card is at least 44×44px with no sideways scroll at 390px. |
+| `appearance-settings.spec.ts` | Settings › Appearance is engine-wide. Body font swaps the prose face while code stays monospace. Soft text contrast resolves `--fg` to `#d2d2de` / `#2e2f46` in dark and light, text contrast and theme survive a reload with the local caches cleared (only the engine can restore them), a refused custom pair keeps Apply disabled and says why while a passing one applies live and Reset clears it, and under Pixel 5 touch emulation every control in the card and in the Custom colours dialog is at least 44×44px with no sideways scroll at 390px. |
 | `touch-targets.spec.ts` | Home, chat, tasks, automations, every Memory section, the project, schedule and task detail pages and every Settings tab under iPhone touch emulation: every control at least 44×44px. It also clicks each menu, popover and dialog trigger and measures what opens (model pickers, the workspace form, chat details), and checks `.field-info` panels stay inside the viewport and beside their glyph. Measures buttons, links, ARIA widgets, inputs (checkboxes and radios through their label), `summary` and opened `<details>`; inline prose links and visually hidden keyboard controls are exempt. jsdom applies no CSS, so only a real engine under `(pointer: coarse)` can measure it. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. And that a project's archived list opens the transcript in the file viewer, with its "Continue this chat", instead of the chat's pinned side tile: the split view exists only in a real layout, so jsdom cannot see the tile the project route must not have. |

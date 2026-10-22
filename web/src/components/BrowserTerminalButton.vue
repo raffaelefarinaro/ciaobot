@@ -3,11 +3,12 @@
  * The chat's and the project's way into the browser terminal.
  *
  * This is the in-app terminal, not a native window: it opens the pane under
- * the chat, and it works from any browser that can reach the engine — the
- * password is asked for once, and the grant lives in a cookie. The native
- * host terminal keeps its own button (`HostTerminalButton.vue`) for the
- * actions that need a real window on the engine's own machine: provider
- * sign-in, skill updates, the engine's own update.
+ * the chat, and it works from any browser that can reach the engine. The
+ * signed-in session is the terminal's trust boundary — there is no password
+ * to ask for — and the grant lives in an HttpOnly cookie. The native host
+ * terminal keeps its own button (`HostTerminalButton.vue`) for the actions
+ * that need a real window on the engine's own machine: provider sign-in,
+ * skill updates, the engine's own update.
  */
 import { useTerminalStore } from '../stores/terminal'
 

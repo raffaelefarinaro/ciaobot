@@ -15,7 +15,7 @@ terminal is a shell on the engine's machine:
   the second set lets a loopback peer skip the session, and a local
   process must not be able to open a shell just by being local. The route
   re-checks the session itself (defence in depth: the middleware is not
-  the only thing standing between a request and a password check).
+  the only thing standing between a request and a grant).
 * **The browser's origin must be this engine's own origin** — the same
   scheme, hostname and effective port. `Origin` is the browser's
   declaration; a read may fall back to `Referer`, a write may not. A
@@ -35,6 +35,17 @@ terminal is a shell on the engine's machine:
   else: not in the JSON, not in a URL, not in a log line. `Path=/` is
   deliberate — both `/api/terminal` and `/ws/terminal` need it.
 
+**The signed-in session is the terminal's trust boundary.** The unlock
+route asks for no secret: a browser that holds a live session and came
+from this engine's own page gets the grant, and the route takes no body
+at all, so there is nothing to re-enter, nothing to guess and nothing
+that could be phished a second time. What the grant still answers is
+*which* browser may hold the socket and *for how long* — it binds the
+browser, expires on its own fixed deadline, and is revoked when the
+session behind it is re-keyed. The consequence is written down rather
+than left implicit: a workspace that denies the agent `Bash` no longer
+has a host-shell boundary, because a signed-in browser is enough.
+
 Two things this module deliberately does *not* do. It does not widen any
 existing allowlist, and it does not touch the native `/api/host/terminal`
 route, which keeps its own, stricter "this browser is on the engine's
@@ -43,10 +54,8 @@ machine" rule.
 
 from __future__ import annotations
 
-import json
 import socket
 from collections.abc import Callable
-from typing import Any
 from urllib.parse import urlsplit
 
 from starlette.requests import Request
@@ -56,7 +65,6 @@ from starlette.websockets import WebSocket
 from ciao import host_terminal
 from ciao.terminal_auth import (
     TERMINAL_COOKIE,
-    TERMINAL_UNLOCK_FAIL_WINDOW_S,
     TERMINAL_UNLOCK_TTL_S,
     TerminalAuthError,
     TerminalGrant,
@@ -74,21 +82,15 @@ from ciao.web.auth import (
 #: The unlock body cap, in bytes. The declared `Content-Length` is checked
 #: against it and the body is capped again while it is read, because a
 #: chunked request declares nothing and a declared length is the caller's
-#: own claim.
+#: own claim. The route takes no body at all, so the cap is a guard on a
+#: request that is going to be refused anyway — it is there so a hostile
+#: body is never read into memory.
 MAX_BODY_BYTES = 4096
-
-#: The longest password the unlock accepts, in UTF-8 bytes.
-MAX_PASSWORD_BYTES = 1024
 
 #: The detached-session lifetime the status reports. A terminal session
 #: detached from its browser stays recoverable for this long; it is a
 #: fixed number, not a sliding one.
 DETACHED_TTL_SECONDS = 900
-
-#: The one key every caller the server cannot identify shares. The store
-#: canonicalizes it into the same bucket, so an absent peer address cannot
-#: make the guessing budget unbounded.
-_UNKNOWN_CLIENT = "unknown"
 
 #: One line per refusal reason, so the reason is a closed vocabulary and a
 #: route cannot invent a new one by accident.
@@ -110,15 +112,12 @@ def _no_store(response: JSONResponse) -> JSONResponse:
     return response
 
 
-def _fail(
-    reason: str, error: str, status: int, *, retry_after: int | None = None
-) -> JSONResponse:
-    response = JSONResponse(
-        {"ok": False, "reason": reason, "error": error}, status_code=status
+def _fail(reason: str, error: str, status: int) -> JSONResponse:
+    return _no_store(
+        JSONResponse(
+            {"ok": False, "reason": reason, "error": error}, status_code=status
+        )
     )
-    if retry_after is not None:
-        response.headers["Retry-After"] = str(retry_after)
-    return _no_store(response)
 
 
 # ── The policy ─────────────────────────────────────────────────────────────
@@ -261,8 +260,7 @@ def _origin_refusal(request: Request | WebSocket) -> str | None:
 def terminal_policy(request: Request | WebSocket) -> str | None:
     """The reason this request may not use the terminal, or ``None``.
 
-    ``None`` means the request may proceed to the session and password
-    checks. The reasons are a closed vocabulary — ``https_required``,
+    ``None`` means the request may proceed to the session check. The reasons are a closed vocabulary — ``https_required``,
     ``origin_required``, ``forbidden_origin`` — because a caller is told
     *which* rule it broke, never what it sent.
 
@@ -339,23 +337,6 @@ def _remaining_seconds(request: Request, grant: TerminalGrant) -> int:
     return max(0, int(grant.expires_at - _clock(request)()))
 
 
-def _client_identity(request: Request) -> str:
-    """The address the *server* selected for this caller.
-
-    The TCP peer the ASGI server saw — which a trusted proxy's configured
-    forwarding has already rewritten — and never an address from the
-    request body, the query string or a raw forwarded header. The store
-    canonicalizes it (one bucket per address, an IPv4-mapped IPv6 address
-    is the IPv4 address it carries), and an address it cannot parse shares
-    one fixed bucket.
-    """
-    client = request.client
-    if client is None:
-        return _UNKNOWN_CLIENT
-    host = str(client.host or "").strip()
-    return host or _UNKNOWN_CLIENT
-
-
 # ── The body ───────────────────────────────────────────────────────────────
 
 
@@ -405,21 +386,6 @@ async def _read_bounded_body(request: Request) -> bytes | None:
     return b"".join(chunks)
 
 
-def _password_of(payload: Any) -> str | None:
-    """The password in a decoded body, or ``None`` when the shape is wrong.
-
-    The body is exactly ``{"password": <string>}``: a missing key, an
-    unknown key, a non-string value and an empty string are all the same
-    refusal, so a caller cannot learn the shape by trying variants.
-    """
-    if not isinstance(payload, dict) or set(payload) != {"password"}:
-        return None
-    password = payload["password"]
-    if not isinstance(password, str) or not password:
-        return None
-    return password
-
-
 # ── The routes ─────────────────────────────────────────────────────────────
 
 
@@ -427,9 +393,9 @@ async def terminal_status(request: Request) -> JSONResponse:
     """Whether this browser may use the terminal, and how long its grant lasts.
 
     A status read needs the ordinary signed session and the strict policy,
-    but no fresh unlock: it reports, it never grants. The answer names no
-    credential — the grant's bearer, the session cookie and the password
-    are all absent from it — and it is never cacheable.
+    but no fresh grant: it reports, it never grants. The answer names no
+    credential — the grant's bearer and the session cookie are both absent
+    from it — and it is never cacheable.
     """
     if not _session_ok(request):
         return _fail("unauthorized", "a signed-in session is required.", 401)
@@ -468,15 +434,21 @@ async def terminal_status(request: Request) -> JSONResponse:
 
 
 async def terminal_unlock(request: Request) -> JSONResponse:
-    """Unlock the terminal for this browser, after the password again.
+    """Give this browser the terminal grant.
 
-    The order is the policy first, then the session, then the body, then
-    the password: a request that is not this engine's own page, or not on a
-    secure transport, never has its body read and never has its password
-    compared, so a refusal cannot become a guess.
+    The order is the policy first, then the session, then the body: a
+    request that is not this engine's own page, or not on a secure
+    transport, never has its body read, so a refusal can never become a
+    guess.
+
+    There is no password. The signed-in session is the terminal's trust
+    boundary: a browser that holds a live session and came from this
+    engine's own page gets the grant, and the route takes no body at all,
+    so there is no secret to send, nothing to re-enter and nothing to
+    phish. A request that carries a body is refused.
 
     A refusal is one of a closed set of reasons and never carries the
-    password, the bearer or the cookie. The grant itself leaves only in the
+    bearer or the cookie. The grant itself leaves only in the
     `Set-Cookie` header.
     """
     refusal = terminal_policy(request)
@@ -490,45 +462,13 @@ async def terminal_unlock(request: Request) -> JSONResponse:
         return _fail(
             "too_large", f"the request body exceeds {MAX_BODY_BYTES} bytes.", 413
         )
-    try:
-        payload = json.loads(raw)
-    except ValueError:
-        # `JSONDecodeError` and `UnicodeDecodeError` are both `ValueError`s:
-        # a malformed body and one that is not UTF-8 are one refusal.
-        return _fail("bad_request", "invalid json", 400)
-    password = _password_of(payload)
-    if password is None:
-        return _fail("bad_request", 'send exactly {"password": "<password>"}', 400)
-
-    # A password that is not valid UTF-8 (a lone surrogate) can never equal
-    # the engine's password, which is valid UTF-8. It is refused as a wrong
-    # password — and it counts as one — instead of raising while its length
-    # is measured.
-    try:
-        encoded = password.encode("utf-8")
-    except UnicodeEncodeError:
-        encoded = None
-    if encoded is not None and len(encoded) > MAX_PASSWORD_BYTES:
-        return _fail(
-            "bad_request", f"the password exceeds {MAX_PASSWORD_BYTES} bytes.", 400
-        )
+    if raw:
+        # The route takes no body: a request that carries one is asking
+        # for something this route does not do. Whatever it carries is
+        # never read as a secret, never compared and never kept.
+        return _fail("bad_request", "this route takes no body.", 400)
 
     store = _store(request)
-    expected = str(getattr(request.app.state.config, "pwa_auth_token", "") or "")
-    try:
-        accepted = store.check_password(_client_identity(request), password, expected)
-    except TerminalAuthError as exc:
-        if exc.reason != "rate_limited":
-            raise
-        return _fail(
-            "rate_limited",
-            "too many unlock attempts; try again later.",
-            429,
-            retry_after=TERMINAL_UNLOCK_FAIL_WINDOW_S,
-        )
-    if not accepted:
-        return _fail("wrong_password", "wrong password.", 403)
-
     try:
         token, _grant = store.issue(
             _session_cookie(request),

@@ -18,7 +18,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { useTerminalStore, type TerminalRenderer } from '../terminal'
+import { useTerminalStore, MAX_AUTO_RECONNECT_ATTEMPTS, type TerminalRenderer } from '../terminal'
 import { encodeTerminalBytes } from '../../lib/terminalProtocol'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -846,10 +846,19 @@ describe('terminal store connection eligibility', () => {
 
   it('refuses to reconnect while the pane is locked', async () => {
     const store = await started()
-    fakeSockets[0].close(4401)
+    // The engine says the terminal is not available: that is a state the
+    // user has to leave, and nothing may open a socket in it.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') {
+        return Promise.resolve(statusPayload({ available: false, reason: 'https_required' }))
+      }
+      return Promise.resolve({ sessions: [] })
+    })
+    fakeSockets[0].close(1006)
     await vi.advanceTimersByTimeAsync(0)
     const before = fakeSockets.length
 
+    expect(store.phase).toBe('locked')
     expect(await store.reconnect()).toBe(false)
     expect(fakeSockets).toHaveLength(before)
   })
@@ -1055,9 +1064,9 @@ describe('terminal store scope and responses', () => {
   })
 })
 
-// ── Status, unlock and the grant ─────────────────────────────────────────
+// ── Status, the grant and the session list ────────────────────────────────
 
-describe('terminal store status and unlock', () => {
+describe('terminal store status and grant', () => {
   it('locks the pane when the engine says the terminal needs HTTPS', async () => {
     apiGet.mockResolvedValue(statusPayload({ available: false, reason: 'https_required' }))
     const store = useTerminalStore()
@@ -1068,73 +1077,211 @@ describe('terminal store status and unlock', () => {
     expect(store.unlocked).toBe(false)
   })
 
-  it('does not send the password when the terminal is unavailable', async () => {
+  it('asks for no grant when the terminal is unavailable', async () => {
     apiGet.mockResolvedValue(statusPayload({ available: false, reason: 'https_required' }))
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })
 
-    const unlocked = await store.unlock('hunter2')
-
-    expect(unlocked).toBe(false)
     expect(apiPost).not.toHaveBeenCalled()
+    expect(store.unlocked).toBe(false)
   })
 
-  it('passes the password to one unlock request and keeps it nowhere', async () => {
+  it('asks for the grant itself, with an empty body and no password', async () => {
     const setItem = vi.spyOn(Storage.prototype, 'setItem')
     apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
     apiPost.mockResolvedValue({ ok: true, expires_in: 900 })
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })
 
-    const unlocked = await store.unlock('hunter2')
-
-    expect(unlocked).toBe(true)
+    expect(store.unlocked).toBe(true)
     expect(apiPost).toHaveBeenCalledTimes(1)
-    expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock', { password: 'hunter2' })
-    expect(JSON.stringify(store.$state)).not.toContain('hunter2')
+    // One POST, and it carries no body at all: there is no password to
+    // send, because the session is the terminal's trust boundary.
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock')
+    const body = apiPost.mock.calls[0][1]
+    expect(body).toBeUndefined()
+    expect(JSON.stringify(store.$state)).not.toContain('password')
     expect(setItem).not.toHaveBeenCalled()
   })
 
-  it('leaves the pane locked after a refused password, and creates no shell', async () => {
-    apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
-    apiPost.mockRejectedValue(apiError(403, 'bad password'))
+  it('keeps a live grant instead of re-minting it', async () => {
+    // Two tabs of one browser share the cookie: re-minting the grant would
+    // revoke the other tab's.
+    apiGet.mockResolvedValue(statusPayload())
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })
 
-    const unlocked = await store.unlock('wrong')
-
-    expect(unlocked).toBe(false)
-    expect(store.phase).toBe('locked')
-    expect(store.error).not.toContain('wrong')
-    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(store.unlocked).toBe(true)
+    expect(apiPost).not.toHaveBeenCalled()
   })
 
-  it('replaces the socket after a fresh unlock, so the old one cannot clobber it', async () => {
+  it('leaves the pane locked after a refused grant, and creates no shell', async () => {
     apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
-    apiPost.mockImplementation((path: string) => {
-      if (path === '/api/terminal/unlock') return Promise.resolve({ ok: true, expires_in: 900 })
-      return Promise.resolve({ session: sessionPayload('s1') })
-    })
+    apiPost.mockRejectedValue(apiError(403, 'forbidden origin'))
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })
-    await store.unlock('hunter2')
-    await store.createSession()
-    store.attachRenderer(makeRenderer('s1').renderer)
-    const first = fakeSockets[0]
-    expect(first).toBeDefined()
 
-    // A fresh unlock changes the grant in the cookie.
-    await store.unlock('hunter2')
+    expect(store.phase).toBe('locked')
+    expect(store.unlocked).toBe(false)
+    expect(store.error).not.toContain('forbidden origin')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    // No shell was started: only the grant was refused.
+    expect(apiPost).not.toHaveBeenCalledWith('/api/terminal/sessions', expect.anything())
+  })
 
-    expect(first.closed).toBe(true)
-    expect(fakeSockets).toHaveLength(2)
+  it('asks for the grant again when the first open could not get one', async () => {
+    // The first status read answers: the terminal is available, and this
+    // browser holds no grant. The unlock is refused, and the open path
+    // does not need the status again to ask.
+    apiGet.mockResolvedValueOnce(statusPayload({ unlock_expires_in: 0 }))
+    apiGet.mockRejectedValue(new Error('network down'))
+    apiPost.mockRejectedValue(new Error('refused'))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+    const store = useTerminalStore()
 
-    // The old socket's late close must not decide what the new one does.
-    first.onclose?.({ code: 4401 } as CloseEvent)
+    await store.open({ chatId: 'chat-1' })
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(store.phase).not.toBe('locked')
+    // The open asked once, and the engine would not give a grant.
+    expect(store.phase).toBe('locked')
+    expect(unlocks()).toBe(1)
+
+    // The pane does not stop there: the next attempt asks again, on the
+    // same backoff a lost connection uses.
+    await vi.advanceTimersByTimeAsync(250)
+    expect(unlocks()).toBe(2)
+
+    // And the budget still stops it: the open's own ask, plus one attempt
+    // per retry the budget allows, and no more.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(unlocks()).toBe(1 + MAX_AUTO_RECONNECT_ATTEMPTS)
+    expect(store.phase).toBe('error')
+    expect(store.error).toContain('could not be re-established')
+  })
+
+  it('resumes the open path when the grant arrives on a later attempt', async () => {
+    // The status says the terminal is available and this browser holds no
+    // grant; the first ask is refused and the second one succeeds.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') {
+        return Promise.resolve(statusPayload({ unlock_expires_in: 0 }))
+      }
+      return Promise.resolve({ sessions: [sessionPayload('s1')] })
+    })
+    apiPost
+      .mockRejectedValueOnce(new Error('refused'))
+      .mockResolvedValue({ ok: true, expires_in: 900 })
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.phase).toBe('locked')
+
+    // The second ask succeeds, and the pane resumes where it stopped.
+    await vi.advanceTimersByTimeAsync(250)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.phase).toBe('ready')
     expect(store.unlocked).toBe(true)
+    expect(store.error).toBe('')
+    // The sessions are listed: an existing session is adopted, never
+    // created.
+    expect(store.sessions.map((session) => session.session_id)).toEqual(['s1'])
+    expect(store.activeSession?.session_id).toBe('s1')
+    // And no socket is opened until a surface attaches.
+    expect(fakeSockets).toHaveLength(0)
+    store.attachRenderer(makeRenderer('s1').renderer)
+    expect(fakeSockets).toHaveLength(1)
+  })
+
+  it('stops asking for a grant when the pane is hidden', async () => {
+    apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
+    apiPost.mockRejectedValue(new Error('refused'))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+    const statuses = () =>
+      apiGet.mock.calls.filter((call) => call[0] === '/api/terminal/status').length
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+    await vi.advanceTimersByTimeAsync(0)
+    const asked = unlocks()
+    const read = statuses()
+
+    // The pane is hidden: the chain stops with it. Nothing is asked behind
+    // the user's back, and the pane's own state is left alone.
+    store.hide()
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(unlocks()).toBe(asked)
+    expect(statuses()).toBe(read)
+    expect(store.phase).not.toBe('reconnecting')
+    expect(store.phase).not.toBe('error')
+  })
+
+  it('stops asking for a grant when the pane is hidden mid-chain', async () => {
+    apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
+    apiPost.mockRejectedValue(new Error('refused'))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+    await vi.advanceTimersByTimeAsync(0)
+    // The chain is running: one retry has asked again.
+    await vi.advanceTimersByTimeAsync(250)
+    const asked = unlocks()
+    expect(asked).toBe(2)
+
+    // The pane is hidden while the chain is in flight: the rest of it
+    // stops with it.
+    store.hide()
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(unlocks()).toBe(asked)
+    expect(store.phase).not.toBe('reconnecting')
+    expect(store.phase).not.toBe('error')
+  })
+
+  it('gives a newly opened pane its own attempt budget', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+
+    // The engine is unreachable: this pane burns its whole budget and says
+    // so.
+    apiGet.mockRejectedValue(new Error('network down'))
+    apiPost.mockRejectedValue(new Error('network down'))
+    fakeSockets[0].close(4401)
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(store.phase).toBe('error')
+
+    // A new pane gets a new budget: its first retry is not blocked by the
+    // previous pane's exhausted one.
+    apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+    const before = unlocks()
+
+    await store.open({ chatId: 'chat-2' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(unlocks()).toBe(before + 1)
+
+    // And the retry happens: the new pane's budget is its own.
+    await vi.advanceTimersByTimeAsync(250)
+    expect(unlocks()).toBe(before + 2)
+  })
+
+  it('exposes no unlock action and no password state', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+
+    expect('unlock' in store).toBe(false)
+    expect('unlocking' in store).toBe(false)
+    expect(JSON.stringify(store.$state)).not.toContain('password')
   })
 
   it('lists the sessions of the scope and adopts an existing one', async () => {
@@ -2453,21 +2600,108 @@ describe('terminal store close codes', () => {
     return { store, socket: fakeSockets[0] }
   }
 
-  it('locks the pane when the grant was revoked', async () => {
+  it('asks for a new grant when the engine closed the stream', async () => {
     const { store, socket } = await connected()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') {
+        return Promise.resolve(statusPayload({ unlock_expires_in: 0 }))
+      }
+      return Promise.resolve({ sessions: [] })
+    })
+    apiPost.mockResolvedValue({ ok: true, expires_in: 900 })
+    const before = fakeSockets.length
+    const createsBefore = apiPost.mock.calls.filter(
+      (call) => call[0] === '/api/terminal/sessions',
+    ).length
 
     socket.close(4401)
 
-    expect(store.phase).toBe('locked')
     expect(store.unlocked).toBe(false)
+
+    // The pane asks the engine for a new grant by itself: the signed-in
+    // session is the terminal's trust boundary, and there is no password
+    // to ask for.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock')
+    expect(store.unlocked).toBe(true)
+    expect(store.error).toBe('')
+
+    // And the stream is resumed on the backoff: a fresh grant, a fresh
+    // socket, and the session attached again.
+    await vi.advanceTimersByTimeAsync(250)
+    expect(fakeSockets).toHaveLength(before + 1)
+    const resumed = fakeSockets[fakeSockets.length - 1]
+    expect(resumed.ofType('attach')).toHaveLength(1)
+    expect(resumed.ofType('attach')[0].takeover).toBe(false)
+    // A reconnect resumes the session; it never starts one.
+    const createsAfter = apiPost.mock.calls.filter(
+      (call) => call[0] === '/api/terminal/sessions',
+    ).length
+    expect(createsAfter).toBe(createsBefore)
   })
 
-  it('locks the pane on the older auth close code too', async () => {
+  it('keeps asking for a grant the engine will not give', async () => {
+    const { store, socket } = await connected()
+    // The engine is unreachable: the status read fails and the grant is
+    // refused. There is no form for the user to fill in any more, so the
+    // pane has to keep trying by itself.
+    apiGet.mockRejectedValue(new Error('network down'))
+    apiPost.mockRejectedValue(new Error('network down'))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+
+    socket.close(4401)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(store.phase).toBe('locked')
+    expect(unlocks()).toBe(1)
+
+    // The next attempt asks again, on the backoff.
+    await vi.advanceTimersByTimeAsync(250)
+    expect(unlocks()).toBe(2)
+
+    // And when the engine answers again, the pane reconnects.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      return Promise.resolve({ sessions: [] })
+    })
+    apiPost.mockResolvedValue({ ok: true, expires_in: 900 })
+    const before = fakeSockets.length
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(fakeSockets.length).toBeGreaterThan(before)
+    expect(store.unlocked).toBe(true)
+  })
+
+  it('stops asking for a grant once the attempt budget runs out', async () => {
+    const { store, socket } = await connected()
+    apiGet.mockRejectedValue(new Error('network down'))
+    apiPost.mockRejectedValue(new Error('network down'))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+
+    socket.close(4401)
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    // The budget is finite: the pane stops asking and says so, rather
+    // than asking forever. The count is exact — the close's own ask is
+    // the budget's first attempt, and the pane holds no grant of its own
+    // to spend before it.
+    expect(unlocks()).toBe(MAX_AUTO_RECONNECT_ATTEMPTS)
+    expect(store.phase).toBe('error')
+    expect(store.error).toContain('could not be re-established')
+    const asked = unlocks()
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(unlocks()).toBe(asked)
+  })
+
+  it('recovers on the older auth close code too', async () => {
     const { store, socket } = await connected()
 
     socket.close(4001)
 
-    expect(store.phase).toBe('locked')
+    expect(store.phase).toBe('reconnecting')
   })
 
   it('reports a refused origin as an error', async () => {
@@ -2543,9 +2777,14 @@ describe('terminal store retries', () => {
 
     await vi.advanceTimersByTimeAsync(250)
     expect(fakeSockets).toHaveLength(2)
+    // The grant was still live, so the reconnect asked for nothing: a
+    // retry resumes the session, it does not re-mint the grant.
+    expect(
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock'),
+    ).toHaveLength(0)
   })
 
-  it('locks the pane when the status says the grant is gone', async () => {
+  it('locks the pane when the status says the terminal is unavailable', async () => {
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })
     apiPost.mockResolvedValue({ session: sessionPayload('s1') })
@@ -2553,7 +2792,7 @@ describe('terminal store retries', () => {
     store.attachRenderer(makeRenderer('s1').renderer)
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/terminal/status') {
-        return Promise.resolve(statusPayload({ available: false, reason: 'unlocked_expired' }))
+        return Promise.resolve(statusPayload({ available: false, reason: 'https_required' }))
       }
       return Promise.resolve({ sessions: [] })
     })
@@ -2565,6 +2804,34 @@ describe('terminal store retries', () => {
     expect(store.phase).toBe('locked')
     expect(store.unlocked).toBe(false)
     expect(fakeSockets).toHaveLength(1)
+  })
+
+  it('asks for a new grant when the status says the grant is gone', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') {
+        return Promise.resolve(statusPayload({ unlock_expires_in: 0 }))
+      }
+      return Promise.resolve({ sessions: [] })
+    })
+    apiPost.mockImplementation((path: string) => {
+      if (path === '/api/terminal/unlock') return Promise.resolve({ ok: true, expires_in: 900 })
+      return Promise.resolve({ session: sessionPayload('s1') })
+    })
+
+    fakeSockets[0].close(1006)
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(5000)
+
+    // A missing grant is not a dead end: the pane asks for one and resumes.
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock')
+    expect(store.unlocked).toBe(true)
+    expect(store.phase).not.toBe('locked')
+    expect(fakeSockets.length).toBeGreaterThan(1)
   })
 
   it('gives up after eight automatic attempts', async () => {

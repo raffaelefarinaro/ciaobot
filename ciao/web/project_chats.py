@@ -3421,10 +3421,11 @@ class ProjectChatManager:
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
-        # The provider's operator default (Settings → Providers tab); the
-        # workspace no longer pins a model. An explicit ``model`` arg wins.
-        # Passing chat_provider resolves against that provider's own operator
-        # default when it differs from the workspace's default provider.
+        # This workspace's override for the chat's provider, else that
+        # provider's operator default (Settings → Providers tab). An explicit
+        # ``model`` arg wins. Passing chat_provider resolves against that
+        # provider's own values when it differs from the workspace's default
+        # provider.
         default_model = self._config.default_model_for_workspace(
             workspace, chat_provider
         )
@@ -3438,10 +3439,11 @@ class ProjectChatManager:
         # and then opens" bug. Empty chats now live until the user deletes
         # them explicitly.
         cid = f"chat-{chat_service._uuid8()}"
-        # Per-provider default thinking level for new chats; a missing entry
-        # leaves it to the provider default ("" = auto).
-        default_thinking = (self._config.provider_default_thinking or {}).get(
-            chat_provider, ""
+        # Per-provider default thinking level for new chats: the workspace's
+        # override, then the engine's; neither leaves it to the provider
+        # default ("" = auto).
+        default_thinking = self._config.default_thinking_for_provider(
+            chat_provider, workspace
         )
         chat = ChatInfo(
             chat_id=cid,
@@ -3449,7 +3451,7 @@ class ProjectChatManager:
             title=title,
             model=chat_model,
             provider=chat_provider,
-            mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
+            mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider, workspace)),
             thinking_level=default_thinking,
             created_at=chat_service._now_iso(),
             helper=chat_service._normalize_chat_helper(helper),
@@ -5687,7 +5689,9 @@ class ProjectChatManager:
             return ""
         return workspace_gws_profile(self._config, workspace)
 
-    def _model_for_provider(self, model: str, provider: str) -> str:
+    def _model_for_provider(
+        self, model: str, provider: str, workspace: str | None = None
+    ) -> str:
         """A chat's model, resolved for the provider that will actually run it.
 
         Tier aliases (haiku/sonnet/opus/fable) are Claude Code's own
@@ -5701,20 +5705,26 @@ class ProjectChatManager:
         """
         resolved = (model or "").strip()
         if provider != "claude" and is_tier(resolved):
-            return self._config.default_model_for_provider(provider)
+            return self._config.default_model_for_provider(provider, workspace)
         return chat_service._normalize_tier(resolved)
 
     def _resolve_and_validate_chat_model(
         self, model: str, provider: str, project_id: str
     ) -> str:
         """Normalize a chat model to its canonical form, then validate it."""
-        resolved_model = self._model_for_provider(model, provider)
+        project = self._projects.get(project_id)
+        resolved_model = self._model_for_provider(
+            model, provider, project.workspace if project else None
+        )
         self._validate_configured_model(resolved_model, provider)
         return resolved_model
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""
-        return self._model_for_provider(chat.model, chat.provider)
+        project = self._projects.get(chat.project_id)
+        return self._model_for_provider(
+            chat.model, chat.provider, project.workspace if project else None
+        )
 
     def _validate_configured_model(
         self, model: str | None, provider: str | None
