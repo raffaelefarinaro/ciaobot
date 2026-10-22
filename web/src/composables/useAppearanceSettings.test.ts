@@ -90,4 +90,54 @@ describe('font scale persistence', () => {
     expect(patch).toHaveBeenCalledTimes(1)
     expect(patch).toHaveBeenCalledWith('/api/settings/appearance', { font_scale: 1.3, revision: 'r0' })
   })
+
+  it('keeps a local change that an engine value overtakes before the save', async () => {
+    vi.useFakeTimers()
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue({ ...base, font_scale: 1.4, revision: 'r5' })
+    useFontScale().set(1.4)
+    await nextTick()
+    // An engine event (another device, or the first load) arrives inside the debounce.
+    applyAppearanceSettings({ ...base, font_scale: 1.2, revision: 'r0b' })
+    expect(useFontScale().fontScale.value).toBe(1.4)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(patch).toHaveBeenCalledWith('/api/settings/appearance', { font_scale: 1.4, revision: 'r0b' })
+  })
+
+  it('keeps a local change made while a save is in flight and saves it next', async () => {
+    vi.useFakeTimers()
+    let resolveFirst!: (value: unknown) => void
+    const patch = vi.spyOn(api, 'patch')
+      .mockReturnValueOnce(new Promise((r) => { resolveFirst = r }))
+      .mockResolvedValue({ ...base, font_scale: 1.45, revision: 'r7' })
+    useFontScale().set(1.3)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(patch).toHaveBeenCalledTimes(1)
+    useFontScale().set(1.45)
+    resolveFirst({ ...base, font_scale: 1.3, revision: 'r6' })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(useFontScale().fontScale.value).toBe(1.45)
+    expect(patch).toHaveBeenLastCalledWith('/api/settings/appearance', { font_scale: 1.45, revision: 'r6' })
+  })
+
+  it('lets the engine win when the font scale save fails', async () => {
+    vi.useFakeTimers()
+    vi.spyOn(api, 'patch').mockRejectedValue(new Error('boom'))
+    useFontScale().set(1.5)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(useFontScale().fontScale.value).toBe(1.2)
+  })
+
+  it('seeds a font scale snapped to the 0.05 grid', async () => {
+    // seeding is once per page life, so this needs a fresh module
+    vi.resetModules()
+    const freshApi = (await import('../lib/api')).api
+    const fresh = await import('./useAppearanceSettings')
+    const freshScale = (await import('./useFontScale')).useFontScale()
+    const patch = vi.spyOn(freshApi, 'patch').mockResolvedValue({ ...base, revision: 'r8' })
+    localStorage.setItem('ciao-theme', 'dark')
+    freshScale.set(1.23)
+    fresh.applyAppearanceSettings({ text_contrast: 'normal', theme: 'dark', font_scale: null, revision: 'r0' })
+    await vi.waitFor(() => expect(patch).toHaveBeenCalled())
+    expect(patch.mock.calls[0][1]).toMatchObject({ font_scale: 1.25 })
+  })
 })

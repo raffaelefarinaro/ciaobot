@@ -10,7 +10,7 @@ import {
   writeAppearanceCache,
   type AppearancePayload,
 } from '../lib/appearance'
-import { MAX_FONT_SCALE, MIN_FONT_SCALE, useFontScale } from './useFontScale'
+import { FONT_SCALE_STEP, MAX_FONT_SCALE, MIN_FONT_SCALE, useFontScale } from './useFontScale'
 
 const settings = ref<AppearancePayload>({ ...DEFAULT_APPEARANCE })
 const loaded = ref(false)
@@ -23,6 +23,12 @@ const { fontScale, set: setFontScale } = useFontScale()
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100
+}
+
+/** Nearest step of the engine's 0.05 grid, clamped to the allowed range. */
+function snapFontScale(value: number): number {
+  const steps = Math.round((value - MIN_FONT_SCALE) / FONT_SCALE_STEP)
+  return round2(Math.min(MAX_FONT_SCALE, Math.max(MIN_FONT_SCALE, MIN_FONT_SCALE + steps * FONT_SCALE_STEP)))
 }
 
 function validFontScale(value: unknown): value is number {
@@ -41,7 +47,9 @@ export function applyAppearanceSettings(value: Partial<AppearancePayload>): void
   if (value.font_scale === null) settings.value.font_scale = null
   else if (validFontScale(value.font_scale)) {
     settings.value.font_scale = round2(value.font_scale)
-    setFontScale(settings.value.font_scale)
+    // A local change that is waiting to be saved, or is being saved, is newer
+    // than whatever the engine just said: keep it and let the save settle it.
+    if (!fontChangePending()) setFontScale(settings.value.font_scale)
   }
   if (typeof value.revision === 'string') settings.value.revision = value.revision
   loaded.value = true
@@ -59,7 +67,7 @@ function seedMissing(): void {
   if (seeded) return
   const patch: Partial<AppearancePayload> = {}
   if (settings.value.theme === null) patch.theme = readLocalTheme()
-  if (settings.value.font_scale === null) patch.font_scale = round2(fontScale.value)
+  if (settings.value.font_scale === null) patch.font_scale = snapFontScale(fontScale.value)
   if (Object.keys(patch).length === 0) return
   seeded = true
   void save(patch).catch(() => {})
@@ -94,13 +102,40 @@ function save(patch: Partial<AppearancePayload>): Promise<void> {
 // Every writer of the font scale (Settings buttons, the zoom shortcuts) goes
 // through useFontScale, so one debounced watcher persists them all to the engine.
 let fontTimer: ReturnType<typeof setTimeout> | null = null
+let fontSaves = 0
+
+function fontChangePending(): boolean {
+  return fontTimer !== null || fontSaves > 0
+}
+
+async function flushFontScale(): Promise<void> {
+  const sent = round2(fontScale.value)
+  fontSaves++
+  try {
+    await save({ font_scale: sent })
+  } catch {
+    // The engine wins on failure (a 409 already reloaded its value).
+    if (settings.value.font_scale !== null) setFontScale(settings.value.font_scale)
+    return
+  } finally {
+    fontSaves--
+  }
+  if (fontChangePending()) return
+  if (round2(fontScale.value) !== sent) {
+    // The user moved again while the save was in flight: save that too.
+    void flushFontScale()
+  } else if (settings.value.font_scale !== null) {
+    // Nothing newer locally: whatever the engine stored is what we show.
+    setFontScale(settings.value.font_scale)
+  }
+}
+
 watch(fontScale, (next) => {
   if (!loaded.value || round2(next) === settings.value.font_scale) return
   if (fontTimer) clearTimeout(fontTimer)
   fontTimer = setTimeout(() => {
     fontTimer = null
-    const current = round2(fontScale.value)
-    if (current !== settings.value.font_scale) void save({ font_scale: current }).catch(() => {})
+    if (round2(fontScale.value) !== settings.value.font_scale) void flushFontScale()
   }, 300)
 })
 

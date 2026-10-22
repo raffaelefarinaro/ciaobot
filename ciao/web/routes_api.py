@@ -5889,6 +5889,9 @@ async def settings_keyboard(request: Request) -> JSONResponse:
     return JSONResponse(payload())
 
 
+_APPEARANCE_KEYS = frozenset({"text_contrast", "theme", "font_scale"})
+
+
 async def settings_appearance(request: Request) -> JSONResponse:
     """Read or update appearance preferences shared by every device of this engine."""
     app_settings = request.app.state.app_settings
@@ -5902,6 +5905,12 @@ async def settings_appearance(request: Request) -> JSONResponse:
         if not isinstance(body, dict):
             return JSONResponse({"error": "expected an object"}, status_code=400)
         expected_revision = body.pop("revision", None)
+        unknown = sorted(set(body) - _APPEARANCE_KEYS)
+        if unknown:
+            return JSONResponse(
+                {"error": f"Unknown appearance settings: {', '.join(unknown)}"},
+                status_code=400,
+            )
         if not isinstance(expected_revision, str):
             return JSONResponse({"error": "revision is required"}, status_code=400)
         if expected_revision != app_settings.appearance_payload()["revision"]:

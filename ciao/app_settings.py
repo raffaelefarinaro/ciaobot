@@ -270,9 +270,13 @@ def _valid_font_scale(value: object) -> TypeGuard[int | float]:
     """A number inside the Settings range that sits on a 0.05 step."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    if not math.isfinite(value) or not MIN_FONT_SCALE - 1e-9 <= value <= MAX_FONT_SCALE + 1e-9:
+    try:
+        number = float(value)  # an int beyond float range raises OverflowError
+    except OverflowError:
         return False
-    steps = (value - MIN_FONT_SCALE) / FONT_SCALE_STEP
+    if not math.isfinite(number) or not MIN_FONT_SCALE - 1e-9 <= number <= MAX_FONT_SCALE + 1e-9:
+        return False
+    steps = (number - MIN_FONT_SCALE) / FONT_SCALE_STEP
     return abs(steps - round(steps)) < 1e-6
 
 

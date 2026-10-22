@@ -489,3 +489,12 @@ def test_theme_and_font_scale_garbage_on_disk_load_as_unset(tmp_path):
     payload = AppSettingsStore(path).appearance_payload()
     assert payload["theme"] is None
     assert payload["font_scale"] is None
+
+
+def test_huge_integer_font_scale_is_invalid_not_a_crash(tmp_path):
+    path = tmp_path / "app_settings.json"
+    huge = 10 ** 400
+    with pytest.raises(ValueError, match="font_scale must be"):
+        AppSettingsStore(path).update({"font_scale": huge})
+    path.write_text('{"font_scale": 1' + "0" * 400 + "}")
+    assert AppSettingsStore(path).appearance_payload()["font_scale"] is None

@@ -28,13 +28,13 @@ test.describe('Settings › Appearance', () => {
     await expect(page.locator('html')).toHaveAttribute('data-text-contrast', 'soft')
     await expect.poll(() => fg(page)).toBe('#d2d2de')
 
-    await page.getByRole('button', { name: 'Light', exact: true }).click()
+    await page.getByRole('radio', { name: 'Light', exact: true }).click()
     await expect(page.locator('html')).toHaveClass(/theme-light/)
     await expect.poll(() => fg(page)).toBe('#2e2f46')
 
     await contrastGroup(page).getByRole('radio', { name: 'Normal' }).click()
     await expect.poll(() => fg(page)).toBe('#1a1a2e')
-    await page.getByRole('button', { name: 'Dark', exact: true }).click()
+    await page.getByRole('radio', { name: 'Dark', exact: true }).click()
     await expect.poll(() => fg(page)).toBe('#e8e8f0')
   })
 
@@ -53,7 +53,7 @@ test.describe('Settings › Appearance', () => {
 
   test('theme is engine-wide: a browser with no local choice follows it', async ({ page }) => {
     await boot(page, '/settings/appearance', SETTINGS)
-    await page.getByRole('button', { name: 'Light', exact: true }).click()
+    await page.getByRole('radio', { name: 'Light', exact: true }).click()
     await expect(page.locator('html')).toHaveClass(/theme-light/)
 
     // A different device: nothing stored locally, so system (dark here) would win.

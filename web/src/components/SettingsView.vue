@@ -307,29 +307,12 @@
               <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
             </div>
             <div class="settings-control">
-              <div class="instance-toggle">
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'dark' }"
-                  @click="setTheme('dark')"
-                >
-                  Dark
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'light' }"
-                  @click="setTheme('light')"
-                >
-                  Light
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'system' }"
-                  @click="setTheme('system')"
-                >
-                  System
-                </button>
-              </div>
+              <SettingsRadioGroup
+                label="Theme"
+                :options="THEME_OPTIONS"
+                :model-value="activeTheme"
+                @update:model-value="setTheme"
+              />
             </div>
           </div>
           <div class="setting-row setting-row--inline">
@@ -2112,6 +2095,7 @@ import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsAppearance from './settings/SettingsAppearance.vue'
+import SettingsRadioGroup from './settings/SettingsRadioGroup.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsMemoryHandover from './settings/SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
@@ -2297,6 +2281,11 @@ function loadAppearanceSettings() {
 
 // Theme and font size are engine-wide: apply here at once, then store on the
 // engine so every device follows. A failed save reloads the engine value.
+const THEME_OPTIONS: { value: Theme; label: string }[] = [
+  { value: 'dark', label: 'Dark' },
+  { value: 'light', label: 'Light' },
+  { value: 'system', label: 'System' },
+]
 const appearanceError = ref('')
 // Another device (or the first load) can move the engine theme while Settings is open.
 watch(() => appearance.settings.value.theme, (theme) => {

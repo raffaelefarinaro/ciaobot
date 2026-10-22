@@ -83,3 +83,28 @@ def test_invalid_value_is_400(tmp_path, patch):
     response = client.patch("/api/settings/appearance", json={**patch, "revision": revision})
     assert response.status_code == 400
     assert client.get("/api/settings/appearance").json()["revision"] == revision
+
+
+def test_huge_integer_font_scale_is_400(tmp_path):
+    client, _ = _client(tmp_path)
+    revision = client.get("/api/settings/appearance").json()["revision"]
+    response = client.patch(
+        "/api/settings/appearance",
+        content='{"font_scale": 1' + "0" * 400 + f', "revision": "{revision}"' + "}",
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+
+
+def test_unrelated_settings_keys_are_refused(tmp_path):
+    client, _ = _client(tmp_path)
+    store = client.app.state.app_settings
+    revision = client.get("/api/settings/appearance").json()["revision"]
+    response = client.patch(
+        "/api/settings/appearance",
+        json={"text_contrast": "soft", "dev_mode": True, "pwa_host": "0.0.0.0", "revision": revision},
+    )
+    assert response.status_code == 400
+    assert "dev_mode" in response.json()["error"] and "pwa_host" in response.json()["error"]
+    assert store.settings.dev_mode is False
+    assert store.settings.text_contrast == ""

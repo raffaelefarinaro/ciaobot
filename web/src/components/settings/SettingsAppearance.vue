@@ -5,21 +5,12 @@
       <span class="routine-detail">Soft makes body text a little dimmer so it glows less on dark backgrounds.</span>
     </div>
     <div class="settings-control">
-      <div class="instance-toggle" role="radiogroup" aria-label="Text contrast">
-        <button
-          v-for="option in TEXT_CONTRAST_OPTIONS"
-          :key="option.value"
-          class="toggle-btn"
-          type="button"
-          role="radio"
-          :aria-checked="settings.text_contrast === option.value"
-          :class="{ active: settings.text_contrast === option.value }"
-          :disabled="pending"
-          @click="choose(option.value)"
-        >
-          {{ option.label }}
-        </button>
-      </div>
+      <SettingsRadioGroup
+        label="Text contrast"
+        :options="TEXT_CONTRAST_OPTIONS"
+        :model-value="settings.text_contrast"
+        @update:model-value="choose"
+      />
     </div>
   </div>
   <p v-if="error" class="action-result" role="alert">{{ error }}</p>
@@ -28,6 +19,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useAppearanceSettings } from '../../composables/useAppearanceSettings'
+import SettingsRadioGroup from './SettingsRadioGroup.vue'
 import type { TextContrast } from '../../lib/appearance'
 
 const TEXT_CONTRAST_OPTIONS: { value: TextContrast; label: string }[] = [

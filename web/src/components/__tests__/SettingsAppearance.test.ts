@@ -41,16 +41,33 @@ describe('SettingsAppearance', () => {
     expect(radios(wrapper).map((b) => b.attributes('aria-checked'))).toEqual(['false', 'true'])
   })
 
-  it('disables both buttons while a save is pending', async () => {
+  it('ignores another choice while a save is pending', async () => {
     let resolve!: (value: typeof engine) => void
-    vi.spyOn(api, 'patch').mockReturnValue(new Promise((r) => { resolve = r }))
+    const patch = vi.spyOn(api, 'patch').mockReturnValue(new Promise((r) => { resolve = r }))
     const wrapper = mount(SettingsAppearance)
     await flushPromises()
     await radios(wrapper)[1].trigger('click')
-    expect(radios(wrapper).every((b) => b.attributes('disabled') !== undefined)).toBe(true)
+    await radios(wrapper)[0].trigger('click')
+    expect(patch).toHaveBeenCalledTimes(1)
     resolve({ ...engine, text_contrast: 'soft' as never, revision: 'r1' })
     await flushPromises()
-    expect(radios(wrapper).some((b) => b.attributes('disabled') !== undefined)).toBe(false)
+  })
+
+  it('follows the radio keyboard pattern: one tab stop, arrows select, Home/End jump', async () => {
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue({ ...engine, text_contrast: 'soft', revision: 'r1' })
+    const wrapper = mount(SettingsAppearance, { attachTo: document.body })
+    await flushPromises()
+    expect(radios(wrapper).map((b) => b.attributes('tabindex'))).toEqual(['0', '-1'])
+    await radios(wrapper)[0].trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/settings/appearance', { text_contrast: 'soft', revision: 'r0' })
+    expect(document.activeElement).toBe(radios(wrapper)[1].element)
+    expect(radios(wrapper).map((b) => b.attributes('tabindex'))).toEqual(['-1', '0'])
+    await radios(wrapper)[1].trigger('keydown', { key: 'Home' })
+    expect(document.activeElement).toBe(radios(wrapper)[0].element)
+    await radios(wrapper)[0].trigger('keydown', { key: 'End' })
+    expect(document.activeElement).toBe(radios(wrapper)[1].element)
+    wrapper.unmount()
   })
 
   it('shows a failed save in an alert', async () => {
