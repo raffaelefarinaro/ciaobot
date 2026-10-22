@@ -101,17 +101,35 @@ carried by the session.
   browser's terminal. A logout that presents no terminal cookie revokes
   nothing. A *successful* `POST /api/auth/settings` password change ends
   **every** grant, on every browser, and clears the `ciao_terminal` cookie
-  — the password is the terminal's own credential, so every browser has to
-  unlock again, including the one that made the change. A refused password
+  — the grant is bound to the signed session, and the change re-keys the
+  session signer, so every browser has to sign in again and ask for a new
+  grant, including the one that made the change. A refused password
   change ends nothing. The grant is revoked here, and the terminal socket
   enforces it twice: a watchdog re-checks the store at most once a second
   and closes the socket `4401`, and the receive loop re-checks on every
   client frame, so a revoked grant ends the stream even between ticks. A
   detached session's shell keeps running until its own 15-minute detached
-  TTL, which is what lets the browser unlock again and recover it. The
+  TTL, which is what lets the browser get a new grant and recover it. The
   signed session cookie remains required for every route either way, and
   neither action names a user or a device: there are no per-device
   identities to revoke against.
+- **The terminal's trust boundary is the signed-in session, and it is the
+  session alone.** `POST /api/terminal/unlock` asks for no secret: it
+  takes no body, and a signed-in browser on this engine's own origin gets
+  the 15-minute grant that the socket and the session routes then ask
+  for. The grant itself no longer proves anything about the password — it
+  answers *which* browser may hold the socket and *for how long* — and the
+  grant's own rules are unchanged: a host-only, HttpOnly, SameSite=Strict
+  cookie, bound to the session cookie that minted it, a fixed 15-minute
+  lifetime that does not slide, at most 32 live grants, one controller per
+  session, and revocation on logout and on a password change. The
+  consequence is written down rather than left implicit: a workspace that
+  denies the agent `Bash` (or confines it to the workspace) no longer has
+  a host-shell boundary. The terminal used to ask for the password a
+  second time, and that second prompt was the last thing between a
+  signed-in tab and a shell on the engine; it is gone, so a signed-in
+  browser is now enough. Anything that relied on that prompt as a second
+  barrier has to rely on the session instead.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails

@@ -352,7 +352,16 @@ async function terminalApi(req, res, pathname, url, state) {
     })
   }
   if (pathname === '/api/terminal/unlock' && req.method === 'POST') {
-    await readBody(req)
+    // The engine's route takes no body: the signed-in session is the
+    // terminal's trust boundary, so a request that carries one is refused.
+    const raw = await readRawBody(req)
+    if (raw.length > 0) {
+      return sendJson(
+        res,
+        { ok: false, reason: 'bad_request', error: 'this route takes no body.' },
+        400,
+      )
+    }
     return sendJson(res, { ok: true, expires_in: 900 })
   }
   if (pathname === '/api/terminal/sessions' && req.method === 'GET') {
@@ -608,6 +617,13 @@ async function readBody(req) {
   for await (const chunk of req) chunks.push(chunk)
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return {} }
+}
+
+/** The raw request body, as bytes: what the engine's unlock route looks at. */
+async function readRawBody(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  return Buffer.concat(chunks)
 }
 
 // ── Static files ────────────────────────────────────────────────────────

@@ -166,6 +166,17 @@ is typed. The native host terminal keeps its own button
 (`HostTerminalButton.vue`) for the actions that need a real window on the
 engine's computer: provider sign-in, skill updates, the engine's own update.
 
+- **The signed-in session is the terminal's trust boundary.** There is no
+  password prompt: `stores/terminal.ts` asks the engine for the grant with
+  an empty body when the browser holds none, and the engine issues it to a
+  signed-in, same-origin browser. The grant still binds the browser, still
+  expires after fifteen minutes, and is still revoked by a logout or a
+  password change — it answers *which* browser may hold the socket and
+  *for how long*, not *who knows the password*. The consequence is plain:
+  a workspace that denies the agent `Bash` no longer has a host-shell
+  boundary, because a signed-in browser is enough to reach a shell on the
+  engine.
+
 - **One entry per surface, outside the repository.** A chat's Chat details
   carries a *Terminal* section of its own — under *Repository*, above *Always
   loaded* — and a project page carries one under its *Repository* section. The
@@ -195,10 +206,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   has always had, and the terminal holds the chat column at 360px and the
   tile at 360px.
 - `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
-  bounded renderer backpressure and the replay offsets. The pane
-  (`components/TerminalPane.vue`) owns the screen and the controls around it;
-  the screen itself is `lib/terminalRenderer.ts` (one xterm, bound to one
-  session for life).
+  bounded renderer backpressure and the replay offsets. It also owns the
+  grant: it asks for one with an empty body when the browser holds none,
+  and asks for a new one when the engine ends the stream because the grant
+  expired or was revoked. The pane (`components/TerminalPane.vue`) owns the
+  screen and the controls around it; the screen itself is
+  `lib/terminalRenderer.ts` (one xterm, bound to one session for life).
 - The pane is a chunk of its own, mounted the first time a terminal is asked
   for and kept after that, so the screen survives a hide and a chat page that
   never opens a terminal does not download it. `lib/terminalPanel.ts` carries
@@ -229,11 +242,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   that chat) and **Dismiss** (which names the suggestion it dismisses, so a
   newer one is never dismissed by mistake, and says so when the suggestion
   changed). The card never runs the command and never pastes it into the
-  shell: *Open in Terminal* starts no shell, asks for no grant and asks the
-  engine to run nothing — an already-live session attaches and shows the
-  screen it already holds, exactly like the *Terminal* section's button. The
-  *Terminal* section stays the persistent, manual way into the terminal; the
-  card is the contextual one, and it is shown only for the chat on screen.
+  shell: *Open in Terminal* starts no shell, mints no grant of its own and
+  asks the engine to run nothing — an already-live session attaches and
+  shows the screen it already holds, exactly like the *Terminal* section's
+  button. The *Terminal* section stays the persistent, manual way into the
+  terminal; the card is the contextual one, and it is shown only for the
+  chat on screen.
 
 ### Layout traps
 

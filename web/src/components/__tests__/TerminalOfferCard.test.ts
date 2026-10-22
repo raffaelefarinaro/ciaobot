@@ -297,7 +297,6 @@ describe('TerminalOfferCard', () => {
     const card = mountCard()
     const terminal = useTerminalStore()
     const sendInput = vi.spyOn(terminal, 'sendInput')
-    const unlock = vi.spyOn(terminal, 'unlock')
     const createSession = vi.spyOn(terminal, 'createSession')
 
     await card.get('button.terminal-button').trigger('click')
@@ -307,7 +306,6 @@ describe('TerminalOfferCard', () => {
     // No shell, no grant, no keystroke: opening the panel starts nothing.
     expect(apiPost).not.toHaveBeenCalled()
     expect(terminal.sessions).toHaveLength(0)
-    expect(unlock).not.toHaveBeenCalled()
     expect(createSession).not.toHaveBeenCalled()
     expect(sendInput).not.toHaveBeenCalled()
   })
@@ -315,7 +313,6 @@ describe('TerminalOfferCard', () => {
   it('does nothing at all on mount', async () => {
     const terminal = useTerminalStore()
     const open = vi.spyOn(terminal, 'open')
-    const unlock = vi.spyOn(terminal, 'unlock')
     const sendInput = vi.spyOn(terminal, 'sendInput')
 
     mountCard()
@@ -327,7 +324,6 @@ describe('TerminalOfferCard', () => {
     expect(apiPost).not.toHaveBeenCalled()
     expect(apiPatch).not.toHaveBeenCalled()
     expect(open).not.toHaveBeenCalled()
-    expect(unlock).not.toHaveBeenCalled()
     expect(sendInput).not.toHaveBeenCalled()
     expect(terminal.visible).toBe(false)
   })
