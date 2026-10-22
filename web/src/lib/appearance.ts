@@ -7,10 +7,12 @@
  */
 
 export type TextContrast = 'normal' | 'soft'
+export type BodyFont = 'system' | 'serif' | 'mono'
 export type Theme = 'dark' | 'light' | 'system'
 
 export interface AppearancePayload {
   text_contrast: TextContrast
+  body_font: BodyFont
   /** `null` until a browser first stores one on the engine. */
   theme: Theme | null
   /** `null` until a browser first stores one on the engine. */
@@ -20,6 +22,7 @@ export interface AppearancePayload {
 
 export const DEFAULT_APPEARANCE: AppearancePayload = {
   text_contrast: 'normal',
+  body_font: 'system',
   theme: null,
   font_scale: null,
   revision: '',
@@ -37,10 +40,16 @@ export function isTextContrast(value: unknown): value is TextContrast {
   return value === 'normal' || value === 'soft'
 }
 
+export function isBodyFont(value: unknown): value is BodyFont {
+  return value === 'system' || value === 'serif' || value === 'mono'
+}
+
 /** Sets the data attributes and inline properties the engine value drives. */
 export function applyAppearanceToRoot(value: Partial<AppearancePayload>, root: HTMLElement): void {
   if (value.text_contrast === 'soft') root.dataset.textContrast = 'soft'
   else if (value.text_contrast === 'normal') delete root.dataset.textContrast
+  if (value.body_font === 'serif' || value.body_font === 'mono') root.dataset.bodyFont = value.body_font
+  else if (value.body_font === 'system') delete root.dataset.bodyFont
 }
 
 /** This browser's stored theme choice, `system` when it has none. */

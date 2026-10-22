@@ -5,7 +5,7 @@ import { api } from '../lib/api'
 import { applyAppearanceSettings, useAppearanceSettings } from './useAppearanceSettings'
 import { useFontScale } from './useFontScale'
 
-const base = { text_contrast: 'normal' as const, theme: 'dark' as const, font_scale: 1.2, revision: 'r0' }
+const base = { text_contrast: 'normal' as const, body_font: 'system' as const, theme: 'dark' as const, font_scale: 1.2, revision: 'r0' }
 
 beforeEach(() => {
   applyAppearanceSettings(base)
@@ -16,6 +16,7 @@ afterEach(() => {
   vi.useRealTimers()
   localStorage.clear()
   document.documentElement.removeAttribute('data-text-contrast')
+  document.documentElement.removeAttribute('data-body-font')
   document.documentElement.classList.remove('theme-light')
 })
 
@@ -25,6 +26,16 @@ describe('applyAppearanceSettings', () => {
     expect(document.documentElement.dataset.textContrast).toBe('soft')
     expect(JSON.parse(localStorage.getItem('ciao-appearance') || '{}').text_contrast).toBe('soft')
     expect(useAppearanceSettings().settings.value.revision).toBe('r1')
+  })
+
+  it('applies the body font to <html> and the cache, and ignores a bogus one', () => {
+    applyAppearanceSettings({ ...base, body_font: 'serif', revision: 'r1' })
+    expect(document.documentElement.dataset.bodyFont).toBe('serif')
+    expect(JSON.parse(localStorage.getItem('ciao-appearance') || '{}').body_font).toBe('serif')
+    applyAppearanceSettings({ body_font: 'comic' as never })
+    expect(useAppearanceSettings().settings.value.body_font).toBe('serif')
+    applyAppearanceSettings({ body_font: 'system' })
+    expect(document.documentElement.dataset.bodyFont).toBeUndefined()
   })
 
   it('ignores bogus values', () => {

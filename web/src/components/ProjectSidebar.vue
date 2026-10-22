@@ -2295,7 +2295,7 @@ async function confirmDeleteChat(chatId: string) {
   font-variant-numeric: tabular-nums;
 }
 .nav-item[data-count]::after { content: attr(data-count); }
-.nav-item[data-note]::after { content: attr(data-note); color: var(--warning); font-family: var(--font-sans); }
+.nav-item[data-note]::after { content: attr(data-note); color: var(--warning); font-family: var(--font); }
 .nav-item[href="/"][data-count]::after { color: var(--accent); font-weight: 600; }
 
 /* Coarse pointers get the full 44px target on every rail row. */
@@ -2445,7 +2445,7 @@ async function confirmDeleteChat(chatId: string) {
   margin: 4px 0 0;
   padding: 6px 10px 5px;
   color: var(--fg3);
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
 }
 
 /* Flat rows rather than a bordered box per project: the tree keeps its
@@ -3025,7 +3025,7 @@ async function confirmDeleteChat(chatId: string) {
   border-radius: var(--radius-sm);
   background: none;
   color: var(--accent);
-  font: 600 var(--text-xs)/1 var(--font-sans);
+  font: 600 var(--text-xs)/1 var(--font);
   cursor: pointer;
 }
 .sidebar-label-link:hover { background: var(--bg3); }
@@ -3247,7 +3247,7 @@ async function confirmDeleteChat(chatId: string) {
   margin: 4px 0 0;
   padding: 6px 10px 5px;
   color: var(--fg3);
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
 }
 .schedule-group-items {
   display: flex;
@@ -3387,7 +3387,7 @@ async function confirmDeleteChat(chatId: string) {
 /* Same register as the chat rail's "Projects" label: 11px sans, sentence
    case. The old uppercase tracked labels read as a second kind of heading. */
 .mm-sidebar-scroll h3 {
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
   color: var(--fg3);
   margin: var(--space-4) 0 var(--space-1);
   padding: 0 8px;

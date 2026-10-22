@@ -5,7 +5,7 @@ import SettingsAppearance from '../settings/SettingsAppearance.vue'
 import { api } from '../../lib/api'
 import { applyAppearanceSettings } from '../../composables/useAppearanceSettings'
 
-const engine = { text_contrast: 'normal' as const, theme: 'dark' as const, font_scale: 1.2, revision: 'r0' }
+const engine = { text_contrast: 'normal' as const, body_font: 'system' as const, theme: 'dark' as const, font_scale: 1.2, revision: 'r0' }
 
 beforeEach(() => {
   applyAppearanceSettings(engine)
@@ -16,6 +16,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   localStorage.clear()
   document.documentElement.removeAttribute('data-text-contrast')
+  document.documentElement.removeAttribute('data-body-font')
 })
 
 function radios(wrapper: ReturnType<typeof mount>) {
@@ -82,6 +83,44 @@ describe('SettingsAppearance', () => {
     const wrapper = mount(SettingsAppearance)
     await flushPromises()
     await radios(wrapper)[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="alert"]').text()).toContain('another device')
+  })
+})
+
+describe('SettingsAppearance body font', () => {
+  const fontRadios = (wrapper: ReturnType<typeof mount>) =>
+    wrapper.findAll('[role="radiogroup"][aria-label="Body font"] [role="radio"]')
+
+  it('renders System, Serif and Mono with the engine value checked, each in its own face', async () => {
+    const wrapper = mount(SettingsAppearance)
+    await flushPromises()
+    const buttons = fontRadios(wrapper)
+    expect(buttons.map((b) => b.text())).toEqual(['System', 'Serif', 'Mono'])
+    expect(buttons.map((b) => b.attributes('aria-checked'))).toEqual(['true', 'false', 'false'])
+    expect(buttons.map((b) => b.attributes('style') ?? '')).toEqual([
+      expect.stringContaining('--font-sans'),
+      expect.stringContaining('--font-serif'),
+      expect.stringContaining('--font-mono'),
+    ])
+  })
+
+  it('patches body_font with the current revision when Serif is clicked', async () => {
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue({ ...engine, body_font: 'serif', revision: 'r1' })
+    const wrapper = mount(SettingsAppearance)
+    await flushPromises()
+    await fontRadios(wrapper)[1].trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/settings/appearance', { body_font: 'serif', revision: 'r0' })
+    expect(fontRadios(wrapper).map((b) => b.attributes('aria-checked'))).toEqual(['false', 'true', 'false'])
+    expect(document.documentElement.dataset.bodyFont).toBe('serif')
+  })
+
+  it('shows a failed save in an alert', async () => {
+    vi.spyOn(api, 'patch').mockRejectedValue(new Error('Appearance settings changed on another device. Reload and try again.'))
+    const wrapper = mount(SettingsAppearance)
+    await flushPromises()
+    await fontRadios(wrapper)[2].trigger('click')
     await flushPromises()
     expect(wrapper.find('[role="alert"]').text()).toContain('another device')
   })

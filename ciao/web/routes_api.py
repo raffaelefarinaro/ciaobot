@@ -5897,7 +5897,7 @@ async def settings_keyboard(request: Request) -> JSONResponse:
     return JSONResponse(payload())
 
 
-_APPEARANCE_KEYS = frozenset({"text_contrast", "theme", "font_scale"})
+_APPEARANCE_KEYS = frozenset({"text_contrast", "body_font", "theme", "font_scale"})
 
 
 async def settings_appearance(request: Request) -> JSONResponse:

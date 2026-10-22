@@ -4,6 +4,7 @@ import {
   DEFAULT_APPEARANCE,
   applyAppearanceToRoot,
   applyTheme,
+  isBodyFont,
   isTextContrast,
   isTheme,
   readLocalTheme,
@@ -42,6 +43,7 @@ function validFontScale(value: unknown): value is number {
 /** Applies an engine value (GET, PATCH result, snapshot or change event). */
 export function applyAppearanceSettings(value: Partial<AppearancePayload>): void {
   if (isTextContrast(value.text_contrast)) settings.value.text_contrast = value.text_contrast
+  if (isBodyFont(value.body_font)) settings.value.body_font = value.body_font
   if (value.theme === null) settings.value.theme = null
   else if (isTheme(value.theme)) {
     settings.value.theme = value.theme

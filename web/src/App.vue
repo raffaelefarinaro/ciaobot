@@ -258,6 +258,7 @@ watch(shouldPollStartup, (shouldPoll) => {
   /* Type: Hybrid typography model. Sans-serif for prose & UI, monospace for code & developer tokens. */
   --font-mono: ui-monospace, 'SF Mono', 'Fira Code', 'Cascadia Code', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-serif: Charter, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
   --font: var(--font-sans);
   --text-xs: calc(11px * var(--font-scale));   /* labels, badges, pills, section titles */
   --text-sm: calc(12px * var(--font-scale));   /* hints, secondary text */
@@ -295,6 +296,11 @@ watch(shouldPollStartup, (shouldPoll) => {
    hierarchy stays. Dark #d2d2de is 11.4:1 on --bg; light #2e2f46 is ~11.9:1. */
 :root[data-text-contrast="soft"] { --fg: #d2d2de; }
 :root.theme-light[data-text-contrast="soft"] { --fg: #2e2f46; }
+
+/* Body font: swaps the --font token only; --font-mono users (code, badges,
+   commands, timestamps, wordmark) are untouched. */
+:root[data-body-font="serif"] { --font: var(--font-serif); }
+:root[data-body-font="mono"] { --font: var(--font-mono); }
 
 /* Per-workspace accent overrides (Option A: accents only).
    Applied on #ciao-app for the active workspace, and on individual
