@@ -1921,8 +1921,14 @@ def test_a_terminal_offer_never_touches_the_host_terminal(
 
 
 def _command_file(tmp_path: Path, text: str, *, name: str = "command.txt") -> Path:
+    """Write the exact bytes the test measured.
+
+    ``write_text`` opens in text mode, so Windows turns every newline into
+    CRLF and the file no longer holds the byte length the test built. The
+    reader counts bytes, so the fixture has to be bytes.
+    """
     path = tmp_path / name
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
     return path
 
 
