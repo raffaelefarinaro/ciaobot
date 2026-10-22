@@ -22,7 +22,7 @@
  * task that store does not hold (not loaded yet, or deleted) still gets the
  * sentence, from the chat's own `task_delegation` stamp, with no state.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { taskAttemptLabel } from '../lib/taskBoard'
 import { approveTask, markTaskDone, taskClosureErrorMessage } from '../lib/taskClosure'
 import type { ChatInfo, Task } from '../lib/types'
@@ -106,16 +106,35 @@ const approving = ref(false)
 const approveError = ref('')
 const noteOpen = ref(false)
 const noteDraft = ref('')
+const noteField = ref<HTMLTextAreaElement | null>(null)
+/** The button that opens the prompt — one of the two, never both at once. */
+const closureButton = ref<HTMLButtonElement | null>(null)
 watch(taskId, () => {
   approveError.value = ''
   noteOpen.value = false
   noteDraft.value = ''
 })
 
+/**
+ * Open the closure prompt with the keyboard already in it: the button that
+ * opened it leaves the DOM, so focus would otherwise fall back to the body
+ * and the note — the common case, an empty one — would be typed nowhere.
+ */
 function beginClosure(): void {
   noteOpen.value = true
   noteDraft.value = ''
   approveError.value = ''
+  nextTick(() => noteField.value?.focus())
+}
+
+/**
+ * Close the prompt and hand the keyboard back to the button that opened it:
+ * the note field leaves the DOM with the prompt, and focus would otherwise
+ * fall back to the body.
+ */
+function cancelClosure(): void {
+  noteOpen.value = false
+  nextTick(() => closureButton.value?.focus())
 }
 
 async function markDone(resolution: string): Promise<void> {
@@ -183,6 +202,7 @@ function submitNote(): void {
           <label class="task-origin-note-label" for="task-origin-resolution">How was this completed? (optional)</label>
           <textarea
             id="task-origin-resolution"
+            ref="noteField"
             v-model="noteDraft"
             class="task-origin-note"
             rows="3"
@@ -195,11 +215,12 @@ function submitNote(): void {
               :disabled="approving"
               @click="submitNote()"
             >{{ approving ? 'Saving…' : (canApprove ? 'Approve Done' : 'Mark done') }}</button>
-            <button type="button" class="btn-small" :disabled="approving" @click="noteOpen = false">Cancel</button>
+            <button type="button" class="btn-small" :disabled="approving" @click="cancelClosure">Cancel</button>
           </div>
         </template>
         <button
           v-else-if="canApprove"
+          ref="closureButton"
           type="button"
           class="btn-small task-origin-approve"
           :disabled="approving"
@@ -208,6 +229,7 @@ function submitNote(): void {
         >Approve Done</button>
         <button
           v-else-if="canMarkDone"
+          ref="closureButton"
           type="button"
           class="btn-small task-origin-approve"
           :disabled="approving"

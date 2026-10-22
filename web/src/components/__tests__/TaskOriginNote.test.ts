@@ -181,6 +181,45 @@ describe('TaskOriginNote', () => {
     expect((wrapper.get('.task-origin-actions .task-origin-approve').element as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('moves focus into the note field when the prompt opens', async () => {
+    // Attached to the document, so focus is real: the button that opened the
+    // prompt leaves the DOM, and the keyboard must land in the field.
+    const signals = useTaskSignalsStore()
+    signals.tasks = [task()]
+    signals.loadedWorkspace = 'personal'
+    const wrapper = mount(TaskOriginNote, {
+      props: { chat: CHAT },
+      attachTo: document.body,
+      global: { stubs: { RouterLink: RouterLinkStub } },
+    })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(wrapper.get('#task-origin-resolution').element)
+    wrapper.unmount()
+  })
+
+  it('gives the keyboard back to the button that opened the prompt when Cancel closes it', async () => {
+    const signals = useTaskSignalsStore()
+    signals.tasks = [task()]
+    signals.loadedWorkspace = 'personal'
+    const wrapper = mount(TaskOriginNote, {
+      props: { chat: CHAT },
+      attachTo: document.body,
+      global: { stubs: { RouterLink: RouterLinkStub } },
+    })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find((b) => b.text() === 'Cancel')!.trigger('click')
+    await flushPromises()
+
+    // The prompt is gone, so its only button is the one that opened it.
+    const opener = wrapper.get('button')
+    expect(opener.text()).toBe('Mark done')
+    expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
+  })
+
   it('answers a stale-revision refusal with a short line and a reload', async () => {
     const reviewed = task({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
     const wrapper = mountNote([reviewed])
