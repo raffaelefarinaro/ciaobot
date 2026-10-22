@@ -18,6 +18,7 @@
   "chat create": "chat_create",
   "chat update": "chat_update",
   "chat send": "chat_send",
+  "chat terminal-offer": "chat_terminal_offer",
   "chat continue": "chat_continue",
   "chat retry": "chat_retry",
   "chat handover": "chat_handover",

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import urllib.error
 import urllib.request
@@ -24,6 +25,11 @@ from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.execution_modes import is_credential_adjacent
+from ciao.terminal_offer import (
+    TERMINAL_OFFER_MAX_BYTES,
+    TerminalOfferError,
+    normalize_terminal_offer,
+)
 
 #: Top-level words ``ciao.cli.main`` hands to this module unconditionally.
 #: ``run`` and ``gws`` are operator commands too (the server launcher and the
@@ -108,6 +114,15 @@ _CHAT_UPDATE_FLAGS: tuple[tuple[str, str], ...] = (
 
 class UsageError(Exception):
     """A caller mistake caught before any request is sent (exit 2)."""
+
+
+#: What a path operation can raise before it has produced a path: an I/O
+#: error, the ``RuntimeError`` an unknown ``~user`` raises while the home
+#: directory is looked up, and the ``ValueError`` an embedded NUL raises in
+#: every OS call that takes the name. All three mean the same thing to a
+#: caller — the file cannot be read — so all three are answered with one
+#: static reason.
+_PATH_FAILURES = (OSError, RuntimeError, ValueError)
 
 
 def is_agent_invocation(argv: list[str]) -> bool:
@@ -262,6 +277,23 @@ def build_parser() -> argparse.ArgumentParser:
         # so the calling chat is never a valid default. Make the target
         # explicit rather than advertising a default that can only error.
         sub.add_argument("--chat", required=True)
+    # The one chat verb with no `--chat`: an offer is a command on somebody's
+    # screen, and the screen is the chat that asked for it.
+    offer = chat.add_parser(
+        "terminal-offer",
+        help="Suggest a terminal command for the calling chat.",
+        # No abbreviation: `--command` would otherwise be an accepted spelling
+        # of `--command-file`, and a near-miss that reads as a path is a
+        # command offered by accident.
+        allow_abbrev=False,
+    )
+    offer.add_argument(
+        "--command-file",
+        required=True,
+        metavar="FILE",
+        help="File holding the command to suggest: @file.txt or a plain path. "
+        "The text is shown to the user to review and run; nothing is executed.",
+    )
 
     project = _verbs(nouns.add_parser("project", help="Projects in the active workspace."))
     plist = project.add_parser("list", help="List projects.")
@@ -519,6 +551,67 @@ def _webhook_instructions(raw: str | None) -> str | None:
     return _task_body(raw, flag="--instructions-file")
 
 
+def _terminal_offer_command(raw: str) -> str:
+    """The suggested command read from a file, validated and normalized.
+
+    The command is untrusted, model-authored text, so it travels in a file for
+    the same reason prose does: as a shell argument it would be mangled by
+    ``$()``, backticks and quotes, and it would sit in the process table. It is
+    read with a bound (a command is a copyable snippet, not a file) and
+    decoded strictly.
+
+    The file has to be an ordinary one. A FIFO, a device or a socket answers
+    an open with a read that never ends, and the byte bound does not help:
+    the read blocks before it counts anything. So the mode is checked first
+    and a non-regular file is refused without being opened.
+
+    Every refusal is static: neither the path nor the text appears in it. A
+    command can carry a credential, and an error string ends up in a log line
+    and in the agent's transcript.
+    """
+    try:
+        path = Path(raw[1:]).expanduser() if raw.startswith("@") else Path(raw).expanduser()
+        resolved = path.resolve()
+    except _PATH_FAILURES:
+        # A name that cannot become a path: an unknown ``~user`` (a
+        # ``RuntimeError``), an embedded NUL (a ``ValueError``), or an I/O
+        # error. The reason says the file is unreadable and names nothing.
+        raise UsageError("--command-file cannot be read.") from None
+    if is_credential_adjacent(resolved):
+        raise UsageError("--command-file refuses a credential-adjacent path.")
+    try:
+        mode = resolved.stat().st_mode
+    except _PATH_FAILURES:
+        raise UsageError("--command-file cannot be read.") from None
+    if not stat.S_ISREG(mode):
+        # Refused before the open: this is the check that keeps a FIFO from
+        # blocking the read that would follow it.
+        raise UsageError("--command-file must be an ordinary file.")
+    try:
+        with resolved.open("rb") as handle:
+            # The handle has to be an ordinary file too. This does not close
+            # the window between the two checks — the stat above is what
+            # keeps a FIFO from blocking the open — it only refuses a handle
+            # that is not an ordinary file.
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise UsageError("--command-file must be an ordinary file.")
+            payload = handle.read(TERMINAL_OFFER_MAX_BYTES + 1)
+    except _PATH_FAILURES:
+        raise UsageError("--command-file cannot be read.") from None
+    if len(payload) > TERMINAL_OFFER_MAX_BYTES:
+        raise UsageError("--command-file holds more text than a command may.")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        raise UsageError("--command-file must be UTF-8 text.") from None
+    try:
+        return normalize_terminal_offer(text)
+    except TerminalOfferError as exc:
+        if exc.reason == "empty":
+            raise UsageError("--command-file holds no command text.") from None
+        raise UsageError("--command-file holds text a command may not contain.") from None
+
+
 def _run_start_arguments(args: argparse.Namespace) -> dict[str, Any]:
     cmd = list(args.cmd)
     if cmd[:1] == ["--"]:
@@ -635,6 +728,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if messages is not None:
                 arguments["messages"] = messages
             return "chat_handover", arguments
+        if verb == "terminal-offer":
+            # No chat id: the offer belongs to the calling chat, and the
+            # command travels as text read here rather than as an argument.
+            return "chat_terminal_offer", {
+                "command": _terminal_offer_command(args.command_file)
+            }
     if noun == "project":
         if verb == "list":
             return "projects_list", {"include_completed": bool(args.include_completed)}
