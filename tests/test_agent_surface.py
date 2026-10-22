@@ -1922,7 +1922,10 @@ def test_a_terminal_offer_never_touches_the_host_terminal(
 
 def _command_file(tmp_path: Path, text: str, *, name: str = "command.txt") -> Path:
     path = tmp_path / name
-    path.write_text(text, encoding="utf-8")
+    # `newline=""` keeps the on-disk bytes equal to the string: the default
+    # translates every "\n" to `os.linesep`, so a fixture built to an exact
+    # byte count would be longer on Windows and the bound would refuse it.
+    path.write_text(text, encoding="utf-8", newline="")
     return path
 
 

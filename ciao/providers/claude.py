@@ -136,6 +136,16 @@ _CONTEXT_USAGE_TIMEOUT_S = 3.0
 # silent still fails, just one turn later than before.
 _STREAM_CLOSE_TIMEOUT_ENV = "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"
 _INITIALIZE_TIMEOUT_MS = 180_000
+# The SDK owns the initialize deadline (it reads it from
+# CLAUDE_CODE_STREAM_CLOSE_TIMEOUT when the client is built) and names a miss
+# with "Control request timeout: initialize". Our outer connect deadline must
+# outlive it, or it fires first with a bare TimeoutError, the SDK never names
+# the cause, and the one retry in run_streaming can never classify the miss.
+# The 30 s margin is smaller than a loaded machine's cold spawn (see above) and
+# the SDK's 180 s clock starts after it, so the outer deadline can still fire
+# first; that is harmless because _connect_with_deadline classifies its own
+# timeout as an initialize miss, preserving the retry.
+_CONNECT_TIMEOUT_S = _INITIALIZE_TIMEOUT_MS / 1000 + 30
 # Ask the CLI to name a refused startup in the message stream. Without it a
 # startup failure ends with stderr alone, which the SDK turns into a bare
 # control-request timeout instead of an error that says what went wrong.
@@ -243,6 +253,20 @@ def _is_initialize_timeout(exc: BaseException) -> bool:
     mistaken for a CLI that never started.
     """
     return isinstance(exc, Exception) and str(exc).startswith(_INITIALIZE_TIMEOUT_MESSAGE)
+
+
+async def _connect_with_deadline(client: ClaudeSDKClient) -> None:
+    """Connect to the CLI, naming a missed initialize as a retryable miss."""
+    try:
+        await asyncio.wait_for(client.connect(), timeout=_CONNECT_TIMEOUT_S)
+    except asyncio.TimeoutError as exc:
+        raise ClaudeInitializeTimeout(
+            f"connect deadline {_CONNECT_TIMEOUT_S:.0f}s exceeded"
+        ) from exc
+    except Exception as exc:
+        if _is_initialize_timeout(exc):
+            raise ClaudeInitializeTimeout(str(exc)) from exc
+        raise
 
 
 def _cli_process_exited(client: object) -> bool:
@@ -1303,15 +1327,10 @@ class ClaudeProvider(BaseSDKProvider):
                     # No prompt: the SDK then never starts stream_input, which
                     # closes stdin once the run goes idle and makes the CLI
                     # exit (#1402).
-                    try:
-                        await asyncio.wait_for(client.connect(), timeout=120)
-                    except Exception as exc:
-                        # Only an initialize handshake that missed its deadline
-                        # is worth a fresh spawn; every other control-request
-                        # failure is a real error for this turn.
-                        if _is_initialize_timeout(exc):
-                            raise ClaudeInitializeTimeout(str(exc)) from exc
-                        raise
+                    # Only an initialize handshake that missed its deadline is
+                    # worth a fresh spawn; every other control-request failure
+                    # is a real error for this turn.
+                    await _connect_with_deadline(client)
                     self._connected = True
                 await asyncio.wait_for(client.query(payload), timeout=120)
 
@@ -1578,7 +1597,10 @@ class ClaudeProvider(BaseSDKProvider):
                 pass
             raise
         except asyncio.TimeoutError:
-            logger.error("Claude connect/query timed out after 120s")
+            logger.error(
+                "Claude query timed out after 120s; the connect step is "
+                "bounded separately by ClaudeInitializeTimeout"
+            )
             try:
                 await self.disconnect()
             except Exception:

@@ -854,6 +854,16 @@
       </div>
     </div>
 
+    <!-- The command the assistant suggested for this chat. A transient card
+         above the queue and the composer, so a suggestion waiting to be
+         reviewed is never buried under the transcript. It is shown, copied,
+         opened or dismissed — never run. -->
+    <TerminalOfferCard
+      v-if="terminalOffer"
+      :chat-id="chat.chat_id"
+      :offer="terminalOffer"
+    />
+
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
       <button
@@ -1411,6 +1421,7 @@ import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
+import TerminalOfferCard from './TerminalOfferCard.vue'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
@@ -1780,6 +1791,47 @@ const scrollAnchor = ref<HTMLElement>()
 const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => store.activeChat!)
+
+/**
+ * The command the assistant suggested for this chat, if it holds one.
+ *
+ * The offer is transient and engine-owned: the browser keeps it in memory and
+ * reads it from the store's map, never from the chat row, because a row's
+ * copy is the payload the list was read at and the map is the live one. An
+ * archived chat holds no offer — the command died with the chat — so the
+ * card is not shown for one.
+ */
+const terminalOffer = computed(() => {
+  const current = chat.value
+  if (!current || current.archived) return null
+  const offer = store.terminalOffers[current.chat_id]
+  return offer ? offer : null
+})
+
+// When the card that holds the focus goes away — dismissed by the user, or
+// dropped by the engine over the socket — it unmounts and the focus would
+// fall to <body>. Hand it to the composer instead, the way the queue hands
+// it over when a chip disappears. The watch is on the card's own render
+// condition, so the handoff also happens when the chat is archived or gone.
+// A replacement patches the card in place, so the focus belongs to the card
+// that is still there.
+watch(
+  () => terminalOffer.value,
+  (offer, previous) => {
+    // Only a removal unmounts the card.
+    if (offer !== null || previous === null) return
+    const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.terminal-offer')
+    if (!held) return
+    void nextTick(() => {
+      // The textarea would raise the soft keyboard on a phone and scroll the
+      // transcript out from under the reader, so the bar takes the focus
+      // there — the same rule the move-to-background chip follows.
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else composerBarEl.value?.focus()
+    })
+  },
+  { flush: 'pre' },
+)
 
 const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_id))
 // The memory pass this chat spawned, recorded on its own postprocess record.
