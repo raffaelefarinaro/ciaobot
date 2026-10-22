@@ -13,9 +13,8 @@ What is pinned here, beyond the shapes:
   cross-origin value is a refusal;
 * a remote browser must arrive over HTTPS, and a raw ``X-Forwarded-Proto``
   or ``X-Forwarded-Host`` cannot talk the gate into believing otherwise;
-* the unlock body is bounded, exactly ``{"password": str}``, and a wrong or
-  malformed password is a counted failure — never an exception and never a
-  grant;
+* the unlock asks for no secret: a signed-in, same-origin browser gets the
+  grant with an empty body, and a request that carries one is refused;
 * the grant itself never reaches JavaScript: it travels only in a host-only,
   HttpOnly, SameSite=Strict cookie.
 
@@ -40,8 +39,6 @@ from starlette.testclient import TestClient
 
 from ciao.terminal_auth import (
     TERMINAL_COOKIE,
-    TERMINAL_MAX_GRANTS,
-    TERMINAL_UNLOCK_FAIL_LIMIT,
     TERMINAL_UNLOCK_TTL_S,
     TerminalGrantStore,
 )
@@ -61,10 +58,6 @@ BASE = "http://localhost:8443"
 UNLOCK = "/api/terminal/unlock"
 STATUS = "/api/terminal/status"
 SESSIONS = "/api/terminal/sessions"
-
-#: A lone surrogate: what a hostile body can carry and what UTF-8 refuses.
-#: Written as an escape so this file stays valid UTF-8.
-_MALFORMED = "\ud800"
 
 
 class FakeClock:
@@ -221,10 +214,11 @@ def test_the_declared_length_is_compared_as_a_number_not_as_a_spelling(
     thousand digits is refused without ever being turned into a number.
     """
     client = _client(_app(tmp_path))
-    body = json.dumps({"password": PASSWORD}).encode("utf-8")
+    # The body is empty — the route takes none — so the answer is decided by
+    # the declared length alone.
     response = client.post(
         UNLOCK,
-        content=body,
+        content=b"",
         headers={
             **_origin(),
             "Content-Type": "application/json",
@@ -258,10 +252,10 @@ def test_terminal_routes_never_skip_session_even_on_loopback(
     client = _client(app, peer=peer, signed_in=False)
 
     assert client.get(STATUS).status_code == 401
-    assert client.post(UNLOCK, json={"password": PASSWORD}).status_code == 401
+    assert client.post(UNLOCK).status_code == 401
     assert client.get(STATUS, headers=_origin()).status_code == 401
     assert (
-        client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin()).status_code
+        client.post(UNLOCK, headers=_origin()).status_code
         == 401
     )
     # Nothing was unlocked, so no grant exists.
@@ -275,14 +269,20 @@ def test_the_terminal_paths_are_in_neither_middleware_allowlist() -> None:
     assert STATUS not in auth._LOOPBACK_ONLY_API
 
 
-# ── The happy path: a local browser unlocks ────────────────────────────────
+# ── The happy path: a local browser gets the grant ─────────────────────────
 
 
-def test_unlock_accepts_exact_local_origin_with_password_and_sets_http_only_cookie(
+def test_unlock_with_no_body_issues_a_grant_and_sets_the_http_only_cookie(
     tmp_path: Path,
 ) -> None:
+    """A signed-in, same-origin browser gets the grant with an empty body.
+
+    There is no password to re-enter: the session is the terminal's trust
+    boundary, and the grant answers which browser may hold the socket and
+    for how long.
+    """
     client = _client(_app(tmp_path))
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
+    response = client.post(UNLOCK, headers=_origin())
 
     assert response.status_code == 200
     body = response.json()
@@ -311,14 +311,14 @@ def test_unlock_accepts_exact_local_origin_with_password_and_sets_http_only_cook
     assert _terminal_cookie(client)
 
 
-def test_unlock_never_echoes_the_password_or_the_bearer_in_the_logs(
+def test_unlock_never_echoes_the_bearer_in_the_logs(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     import logging
 
     client = _client(_app(tmp_path))
     with caplog.at_level(logging.DEBUG):
-        response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
+        response = client.post(UNLOCK, headers=_origin())
 
     assert response.status_code == 200
     bearer = _terminal_cookie(client)
@@ -373,7 +373,7 @@ def test_status_does_not_require_unlock_and_never_returns_credential_material(
 def test_status_reports_the_remaining_unlock_time(tmp_path: Path) -> None:
     client = _client(_app(tmp_path))
     assert (
-        client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin()).status_code
+        client.post(UNLOCK, headers=_origin()).status_code
         == 200
     )
 
@@ -397,7 +397,7 @@ def test_the_status_reads_the_grant_deadline_against_the_store_s_own_clock(
     client = _client(app)
 
     assert (
-        client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin()).status_code
+        client.post(UNLOCK, headers=_origin()).status_code
         == 200
     )
     body = client.get(STATUS, headers=_origin()).json()
@@ -432,7 +432,7 @@ def test_remote_https_unlock_and_status_work(tmp_path: Path) -> None:
     client = _client(app, peer="100.64.0.7", base_url="https://app.example")
     origin = _origin("https://app.example")
 
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=origin)
+    response = client.post(UNLOCK, headers=origin)
     assert response.status_code == 200
     assert response.json() == {"ok": True, "expires_in": TERMINAL_UNLOCK_TTL_S}
 
@@ -444,17 +444,24 @@ def test_remote_https_unlock_and_status_work(tmp_path: Path) -> None:
     assert body["unlock_expires_in"] > 0
 
 
-def test_remote_plain_http_is_refused_before_password_read(tmp_path: Path) -> None:
-    """A plain-HTTP remote browser sees "https required", never a password box."""
+def test_remote_plain_http_is_refused_before_the_body_is_read(tmp_path: Path) -> None:
+    """A plain-HTTP remote browser sees "https required", never a grant.
+
+    The body is a real one, so the order is observable: a route that read
+    the body before the policy would answer 400 (a body is refused) and
+    never reach the transport rule.
+    """
     app = _app(tmp_path)
     client = _client(app, peer="100.64.0.7", base_url="http://app.example")
     response = client.post(
-        UNLOCK, json={"password": PASSWORD}, headers=_origin("http://app.example")
+        UNLOCK,
+        content=b'{"x": "y"}',
+        headers={**_origin("http://app.example"), "Content-Type": "application/json"},
     )
 
     assert response.status_code == 403
     assert response.json()["reason"] == "https_required"
-    # The body was never read, so no guess was counted.
+    # The body was never read, and no grant was minted.
     store: TerminalGrantStore = app.state.terminal_grants
     assert store.retained_grant_count() == 0
     assert not _terminal_cookie(client)
@@ -480,7 +487,6 @@ def test_proxy_headers_never_grant_plain_http_loopback_exception(
     client = _client(app)
     response = client.post(
         UNLOCK,
-        json={"password": PASSWORD},
         headers={**_origin(), "X-Forwarded-For": "203.0.113.9"},
     )
 
@@ -495,7 +501,6 @@ def test_raw_forwarded_proto_cannot_override_the_actual_scheme(tmp_path: Path) -
     client = _client(app, peer="100.64.0.7", base_url="http://app.example")
     response = client.post(
         UNLOCK,
-        json={"password": PASSWORD},
         headers={**_origin("http://app.example"), "X-Forwarded-Proto": "https"},
     )
 
@@ -510,7 +515,6 @@ def test_raw_forwarded_host_cannot_override_the_actual_origin(tmp_path: Path) ->
     client = _client(app, peer="100.64.0.7", base_url="https://app.example")
     response = client.post(
         UNLOCK,
-        json={"password": PASSWORD},
         headers={
             **_origin("https://evil.example"),
             "X-Forwarded-Host": "evil.example",
@@ -784,7 +788,7 @@ def test_the_terminal_policy_is_at_least_as_strict_as_the_app_s_own_one() -> Non
 
 def test_a_missing_origin_is_refused_for_unlock(tmp_path: Path) -> None:
     client = _client(_app(tmp_path))
-    response = client.post(UNLOCK, json={"password": PASSWORD})
+    response = client.post(UNLOCK)
 
     assert response.status_code == 403
     assert response.json()["reason"] == "origin_required"
@@ -806,7 +810,6 @@ def test_a_hostile_origin_wins_over_a_good_referer(tmp_path: Path) -> None:
     client = _client(_app(tmp_path))
     response = client.post(
         UNLOCK,
-        json={"password": PASSWORD},
         headers={**_origin("http://evil.example:8443"), "Referer": f"{BASE}/page"},
     )
 
@@ -829,7 +832,7 @@ def test_the_middleware_refuses_a_cross_origin_post_before_the_route(
     """
     client = _client(_app(tmp_path))
     response = client.post(
-        UNLOCK, json={"password": PASSWORD}, headers=_origin("http://evil.example:8443")
+        UNLOCK, headers=_origin("http://evil.example:8443")
     )
 
     assert response.status_code == 403
@@ -852,7 +855,7 @@ def test_the_route_refuses_an_origin_that_is_not_a_bare_origin(
     """The route's own origin rule, on the origins the middleware lets through."""
     app = _app(tmp_path)
     client = _client(app)
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin(origin))
+    response = client.post(UNLOCK, headers=_origin(origin))
 
     assert response.status_code == 403, label
     assert response.json()["reason"] == "forbidden_origin", label
@@ -875,89 +878,107 @@ def test_the_status_route_answers_the_policy_refusals_with_its_own_reason(
     assert body["reason"] == "forbidden_origin"
 
 
-# ── The password, the body and the guessing budget ────────────────────────
+def test_a_same_site_sibling_origin_cannot_mint_a_grant(tmp_path: Path) -> None:
+    """A sibling origin — the same host, another port — is not this engine.
 
+    `localhost:5173` is the same *site* as `localhost:8443` and a different
+    *origin*: a dev server, a proxy, or another app on the machine, all of
+    which a browser sends as a plain `Origin`. The exact-origin rule is the
+    only thing in front of the grant now, so it is pinned on both sides:
+    the terminal's own rule refuses it with a static reason — never an echo
+    of what the caller sent — and the same request through the real app is
+    refused too. Neither sets a cookie, and neither mints a grant.
+    """
+    sibling = "http://localhost:5173"
 
-def test_a_wrong_password_is_refused_and_no_grant_is_issued(tmp_path: Path) -> None:
-    app = _app(tmp_path)
-    client = _client(app)
-    response = client.post(UNLOCK, json={"password": "wrong"}, headers=_origin())
-
-    assert response.status_code == 403
-    assert response.json()["reason"] == "wrong_password"
-    assert not _terminal_cookie(client)
-    assert app.state.terminal_grants.retained_grant_count() == 0
-
-
-def test_a_missing_or_wrongly_typed_password_is_refused(tmp_path: Path) -> None:
-    client = _client(_app(tmp_path))
-
-    for body in ({}, {"password": ""}, {"password": 5}, {"password": None}):
-        response = client.post(UNLOCK, json=body, headers=_origin())
-        assert response.status_code == 400
-    assert not _terminal_cookie(client)
-
-
-def test_a_malformed_unicode_password_is_refused_safely(tmp_path: Path) -> None:
-    """A lone surrogate is a value, not an exception: a counted wrong password."""
-    app = _app(tmp_path)
-    client = _client(app)
-    response = client.post(
-        UNLOCK,
-        content=json.dumps({"password": _MALFORMED}).encode("utf-8"),
-        headers={**_origin(), "Content-Type": "application/json"},
+    # The terminal's own rule, with nothing in front of it.
+    bare = _bare_app(tmp_path)
+    bare_client = TestClient(bare, base_url=BASE, client=("127.0.0.1", 50000))
+    bare_client.cookies.set(
+        SESSION_COOKIE, bare.state.serializer.dumps({"user": "owner"})
     )
+    response = bare_client.post(UNLOCK, headers=_origin(sibling))
 
     assert response.status_code == 403
-    assert response.json()["reason"] == "wrong_password"
-    assert _MALFORMED not in response.text
-    assert not _terminal_cookie(client)
+    assert response.json()["reason"] == "forbidden_origin"
+    # A static refusal: the answer never repeats what the caller sent.
+    assert "5173" not in response.text
+    assert "set-cookie" not in response.headers
+    assert not _terminal_cookie(bare_client)
+    assert bare.state.terminal_grants.retained_grant_count() == 0
 
-
-def test_a_malformed_password_counts_towards_the_limit(tmp_path: Path) -> None:
-    client = _client(_app(tmp_path))
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        response = client.post(
-            UNLOCK,
-            content=json.dumps({"password": _MALFORMED}).encode("utf-8"),
-            headers={**_origin(), "Content-Type": "application/json"},
-        )
-        assert response.status_code == 403
-
-    # The window is closed: the correct password is refused too, and the
-    # refusal is a rate limit rather than a wrong-password answer.
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
-    assert response.status_code == 429
-    assert response.json()["reason"] == "rate_limited"
-    assert response.headers.get("Retry-After")
-    assert not _terminal_cookie(client)
-
-
-def test_locked_out_attempts_cannot_be_bypassed(tmp_path: Path) -> None:
+    # And the same request through the real app, middleware and all.
     app = _app(tmp_path)
     client = _client(app)
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert (
-            client.post(
-                UNLOCK, json={"password": "wrong"}, headers=_origin()
-            ).status_code
-            == 403
-        )
+    response = client.post(UNLOCK, headers=_origin(sibling))
 
-    # The right password inside the closed window is refused as well.
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
-    assert response.status_code == 429
+    assert response.status_code == 403
+    assert "5173" not in response.text
+    assert "set-cookie" not in response.headers
+    assert not _terminal_cookie(client)
     assert app.state.terminal_grants.retained_grant_count() == 0
 
 
-def test_an_unknown_key_in_the_body_is_refused(tmp_path: Path) -> None:
+def test_only_post_can_mint_a_terminal_grant(tmp_path: Path) -> None:
+    """No other verb may reach the grant.
+
+    The unlock is a POST and nothing else. The shipped app registers it
+    that way, and the router refuses every other verb before the handler
+    can run: a GET is a 405, with no cookie to set and no grant to keep.
+    The method is a gate, not a hint.
+    """
+    # The shipped registration: POST alone.
+    shipped = create_app(_config(tmp_path))
+    methods = {
+        tuple(sorted(route.methods or ()))
+        for route in shipped.routes
+        if getattr(route, "path", "") == UNLOCK
+    }
+    assert methods == {("POST",)}
+
+    # And the router's own answer for a verb that is not there.
+    app = _app(tmp_path)
+    client = _client(app)
+    response = client.get(UNLOCK, headers=_origin())
+
+    assert response.status_code == 405
+    allowed = response.headers.get("allow", "")
+    assert "POST" in allowed
+    assert "GET" not in allowed
+    # And nothing was minted: no cookie, and no grant behind it.
+    assert "set-cookie" not in response.headers
+    assert not _terminal_cookie(client)
+    assert app.state.terminal_grants.retained_grant_count() == 0
+
+
+# ── The body: the route takes none ─────────────────────────────────────────
+
+
+def test_a_body_is_refused_and_no_grant_is_issued(tmp_path: Path) -> None:
+    """The route takes no body, so a request that carries one is refused.
+
+    There is no secret to send: a signed-in, same-origin browser gets the
+    grant with an empty body. A body — a password, a field, anything — is
+    a request for something this route does not do, and it is refused
+    rather than quietly ignored, so a stale client finds out.
+    """
+    app = _app(tmp_path)
+    client = _client(app)
+    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
+
+    assert response.status_code == 400
+    assert response.json()["reason"] == "bad_request"
+    assert not _terminal_cookie(client)
+    assert app.state.terminal_grants.retained_grant_count() == 0
+
+
+def test_every_shape_of_body_is_refused(tmp_path: Path) -> None:
+    """An empty object, a field, a list and a malformed body are one refusal."""
     client = _client(_app(tmp_path))
-    for body in (
-        {"password": PASSWORD, "extra": 1},
-        {"password": PASSWORD, "grant": "x"},
-    ):
+
+    for body in ({}, {"password": ""}, {"password": 5}, {"password": None}, [1, 2]):
         response = client.post(UNLOCK, json=body, headers=_origin())
-        assert response.status_code == 400
+        assert response.status_code == 400, body
     assert not _terminal_cookie(client)
 
 
@@ -972,7 +993,7 @@ def test_malformed_json_is_refused(tmp_path: Path) -> None:
     assert not _terminal_cookie(client)
 
 
-def test_json_body_is_bounded_including_chunked_and_wrong_content_length(
+def test_the_body_is_bounded_including_chunked_and_wrong_content_length(
     tmp_path: Path,
 ) -> None:
     app = _app(tmp_path)
@@ -1019,13 +1040,6 @@ def test_json_body_is_bounded_including_chunked_and_wrong_content_length(
     assert app.state.terminal_grants.retained_grant_count() == 0
 
 
-def test_a_password_longer_than_the_cap_is_refused(tmp_path: Path) -> None:
-    client = _client(_app(tmp_path))
-    response = client.post(UNLOCK, json={"password": "a" * 1025}, headers=_origin())
-    assert response.status_code == 400
-    assert not _terminal_cookie(client)
-
-
 # ── Grant rotation ─────────────────────────────────────────────────────────
 
 
@@ -1037,7 +1051,7 @@ def test_unlock_rotates_only_the_presented_grant_cookie(tmp_path: Path) -> None:
     first_client = _client(app)
     assert (
         first_client.post(
-            UNLOCK, json={"password": PASSWORD}, headers=_origin()
+            UNLOCK, headers=_origin()
         ).status_code
         == 200
     )
@@ -1049,7 +1063,7 @@ def test_unlock_rotates_only_the_presented_grant_cookie(tmp_path: Path) -> None:
     other = _client(app)
     other.cookies.set(SESSION_COOKIE, first_client.cookies.get(SESSION_COOKIE) or "")
     assert (
-        other.post(UNLOCK, json={"password": PASSWORD}, headers=_origin()).status_code
+        other.post(UNLOCK, headers=_origin()).status_code
         == 200
     )
     second = _terminal_cookie(other)
@@ -1062,7 +1076,7 @@ def test_unlock_rotates_only_the_presented_grant_cookie(tmp_path: Path) -> None:
     # touched.
     assert (
         first_client.post(
-            UNLOCK, json={"password": PASSWORD}, headers=_origin()
+            UNLOCK, headers=_origin()
         ).status_code
         == 200
     )
@@ -1080,10 +1094,13 @@ def test_grant_capacity_is_a_refusal_and_not_a_crash(tmp_path: Path) -> None:
     client = _client(app)
     store: TerminalGrantStore = app.state.terminal_grants
 
-    for index in range(TERMINAL_MAX_GRANTS):
+    # A literal 32, not the constant: the contract is 32 live grants, and a
+    # constant that grew would let a 33rd one through this test. (The
+    # constant's own value is pinned in `tests/test_terminal_auth.py`.)
+    for index in range(32):
         store.issue(f"other-session-{index}")
 
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
+    response = client.post(UNLOCK, headers=_origin())
     assert response.status_code == 429
     assert response.json()["reason"] == "capacity"
     assert response.headers["cache-control"] == "no-store"
@@ -1182,7 +1199,7 @@ def _bare_app(tmp_path: Path) -> Starlette:
 
     The middleware is the outer gate; this app removes it, so the route's
     own session check is the only thing standing between a request and a
-    password comparison.
+    grant.
     """
     serializer = URLSafeTimedSerializer(SECRET)
     app = Starlette(
@@ -1213,7 +1230,13 @@ def test_the_route_refuses_an_unsigned_request_without_the_middleware(
     assert response.status_code == 401
     assert response.json()["reason"] == "unauthorized"
 
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
+    # A real body, so the order is observable: a route that read it before
+    # the session check would answer 400 and never reach the session.
+    response = client.post(
+        UNLOCK,
+        content=b'{"x": "y"}',
+        headers={**_origin(), "Content-Type": "application/json"},
+    )
     assert response.status_code == 401
     assert response.json()["reason"] == "unauthorized"
     assert "set-cookie" not in response.headers
@@ -1223,13 +1246,23 @@ def test_the_route_refuses_an_unsigned_request_without_the_middleware(
 def test_an_unsigned_unlock_reads_no_body_and_issues_no_grant(
     tmp_path: Path,
 ) -> None:
-    """The refusal comes before the body is read, so no guess is counted."""
+    """The refusal comes before the body is read, so no grant is minted.
+
+    The body is a real one, so the order is observable: a route that read
+    it before the session check would answer 400 and never reach the
+    session.
+    """
     app = _bare_app(tmp_path)
     client = TestClient(app, base_url=BASE, client=("127.0.0.1", 50000))
 
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
+    response = client.post(
+        UNLOCK,
+        content=b'{"x": "y"}',
+        headers={**_origin(), "Content-Type": "application/json"},
+    )
     assert response.status_code == 401
-    # No guess was counted against the client address.
+    assert response.json()["reason"] == "unauthorized"
+    # Nothing was minted and nothing was kept.
     assert app.state.terminal_grants.retained_grant_count() == 0
     assert not _terminal_cookie(client)
 
@@ -1243,7 +1276,7 @@ def test_a_tampered_session_cookie_is_refused_without_the_middleware(
 
     assert client.get(STATUS, headers=_origin()).status_code == 401
     assert (
-        client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin()).status_code
+        client.post(UNLOCK, headers=_origin()).status_code
         == 401
     )
     assert app.state.terminal_grants.retained_grant_count() == 0
@@ -1260,7 +1293,7 @@ def test_a_session_signed_with_another_key_is_refused_without_the_middleware(
 
     assert client.get(STATUS, headers=_origin()).status_code == 401
     assert (
-        client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin()).status_code
+        client.post(UNLOCK, headers=_origin()).status_code
         == 401
     )
     assert app.state.terminal_grants.retained_grant_count() == 0
@@ -1275,7 +1308,7 @@ def test_a_signed_session_is_accepted_without_the_middleware(tmp_path: Path) -> 
     body = client.get(STATUS, headers=_origin()).json()
     assert body["available"] is True
 
-    response = client.post(UNLOCK, json={"password": PASSWORD}, headers=_origin())
+    response = client.post(UNLOCK, headers=_origin())
     assert response.status_code == 200
     assert _terminal_cookie(client)
 
@@ -1312,28 +1345,29 @@ def test_the_direct_handler_tests_would_catch_a_disabled_session_check(
 ) -> None:
     """The direct-handler tests are load-bearing, not decorative.
 
-    The route's own session check is neutered here, and the unsigned
-    request that the direct tests above refuse now reaches the password
-    comparison instead. A suite that only ever went through the
-    middleware would never have noticed — so the direct tests are what
-    pin the defence in depth.
+    The route's own session check is neutered here, and a request with a
+    tampered session cookie — one the serializer never signed — now reaches
+    the grant store, which binds a grant to whatever cookie it is handed. A
+    suite that only ever went through the middleware would never have
+    noticed — so the direct tests are what pin the defence in depth.
     """
     from ciao.web import routes_terminal
 
     app = _bare_app(tmp_path)
     client = TestClient(app, base_url=BASE, client=("127.0.0.1", 50000))
+    client.cookies.set(SESSION_COOKIE, "not-a-signed-session")
 
     # Unmutated: the route's own check refuses the unsigned request
-    # before the body is read, so the password is never compared.
-    response = client.post(UNLOCK, json={"password": "wrong"}, headers=_origin())
+    # before the body is read, so no grant is minted.
+    response = client.post(UNLOCK, headers=_origin())
     assert response.status_code == 401
     assert response.json()["reason"] == "unauthorized"
 
     monkeypatch.setattr(routes_terminal, "_session_ok", lambda request: True)
 
-    # Mutated: the same unsigned request now reaches the password
-    # comparison, which is the difference the direct tests assert. The
-    # direct tests above expect a 401, so they fail against this build.
-    response = client.post(UNLOCK, json={"password": "wrong"}, headers=_origin())
-    assert response.status_code == 403
-    assert response.json()["reason"] == "wrong_password"
+    # Mutated: the same request now reaches the grant store, which binds a
+    # grant to the cookie it is handed. The direct tests above expect a
+    # 401, so they fail against this build.
+    response = client.post(UNLOCK, headers=_origin())
+    assert response.status_code == 200
+    assert _terminal_cookie(client)

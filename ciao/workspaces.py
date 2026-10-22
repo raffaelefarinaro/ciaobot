@@ -16,13 +16,17 @@ from typing import Any, Iterable, cast
 
 from ciao import provider_registry
 from ciao.config import (
+    CLAUDE_MODELS,
     DEFAULT_MEMORY_HANDOVER,
     DEFAULT_WORKSPACE_COLOR,
     WorkspaceConfig,
     coerce_agent_fs_scope,
     coerce_memory_handover,
+    coerce_provider_overrides,
     coerce_workspace_color,
 )
+from ciao.model_tiers import is_tier
+from ciao.provider_service import capabilities_for
 
 WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -98,6 +102,10 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         memory_handover = coerce_memory_handover(workspace.memory_handover)
     except ValueError:
         memory_handover = DEFAULT_MEMORY_HANDOVER
+    try:
+        provider_overrides = coerce_provider_overrides(workspace.provider_overrides)
+    except ValueError:
+        provider_overrides = {}
     # A stored value naming a removed backend (e.g. pre-refactor "ollama") is
     # reported as the provider that actually runs the workspace. The PWA
     # renders this into a <select> limited to the provider options, so an
@@ -117,6 +125,7 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         "color": color,
         "agent_fs_scope": agent_fs_scope,
         "memory_handover": memory_handover,
+        "provider_overrides": provider_overrides,
     }
 
 
@@ -232,6 +241,13 @@ def workspace_from_request(
         memory_handover = existing.memory_handover
     else:
         memory_handover = DEFAULT_MEMORY_HANDOVER
+    if "provider_overrides" in data:
+        provider_overrides = coerce_provider_overrides(data.get("provider_overrides"))
+        _check_override_models(provider_overrides)
+    elif existing is not None:
+        provider_overrides = existing.provider_overrides
+    else:
+        provider_overrides = {}
     return WorkspaceConfig(
         name=name,
         # Vault locations are not an editable Settings field. Updating a
@@ -252,7 +268,26 @@ def workspace_from_request(
         color=color,
         agent_fs_scope=agent_fs_scope,
         memory_handover=memory_handover,
+        provider_overrides=provider_overrides,
     )
+
+
+def _check_override_models(overrides: dict[str, dict[str, str]]) -> None:
+    """Reject a model override a new chat could not start with.
+
+    Mirrors ``ProjectChatManager._validate_configured_model``: an invalid saved
+    Claude model would make every new chat in the workspace fail at creation.
+    Dynamic-catalog providers (opencode) are exempt; their catalog is async.
+    """
+    for provider, fields in overrides.items():
+        if capabilities_for(provider).dynamic_models:
+            continue
+        for field_name in ("model", "insights_model"):
+            value = fields.get(field_name)
+            if value and not (is_tier(value) or value in CLAUDE_MODELS):
+                raise ValueError(
+                    f"provider_overrides.{provider}.{field_name}: unknown model '{value}'"
+                )
 
 
 def _workspaces_path(config: Any) -> Path:

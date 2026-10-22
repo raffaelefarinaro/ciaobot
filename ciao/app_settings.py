@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, TypeGuard
 
 from ciao import provider_registry
+from ciao.config import PERMISSION_MODES
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +55,6 @@ def _clean_provider_map(raw: object) -> dict[str, str]:
     }
 
 
-# Execution (permission) modes a provider default may pin. ``manual`` is the
-# PWA-facing name for the BridgeMode ``normal`` (ask for every action);
-# ``plan`` stays chat-only and is not a settings default.
-_MODES = ("manual", "auto", "bypass")
 _KEYBOARD_SHORTCUT_IDS = {
     "newChat", "archiveChat", "toggleSidebar", "modelPicker",
     "fontIncrease", "fontDecrease", "closeChat",
@@ -75,7 +72,7 @@ def _clean_default_modes(raw: object) -> dict[str, str]:
         for provider_id, mode in raw.items()
         if str(provider_id) in known
         and isinstance(mode, str)
-        and mode.strip() in _MODES
+        and mode.strip() in PERMISSION_MODES
     }
 
 
@@ -236,9 +233,15 @@ class AppSettings:
     # font_scale from its own local values, after which the engine wins.
     # text_contrast: "" = normal, "soft" = dimmer body text.
     text_contrast: str = ""
+    # body_font: "" = system sans, "serif" or "mono".
+    body_font: str = ""
     # "dark", "light" or "system" (resolved per device from its OS).
     theme: str = ""
     font_scale: float = 0.0
+    # custom_colors: {"dark": {"bg", "fg"}, "light": {...}} as '#rrggbb'; either
+    # mode may be absent. The server checks the hex shape only; the readability
+    # (WCAG AA) check lives in the PWA's lib/contrast.ts.
+    custom_colors: dict[str, dict[str, str]] | None = None
 
     # The server's bind address; "" = DEFAULT_PWA_HOST. Read at startup only,
     # so a change takes effect after a restart. Was PWA_HOST.
@@ -261,6 +264,7 @@ class AppSettings:
 
 
 THEMES = ("dark", "light", "system")
+_BODY_FONTS = ("serif", "mono")
 MIN_FONT_SCALE = 0.8
 MAX_FONT_SCALE = 1.5
 FONT_SCALE_STEP = 0.05
@@ -280,6 +284,28 @@ def _valid_font_scale(value: object) -> TypeGuard[int | float]:
     return abs(steps - round(steps)) < 1e-6
 
 
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+_COLOR_MODES = ("dark", "light")
+
+
+def _clean_custom_colors(value: object) -> dict[str, dict[str, str]] | None:
+    """``value`` as ``{mode: {bg, fg}}`` with lowercase hex, else ``None``.
+
+    Returns ``None`` for anything malformed (an unknown mode, a missing or
+    extra key, a value that is not ``#rrggbb``) and for an empty map.
+    """
+    if not isinstance(value, dict):
+        return None
+    cleaned: dict[str, dict[str, str]] = {}
+    for mode, pair in value.items():
+        if mode not in _COLOR_MODES or not isinstance(pair, dict) or set(pair) != {"bg", "fg"}:
+            return None
+        if not all(isinstance(c, str) and _HEX_COLOR.fullmatch(c) for c in pair.values()):
+            return None
+        cleaned[mode] = {"bg": pair["bg"].lower(), "fg": pair["fg"].lower()}
+    return cleaned or None
+
+
 def _parse_settings(raw: object) -> AppSettings:
     """``raw`` (the decoded JSON file) as validated settings. No side effects."""
     settings = AppSettings()
@@ -290,7 +316,7 @@ def _parse_settings(raw: object) -> AppSettings:
         for field in fields(AppSettings)
         if field.name not in _NESTED_CLEANERS
         and field.name not in _BOOLEAN_FIELDS
-        and field.name != "font_scale"
+        and field.name not in {"font_scale", "custom_colors"}
     }
     for key, value in raw.items():
         if key in string_fields and isinstance(value, str):
@@ -318,8 +344,11 @@ def _parse_settings(raw: object) -> AppSettings:
         settings.mid_turn_delivery = ""
     if settings.text_contrast != "soft":
         settings.text_contrast = ""
+    if settings.body_font not in _BODY_FONTS:
+        settings.body_font = ""
     if settings.theme not in THEMES:
         settings.theme = ""
+    settings.custom_colors = _clean_custom_colors(raw.get("custom_colors"))
     raw_scale = raw.get("font_scale")
     if _valid_font_scale(raw_scale):
         settings.font_scale = round(float(raw_scale), 2)
@@ -448,11 +477,11 @@ class AppSettingsStore:
                         str(mode)
                         for mode in value.values()
                         if not isinstance(mode, str)
-                        or (mode.strip() and mode.strip() not in _MODES)
+                        or (mode.strip() and mode.strip() not in PERMISSION_MODES)
                     )
                     if unknown:
                         raise ValueError(
-                            f"{key} entries must be one of {', '.join(_MODES)}"
+                            f"{key} entries must be one of {', '.join(PERMISSION_MODES)}"
                         )
                 setattr(updated, key, _NESTED_CLEANERS[key](value))
                 continue
@@ -487,10 +516,26 @@ class AppSettingsStore:
                     raise ValueError("text_contrast must be normal or soft")
                 updated.text_contrast = "soft" if value == "soft" else ""
                 continue
+            if key == "body_font":
+                if not isinstance(value, str) or value not in {"system", *_BODY_FONTS}:
+                    raise ValueError("body_font must be system, serif or mono")
+                updated.body_font = "" if value == "system" else value
+                continue
             if key == "theme":
                 if not isinstance(value, str) or value not in THEMES:
                     raise ValueError("theme must be dark, light or system")
                 updated.theme = value
+                continue
+            if key == "custom_colors":
+                if value is None:
+                    updated.custom_colors = None
+                    continue
+                if not isinstance(value, dict):
+                    raise ValueError("custom_colors must be an object")
+                cleaned_colors = _clean_custom_colors(value)
+                if value and cleaned_colors is None:
+                    raise ValueError("custom_colors entries must be {bg, fg} hex colours")
+                updated.custom_colors = cleaned_colors
                 continue
             if key == "font_scale":
                 if not _valid_font_scale(value):
@@ -526,8 +571,10 @@ class AppSettingsStore:
         """
         body: dict[str, object] = {
             "text_contrast": self.settings.text_contrast or "normal",
+            "body_font": self.settings.body_font or "system",
             "theme": self.settings.theme or None,
             "font_scale": self.settings.font_scale or None,
+            "custom_colors": self.settings.custom_colors or {},
         }
         digest = hashlib.sha256(
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")

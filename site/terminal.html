@@ -4,12 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Browser Terminal · Ciaobot</title>
-  <meta name="description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, why it asks for the password again, and what a session does.">
+  <meta name="description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, what your signed-in session already allows, and what a session does.">
   <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/terminal.html">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Ciaobot">
   <meta property="og:title" content="Browser Terminal · Ciaobot">
-  <meta property="og:description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, why it asks for the password again, and what a session does.">
+  <meta property="og:description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, what your signed-in session already allows, and what a session does.">
   <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/terminal.html">
   <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <meta property="og:image:type" content="image/png">
@@ -18,7 +18,7 @@
   <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Browser Terminal · Ciaobot">
-  <meta name="twitter:description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, why it asks for the password again, and what a session does.">
+  <meta name="twitter:description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, what your signed-in session already allows, and what a session does.">
   <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
   <link rel="icon" href="assets/img/favicon.png">
   <link rel="stylesheet" href="assets/style.css">
@@ -47,7 +47,7 @@
       <p class="lead">The terminal panel opens a real shell on the machine Ciaobot runs on. Here is where that shell lives, what it is allowed to do, and how long a session lasts.</p>
       <ul class="toc" aria-label="On this page">
         <li><a href="#where">Where it runs</a></li>
-        <li><a href="#password">The password again</a></li>
+        <li><a href="#access">What gets you in</a></li>
         <li><a href="#open">Opening a terminal</a></li>
         <li><a href="#sessions">Hide, End and the fifteen minutes</a></li>
         <li><a href="#phone">From a phone</a></li>
@@ -61,14 +61,14 @@
       <p>The panel is not a shell that lives in the browser. It is a process on the computer Ciaobot runs on, started by the engine, with the account the engine runs as. What you see in the panel is the bytes that process writes, sent to your browser as they arrive.</p>
       <p>The shell it starts is the engine account's login shell on macOS and Linux, and PowerShell on Windows.</p>
       <div class="note"><strong>It is not sandboxed, and it is not confined to your notes folder.</strong> Whatever the engine's account can read, the terminal can read, and the workspace's <strong>File access</strong> setting does not apply to it. <a href="features.html#file-access">How file access works →</a></div>
-      <p>That matters most on a shared or rented machine, where the engine runs as the service's own account. Treat the terminal panel as a full shell on that machine, and keep the password that opens it to yourself.</p>
+      <p>That matters most on a shared or rented machine, where the engine runs as the service's own account. Treat the terminal panel as a full shell on that machine, and treat anyone who can sign in to Ciaobot on this engine as someone who can open it.</p>
     </section>
 
-    <section id="password">
-      <h2>It asks for the password again</h2>
-      <p>Being signed in is not enough. Before the terminal opens a shell, it asks for your Ciaobot password a second time, and that unlock lasts 15 minutes. After it runs out, the panel asks again.</p>
-      <p>The unlock is not your session. It is a separate, short-lived permission held in a cookie the page's own script cannot read. Signing out of Ciaobot ends it, and so does changing your password: a new password ends every terminal unlock, on every device, including the one that changed it.</p>
-      <p>Five wrong attempts from the same address in fifteen minutes close that address's window, and then the terminal refuses every attempt from it, the right password included, until the window passes. The address is the one the engine sees, so several devices behind one router share one budget.</p>
+    <section id="access">
+      <h2>What gets you in</h2>
+      <p>Your signed-in session is what opens the terminal. There is no second password prompt: the same browser session that can talk to the agent can open the panel, because on this engine those are already the same level of access.</p>
+      <p>The panel still holds a separate, short-lived permission in a cookie your page's own script cannot read: a grant that lasts fifteen minutes and belongs to this browser. It is how the panel knows which browser may hold the socket. Signing out of Ciaobot ends it, and so does changing your password: a new password ends every grant, on every device, including the one that changed it. While the panel is open and the engine closes the socket, it asks for a fresh grant for itself, so the fifteen minutes bound a grant rather than an open pane.</p>
+      <div class="note"><strong>A workspace that denies the agent a shell does not deny you one.</strong> If a workspace removes the agent's Bash tool, or confines its shell to the workspace, the browser terminal still opens the engine account's own shell. The signed-in session is the boundary; keep that account, and who can sign in to it, as the thing you protect.</div>
     </section>
 
     <section id="open">

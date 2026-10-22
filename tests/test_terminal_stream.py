@@ -240,7 +240,7 @@ def _client(
             client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
         if unlocked:
             response = client.post(
-                UNLOCK, json={"password": PASSWORD}, headers=_origin(base_url)
+                UNLOCK, headers=_origin(base_url)
             )
             assert response.status_code == 200
         yield client

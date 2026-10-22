@@ -5,7 +5,7 @@ import { api } from '../lib/api'
 import { applyAppearanceSettings, useAppearanceSettings } from './useAppearanceSettings'
 import { useFontScale } from './useFontScale'
 
-const base = { text_contrast: 'normal' as const, theme: 'dark' as const, font_scale: 1.2, revision: 'r0' }
+const base = { text_contrast: 'normal' as const, body_font: 'system' as const, theme: 'dark' as const, font_scale: 1.2, revision: 'r0' }
 
 beforeEach(() => {
   applyAppearanceSettings(base)
@@ -16,6 +16,7 @@ afterEach(() => {
   vi.useRealTimers()
   localStorage.clear()
   document.documentElement.removeAttribute('data-text-contrast')
+  document.documentElement.removeAttribute('data-body-font')
   document.documentElement.classList.remove('theme-light')
 })
 
@@ -25,6 +26,16 @@ describe('applyAppearanceSettings', () => {
     expect(document.documentElement.dataset.textContrast).toBe('soft')
     expect(JSON.parse(localStorage.getItem('ciao-appearance') || '{}').text_contrast).toBe('soft')
     expect(useAppearanceSettings().settings.value.revision).toBe('r1')
+  })
+
+  it('applies the body font to <html> and the cache, and ignores a bogus one', () => {
+    applyAppearanceSettings({ ...base, body_font: 'serif', revision: 'r1' })
+    expect(document.documentElement.dataset.bodyFont).toBe('serif')
+    expect(JSON.parse(localStorage.getItem('ciao-appearance') || '{}').body_font).toBe('serif')
+    applyAppearanceSettings({ body_font: 'comic' as never })
+    expect(useAppearanceSettings().settings.value.body_font).toBe('serif')
+    applyAppearanceSettings({ body_font: 'system' })
+    expect(document.documentElement.dataset.bodyFont).toBeUndefined()
   })
 
   it('ignores bogus values', () => {
@@ -75,6 +86,34 @@ describe('save', () => {
     await expect(useAppearanceSettings().save({ text_contrast: 'normal' })).rejects.toBe(conflict)
     expect(get).toHaveBeenCalledWith('/api/settings/appearance')
     expect(useAppearanceSettings().settings.value.text_contrast).toBe('soft')
+  })
+})
+
+describe('custom colours', () => {
+  const colors = { dark: { bg: '#101018', fg: '#e8e8f0' }, light: { bg: '#fdf6e3', fg: '#2b2b2b' } }
+
+  it('applies the active mode pair and the cache keeps it', () => {
+    applyAppearanceSettings({ ...base, custom_colors: colors, revision: 'r1' })
+    expect(document.documentElement.style.getPropertyValue('--bg')).toBe('#101018')
+    expect(JSON.parse(localStorage.getItem('ciao-appearance') || '{}').custom_colors.dark.bg).toBe('#101018')
+    applyAppearanceSettings({ custom_colors: 'red' as never })
+    expect(useAppearanceSettings().settings.value.custom_colors).toEqual(colors)
+    applyAppearanceSettings({ custom_colors: {}, revision: 'r2' })
+    expect(document.documentElement.style.getPropertyValue('--bg')).toBe('')
+  })
+
+  it('re-applies the other mode pair when the theme class flips', async () => {
+    applyAppearanceSettings({ ...base, custom_colors: colors, revision: 'r1' })
+    document.documentElement.classList.add('theme-light')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+    expect(document.documentElement.style.getPropertyValue('--bg')).toBe('#fdf6e3')
+    expect(document.documentElement.dataset.customColors).toBe('light')
+    document.documentElement.classList.remove('theme-light')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+    expect(document.documentElement.style.getPropertyValue('--bg')).toBe('#101018')
+    applyAppearanceSettings({ custom_colors: {}, revision: 'r2' })
   })
 })
 
@@ -139,5 +178,36 @@ describe('font scale persistence', () => {
     fresh.applyAppearanceSettings({ text_contrast: 'normal', theme: 'dark', font_scale: null, revision: 'r0' })
     await vi.waitFor(() => expect(patch).toHaveBeenCalled())
     expect(patch.mock.calls[0][1]).toMatchObject({ font_scale: 1.25 })
+  })
+})
+
+describe('boot before the engine value loads', () => {
+  it('keeps the restored paint cache when the theme class flips', async () => {
+    vi.resetModules()
+    localStorage.setItem('ciao-appearance', JSON.stringify({
+      text_contrast: 'soft',
+      body_font: 'serif',
+      custom_colors: { light: { bg: '#fdf6e3', fg: '#2b2b2b' } },
+    }))
+    const root = document.documentElement
+    root.classList.remove('theme-light')
+    await import('./useAppearanceSettings')
+    const { restoreAppearanceFromCache } = await import('../lib/appearance')
+    try {
+      // main.ts: theme class, then the cache, both after the module graph loaded.
+      root.classList.add('theme-light')
+      restoreAppearanceFromCache(root)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(root.style.getPropertyValue('--bg')).toBe('#fdf6e3')
+      expect(root.dataset.textContrast).toBe('soft')
+      expect(root.dataset.bodyFont).toBe('serif')
+    } finally {
+      root.classList.remove('theme-light')
+      root.removeAttribute('style')
+      root.removeAttribute('data-text-contrast')
+      root.removeAttribute('data-body-font')
+      root.removeAttribute('data-custom-colors')
+    }
   })
 })

@@ -285,4 +285,24 @@ test.describe('touch targets', () => {
     expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
     expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
   })
+
+  test('the workspace reorder handle and Move up / Move down are at least 44×44 on touch', async ({ page }) => {
+    await boot(page, '/settings/workspaces', '.settings-main')
+    const handle = page.locator('[data-workspace-handle="beta"]')
+    await expect(handle).toBeVisible()
+    const box = await handle.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.width).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+    expect(box!.height).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+
+    await page.getByRole('button', { name: 'Actions for workspace beta' }).click()
+    for (const name of ['Move workspace beta up', 'Move workspace beta down']) {
+      const item = page.getByRole('menuitem', { name })
+      await expect(item).toBeVisible()
+      const itemBox = await item.boundingBox()
+      expect(itemBox, name).not.toBeNull()
+      expect(itemBox!.height, name).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+      expect(itemBox!.width, name).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+    }
+  })
 })

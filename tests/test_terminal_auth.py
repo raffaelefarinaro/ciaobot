@@ -21,10 +21,7 @@ import pytest
 
 from ciao.terminal_auth import (
     TERMINAL_COOKIE,
-    TERMINAL_MAX_FAILURE_CLIENTS,
     TERMINAL_MAX_GRANTS,
-    TERMINAL_UNLOCK_FAIL_LIMIT,
-    TERMINAL_UNLOCK_FAIL_WINDOW_S,
     TERMINAL_UNLOCK_TTL_S,
     TerminalAuthError,
     TerminalGrant,
@@ -392,268 +389,7 @@ def test_malformed_credential_unicode_is_refused_not_raised() -> None:
     assert store.verify(token, "cookie-a") is not None
 
 
-# ── Password policy ───────────────────────────────────────────────────────
-
-
-def test_password_comparison_handles_unicode_and_refuses_empty_expected() -> None:
-    clock = FakeClock()
-    store = _store(clock)
-
-    assert store.check_password("10.0.0.1", "pässwörd☃", "pässwörd☃") is True
-    assert store.check_password("10.0.0.2", "pässwörd☃", "pässwörd") is False
-    # An unset password never authenticates, not even an empty guess.
-    assert store.check_password("10.0.0.3", "", "") is False
-    assert store.check_password("10.0.0.4", "anything", "") is False
-
-    # A blank expected password still counts as a failed attempt.
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert store.check_password("10.0.0.5", "anything", "") is False
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.5", "right", "")
-    assert excinfo.value.reason == "rate_limited"
-
-
-def test_a_malformed_password_is_a_failure_and_reaches_the_limit() -> None:
-    """A password that is not valid UTF-8 fails, and it counts."""
-    clock = FakeClock()
-    store = _store(clock)
-
-    # Matching malformed values must not authorize through surrogate encoding.
-    assert store.check_password("10.0.0.3", _MALFORMED, _MALFORMED) is False
-
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert store.check_password("10.0.0.1", _MALFORMED, "right") is False
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.1", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-    # The same holds for a malformed expected password.
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert store.check_password("10.0.0.2", "right", _MALFORMED) is False
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.2", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-
-def test_a_whitespace_only_expected_password_never_authenticates() -> None:
-    clock = FakeClock()
-    store = _store(clock)
-
-    for blank in ("", "   ", "\t\n"):
-        assert store.check_password("10.0.0.1", "anything", blank) is False
-        assert store.check_password("10.0.0.2", blank, blank) is False
-
-
-def test_a_password_with_significant_spaces_is_compared_byte_for_byte() -> None:
-    """Neither operand is stripped: the spaces are part of the password."""
-    clock = FakeClock()
-    store = _store(clock)
-
-    assert store.check_password("10.0.0.1", " pass ", " pass ") is True
-    assert store.check_password("10.0.0.2", "pass", " pass ") is False
-    assert store.check_password("10.0.0.3", " pass", " pass ") is False
-    assert store.check_password("10.0.0.4", "pass ", " pass") is False
-
-
-def test_an_empty_supplied_password_fails_against_a_nonempty_expected() -> None:
-    clock = FakeClock()
-    store = _store(clock)
-
-    assert store.check_password("10.0.0.1", "", "right") is False
-    # And it counts as an attempt like any other.
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT - 1):
-        assert store.check_password("10.0.0.1", "", "right") is False
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.1", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-
-def test_five_failures_block_attempts_including_correct_password_until_window_expires() -> None:
-    clock = FakeClock()
-    store = _store(clock)
-
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT - 1):
-        assert store.check_password("10.0.0.1", "wrong", "right") is False
-
-    # The fifth failure is the last one that is answered.
-    assert store.check_password("10.0.0.1", "wrong", "right") is False
-
-    # The window is closed: even the correct password is refused, and the
-    # refusal is a typed one rather than a False.
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.1", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-    clock.advance(TERMINAL_UNLOCK_FAIL_WINDOW_S + 1)
-    assert store.check_password("10.0.0.1", "right", "right") is True
-
-
-def test_the_rolling_window_closes_at_its_exact_boundary() -> None:
-    clock = FakeClock()
-    store = _store(clock)
-
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert store.check_password("10.0.0.1", "wrong", "right") is False
-
-    # One second before the window closes the failures still count.
-    clock.advance(TERMINAL_UNLOCK_FAIL_WINDOW_S - 1)
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.1", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-    # At the boundary the oldest failure has aged out and the window is open.
-    clock.advance(1)
-    assert store.check_password("10.0.0.1", "right", "right") is True
-
-
-def test_the_rolling_window_expires_failures_one_by_one() -> None:
-    """Failures age out individually, so a staggered run frees the window."""
-    clock = FakeClock()
-    store = _store(clock)
-
-    for _ in range(3):
-        assert store.check_password("10.0.0.1", "wrong", "right") is False
-    clock.advance(100)
-    for _ in range(2):
-        assert store.check_password("10.0.0.1", "wrong", "right") is False
-
-    # Five failures: the window is closed.
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.1", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-    # The three old failures age out; the two recent ones stay, so the count
-    # is exactly two. Three more failures therefore fit, and the fourth
-    # attempt is the one that closes the window again.
-    clock.advance(801)
-    for _ in range(3):
-        assert store.check_password("10.0.0.1", "wrong", "right") is False
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.1", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-
-def test_success_before_the_failure_limit_resets_that_clients_count() -> None:
-    clock = FakeClock()
-    store = _store(clock)
-
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT - 1):
-        assert store.check_password("10.0.0.1", "wrong", "right") is False
-    assert store.check_password("10.0.0.1", "right", "right") is True
-
-    # The budget is spent again from zero, not continued from where it was.
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT - 1):
-        assert store.check_password("10.0.0.1", "wrong", "right") is False
-    assert store.check_password("10.0.0.1", "right", "right") is True
-
-
-def test_failure_buckets_are_bounded_without_evicting_live_limits() -> None:
-    clock = FakeClock()
-    store = _store(clock)
-
-    for index in range(TERMINAL_MAX_FAILURE_CLIENTS):
-        assert store.check_password(f"10.0.0.{index}", "wrong", "right") is False
-
-    # The bucket table is full: a new client is refused rather than allowed
-    # to start guessing.
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.9.9.9", "wrong", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-    # Fail-closed at the bound: a correct password is refused too while the
-    # table is full, so a correct guess is never a way past a full table.
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.9.9.9", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-    # No live bucket was evicted to make room for it, so the first client
-    # still remembers its earlier failure and reaches the limit on its own.
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT - 1):
-        assert store.check_password("10.0.0.0", "wrong", "right") is False
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.0", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-    # A stale bucket is reclaimed once its window has passed.
-    clock.advance(TERMINAL_UNLOCK_FAIL_WINDOW_S + 1)
-    assert store.check_password("10.9.9.9", "right", "right") is True
-
-
-# ── The client identity the failures are counted against ──────────────────
-
-
-def test_two_spellings_of_one_address_share_a_failure_bucket() -> None:
-    """The bucket is the address, not the string the caller happened to pass."""
-    clock = FakeClock()
-    store = _store(clock)
-
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert store.check_password("2001:0db8:0000:0000:0000:0000:0000:0001", "wrong", "right") is False
-
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("2001:db8::1", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-
-def test_an_ipv4_mapped_address_shares_the_ipv4_bucket() -> None:
-    clock = FakeClock()
-    store = _store(clock)
-
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert store.check_password("::ffff:10.0.0.1", "wrong", "right") is False
-
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("10.0.0.1", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-
-def test_the_ipv4_and_ipv6_loopbacks_are_separate_buckets() -> None:
-    """They are two different addresses, so they are two different budgets."""
-    clock = FakeClock()
-    store = _store(clock)
-
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert store.check_password("127.0.0.1", "wrong", "right") is False
-
-    assert store.check_password("::1", "right", "right") is True
-
-
-def test_unusable_addresses_share_one_unknown_client_bucket() -> None:
-    """An address the server cannot parse is one bucket, not unbounded keys."""
-    clock = FakeClock()
-    store = _store(clock)
-
-    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
-        assert store.check_password("not-an-ip", "wrong", "right") is False
-
-    with pytest.raises(TerminalAuthError) as excinfo:
-        store.check_password("another-garbage", "right", "right")
-    assert excinfo.value.reason == "rate_limited"
-
-
 # ── The comparisons are constant-time and the digests are compared ─────────
-
-
-def test_the_password_comparison_goes_through_compare_digest(monkeypatch) -> None:
-    """The password bytes are compared with ``hmac.compare_digest``."""
-    from ciao import terminal_auth
-
-    real = hmac.compare_digest
-    calls: list[tuple[Any, Any]] = []
-
-    def spy(a: Any, b: Any) -> bool:
-        calls.append((a, b))
-        return real(a, b)
-
-    monkeypatch.setattr(terminal_auth.hmac, "compare_digest", spy)
-    clock = FakeClock()
-    store = _store(clock)
-
-    assert store.check_password("10.0.0.1", "secret", "secret") is True
-
-    # Exactly one comparison: the password's bytes. The bearer lookup is a
-    # keyed digest lookup, not a scan over the stored digests.
-    assert calls == [(b"secret", b"secret")]
 
 
 def test_the_session_binding_comparison_goes_through_compare_digest(
@@ -694,13 +430,10 @@ def test_no_terminal_auth_data_is_logged(
 
     with caplog.at_level(logging.DEBUG):
         token, _ = store.issue("cookie-a")
-        store.check_password("10.0.0.1", "supplied-secret", "expected-secret")
         store.revoke(token)
 
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert token not in logged
-    assert "supplied-secret" not in logged
-    assert "expected-secret" not in logged
     assert "cookie-a" not in logged
 
 
@@ -785,9 +518,6 @@ def test_the_terminal_grant_constants_match_the_contract() -> None:
     assert TERMINAL_COOKIE == "ciao_terminal"
     assert TERMINAL_UNLOCK_TTL_S == 900
     assert TERMINAL_MAX_GRANTS == 32
-    assert TERMINAL_UNLOCK_FAIL_LIMIT == 5
-    assert TERMINAL_UNLOCK_FAIL_WINDOW_S == 900
-    assert TERMINAL_MAX_FAILURE_CLIENTS == 256
 
 
 def test_a_grant_is_a_frozen_public_record() -> None:

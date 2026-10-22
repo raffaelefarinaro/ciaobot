@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
+from ciao.execution_modes import cap_schedule_mode
 from ciao.legacy_node_state import (
     LegacyNodeState,
     STATE_FILENAME as LEGACY_STATE_FILENAME,
@@ -120,6 +121,18 @@ class StartupTracker:
             "phases": [asdict(p) for p in self._phases.values()],
             "overall_ready": self.overall_ready,
         }
+
+
+def schedule_run_mode(
+    config: CiaoConfig, saved: str, provider: str, workspace: str | None
+) -> str:
+    """The permission mode one schedule run uses.
+
+    The default is the operator's pin for the provider the run resolves to, with
+    the workspace's override of that pin winning. A saved mode (an agent-made
+    routine) is an upper limit, not a pin: see ``cap_schedule_mode``.
+    """
+    return cap_schedule_mode(saved, config.default_mode_for_provider(provider, workspace))
 
 
 def _refresh_vault_index(
@@ -876,10 +889,11 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # The mode default is the operator's pin for the provider this run
         # actually resolves to (Settings -> Models & providers -> permission mode), so a
         # routine obeys the same setting a hand-opened chat on that provider
-        # does. It used to fall back to the Telegram context's mode, which is a
-        # different surface's state and belongs to no workspace.
-        provider, model, _workspace = pcm.schedule_effective_routing(entry)
-        mode = entry.mode or config.default_mode_for_provider(provider)
+        # does, with this workspace's override of that pin winning. It used to
+        # fall back to the Telegram context's mode, which is a different
+        # surface's state and belongs to no workspace.
+        provider, model, workspace = pcm.schedule_effective_routing(entry)
+        mode = schedule_run_mode(config, entry.mode, provider, workspace)
         return ("claude", model, mode, provider)
 
     # Classified before anything else touches the runtime root, because the

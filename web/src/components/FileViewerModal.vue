@@ -356,6 +356,7 @@ import { startFileDiscussion } from '../lib/fileDiscussion'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
 import { handleAppLinkClick } from '../lib/appLinks'
+import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
@@ -481,7 +482,7 @@ const metadata = computed(() => buildVaultDocumentMetadata(
   store.path,
   store.markdownPaths,
 ))
-const renderedMarkdown = computed(() => renderVaultMarkdown(metadata.value.body, store.path, store.markdownPaths))
+const renderedMarkdown = computed(() => renderVaultMarkdown(metadata.value.body, store.path, store.markdownPaths, true))
 
 function openRelated(path: string): void {
   const cid = store.chatId || ''
@@ -692,6 +693,7 @@ function onMdClick(e: MouseEvent): void {
   // The task opens behind this dialog, so the dialog closes first; a refused
   // close (unsaved edits kept) leaves the user where they were.
   if (handleAppLinkClick(e, () => store.close())) return
+  if (handleOpenLocalFileClick(e, (m) => projectsStore.pushErrorToast('Could not open file', m))) return
 
   const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
   if (fileLink) {
@@ -1997,3 +1999,7 @@ watch(
 }
 
 </style>
+
+<!-- The openable dead link: a `file:` path rendered as a button the engine
+     can act on. Shared with the chat panel and the pinned-file panel. -->
+<style scoped src="./markdownDeadLink.css"></style>

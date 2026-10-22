@@ -23,6 +23,7 @@ from ciao.web.routes_api import (
     gws_remove_profile,
     list_workspaces,
     provider_config_settings,
+    reorder_workspaces,
     upsert_workspace_setting,
 )
 from ciao.os_support.private import is_private
@@ -84,6 +85,7 @@ def _client(
         routes=[
             Route("/api/workspaces", list_workspaces, methods=["GET"]),
             Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
+            Route("/api/workspaces/reorder", reorder_workspaces, methods=["POST"]),
             Route(
                 "/api/workspaces/{name}",
                 upsert_workspace_setting,
@@ -1659,12 +1661,52 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path):
     assert stored_run.workspace == "beta"
 
 
+def test_patch_rename_without_the_key_keeps_provider_overrides(tmp_path):
+    """A rename PATCH that omits provider_overrides carries the stored map to the new name."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    overrides = {"claude": {"model": "opus", "permission_mode": "manual"}}
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "alpha": WorkspaceConfig(
+                name="alpha", vault_root="memory-vault/alpha", provider_overrides=overrides
+            ),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+    config.persist_workspace_registry()
+    app = Starlette(
+        routes=[Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"])]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = _RenamePCM()
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    resp = client.patch("/api/workspaces/alpha", json={"name": "beta"})
+
+    assert resp.status_code == 200, resp.json()
+    beta = next(w for w in resp.json()["workspaces"] if w["name"] == "beta")
+    assert beta["provider_overrides"] == overrides
+    assert config.workspace("beta").provider_overrides == overrides
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert next(r for r in stored if r["name"] == "beta")["provider_overrides"] == overrides
+
+
 @pytest.mark.parametrize(
     "extra",
     [
         {"default_provider": "invalid"},
         {"color": "chartreuse"},
         {"disallowed_tools": 123},
+        {"provider_overrides": {"claude": {"model": "gpt-9"}}},
     ],
 )
 def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
@@ -1870,6 +1912,76 @@ def test_workspace_memory_handover_defaults_off_persists_and_validates(tmp_path)
     bad = client.patch("/api/workspaces/personal", json={"memory_handover": "everything"})
     assert bad.status_code == 400
     assert config.workspace("personal").memory_handover == "off"
+
+
+def test_workspace_provider_overrides_persist_validate_and_clear(tmp_path):
+    """Overrides are operator-set per workspace and provider, sparse on disk, replaced whole."""
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+
+    def stored_row() -> dict:
+        return next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")
+
+    def listed_overrides() -> dict:
+        listed = client.get("/api/workspaces").json()
+        return next(w for w in listed["workspaces"] if w["name"] == "personal")["provider_overrides"]
+
+    assert listed_overrides() == {}
+
+    body = {"claude": {"model": "sonnet", "permission_mode": "manual"}}
+    patched = client.patch("/api/workspaces/personal", json={"provider_overrides": body})
+    assert patched.status_code == 200, patched.json()
+    updated = next(w for w in patched.json()["workspaces"] if w["name"] == "personal")
+    assert updated["provider_overrides"] == body
+    assert stored_row()["provider_overrides"] == body
+    assert config.workspace("personal").provider_overrides == body
+    assert listed_overrides() == body
+
+    # A save that omits the key keeps it.
+    kept = client.patch("/api/workspaces/personal", json={"color": "cyan"})
+    assert kept.status_code == 200
+    assert config.workspace("personal").provider_overrides == body
+
+    # A save that carries the key replaces the whole map; opencode takes any model id.
+    replaced = client.patch(
+        "/api/workspaces/personal",
+        json={"provider_overrides": {"opencode": {"model": "vendor/x", "thinking": "high"}}},
+    )
+    assert replaced.status_code == 200
+    assert stored_row()["provider_overrides"] == {
+        "opencode": {"model": "vendor/x", "thinking": "high"}
+    }
+
+    for bad in (
+        {"nope": {"model": "sonnet"}},
+        {"claude": {"default_model": "sonnet"}},
+        {"claude": {"permission_mode": "plan"}},
+        {"claude": {"thinking": "extreme"}},
+        {"claude": {"model": "gpt-9"}},
+        {"claude": {"insights_model": "gpt-9"}},
+        [],
+    ):
+        refused = client.patch("/api/workspaces/personal", json={"provider_overrides": bad})
+        assert refused.status_code == 400, bad
+        assert stored_row()["provider_overrides"] == {
+            "opencode": {"model": "vendor/x", "thinking": "high"}
+        }
+        assert config.workspace("personal").provider_overrides == {
+            "opencode": {"model": "vendor/x", "thinking": "high"}
+        }
+
+    # {} clears it and the key leaves the file.
+    cleared = client.patch("/api/workspaces/personal", json={"provider_overrides": {}})
+    assert cleared.status_code == 200
+    assert "provider_overrides" not in stored_row()
+    assert listed_overrides() == {}
+
+    created = client.post(
+        "/api/workspaces",
+        json={"name": "fresh", "provider_overrides": {"claude": {"thinking": "low"}}},
+    )
+    assert created.status_code in (200, 201), created.json()
+    assert config.workspace("fresh").provider_overrides == {"claude": {"thinking": "low"}}
 
 
 def test_missing_agent_fs_scope_loads_as_workspace(tmp_path, monkeypatch):
@@ -2085,3 +2197,266 @@ def test_workspace_color_saved_as_pink_stays_pink():
     unset = _workspace_from_mapping({"name": "work"})
     assert stored is not None and stored.color == "pink"
     assert unset is not None and unset.color == "amber"
+
+
+# ── reorder ─────────────────────────────────────────────────────────────
+
+
+class _ReorderEvents:
+    def __init__(self) -> None:
+        self.published: list[dict] = []
+
+    def publish(self, payload: dict) -> None:
+        self.published.append(payload)
+
+
+def _reorder_client(tmp_path: Path, names=("a", "b", "c")):
+    client, config, pcm = _client(tmp_path)
+    for name in names:
+        resp = client.post(
+            "/api/workspaces", json={"name": name, "vault_root": name}
+        )
+        assert resp.status_code == 201, resp.json()
+    pcm.events = _ReorderEvents()
+    return client, config, pcm
+
+
+def _registry_file(tmp_path: Path) -> Path:
+    return tmp_path / ".runtime" / "workspaces.json"
+
+
+def _stored_names(tmp_path: Path) -> list[str]:
+    return [item["name"] for item in json.loads(_registry_file(tmp_path).read_text())]
+
+
+def _payload_names(payload: dict) -> list[str]:
+    return [item["name"] for item in payload["workspaces"]]
+
+
+def test_reorder_workspaces_persists_and_returns_order(tmp_path):
+    client, config, _pcm = _reorder_client(tmp_path)
+    before = [name for name in config.workspaces if name in ("a", "b", "c")]
+    assert before == ["a", "b", "c"]
+    order = [name for name in config.workspaces if name not in ("a", "b", "c")]
+    order += ["c", "a", "b"]
+
+    resp = client.post("/api/workspaces/reorder", json={"order": order})
+
+    assert resp.status_code == 200, resp.json()
+    assert _payload_names(resp.json()) == order
+    assert list(config.workspaces) == order
+    assert _stored_names(tmp_path) == order
+    reloaded = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
+        }
+    )
+    assert list(reloaded.workspaces) == order
+    assert _payload_names(client.get("/api/workspaces").json()) == order
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda cur: cur[:-1], id="missing-name"),
+        pytest.param(lambda cur: [*cur, "ghost"], id="unknown-name"),
+        pytest.param(lambda cur: [*cur[:-1], cur[0]], id="duplicate"),
+        pytest.param(lambda cur: "abc", id="not-a-list"),
+        pytest.param(lambda cur: [*cur[:-1], 7], id="non-string-item"),
+        pytest.param(lambda cur: [name.upper() for name in cur], id="case-sensitive"),
+    ],
+)
+def test_reorder_workspaces_rejects_non_permutations(tmp_path, build):
+    client, config, _pcm = _reorder_client(tmp_path)
+    current = list(config.workspaces)
+    stored = _registry_file(tmp_path).read_text()
+
+    resp = client.post("/api/workspaces/reorder", json={"order": build(current)})
+
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+    assert list(config.workspaces) == current
+    assert _registry_file(tmp_path).read_text() == stored
+
+
+def test_reorder_workspaces_rejects_invalid_json_and_missing_order(tmp_path):
+    client, config, _pcm = _reorder_client(tmp_path)
+    current = list(config.workspaces)
+
+    bad = client.post(
+        "/api/workspaces/reorder",
+        content=b"{nope",
+        headers={"content-type": "application/json"},
+    )
+    assert bad.status_code == 400
+    assert bad.json() == {"error": "invalid JSON"}
+    for body in ({}, [], {"order": None}):
+        resp = client.post("/api/workspaces/reorder", json=body)
+        assert resp.status_code == 400
+    assert list(config.workspaces) == current
+
+
+def test_reorder_workspaces_rejects_an_archived_name(tmp_path):
+    client, config, _pcm = _reorder_client(tmp_path)
+    current = list(config.workspaces)
+    # An archived workspace is not in the registry, so it is unknown here.
+    resp = client.post("/api/workspaces/reorder", json={"order": [*current, "archived-one"]})
+    assert resp.status_code == 400
+    resp = client.post(
+        "/api/workspaces/reorder", json={"order": [*current[:-1], "archived-one"]}
+    )
+    assert resp.status_code == 400
+    assert list(config.workspaces) == current
+
+
+def test_reorder_workspaces_identical_order_is_a_noop(tmp_path):
+    client, config, pcm = _reorder_client(tmp_path)
+    registry = _registry_file(tmp_path)
+    before_mtime = registry.stat().st_mtime_ns
+    before_text = registry.read_text()
+    current = list(config.workspaces)
+    refreshes = pcm.refresh_count
+
+    resp = client.post("/api/workspaces/reorder", json={"order": current})
+
+    assert resp.status_code == 200
+    assert _payload_names(resp.json()) == current
+    assert registry.stat().st_mtime_ns == before_mtime
+    assert registry.read_text() == before_text
+    assert pcm.refresh_count == refreshes
+    assert pcm.events.published == []
+
+
+def test_reorder_workspaces_rolls_back_when_persist_fails(tmp_path, monkeypatch):
+    client, config, pcm = _reorder_client(tmp_path)
+    current = list(config.workspaces)
+    stored = _registry_file(tmp_path).read_text()
+
+    def boom(_config):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("ciao.web.routes_api.persist_workspaces", boom)
+
+    resp = client.post("/api/workspaces/reorder", json={"order": list(reversed(current))})
+
+    assert resp.status_code == 500
+    assert "disk full" in resp.json()["error"]
+    assert list(config.workspaces) == current
+    assert _registry_file(tmp_path).read_text() == stored
+    assert pcm.events.published == []
+
+
+def test_reorder_workspaces_publishes_workspaces_changed(tmp_path):
+    client, config, pcm = _reorder_client(tmp_path)
+    resp = client.post(
+        "/api/workspaces/reorder", json={"order": list(reversed(list(config.workspaces)))}
+    )
+    assert resp.status_code == 200
+    assert pcm.events.published == [{"type": "workspaces_changed"}]
+
+
+def test_rename_keeps_position_after_reorder(tmp_path):
+    client, config, _pcm = _reorder_client(tmp_path)
+    pcm = _RenamePCM()
+    client.app.state.project_chat_manager = pcm  # type: ignore[attr-defined]
+    order = ["c", *[n for n in config.workspaces if n != "c"]]
+    assert client.post("/api/workspaces/reorder", json={"order": order}).status_code == 200
+
+    resp = client.patch("/api/workspaces/c", json={"name": "z"})
+
+    assert resp.status_code == 200, resp.json()
+    expected = ["z", *order[1:]]
+    assert list(config.workspaces) == expected
+    assert _stored_names(tmp_path) == expected
+
+
+def _no_personal_client(tmp_path: Path, names=("work", "clientA", "other")):
+    """A registry with no workspace named ``personal``: the first is the main one."""
+    from ciao.config import WorkspaceConfig
+
+    client, config, pcm = _client(tmp_path)
+    config.workspaces.clear()
+    for name in names:
+        config.workspaces[name] = WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+    config.persist_workspace_registry()
+    pcm.events = _ReorderEvents()
+    return client, config, pcm
+
+
+def test_reorder_never_moves_the_main_workspace_off_the_top(tmp_path):
+    client, config, pcm = _no_personal_client(tmp_path)
+    assert config.primary_workspace() == "work"
+    stored = _registry_file(tmp_path).read_text()
+    refreshes = pcm.refresh_count
+
+    resp = client.post(
+        "/api/workspaces/reorder", json={"order": ["clientA", "work", "other"]}
+    )
+
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "'work' is the main workspace and stays first"}
+    assert list(config.workspaces) == ["work", "clientA", "other"]
+    assert config.primary_workspace() == "work"
+    assert _registry_file(tmp_path).read_text() == stored
+    assert pcm.refresh_count == refreshes
+    assert pcm.events.published == []
+
+
+def test_reorder_below_the_main_workspace_is_allowed(tmp_path):
+    client, config, _pcm = _no_personal_client(tmp_path)
+
+    resp = client.post(
+        "/api/workspaces/reorder", json={"order": ["work", "other", "clientA"]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert list(config.workspaces) == ["work", "other", "clientA"]
+    assert _stored_names(tmp_path) == ["work", "other", "clientA"]
+    assert resp.json()["primary"] == "work"
+
+
+def test_reorder_with_a_personal_workspace_moves_anything_anywhere(tmp_path):
+    client, config, _pcm = _no_personal_client(tmp_path, names=("work", "personal", "other"))
+    assert config.primary_workspace() == "personal"
+
+    for order in (
+        ["personal", "work", "other"],
+        ["other", "work", "personal"],
+        ["work", "other", "personal"],
+    ):
+        resp = client.post("/api/workspaces/reorder", json={"order": order})
+        assert resp.status_code == 200, resp.json()
+        assert list(config.workspaces) == order
+        assert resp.json()["primary"] == "personal"
+
+
+def test_reorder_workspaces_waits_for_the_registry_lock(tmp_path):
+    import asyncio
+
+    import httpx
+
+    client, config, _pcm = _reorder_client(tmp_path)
+    app = client.app
+    current = list(config.workspaces)
+    wanted = list(reversed(current))
+
+    async def scenario() -> None:
+        lock = asyncio.Lock()
+        app.state.workspace_archive_lock = lock  # type: ignore[attr-defined]
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            await lock.acquire()
+            task = asyncio.create_task(
+                http.post("/api/workspaces/reorder", json={"order": wanted})
+            )
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            assert list(config.workspaces) == current
+            lock.release()
+            resp = await task
+        assert resp.status_code == 200
+        assert list(config.workspaces) == wanted
+
+    asyncio.run(scenario())

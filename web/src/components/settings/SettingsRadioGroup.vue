@@ -9,6 +9,7 @@
       role="radio"
       :aria-checked="modelValue === option.value"
       :class="{ active: modelValue === option.value }"
+      :style="option.fontFamily ? { fontFamily: option.fontFamily } : undefined"
       :tabindex="index === tabStop ? 0 : -1"
       @click="emit('update:modelValue', option.value)"
     >
@@ -26,7 +27,7 @@ import { computed, ref } from 'vue'
  */
 const props = defineProps<{
   label: string
-  options: { value: T; label: string }[]
+  options: { value: T; label: string; fontFamily?: string }[]
   modelValue: T | null
 }>()
 const emit = defineEmits<{ 'update:modelValue': [value: T] }>()

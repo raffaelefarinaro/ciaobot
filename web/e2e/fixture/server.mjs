@@ -15,6 +15,9 @@
  *   POST /__fixture__/update-tasks                   give this session update tasks
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
  *   POST /__fixture__/terminal-offer { chat_id, command }  offer a suggested command
+ *
+ * Workspace order is per session too: POST /api/workspaces/reorder stores a
+ * permutation of the workspace names and GET /api/workspaces answers in it.
  */
 import http from 'node:http'
 import fs from 'node:fs'
@@ -178,11 +181,30 @@ const sessions = new Map()
 
 /** The workspace registry as this session sees it: a saved Memory handover shows on its workspace. */
 function workspacesPayload(state) {
+  const ordered = orderedWorkspaces(state)
   return {
-    workspaces: WORKSPACES.map(w => (state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w)),
-    active: WORKSPACES[0].name,
+    workspaces: ordered.map(w => (state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w)),
+    active: ordered[0].name,
     provider_options: [{ value: 'claude', label: 'Claude' }],
   }
+}
+
+/** The workspaces in this session's order (the fixture's own until a reorder). */
+function orderedWorkspaces(state) {
+  if (!state.workspaceOrder) return WORKSPACES
+  return state.workspaceOrder.map(name => WORKSPACES.find(w => w.name === name))
+}
+
+/** Store a reorder when `order` is exactly a permutation of the workspace names. */
+function reorderWorkspaces(state, order) {
+  const names = WORKSPACES.map(w => w.name)
+  const valid = Array.isArray(order)
+    && order.length === names.length
+    && new Set(order).size === names.length
+    && order.every(name => names.includes(name))
+  if (!valid) return false
+  state.workspaceOrder = order
+  return true
 }
 
 function sessionOf(req) {
@@ -190,7 +212,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), appearance: { text_contrast: 'normal', theme: null, font_scale: null, revision: 'a0' }, handover: {} }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null }
     sessions.set(id, state)
   }
   return state
@@ -351,17 +373,30 @@ function terminalEmit(session, ws, text) {
 async function terminalApi(req, res, pathname, url, state) {
   const terminals = terminalSessions(state)
   if (pathname === '/api/terminal/status' && req.method === 'GET') {
+    // No grant until the browser has asked for one: the pane obtains it
+    // by itself, so a spec that opens the terminal exercises that path
+    // rather than finding a live grant waiting for it.
     return sendJson(res, {
       available: true,
       reason: '',
       platform: TERMINAL_PLATFORM,
       host: TERMINAL_HOST,
-      unlock_expires_in: 900,
+      unlock_expires_in: state.terminalUnlocked ? 900 : 0,
       detached_ttl_seconds: 600,
     })
   }
   if (pathname === '/api/terminal/unlock' && req.method === 'POST') {
-    await readBody(req)
+    // The engine's route takes no body: the signed-in session is the
+    // terminal's trust boundary, so a request that carries one is refused.
+    const raw = await readRawBody(req)
+    if (raw.length > 0) {
+      return sendJson(
+        res,
+        { ok: false, reason: 'bad_request', error: 'this route takes no body.' },
+        400,
+      )
+    }
+    state.terminalUnlocked = true
     return sendJson(res, { ok: true, expires_in: 900 })
   }
   if (pathname === '/api/terminal/sessions' && req.method === 'GET') {
@@ -450,8 +485,8 @@ const GET_ROUTES = {
   }),
   '/api/proposals/history': (req) => (sessionOf(req).verification ? VERIFICATION_HISTORY : { rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
   '/api/vault/graph': (req) => (sessionOf(req).verification
-    ? { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
-    : { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
+    ? { workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
+    : { workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
   '/api/vault/review': (req) => (sessionOf(req).verification ? VERIFICATION_REVIEW : { candidates: [], trashed: [], cleared: [] }),
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   '/api/models': () => ({
@@ -623,6 +658,13 @@ async function readBody(req) {
   for await (const chunk of req) chunks.push(chunk)
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return {} }
+}
+
+/** The raw request body, as bytes: what the engine's unlock route looks at. */
+async function readRawBody(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  return Buffer.concat(chunks)
 }
 
 // ── Static files ────────────────────────────────────────────────────────
@@ -812,11 +854,18 @@ const server = http.createServer(async (req, res) => {
     // had.
     if (req.method === 'PATCH' && pathname === '/api/settings/appearance') {
       const state = sessionOf(req)
-      for (const key of ['text_contrast', 'theme', 'font_scale']) {
+      for (const key of ['text_contrast', 'body_font', 'theme', 'font_scale', 'custom_colors']) {
         if (body && body[key] !== undefined) state.appearance[key] = body[key]
       }
       state.appearance.revision = `a${Number(state.appearance.revision.slice(1)) + 1}`
       return sendJson(res, state.appearance)
+    }
+    if (req.method === 'POST' && pathname === '/api/workspaces/reorder') {
+      const state = sessionOf(req)
+      if (!reorderWorkspaces(state, body?.order)) {
+        return sendJson(res, { error: 'order must list every registered workspace exactly once' }, 400)
+      }
+      return sendJson(res, workspacesPayload(state))
     }
     // A workspace PATCH keeps the Memory handover it saves, per session, and
     // answers with the registry (the store replaces its list from the reply).

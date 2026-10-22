@@ -1,12 +1,16 @@
 import { ref, watch } from 'vue'
 import { api } from '../lib/api'
+import { isLightTheme } from '../lib/theme'
+import type { ColorPair } from '../lib/contrast'
 import {
   DEFAULT_APPEARANCE,
   applyAppearanceToRoot,
   applyTheme,
+  isBodyFont,
   isTextContrast,
   isTheme,
   readLocalTheme,
+  restoreAppearanceFromCache,
   writeAppearanceCache,
   type AppearancePayload,
   type Theme,
@@ -39,9 +43,19 @@ function validFontScale(value: unknown): value is number {
     && value >= MIN_FONT_SCALE - 1e-9 && value <= MAX_FONT_SCALE + 1e-9
 }
 
+function validColors(value: unknown): value is AppearancePayload['custom_colors'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  return Object.entries(value).every(([mode, pair]) => {
+    if (mode !== 'dark' && mode !== 'light') return false
+    const candidate = pair as Partial<ColorPair> | null
+    return !!candidate && typeof candidate.bg === 'string' && typeof candidate.fg === 'string'
+  })
+}
+
 /** Applies an engine value (GET, PATCH result, snapshot or change event). */
 export function applyAppearanceSettings(value: Partial<AppearancePayload>): void {
   if (isTextContrast(value.text_contrast)) settings.value.text_contrast = value.text_contrast
+  if (isBodyFont(value.body_font)) settings.value.body_font = value.body_font
   if (value.theme === null) settings.value.theme = null
   else if (isTheme(value.theme)) {
     settings.value.theme = value.theme
@@ -56,6 +70,7 @@ export function applyAppearanceSettings(value: Partial<AppearancePayload>): void
     // than whatever the engine just said: keep it and let the save settle it.
     if (!fontChangePending()) setFontScale(settings.value.font_scale)
   }
+  if (validColors(value.custom_colors)) settings.value.custom_colors = value.custom_colors
   if (typeof value.revision === 'string') settings.value.revision = value.revision
   loaded.value = true
   applyAppearanceToRoot(settings.value, document.documentElement)
@@ -103,6 +118,15 @@ function save(patch: Partial<AppearancePayload>): Promise<void> {
   writes = result.catch(() => {})
   return result
 }
+
+// Flipping Theme (or the OS scheme) switches which mode's custom pair shows.
+watch(isLightTheme, () => {
+  const root = document.documentElement
+  // Before the first engine value, `settings` is still the defaults; applying
+  // them would wipe the paint cache main.ts just restored.
+  if (loaded.value) applyAppearanceToRoot(settings.value, root)
+  else restoreAppearanceFromCache(root)
+})
 
 // Every writer of the font scale (Settings buttons, the zoom shortcuts) goes
 // through useFontScale, so one debounced watcher persists them all to the engine.

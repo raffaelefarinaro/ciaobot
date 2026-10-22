@@ -18,8 +18,8 @@ refusal is a close code rather than a body:
   which is also what every other ``/ws/*`` route uses. It answers 4001
   for a missing session, and 4003 for a foreign origin — though the
   terminal's own policy has already refused a foreign origin by then.
-* **a live grant** (``terminal_grant``) — the browser must have unlocked
-  the terminal with the password. A missing or revoked grant is 4401, and
+* **a live grant** (``terminal_grant``) — the browser must hold a grant
+  for this engine. A missing or revoked grant is 4401, and
   a grant is re-checked while the socket is open: a revoked one closes
   the socket within a second.
 
