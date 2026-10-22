@@ -50,7 +50,7 @@ Example `.runtime/workspaces.json`:
 
 `vault_root` is relative to `CIAO_WORKSPACE` unless it is absolute.
 
-`color` is an optional PWA accent preset (`amber`, `pink`, `cyan`, `emerald`, `violet`). Missing values default to Ciao orange (`amber`). Only accent tokens change; canvas colors stay fixed.
+`color` is an optional PWA accent preset (`amber`, `pink`, `cyan`, `emerald`, `violet`, `blue`, `teal`, `lime`, `fuchsia`). Missing values default to Ciao orange (`amber`). Only accent tokens change; canvas colors stay fixed.
 
 ## Providers and Models
 

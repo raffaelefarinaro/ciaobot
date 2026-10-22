@@ -67,7 +67,9 @@ web/
                            agreement rate and the operator-only per-workspace handover choice;
                            SettingsWorkspaceOverview.vue is the Workspace > Overview page;
                            SettingsManageWorkspaces.vue is the Manage workspaces page: boxed
-                           rows, the short New workspace form and Archived), plus the
+                           rows, the short New workspace form and Archived; WorkspaceColorPicker.vue is the accent
+                           swatch group both use: five base presets plus a dashed "+" disclosure for
+                           blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in

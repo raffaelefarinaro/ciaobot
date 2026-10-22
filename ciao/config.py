@@ -315,7 +315,9 @@ def _vault_evidence_score(path: Path) -> int:
 # Accent presets for the PWA. Missing/unknown values resolve to amber (Ciao
 # orange; the old pink default read as an error). Only accents shift; canvas
 # tokens stay stable.
-WORKSPACE_COLOR_IDS = ("amber", "pink", "cyan", "emerald", "violet")
+WORKSPACE_COLOR_IDS = (
+    "amber", "pink", "cyan", "emerald", "violet", "blue", "teal", "lime", "fuchsia",
+)
 DEFAULT_WORKSPACE_COLOR = "amber"
 
 

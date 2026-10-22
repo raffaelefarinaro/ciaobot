@@ -922,7 +922,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider,
-# gws_profile, color (pink|cyan|amber|emerald|violet; default
+# gws_profile, color (pink|cyan|amber|emerald|violet|blue|teal|lime|fuchsia; default
 # pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
 # null = defaults), claude_ai_connectors (boolean, default true). When false,
 # Claude chats in the workspace start with ENABLE_CLAUDEAI_MCP_SERVERS=false, so

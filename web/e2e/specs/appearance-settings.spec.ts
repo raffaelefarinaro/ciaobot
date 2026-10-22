@@ -89,3 +89,38 @@ test('on a touch device every control is at least 44px and the page does not scr
     await context.close()
   }
 })
+
+test('the more-colours swatch reveals the extra accent presets', async ({ page }, testInfo) => {
+  await isolate(page, `accent-more-${testInfo.workerIndex}`)
+  await boot(page, '/settings/workspaces', '.settings-main .section-title')
+  await page.getByRole('button', { name: 'New workspace' }).click()
+  const swatches = page.locator('#new-workspace .workspace-color-swatch[role=radio]')
+  await expect(swatches).toHaveCount(5)
+  await page.getByRole('button', { name: 'More colours' }).click()
+  await expect(swatches).toHaveCount(9)
+  await page.getByRole('radio', { name: 'Deep Teal' }).click()
+  await expect(page.getByRole('radio', { name: 'Deep Teal' })).toHaveAttribute('aria-checked', 'true')
+  await expect(page.getByRole('button', { name: 'Show fewer colours' })).toHaveAttribute('aria-expanded', 'true')
+})
+
+test('on a touch device every accent swatch, including the plus, is at least 44px', async ({ browser }, testInfo) => {
+  const context = await browser.newContext({ ...devices['Pixel 5'], baseURL: testInfo.project.use.baseURL })
+  const page = await context.newPage()
+  try {
+    await isolate(page, `accent-touch-${testInfo.workerIndex}`)
+    await boot(page, '/settings/workspaces', '.settings-main .section-title')
+    await page.getByRole('button', { name: 'New workspace' }).click()
+    await page.getByRole('button', { name: 'More colours' }).click()
+    const sizes = await page.$$eval('#new-workspace .workspace-color-swatch', (els) =>
+      els.map((el) => { const r = el.getBoundingClientRect(); return [Math.round(r.width), Math.round(r.height)] }),
+    )
+    expect(sizes).toHaveLength(10)
+    for (const [w, h] of sizes) {
+      expect(w).toBeGreaterThanOrEqual(TOUCH_MIN)
+      expect(h).toBeGreaterThanOrEqual(TOUCH_MIN)
+    }
+    expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
+  } finally {
+    await context.close()
+  }
+})
