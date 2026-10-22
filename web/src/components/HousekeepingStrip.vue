@@ -162,7 +162,7 @@ async function openChat(action: OperatorAction): Promise<void> {
   try {
     const workspace = action.workspace || projectStore.activeWorkspace
     if (projectStore.activeWorkspace !== workspace) {
-      await projectStore.switchWorkspace(workspace)
+      if ((await projectStore.switchWorkspace(workspace)) === false) return
     }
     let project = projectStore.projects.find(
       p => p.workspace === workspace && p.is_auto,

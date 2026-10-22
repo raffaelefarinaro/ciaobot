@@ -9,7 +9,6 @@ import { activeWorkspaceButton, boot, horizontalOverflow, isolate } from '../sup
  */
 const OVERVIEW = '/settings/workspace'
 const READY = '.settings-main .section-title'
-const SHOTS = '/private/tmp/claude-501/-Users-raffaelefarinaro-repos-ciaobot/99b57655-501d-4cf6-a65f-209885cd051b/scratchpad/shots'
 
 test.describe('workspace overview', () => {
   test.beforeEach(async ({ page }, testInfo) => {
@@ -34,15 +33,15 @@ test.describe('workspace overview', () => {
     const other = page.locator('#workspace-scope-menu [role="menuitem"]').filter({ hasNotText: new RegExp(first, 'i') }).first()
     await other.click()
     await expect(name).not.toHaveValue(first)
-    await page.screenshot({ path: `${SHOTS}/issue-1892-e2e-overview-1280.png`, fullPage: true })
   })
 
   test('the memory handover radiogroup takes arrow keys', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
-    // The saved choice comes back from the PATCH; the fixture has no write route.
+    // The fixture has no write route.
     await page.route('**/api/workspaces/*', async (route) => {
       if (route.request().method() === 'PATCH') {
-        await route.fulfill({ json: { ok: true } })
+        // Answer with the registry itself: the store replaces its list from the reply.
+        await route.fulfill({ json: await (await page.request.get('/api/workspaces')).json() })
         return
       }
       await route.fallback()
@@ -55,7 +54,11 @@ test.describe('workspace overview', () => {
     await off.focus()
     await expect(off).toHaveAttribute('aria-checked', 'true')
     await page.keyboard.press('ArrowRight')
-    await expect(group.getByRole('radio', { name: 'Dismiss', exact: true })).toBeFocused()
+    const dismiss = group.getByRole('radio', { name: 'Dismiss', exact: true })
+    await expect(dismiss).toBeFocused()
+    // Focus survives the save, so a second arrow still moves on.
+    await page.keyboard.press('ArrowLeft')
+    await expect(off).toBeFocused()
   })
 
   for (const [width, height] of [[390, 844], [640, 450]] as const) {
@@ -64,7 +67,6 @@ test.describe('workspace overview', () => {
       await boot(page, OVERVIEW, READY)
       const { overflow, culprits } = await horizontalOverflow(page)
       expect(overflow, `scrolls ${overflow}px sideways; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
-      await page.screenshot({ path: `${SHOTS}/issue-1892-e2e-overview-${width}.png`, fullPage: true })
     })
   }
 })

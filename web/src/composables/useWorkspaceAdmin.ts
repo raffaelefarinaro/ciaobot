@@ -407,7 +407,8 @@ export function useWorkspaceAdmin(deps: {
     })
   }
   projectStore.setWorkspaceSwitchGuard(confirmWorkspaceSwitch)
-  onScopeDispose(() => projectStore.setWorkspaceSwitchGuard(null))
+  // Clear only our own guard: a newer instance may already have replaced it.
+  onScopeDispose(() => projectStore.clearWorkspaceSwitchGuard(confirmWorkspaceSwitch))
 
   return {
     workspaceProviderFieldLabel,

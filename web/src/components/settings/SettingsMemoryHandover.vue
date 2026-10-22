@@ -70,8 +70,9 @@
           class="toggle-btn"
           :class="{ active: selected === option.value }"
           :aria-checked="selected === option.value"
-          :tabindex="selected === option.value ? 0 : -1"
-          :disabled="optionDisabled(option.value)"
+          :tabindex="option.value === tabStop ? 0 : -1"
+          :disabled="unavailable(option.value)"
+          :aria-disabled="saving || unavailable(option.value) ? 'true' : undefined"
           @click="choose(option.value)"
         >{{ option.label }}</button>
       </div>
@@ -140,14 +141,23 @@ async function load(): Promise<void> {
   }
 }
 
-function optionDisabled(value: MemoryHandover): boolean {
-  return saving.value || (value !== 'off' && !data.value?.acting_available)
+// Off stays reachable so a saved dismiss/all can always be turned back off.
+function unavailable(value: MemoryHandover): boolean {
+  return value !== 'off' && !data.value?.acting_available
 }
+
+// One tab stop: the saved choice, or the first enabled option when that one is
+// disabled. While saving the buttons stay enabled (aria-disabled only), or the
+// focused one would drop focus to the page body mid-keystroke.
+const tabStop = computed<MemoryHandover>(() => {
+  if (!unavailable(selected.value)) return selected.value
+  return OPTIONS.find((o) => !unavailable(o.value))?.value ?? 'off'
+})
 
 // Radio-group keys: arrows select (and so save) the neighbour, wrapping past
 // the ends and skipping disabled options; Home/End jump to the first/last.
 function onOptionKeydown(e: KeyboardEvent): void {
-  const enabled = OPTIONS.map((o, i) => ({ o, i })).filter(({ o }) => !optionDisabled(o.value))
+  const enabled = OPTIONS.map((o, i) => ({ o, i })).filter(({ o }) => !unavailable(o.value))
   if (!enabled.length) return
   const at = enabled.findIndex(({ o }) => o.value === selected.value)
   let target: number
@@ -170,13 +180,15 @@ function onOptionKeydown(e: KeyboardEvent): void {
       return
   }
   e.preventDefault()
+  if (saving.value) return
   const next = enabled[target]
   optionEls.value[next.i]?.focus()
   void choose(next.o.value)
 }
 
 async function choose(value: MemoryHandover): Promise<void> {
-  if (saving.value || !data.value || value === data.value.handover) {
+  if (saving.value) return
+  if (!data.value || value === data.value.handover) {
     selected.value = data.value?.handover ?? 'off'
     return
   }
@@ -237,45 +249,4 @@ watch(workspace, () => {
 .handover-evidence p { margin: 0; }
 .handover-line { color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
 .handover-hint { margin-top: var(--space-2); }
-</style>
-
-<style scoped>
-.action-result--error { color: var(--error); }
-.handover-note {
-  margin: 0 0 var(--space-3);
-  color: var(--fg);
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-.handover-evidence {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-2);
-  border-top: 1px solid var(--border);
-  padding-top: var(--space-3);
-}
-.handover-evidence p { margin: 0; }
-.handover-line { color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
-.handover-options {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-.handover-option {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-3);
-  min-height: var(--touch, 44px);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md, 8px);
-  cursor: pointer;
-}
-.handover-option--on { border-color: var(--fg2); }
-.handover-option:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
-.handover-option input { margin-top: 0.25rem; flex: none; }
-.handover-option-text { display: flex; flex-direction: column; gap: 0.1rem; }
-.handover-option-label { color: var(--fg); font-size: var(--text-sm); font-weight: 600; }
 </style>

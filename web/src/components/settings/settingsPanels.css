@@ -699,6 +699,9 @@
   .set-subrow-label { flex-basis: 100%; }
   .set-subrow-control { max-width: none; }
   .set-row-body { padding-left: 0; }
+  /* A switch row keeps its label and switch on one line: the switch is short. */
+  .settings-switch-row.set-subrow { flex-wrap: nowrap; }
+  .settings-switch-row.set-subrow .set-subrow-label { flex: 1 1 auto; min-width: 0; }
 }
 
 .ws-label {
@@ -901,6 +904,7 @@
 @media (pointer: coarse) {
   .toggle-btn { min-height: var(--touch); }
 }
+.toggle-btn[aria-disabled="true"],
 .toggle-btn:disabled {
   opacity: 0.6;
   cursor: default;

@@ -3728,10 +3728,6 @@ async function openWorkspaceSettings(name: string, hash = ''): Promise<void> {
   await router.push({ path: '/settings/workspace', hash })
 }
 
-
-
-
-
 // Platform MCP list only — exclude Ciaobot project servers from .mcp.json
 // (n8n_mcp, notion, ciaobot), which have their own MCP status section.
 const EXCLUDED_PLATFORM_MCPS = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
@@ -3755,8 +3751,6 @@ function connectionMcps(providerId: string): string[] {
   }
   return result
 }
-
-
 
 // `force` bypasses the provider catalog caches, which costs a provider process
 // spawn. Opening Settings is exactly the moment a user has just connected a
@@ -4007,7 +4001,7 @@ async function fixDeployErrorInChat() {
   const defaultWorkspace = projectStore.workspaceOptions[0]?.name || 'personal'
 
   if (projectStore.activeWorkspace !== defaultWorkspace) {
-    await projectStore.switchWorkspace(defaultWorkspace)
+    if ((await projectStore.switchWorkspace(defaultWorkspace)) === false) return
   }
 
   let project = projectStore.projects.find(p => p.workspace === defaultWorkspace)
@@ -4060,7 +4054,7 @@ async function fixIssuesInChat() {
 
     const defaultWorkspace = projectStore.workspaceOptions[0]?.name || 'personal'
     if (projectStore.activeWorkspace !== defaultWorkspace) {
-      await projectStore.switchWorkspace(defaultWorkspace)
+      if ((await projectStore.switchWorkspace(defaultWorkspace)) === false) return
     }
     let project = projectStore.projects.find(p => p.workspace === defaultWorkspace)
     if (!project) {

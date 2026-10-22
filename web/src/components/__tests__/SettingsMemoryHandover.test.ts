@@ -268,6 +268,38 @@ describe('SettingsMemoryHandover', () => {
     expect(projectStore.updateWorkspace).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the buttons focusable while saving so a second arrow still works', async () => {
+    let release: () => void = () => {}
+    projectStore.updateWorkspace = vi.fn(() => new Promise<void>((r) => { release = r })) as never
+    const view = mount(SettingsMemoryHandover, { attachTo: document.body })
+    mounted.push(view)
+    await flushPromises()
+    const off = radio(view, 'off')
+    ;(off.element as HTMLButtonElement).focus()
+    await off.trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    // Saving: nothing is natively disabled, so focus is not dropped to BODY.
+    const dismiss = radio(view, 'dismiss')
+    expect(dismiss.attributes('disabled')).toBeUndefined()
+    expect(dismiss.attributes('aria-disabled')).toBe('true')
+    expect(document.activeElement).toBe(dismiss.element)
+    // A second choice while the first saves is ignored.
+    await dismiss.trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(projectStore.updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(askConfirm).not.toHaveBeenCalled()
+    release()
+    await flushPromises()
+  })
+
+  it('the first enabled option is the tab stop when the saved choice is disabled', async () => {
+    apiGet.mockResolvedValue(response({ handover: 'all', acting_available: false }))
+    const view = await mountCard()
+    expect(radio(view, 'all').attributes('tabindex')).toBe('-1')
+    expect(radio(view, 'off').attributes('tabindex')).toBe('0')
+    expect(view.findAll('button[role="radio"]').filter((b) => b.attributes('tabindex') === '0')).toHaveLength(1)
+  })
+
   it('all but Off are disabled when acting is unavailable', async () => {
     apiGet.mockResolvedValue(response({ acting_available: false }))
     const view = await mountCard()

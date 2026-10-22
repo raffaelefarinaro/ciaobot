@@ -171,6 +171,24 @@ describe('Settings > Workspace Overview', () => {
     }
   })
 
+  it('a declined discard keeps the workspace and the draft, and tells the caller', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    const { wrapper, store } = await mountOverview('work')
+    try {
+      await wrapper.get('#workspace-name-input').setValue('work-renamed')
+      const switched = store.switchWorkspace('personal', { transition: false })
+      await flushPromises()
+      expect(pendingConfirm.value!.message).toBe('Discard unsaved changes to work?')
+      pendingConfirm.value!.resolve(false)
+
+      expect(await switched).toBe(false)
+      expect(store.activeWorkspace).toBe('work')
+      expect(nameValue(wrapper)).toBe('work-renamed')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('pane header reads "<Workspace> · Overview"', async () => {
     const { wrapper } = await mountOverview('work')
     try {

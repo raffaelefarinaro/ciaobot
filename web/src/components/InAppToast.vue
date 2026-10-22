@@ -116,7 +116,7 @@ async function onClick(toast: InAppToast) {
   // Switch workspace if needed (the toast may be for a chat in the other one)
   const project = store.projectFor(toast.chat_id)
   if (project && project.workspace !== store.activeWorkspace) {
-    await store.switchWorkspace(project.workspace)
+    if ((await store.switchWorkspace(project.workspace)) === false) return
   }
   await store.switchChat(toast.chat_id)
   store.dismissToast(toast.id)
