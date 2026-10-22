@@ -1352,7 +1352,7 @@
       </section>
       <section class="rail-section" aria-labelledby="chat-rail-files">
         <p id="chat-rail-files" class="rail-label">Files</p>
-        <div v-if="railOutputs.length" class="rail-list">
+        <div v-if="inspectorOutputs.length" class="rail-list">
           <button
             v-for="output in shownOutputs"
             :key="`${output.action}:${output.file_path}`"
@@ -1366,13 +1366,13 @@
           </button>
         </div>
         <button
-          v-if="railOutputs.length > RAIL_LIST_MAX"
+          v-if="inspectorOutputs.length > RAIL_LIST_MAX"
           type="button"
           class="chat-rail-more"
           :aria-expanded="railShowAll.files"
           @click="railShowAll.files = !railShowAll.files"
-        >{{ railShowAll.files ? 'Show fewer' : `Show all ${railOutputs.length}` }}</button>
-        <p v-if="!railOutputs.length && !mentionedFiles.length" class="rail-note">None yet.</p>
+        >{{ railShowAll.files ? 'Show fewer' : `Show all ${inspectorOutputs.length}` }}</button>
+        <p v-if="!inspectorOutputs.length && !mentionedFiles.length" class="rail-note">None yet.</p>
         <template v-if="mentionedFiles.length">
           <p class="rail-label chat-rail-sublabel">Mentioned in replies</p>
           <div class="rail-list">
@@ -2104,13 +2104,12 @@ const mentionedFiles = computed<string[]>(() => {
 const RAIL_LIST_MAX = 5
 const railShowAll = ref({ files: false, mentioned: false, tools: false })
 watch(() => chat.value?.chat_id, () => { railShowAll.value = { files: false, mentioned: false, tools: false } })
-const railOutputs = computed(() => inspectorOutputs.value)
 const railMentioned = computed(() => [...mentionedFiles.value].reverse())
 const railTools = computed(() => [
   ...toolUsage.value.skills.map(skill => ({ ...skill, kind: 'skill' as const, tools: undefined as string[] | undefined })),
   ...toolUsage.value.mcp.map(server => ({ ...server, kind: 'mcp' as const })),
 ])
-const shownOutputs = computed(() => railShowAll.value.files ? railOutputs.value : railOutputs.value.slice(0, RAIL_LIST_MAX))
+const shownOutputs = computed(() => railShowAll.value.files ? inspectorOutputs.value : inspectorOutputs.value.slice(0, RAIL_LIST_MAX))
 const shownMentioned = computed(() => railShowAll.value.mentioned ? railMentioned.value : railMentioned.value.slice(0, RAIL_LIST_MAX))
 const shownTools = computed(() => railShowAll.value.tools ? railTools.value : railTools.value.slice(0, RAIL_LIST_MAX))
 

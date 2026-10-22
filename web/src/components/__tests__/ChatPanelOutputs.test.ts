@@ -414,6 +414,14 @@ describe('ChatPanel Outputs section', () => {
     expect(files.find('.chat-rail-more').exists()).toBe(false)
   })
 
+  it('leaves Always loaded closed on a plain Chat details open', async () => {
+    localStorage.removeItem('ciao.chatDetails.alwaysLoadedOpen')
+    const { wrapper } = await mountPanel({ AgentContextSection: false })
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('#chat-work-rail details.agent-context-loaded').attributes('open')).toBeUndefined()
+  })
+
   it('opens Always loaded from "See what Ciao knows" when the drawer was closed', async () => {
     localStorage.removeItem('ciao.chatDetails.alwaysLoadedOpen')
     const { wrapper } = await mountPanel({ AgentContextSection: false })

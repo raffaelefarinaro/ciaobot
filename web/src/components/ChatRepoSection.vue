@@ -240,9 +240,9 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
 .chat-repo-copy:hover, .repo-code-info:hover { color: var(--fg); }
 .chat-repo-copy:focus-visible, .repo-code-info:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
 .chat-repo-meta { margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--fg2); }
-/* The branch and the checkout facts share one line: the branch name gives way
-   (ellipsis) before the facts wrap under it. */
-.chat-repo-branch-line { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-3); min-width: 0; }
+/* The facts sit beside the branch when both fit and drop under it when they
+   do not; a name wider than the rail ellipsizes. */
+.chat-repo-branch-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--space-3); min-width: 0; }
 .chat-repo-facts { display: inline-flex; flex-wrap: wrap; flex: none; align-items: center; gap: 2px var(--space-3); }
 .chat-repo-branch {
   display: inline-flex;

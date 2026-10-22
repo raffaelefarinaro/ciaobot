@@ -59,3 +59,35 @@ test('the Repository section is compact and the rail does not scroll sideways', 
   expect(overflow).toBeLessThanOrEqual(0)
   await section.screenshot({ path: 'test-results/chat-details-repo.png' })
 })
+
+test('a long branch keeps a readable name and the facts wrap under it', async ({ page }) => {
+  const branch = 'feature/a-very-long-branch-name-that-cannot-fit-beside-the-facts'
+  await page.route('**/api/projects', async route => {
+    const response = await route.fetch()
+    const projects = await response.json()
+    await route.fulfill({ response, json: projects.map((p: { repo?: Record<string, unknown> | null }) => (
+      p.repo ? { ...p, repo: { ...p.repo, branch, dirty: true } } : p
+    )) })
+  })
+  // The chat works in the main checkout, so the uncommitted-changes fact shows.
+  // The list (`?active_only=1`) and the single-chat read both carry it.
+  await page.route(/\/api\/chats(\/[^/?]+)?(\?.*)?$/, async route => {
+    const response = await route.fetch()
+    const body = await response.json()
+    const strip = (c: Record<string, unknown>) => {
+      const { repo_location: _drop, ...rest } = c
+      return rest
+    }
+    await route.fulfill({ response, json: Array.isArray(body) ? body.map(strip) : strip(body) })
+  })
+  await boot(page, CHAT_PATH, COMPOSER)
+  const section = page.locator('.chat-repo-section')
+  await expect(section.locator('.chat-repo-dirty')).toBeVisible({ timeout: 8_000 })
+  // The facts drop under a name that does not fit, so the name gets most of
+  // the section's width rather than whatever the facts leave beside them.
+  const nameWidth = await section.locator('.chat-repo-branch-name').evaluate(el => el.clientWidth)
+  const sectionWidth = await section.evaluate(el => el.clientWidth)
+  expect(nameWidth).toBeGreaterThan(sectionWidth * 0.6)
+  const rail = page.locator('.chat-rail').first()
+  expect(await rail.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(0)
+})
