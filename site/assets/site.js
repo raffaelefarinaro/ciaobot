@@ -98,13 +98,13 @@
   });
 })();
 
-// Live GitHub stars and app downloads. Unauthenticated API (60 requests/hour
+// Live GitHub stars and product downloads. Unauthenticated API (60 requests/hour
 // per visitor), so results are cached for ten minutes in sessionStorage.
 (function () {
   var box = document.getElementById('repo-stats');
   if (!box || !window.fetch) return;
   var REPO = 'https://api.github.com/repos/raffaelefarinaro/ciaobot';
-  var KEY = 'ciaobot-repo-stats';
+  var KEY = 'ciaobot-repo-stats-v2';
   function show(d) {
     var fmt = new Intl.NumberFormat('en', { notation: d.downloads > 9999 ? 'compact' : 'standard' });
     box.querySelector('[data-stat="stars"]').textContent = fmt.format(d.stars);
@@ -122,9 +122,9 @@
     }).then(function (list) {
       list.forEach(function (rel) {
         rel.assets.forEach(function (a) {
-          // Count the app itself (installs and updates), not the installer
-          // script, signatures or update manifests fetched alongside it.
-          if (/\.app\.tar\.gz$|\.dmg$/.test(a.name)) total += a.download_count;
+          // Count engine wheels and historical desktop downloads (including
+          // updates), not installers, signatures, manifests or server hosts.
+          if (/^ciaobot-.*\.whl$|\.app\.tar\.gz$|\.dmg$/.test(a.name)) total += a.download_count;
         });
       });
       return list.length === 100 && page < 5 ? releases(page + 1, total) : total;
