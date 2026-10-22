@@ -119,6 +119,7 @@ from ciao.web.project_chats import (
     ChatPinConflictError,
     ChatInfo,
     ProjectChatManager,
+    TerminalOfferConflictError,
 )
 from ciao.web.routes_helpers import (
     _allowed_roots,
@@ -2363,6 +2364,50 @@ def _chat_pin_request(body: dict) -> tuple[str, int]:
     return raw_path.strip(), revision
 
 
+# The id the engine mints for a terminal offer: 16 random bytes as 32
+# lowercase hex characters. A dismissal quotes the id it saw, so the
+# shape is checked exactly rather than coerced — a number is not an id,
+# and an uppercase hex string is not one of ours.
+_TERMINAL_OFFER_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+
+
+def _chat_terminal_offer_request(body: dict) -> str:
+    """Validate a `{"terminal_offer": {...}}` chat PATCH body (#1843).
+
+    Returns the id of the offer the caller believes is showing.
+
+    Deliberately separate from `update_chat`, like the pin parser: a
+    dismissal is a request to forget one string, and it is exclusive of
+    every other chat update. A combined write could land the other
+    change and then fail on the dismissal, leaving the chat half-updated
+    by a request the engine refused.
+
+    Every refusal is a static string. The body can carry a command, a
+    credential or a private path, and an error string ends up in a log
+    line and a browser console, so nothing the caller wrote is echoed
+    back — not the value, not even the name of an unknown key.
+    """
+    if set(body) - {"terminal_offer"}:
+        raise ValueError(
+            "terminal_offer cannot be combined with other chat updates"
+        )
+    offer = body["terminal_offer"]
+    if not isinstance(offer, dict):
+        raise ValueError("terminal_offer must be an object")
+    if set(offer) - {"expected_id"}:
+        raise ValueError(
+            "terminal_offer has unknown keys (allowed: expected_id)"
+        )
+    expected_id = offer.get("expected_id")
+    if not isinstance(expected_id, str) or not _TERMINAL_OFFER_ID_PATTERN.fullmatch(
+        expected_id
+    ):
+        raise ValueError(
+            "terminal_offer.expected_id must be a 32-character lowercase hex string"
+        )
+    return expected_id
+
+
 def _resolve_pin_path(config, raw_path: str, *, agent_root: Path | None = None) -> Path | Response:
     """Resolve a nonempty manual pin path to the identity that gets stored.
 
@@ -2456,13 +2501,35 @@ async def chat_detail(request: Request) -> Response:
         logging.getLogger("ciao.web.routes").info("chat DELETE %s -> ok=%r", chat_id, ok)
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
-    body = await request.json()
+    # The body is read once, here, and it has to be a JSON object before
+    # anything else happens: a chat update is a set of named fields, and
+    # a body that is malformed JSON, or JSON that is not an object, has
+    # no fields to read. Refusing it here is what keeps a 500 out of a
+    # request the engine was going to refuse anyway.
+    #
+    # Both refusals are static strings, and the raw body is never echoed:
+    # it can carry a command, a credential or a private path, and an
+    # error string ends up in a log line and a browser console.
+    try:
+        body = await request.json()
+    except ValueError:
+        # `json.JSONDecodeError` and a `UnicodeDecodeError` on a body
+        # that is not UTF-8 are both `ValueError`s.
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    # A terminal-offer dismissal is its own body shape, like a pin write
+    # (#1843): it names the offer the caller saw, and nothing else. It
+    # never falls through to `update_chat`, so it cannot carry a title
+    # or a provider along.
+    if "terminal_offer" in body:
+        return await _chat_terminal_offer_patch(pcm, chat_id, body)
     # A pin write is its own body shape, not another `update_chat` field
     # (#1118). It never falls through to `update_chat`, so `path: ""` cannot be
     # read as "no change" there.
-    if isinstance(body, dict) and "pin" in body:
+    if "pin" in body:
         return await _chat_pin_patch(request, pcm, chat_id, body)
-    code_mode = body.get("code_mode") if isinstance(body, dict) else None
+    code_mode = body.get("code_mode")
     if code_mode is not None and not isinstance(code_mode, bool):
         return JSONResponse({"error": "code_mode must be a boolean"}, status_code=400)
     try:
@@ -2535,6 +2602,57 @@ async def _chat_pin_patch(
     chat = pcm.get_chat(chat_id)
     if chat is None:  # pragma: no cover — deleted between the checks above
         return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
+
+
+async def _chat_terminal_offer_patch(pcm, chat_id: str, body: dict) -> Response:
+    """`PATCH /api/chats/{id}` with a `{"terminal_offer": {...}}` body (#1843).
+
+    Dismisses the chat's suggested terminal command: the plain text the
+    assistant proposed for the user to read, copy and run themselves. It
+    is guidance, so dropping it is not a privileged act — the request
+    needs no terminal grant, opens no host terminal, creates no provider
+    session and runs nothing. It reuses the existing signed-session,
+    origin-gated route, so a dismissal gets no new endpoint and no auth
+    exception.
+
+    Ordering is deliberate. Shape first (400), then existence (404), then
+    the write: a malformed body must not cost a lookup, and an unknown
+    chat must not be answerable as "there was nothing to dismiss".
+
+    The body quotes the id the caller saw. A stale id is a conflict
+    (409) that changes nothing, so a device that raced a newer offer
+    cannot remove a command the user is looking at; the conflict carries
+    the current offer so the client can re-apply against it. A chat
+    without an offer is a successful no-op, which is what makes a retry
+    of a dismissal the browser never saw the answer to safe.
+    """
+    try:
+        expected_id = _chat_terminal_offer_request(body)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # The manager's dismissal cannot tell "no such chat" from "no offer":
+    # both are a no-op. The lookup is what separates them, and it is
+    # synchronous and adjacent to the write, so the chat cannot vanish
+    # between the two. The chat it returns is the live row, so the same
+    # reference reads the cleared offer afterwards.
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    try:
+        # Raises TerminalOfferConflictError before mutating anything when
+        # the quoted id is stale, so a 409 leaves the newer offer intact.
+        pcm.dismiss_terminal_offer(chat_id, expected_id)
+    except TerminalOfferConflictError as exc:
+        return JSONResponse(
+            {
+                "error": "terminal_offer_conflict",
+                "terminal_offer": exc.terminal_offer,
+            },
+            status_code=409,
+        )
     return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
 
 
