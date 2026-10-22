@@ -635,7 +635,9 @@ describe('component mount smoke', () => {
     })
 
     const router = makeRouter()
-    await router.push('/settings/workspaces')
+    await router.push('/settings/workspace')
+    const overviewStore = (await import('../../stores/projects')).useProjectStore()
+    overviewStore.activeWorkspace = 'legacy'
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -645,9 +647,6 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      // Rows are collapsed; Edit opens the workspace's fields in place.
-      await wrapper.get('[aria-label="Edit workspace legacy"]').trigger('click')
-      await nextTick()
       const providerField = wrapper.findAll('label.settings-field')
         .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
       expect(providerField).toBeTruthy()
@@ -687,7 +686,9 @@ describe('component mount smoke', () => {
       { payload: { error: 'default_provider must be one of: claude, opencode' } },
     ))
     const router = makeRouter()
-    await router.push('/settings/workspaces')
+    await router.push('/settings/workspace')
+    const overviewStore = (await import('../../stores/projects')).useProjectStore()
+    overviewStore.activeWorkspace = 'personal'
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -697,9 +698,7 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      // Save appears only after a change in the opened row.
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await nextTick()
+      // Save appears only after a change on the page.
       expect(wrapper.find('.workspace-save').exists()).toBe(false)
       await wrapper.get('.workspace-color-swatch[aria-label="Terminal Cyan"]').trigger('click')
       await nextTick()

@@ -427,7 +427,7 @@ async function openChat(chatId: string) {
   // which may not be the one the review list is currently scoped to.
   const project = projectStore.projectFor(chatId)
   if (project && project.workspace !== projectStore.activeWorkspace) {
-    await projectStore.switchWorkspace(project.workspace)
+    if ((await projectStore.switchWorkspace(project.workspace)) === false) return
   }
   await projectStore.switchChat(chatId)
 }

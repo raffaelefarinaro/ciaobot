@@ -8,9 +8,9 @@ const TARGET = '/settings/workspaces?workspace=beta#file-access'
 const DRAFT = 'add the design workspace before I forget'
 
 /**
- * Why this is a browser test: the link is a real hash navigation into a
- * virtualised, asynchronously loaded list, and whether the right row is
- * revealed, scrolled inside the pane and focused is a layout question jsdom
+ * Why this is a browser test: the link is a real hash navigation that switches
+ * the active workspace and lands on Overview, and whether the File access
+ * selector is scrolled inside the pane and focused is a layout question jsdom
  * cannot answer. A write would be a real request, so the same test listens.
  *
  * The transcript is injected with the `page.route` contract `app-links.spec.ts`
@@ -43,19 +43,14 @@ function watchWorkspaceWrites(page: import('@playwright/test').Page): string[] {
   return writes
 }
 
-function workspaceCard(page: import('@playwright/test').Page, name: string) {
-  return page.locator('.workspace-list .workspace-card')
-    .filter({ has: page.locator('.workspace-title', { hasText: name }) })
-}
-
 async function expectFileAccessTarget(
   page: import('@playwright/test').Page,
   name: string,
 ): Promise<void> {
-  const card = workspaceCard(page, name)
-  await expect(card).toBeVisible()
-  await expect(card.locator('.set-row-body')).toBeVisible()
-  const select = card.locator(`#workspace-file-access-${name}`)
+  await expect(page).toHaveURL(/\/settings\/workspace#file-access$/)
+  // The link made the named workspace active; the pane header names it.
+  await expect(page.locator('.page-tag')).toContainText(`${name[0].toUpperCase()}${name.slice(1)} · Overview`)
+  const select = page.locator(`#workspace-file-access-${name}`)
   await expect(select).toBeVisible()
   await expect(select).toBeFocused()
   // The fixture's workspace never chose a scope, so the engine default is
@@ -102,7 +97,6 @@ test.describe('a File access link in a chat reply', () => {
     await page.evaluate(() => { (window as unknown as { __kept?: boolean }).__kept = true })
 
     await link.click()
-    await expect(page).toHaveURL(/\/settings\/workspaces\?workspace=beta#file-access$/)
     await expectFileAccessTarget(page, 'beta')
 
     expect(context.pages()).toHaveLength(1)
@@ -187,9 +181,9 @@ test.describe('a File access link in a chat reply', () => {
     expect(box!.height).toBeGreaterThanOrEqual(44)
     expect(box!.width).toBeGreaterThanOrEqual(44)
     // Reduced motion keeps the focus ring but drops the transient tint.
-    await expect(workspaceCard(page, 'beta')).toHaveClass(/workspace-card--target/)
-    expect(await workspaceCard(page, 'beta')
-      .evaluate(el => getComputedStyle(el).animationName)).toBe('none')
+    const row = page.locator('#workspace-file-access-row-beta')
+    await expect(row).toHaveClass(/workspace-card--target/)
+    expect(await row.evaluate(el => getComputedStyle(el).animationName)).toBe('none')
 
     const { overflow, culprits } = await horizontalOverflow(page)
     expect(

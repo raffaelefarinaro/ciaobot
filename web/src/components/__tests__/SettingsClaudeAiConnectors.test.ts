@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-// Settings > Workspaces: the "claude.ai connectors" switch on the edit panel
+// Settings > Workspace > Overview: the "claude.ai connectors" switch
 // sets the workspace's claude_ai_connectors. It reads On for a workspace that
 // never set it, and an edit that leaves it alone does not change it.
 
@@ -19,6 +19,19 @@ vi.mock('../../lib/api', () => {
   const get = vi.fn((path: string) => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
+    if (path.startsWith('/api/proposals/handover')) {
+      return Promise.resolve({
+        workspace: 'personal',
+        handover: 'off',
+        acting_available: true,
+        agreement: {
+          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
+          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
+          suggest_handover: false,
+        },
+      })
+    }
+    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     if (path === '/api/integrations/gws') {
       return Promise.resolve({
         installed: false,
@@ -67,12 +80,12 @@ function workspaces(connectors?: boolean): WorkspacesResponse {
   } as unknown as WorkspacesResponse
 }
 
-async function mountWorkspacesTab() {
+async function mountWorkspacesTab(path = '/settings/workspaces') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
   })
-  await router.push('/settings/workspaces')
+  await router.push(path)
   await router.isReady()
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
@@ -98,11 +111,8 @@ describe('Settings > Workspaces claude.ai connectors switch', () => {
 
   it('reads On for a workspace that never set it, and says what it does', async () => {
     state.workspaces = workspaces()
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountWorkspacesTab('/settings/workspace')
     try {
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await flushPromises()
-
       const toggle = connectorsSwitch(wrapper)
       expect(toggle.attributes('aria-checked')).toBe('true')
       expect(toggle.text()).toBe('On')
@@ -114,10 +124,8 @@ describe('Settings > Workspaces claude.ai connectors switch', () => {
 
   it('reads Off for a workspace that turned it off', async () => {
     state.workspaces = workspaces(false)
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountWorkspacesTab('/settings/workspace')
     try {
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await flushPromises()
       expect(connectorsSwitch(wrapper).attributes('aria-checked')).toBe('false')
     } finally {
       wrapper.unmount()
@@ -127,11 +135,8 @@ describe('Settings > Workspaces claude.ai connectors switch', () => {
   it('saves the switch from the edit panel', async () => {
     const { api } = await import('../../lib/api')
     state.workspaces = workspaces(true)
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountWorkspacesTab('/settings/workspace')
     try {
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await flushPromises()
-
       await connectorsSwitch(wrapper).trigger('click')
       await flushPromises()
       expect(connectorsSwitch(wrapper).attributes('aria-checked')).toBe('false')
