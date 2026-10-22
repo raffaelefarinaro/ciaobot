@@ -47,6 +47,10 @@ Each area has a reference file next to this one. Open only the file the question
 | Terminal | the browser terminal panel: where it runs, the unlock, sessions, the socket protocol, and what an agent can and cannot do | `references/terminal.md` |
 | App and system | Settings page, MCP, installing and updating, other devices, forgotten password, Linux, Windows, local API | `references/install-and-settings.md` |
 
+## Left to companion tools
+
+Ciaobot deliberately does not build in dictation, keeping the host awake, an agent browser, or subscription usage tracking: those tools change fast, so the user picks their own. The maintainer's open-source picks, each installable by asking the agent: dictation, [FluidVoice](https://github.com/altic-dev/FluidVoice); keeping a Mac awake, [KeepingYouAwake](https://github.com/newmarcel/KeepingYouAwake); an agent browser, [ego lite](https://github.com/citrolabs/ego-lite); usage left, [OpenUsage](https://github.com/robinebers/openusage). The list lives at https://www.raffaelefarinaro.com/ciaobot/companions.html and is linked from Settings → What can Ciaobot do?.
+
 ## Privacy and trust posture
 
 Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept). An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. The agent's file access is set per workspace (File access, in `references/workspaces-and-chats.md`): under Workspace only it cannot read outside that workspace's folder, but the network is not restricted.
