@@ -6419,6 +6419,42 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).not.toHaveBeenCalled()
   })
 
+  test('switchWorkspace asks the settings guard first and stays when it declines', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(guard)
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(guard).toHaveBeenCalledWith('work')
+    expect(store.activeWorkspace).toBe('work')
+
+    guard.mockResolvedValue(true)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+    expect(store.activeWorkspace).toBe('personal')
+    // Already there counts as switched.
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+
+    store.setWorkspaceSwitchGuard(null)
+    await store.switchWorkspace('work', { transition: false })
+    expect(guard).toHaveBeenCalledTimes(2)
+    expect(store.activeWorkspace).toBe('work')
+  })
+
+  test('clearWorkspaceSwitchGuard only clears the guard that is still installed', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const older = vi.fn().mockResolvedValue(false)
+    const newer = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(older)
+    store.setWorkspaceSwitchGuard(newer)
+    store.clearWorkspaceSwitchGuard(older)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(newer).toHaveBeenCalled()
+    store.clearWorkspaceSwitchGuard(newer)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+  })
+
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
     const store = useProjectStore()
     store.projects = [

@@ -1,6 +1,8 @@
 // Settings tabs, in rail order, in two groups: Ciaobot (engine-wide) and the
-// active workspace (its name and tile, filled in by the sidebar). /settings is
-// the General tab (route kept as-is).
+// active workspace (its name and tile, filled in by the sidebar), which starts
+// with its Overview page (/settings/workspace, singular; the Workspaces tab at
+// /settings/workspaces is the list of all of them). /settings is the General
+// tab (route kept as-is).
 export type SettingsNavItem = { readonly to: string; readonly label: string }
 export type SettingsNavGroup = {
   readonly id: 'engine' | 'workspace'
@@ -19,6 +21,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
     { to: '/settings/workspaces', label: 'Workspaces' },
   ] },
   { id: 'workspace', label: null, items: [
+    { to: '/settings/workspace', label: 'Overview' },
     { to: '/settings/skills', label: 'Skills' },
     { to: '/settings/subagents', label: 'Subagents' },
     { to: '/settings/commands', label: 'Commands' },

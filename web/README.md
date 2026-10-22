@@ -64,8 +64,10 @@ web/
                            titleShimmer.css)
     components/settings/  panels split out of SettingsView.vue (the host's start-at-sign-in row is
                            SettingsEngineLogin.vue; SettingsMemoryHandover.vue is the Memory handover card:
-                           agreement rate and the operator-only per-workspace handover choice), plus the
+                           agreement rate and the operator-only per-workspace handover choice;
+                           SettingsWorkspaceOverview.vue is the Workspace > Overview page), plus the
                            scoped CSS they share with it
+    components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
                            MemoryMapView under the header (so every Memory section shows it). Its open
                            state is the only storage, `ciao.memory.howOpen` ('1'/'0', read and written in
@@ -76,7 +78,7 @@ web/
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
-                          useMcpServers, useModalFocus)
+                          useMcpServers, useModalFocus, useWorkspaceAdmin)
     lib/                  pure helpers (api, time, safeMarkdown, etc.) — no Vue imports
 ```
 
@@ -166,6 +168,17 @@ is typed. The native host terminal keeps its own button
 (`HostTerminalButton.vue`) for the actions that need a real window on the
 engine's computer: provider sign-in, skill updates, the engine's own update.
 
+- **The signed-in session is the terminal's trust boundary.** There is no
+  password prompt: `stores/terminal.ts` asks the engine for the grant with
+  an empty body when the browser holds none, and the engine issues it to a
+  signed-in, same-origin browser. The grant still binds the browser, still
+  expires after fifteen minutes, and is still revoked by a logout or a
+  password change — it answers *which* browser may hold the socket and
+  *for how long*, not *who knows the password*. The consequence is plain:
+  a workspace that denies the agent `Bash` no longer has a host-shell
+  boundary, because a signed-in browser is enough to reach a shell on the
+  engine.
+
 - **One entry per surface, outside the repository.** A chat's Chat details
   carries a *Terminal* section of its own — under *Repository*, above *Always
   loaded* — and a project page carries one under its *Repository* section. The
@@ -195,10 +208,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   has always had, and the terminal holds the chat column at 360px and the
   tile at 360px.
 - `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
-  bounded renderer backpressure and the replay offsets. The pane
-  (`components/TerminalPane.vue`) owns the screen and the controls around it;
-  the screen itself is `lib/terminalRenderer.ts` (one xterm, bound to one
-  session for life).
+  bounded renderer backpressure and the replay offsets. It also owns the
+  grant: it asks for one with an empty body when the browser holds none,
+  and asks for a new one when the engine ends the stream because the grant
+  expired or was revoked. The pane (`components/TerminalPane.vue`) owns the
+  screen and the controls around it; the screen itself is
+  `lib/terminalRenderer.ts` (one xterm, bound to one session for life).
 - The pane is a chunk of its own, mounted the first time a terminal is asked
   for and kept after that, so the screen survives a hide and a chat page that
   never opens a terminal does not download it. `lib/terminalPanel.ts` carries
@@ -229,11 +244,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   that chat) and **Dismiss** (which names the suggestion it dismisses, so a
   newer one is never dismissed by mistake, and says so when the suggestion
   changed). The card never runs the command and never pastes it into the
-  shell: *Open in Terminal* starts no shell, asks for no grant and asks the
-  engine to run nothing — an already-live session attaches and shows the
-  screen it already holds, exactly like the *Terminal* section's button. The
-  *Terminal* section stays the persistent, manual way into the terminal; the
-  card is the contextual one, and it is shown only for the chat on screen.
+  shell: *Open in Terminal* starts no shell and asks the engine to run
+  nothing — an already-live session attaches and shows the screen it
+  already holds, exactly like the *Terminal* section's button. The
+  *Terminal* section stays the persistent, manual way into the terminal;
+  the card is the contextual one, and it is shown only for the chat on
+  screen.
 
 ### Layout traps
 
@@ -402,13 +418,27 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   existing viewer, never a forced split pane or an auto-opened modal. A remote
   unpin removes the opener and, if its clean shared-pin preview is open, closes
   that preview — a separately opened viewer or a dirty edit is left untouched.
+- **Workspace > Overview (`/settings/workspace`).** The first item of the
+  workspace rail group is the page for `projectStore.activeWorkspace`:
+  `SettingsWorkspaceOverview.vue` draws the Workspace and Google account cards
+  (one editor, one Save changes / Discard row), then Memory handover, Update
+  task history and, for an archivable workspace, Archive this workspace. The
+  editor state is not in the component: `composables/useWorkspaceAdmin.ts` owns
+  the registry forms, drafts, save, archive and restore, `SettingsView.vue` calls
+  it once and `provide`s it (`WORKSPACE_ADMIN_KEY`), and the Overview `inject`s
+  it, so the Workspaces tab and Overview share one load. Tab ids differ by one
+  letter: `workspace` is Overview, `workspaces` is the list. A workspace switch
+  drops the previous draft; one started from the UI while the draft is dirty
+  asks first through `projectStore.setWorkspaceSwitchGuard`. A File access link
+  (`/settings/workspaces?workspace=NAME#file-access`) switches to NAME and lands
+  on Overview with the selector focused; it never saves.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General is split
   into four pages. General begins with the Updates section (compact to a title
   and an "Up to date" status when nothing is in progress), then the
   capability-help section linking to the public feature guide, then Use Ciaobot
-  as an app, Notifications, Keyboard shortcuts, the update task history, Start
-  at sign-in, Memory handover, Session insights and Open source. Appearance is
+  as an app, Notifications, Keyboard shortcuts, Start at sign-in and Open
+  source. Appearance is
   the Appearance card alone: Theme and Font size rows in `SettingsView.vue`, and
   `settings/SettingsAppearance.vue` (Text contrast, Body font). Appearance is engine-wide:
   `composables/useAppearanceSettings.ts` mirrors `/api/settings/appearance`, applies
@@ -539,4 +569,4 @@ The MCP Settings panel shows provider-native configuration separately from per-c
 - The To decide filter chips are by change type, by reason, and *Needs you* (`decideFilter` in the proposals store, separate from `kindFilter` because History shares that one). *Needs you* keeps rows whose `decider` is not `nightly`, so rows with no decider count, and the chip shows only when at least one row is marked `nightly`. A row shows its `decider` and a one-line `decide_reason`, rendered as text.
 - An optional reason is asked for before every individual accept and dismissal in the queue: the row's accept opens the decision card with the reason on it (`Why keep this? (optional)`), and every Dismiss opens an inline confirmation naming the proposal (`Why dismiss this? (optional)`). Picking the workspace for a re-home is the exception — the destination is the answer — and the batch bar never asks. There is no *Why?* disclosure left on a row or a card. The shared `DecisionReason` with the memory chips from `lib/memoryDecisionReasons.ts` holds the answer per row in the panel (`reasonById`), and it is discarded on Cancel, on a switch to another card, and after a successful decision; a failed dismissal keeps it so the retry does not lose the sentence. It is sent as `reason` only when non-empty, with that row's accept (and the retry of a deferred accept) or its dismissal, never on the batch bar; a refused accept clears it, the deferral keeping its own copy for the retry. With no reason typed the confirmation's button reads *Continue without a reason* and the card names the action above it (*This will save to ciao:memory.*, *This will dismiss the proposal.*); with a reason the accept button names the destination again. History renders a row's `reason` as text (`.ph-reason`), never markup.
 - History shows a row's `prediction` under its text as predicted against decided, with a muted *Matched* or *Missed* badge (a miss is information, never an error) and the prediction `reason` as text. A `[memory]`/`[profile]` row the nightly run settled itself (`via: agent`) reads *Filed by Workspace care* (accepted) or *Dismissed by Workspace care* (dismissed), badges *Acted on prediction*, and offers *Undo* from the row when its change is undoable. The To decide queue never shows a prediction on a pending row, so the agreement rate stays unbiased.
-- Settings → *Memory handover* (`SettingsMemoryHandover.vue`) loads `GET /api/proposals/handover?workspace=` for the active workspace and saves only `{ memory_handover }` through `PATCH /api/workspaces/{name}`. It never saves on its own: the suggestion is text. Choosing *Dismiss and accept* asks for confirmation, and the card says that it lets queued text reach always-loaded memory, with Undo in History and a cap of 5 changes per run. When the response's `acting_available` is false (a Linux/systemd install, where the gate trusts no service definition) the card says handover cannot act on this install and disables the options.
+- Settings → Overview → *Memory handover* (`SettingsMemoryHandover.vue`, a three-way segmented control styled like Theme: arrows select) loads `GET /api/proposals/handover?workspace=` for the active workspace and saves only `{ memory_handover }` through `PATCH /api/workspaces/{name}`. It never saves on its own: the suggestion is text. Choosing *Dismiss and accept* asks for confirmation, and the card says that it lets queued text reach always-loaded memory, with Undo in History and a cap of 5 changes per run. When the response's `acting_available` is false (a Linux/systemd install, where the gate trusts no service definition) the card says handover cannot act on this install and disables the options.

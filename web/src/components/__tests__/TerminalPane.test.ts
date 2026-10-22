@@ -4,10 +4,11 @@
  * `components/TerminalPane.vue` — the browser terminal's pane.
  *
  * The pane is the part a person touches, so this file is about the parts a
- * person can get wrong: the locked pane asks for the password, the unlocked
- * pane lists the shells, opening one gives the session a screen and a
- * connection, Hide detaches without stopping the shell, End stops it, and a
- * takeover refusal is offered as something to do rather than a dead end.
+ * person can get wrong: the pane never asks for a password, it obtains the
+ * grant itself and lists the shells, opening one gives the session a screen
+ * and a connection, Hide detaches without stopping the shell, End stops it,
+ * and a takeover refusal is offered as something to do rather than a dead
+ * end.
  *
  * The keyboard is the other half. The shell keeps Escape, Tab, the arrows,
  * Ctrl+C and Ctrl+D while it has the focus, and the app's own shortcuts must
@@ -230,18 +231,26 @@ describe('TerminalPane', () => {
     vi.unstubAllGlobals()
   })
 
-  it('asks for the password while the terminal is locked', async () => {
+  it('never renders a password field, not even when the terminal is locked', async () => {
+    // The engine refuses the grant, so the pane really is locked — the
+    // state the old unlock form used to live in.
     serve([], { unlock_expires_in: 0 })
+    apiPost.mockRejectedValue(new Error('refused'))
     const store = useTerminalStore()
     const wrapper = await mountPane()
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
     expect(store.phase).toBe('locked')
-    expect(wrapper.find('.tp-unlock').exists()).toBe(true)
-    expect(wrapper.get('.tp-unlock-input').attributes('type')).toBe('password')
-    // The password is handed over once and not kept.
-    expect(wrapper.text()).toContain('not kept')
+    // The locked body says what happened, so an empty pane cannot pass
+    // for a locked one.
+    expect(wrapper.text()).toContain('The terminal grant could not be obtained.')
+    // There is no unlock form any more: the signed-in session is the
+    // terminal's trust boundary, so the pane has nothing to ask for.
+    expect(wrapper.find('.tp-unlock').exists()).toBe(false)
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Terminal password')
+    expect(wrapper.text()).not.toContain('Unlock')
     wrapper.unmount()
   })
 
@@ -304,32 +313,20 @@ describe('TerminalPane', () => {
     wrapper.unmount()
   })
 
-  it('unlocks with the password and forgets it', async () => {
-    serve([], { unlock_expires_in: 0 })
+  it('obtains the grant itself and lists the sessions', async () => {
+    serve([sessionInfo('s1'), sessionInfo('s2', { folder: '/tmp/other', exited: true })], {
+      unlock_expires_in: 0,
+    })
     apiPost.mockResolvedValue({ ok: true, expires_in: 900 })
     const store = useTerminalStore()
     const wrapper = await mountPane()
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
-    const field = wrapper.get('.tp-unlock-input').element as HTMLInputElement
-    await wrapper.get('.tp-unlock-input').setValue('hunter2')
-    await wrapper.get('.tp-unlock').trigger('submit')
-    await flushPromises()
-
-    expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock', { password: 'hunter2' })
-    // The field is gone with the form, and what it held went with it.
-    expect(field.value).toBe('')
-    wrapper.unmount()
-  })
-
-  it('lists the sessions once the terminal is unlocked', async () => {
-    serve([sessionInfo('s1'), sessionInfo('s2', { folder: '/tmp/other', exited: true })])
-    const store = useTerminalStore()
-    const wrapper = await mountPane()
-    await store.open({ chatId: 'c1' })
-    await flushPromises()
-
+    // The pane asks the engine for the grant by itself, with an empty
+    // body: there is no password to ask for.
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock')
+    expect(store.unlocked).toBe(true)
     expect(store.phase).not.toBe('locked')
     const rows = wrapper.findAll('.tp-session')
     expect(rows).toHaveLength(2)

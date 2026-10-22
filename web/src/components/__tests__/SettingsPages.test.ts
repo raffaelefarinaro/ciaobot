@@ -68,13 +68,13 @@ function calledUrls(get: ReturnType<typeof stubGet>): string[] {
 }
 
 describe('Settings pages', () => {
-  const MOVED = ['Appearance', 'This host', 'PWA password', 'Other devices', 'Network access', 'Developer', 'Workspace health', 'Memory backup']
+  const MOVED = ['Appearance', 'This host', 'PWA password', 'Other devices', 'Network access', 'Developer', 'Workspace health', 'Memory backup', 'Update task history', 'Memory handover']
 
   it('each page renders only its own cards', async () => {
     const general = await mountSettings('/settings')
     try {
       const t = titles(general.wrapper)
-      for (const title of ['Updates', 'What can Ciaobot do?', 'Use Ciaobot as an app', 'Notifications', 'Keyboard shortcuts', 'Update task history', 'Open source']) {
+      for (const title of ['Updates', 'What can Ciaobot do?', 'Use Ciaobot as an app', 'Notifications', 'Keyboard shortcuts', 'Open source']) {
         expect(t).toContain(title)
       }
       for (const title of MOVED) expect(t).not.toContain(title)

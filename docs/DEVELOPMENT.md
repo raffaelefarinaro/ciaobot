@@ -649,7 +649,7 @@ For **After this update** changes (Home's update-task group, or the Settings
 history), the separation is the thing to preserve: `HousekeepingStrip.vue` renders
 the operator-action tiles and the update-task group as two sibling sections, and a
 blocking tile must stay above both, unmissable, with no "hide it" button of its
-own. The group and Settings → Update task history read the same
+own. The group and Settings → Overview → Update task history read the same
 `GET /api/update-tasks?workspace=` rows, so a change to one state has to be checked
 in both: `offered` starts, `in_progress` resumes, `waiting_review` offers Review
 proposals (the real queue at `/memory/review?show=suggested`) *and* Resume,

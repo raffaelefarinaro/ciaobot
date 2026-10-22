@@ -142,7 +142,7 @@ describe('ProjectSidebar review section', () => {
     ['memory', false],
   ] as const)('switches workspace from the %s view with transition %s', async (mode, transition) => {
     const store = useProjectStore()
-    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue()
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
     const wrapper = await mountSidebar(mode)
     await wrapper.get('.workspace-scope-trigger').trigger('click')
     await wrapper.findAll('.workspace-scope-option')[1].trigger('click')
