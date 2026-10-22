@@ -27,6 +27,7 @@ from typing import Any, Literal, cast
 from ciao import decision_rules, vault_index
 from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
+from ciao.execution_modes import MODE_RANK
 from ciao.fts_search import (
     get_db_path,
     index_vault,
@@ -194,7 +195,7 @@ McpPrincipal = AgentPrincipal
 # ``plan`` is read-only, ``normal`` asks before acting, ``auto`` acts with safer
 # defaults, ``bypass`` skips approvals. Mirrors ``BridgeMode`` in ciao.models
 # and the SDK mapping in ciao.providers.claude.
-_MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
+_MODE_RANK = MODE_RANK
 
 RELOAD_OWN_NOTE = (
     "The provider restarts when this turn ends and the conversation continues "
@@ -4095,6 +4096,7 @@ class CiaoControlPlane:
         project_id: str | None = None,
         actor: Actor = "user",
         instructions: str = "",
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """Hand one task to the agent as an ordinary chat, exactly once.
 
@@ -4125,6 +4127,11 @@ class CiaoControlPlane:
         what the turn did — a chat exists and nothing will report its outcome. That
         is the state a crash in this window leaves too, and it is never replayed
         without a person asking.
+
+        ``mode`` is the permission mode of the delegated chat. The user path
+        passes none and gets the workspace default; an agent caller passes its
+        own ceiling (:meth:`_child_mode`), so a workspace override can never
+        hand an agent a stronger chat than its own.
 
         ``actor`` is recorded for the caller, not used to weaken anything: the
         store refuses an agent completion either way, and this method never
@@ -4213,6 +4220,7 @@ class CiaoControlPlane:
             chat = self.pcm.create_chat(
                 project,
                 title=record.title,
+                mode=mode,
                 helper=task_delegation_helper(
                     task_id=record.id, task_revision=revision, attempt_id=attempt_id
                 ),
@@ -5030,6 +5038,7 @@ class CiaoControlPlane:
         task_id: str = "",
         actor: Actor = "user",
         reason: str | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """One lifecycle gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
 
@@ -5091,7 +5100,7 @@ class CiaoControlPlane:
         if verb == "resume":
             return self._attempt_resume(workspace, attempt, actor=actor)
         if verb == "retry":
-            return self._attempt_retry(workspace, attempt, actor=actor)
+            return self._attempt_retry(workspace, attempt, actor=actor, mode=mode)
         if verb == "detach":
             return await self._attempt_detach(workspace, attempt, actor=actor, reason=note)
         raise ControlPlaneError(
@@ -5226,7 +5235,7 @@ class CiaoControlPlane:
         }
 
     def _attempt_retry(
-        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor, mode: str | None = None
     ) -> dict[str, Any]:
         """Start a new attempt for the same task, in a fresh chat.
 
@@ -5253,6 +5262,7 @@ class CiaoControlPlane:
             expected_revision=document.revision,
             project_id=None,
             actor=actor,
+            mode=mode,
         )
         return {**outcome, "retried": True}
 
@@ -5393,6 +5403,7 @@ class CiaoControlPlane:
                 expected_revision=expected_revision,
                 project_id=project_id,
                 actor="agent",
+                mode=self._child_mode(principal, None),
             )
         )
 
@@ -5412,7 +5423,12 @@ class CiaoControlPlane:
         """
         return _ok(
             await self.workspace_task_attempt_action(
-                self._workspace(principal), attempt_id, action, actor="agent", reason=reason
+                self._workspace(principal),
+                attempt_id,
+                action,
+                actor="agent",
+                reason=reason,
+                mode=self._child_mode(principal, None),
             )
         )
 
@@ -5804,6 +5820,19 @@ class CiaoControlPlane:
             )
         )
 
+    def _require_webhook_mode(self, principal: AgentPrincipal) -> None:
+        """Refuse when the caller's mode ranks below the workspace's webhook chat mode."""
+        scope = self._workspace(principal)
+        provider = self.config.default_provider_for_workspace(scope)
+        default = self.config.default_mode_for_provider(provider, scope)
+        if MODE_RANK[self._child_mode(principal, None)] < MODE_RANK[default]:
+            raise ControlPlaneError(
+                "webhook_requires_operator",
+                "A webhook runs its chats in this workspace's default permission "
+                f"mode ({default}), which is stronger than this chat's. Ask the "
+                "user to make this change to the trigger in Settings.",
+            )
+
     def webhook_update(
         self,
         principal: AgentPrincipal,
@@ -5814,7 +5843,16 @@ class CiaoControlPlane:
         instructions: str | None = None,
         enabled: bool | None = None,
     ) -> dict[str, Any]:
-        """Edit one trigger at the revision it was read at."""
+        """Edit one trigger at the revision it was read at.
+
+        A webhook chat starts at the workspace's default permission mode, which
+        a sender cannot choose. Switching a trigger on, or changing what it
+        runs, is therefore the operator's call when the calling agent runs
+        below that default: it could otherwise hand an outside sender a
+        stronger chat than its own. Renaming and disabling stay open.
+        """
+        if enabled or instructions is not None:
+            self._require_webhook_mode(principal)
         return _ok(
             self.workspace_webhook_update(
                 self._workspace(principal),
@@ -5829,7 +5867,12 @@ class CiaoControlPlane:
     def webhook_rotate(
         self, principal: AgentPrincipal, trigger_id: str, *, expected_revision: str
     ) -> dict[str, Any]:
-        """Replace one trigger's secret; the old one stops working at once."""
+        """Replace one trigger's secret; the old one stops working at once.
+
+        Rotating a live trigger is held to the same mode check as editing it.
+        """
+        if self._webhook_of(self._workspace(principal), trigger_id).enabled:
+            self._require_webhook_mode(principal)
         return _ok(
             self.workspace_webhook_rotate(
                 self._workspace(principal),
@@ -6096,12 +6139,11 @@ class CiaoControlPlane:
             created_at=now,
             model=str(values.get("model") or ""),
             provider=str(values.get("provider") or ""),
-            # "" means inherit, exactly as an empty model/provider does: the
-            # permission mode is resolved from the operator's per-provider pin
-            # at dispatch. The MCP schedule tool exposes no `mode` at all, so
-            # the old "auto" default was an unconditional override that made the
-            # dispatcher's inheritance dead for every model-created routine.
-            mode=str(values.get("mode") or ""),
+            # An agent-created routine runs unattended later, so its mode is
+            # fixed now at the caller's own ceiling (a requested weaker mode is
+            # honoured, a stronger one is clamped), never left to inherit the
+            # workspace/engine default at dispatch time.
+            mode=self._child_mode(principal, str(values.get("mode") or "") or None),
             timezone_name=str(values.get("timezone") or values.get("timezone_name") or "UTC"),
             days_of_week=list(values.get("days_of_week") or []),
             frequency=frequency,
@@ -6220,6 +6262,22 @@ class CiaoControlPlane:
             # (unlike `changes`, filtered above).
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
+        if (
+            "mode" in changes
+            or normalized.get("prompt")
+            or "command" in normalized
+            or "provider" in normalized
+        ):
+            # Same ceiling `schedule_create` applies. Rewriting a routine's text
+            # or command, naming its mode, or switching its provider (whose
+            # default may be pinned higher) makes the routine the agent's own
+            # work, so it runs at most at the agent's mode: it can weaken the
+            # saved mode, never keep or set a stronger one, and an empty mode
+            # cannot clear a saved one. An update touching none of these
+            # (enable/disable, workspace) leaves the saved mode alone.
+            normalized["mode"] = self._child_mode(
+                principal, str(normalized.get("mode") or entry.mode or "") or None
+            )
         if project is not None:
             # The recorded name is what survives per-instance project-id
             # regeneration (dispatch re-homes by it), so leaving the previous

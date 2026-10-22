@@ -15,12 +15,12 @@ def resolve_insights_model(
 ) -> str:
     """Pick the model for the memory pass and the one-shots that share it.
 
-    ``provider`` is the chat's actual provider. Its Session insights model
-    (Settings → Providers → that provider's card, ``provider_insights_models``)
-    wins; Automatic uses the source chat's model. Calls without a recorded
+    ``provider`` is the chat's actual provider. The workspace's Session
+    insights override for it wins, else the engine's (Settings → Providers →
+    that provider's card, ``provider_insights_models``); Automatic uses the source chat's model. Calls without a recorded
     source model (for example history imports) use the workspace/provider default.
     """
-    override = (config.provider_insights_models or {}).get(provider, "")
+    override = config.insights_model_override(provider, workspace)
     if override:
         return override
     if source_model:
@@ -39,12 +39,13 @@ def resolve_helper_model(
 ) -> str:
     """Pick the model for a classification-sized helper one-shot.
 
-    Used by the schedule attention classifier. The Settings override (``provider_insights_models``) wins. Under
+    Used by the schedule attention classifier. The workspace's Session insights override, else the
+    engine's (``provider_insights_models``), wins. Under
     the claude provider the answer is :data:`HELPER_MODEL_CLAUDE`, whatever
     the source chat runs on. Other providers have no small-model notion in
     the registry, so they keep :func:`resolve_insights_model`.
     """
-    override = (config.provider_insights_models or {}).get(provider, "")
+    override = config.insights_model_override(provider, workspace)
     if provider == "claude" and not override:
         return HELPER_MODEL_CLAUDE
     return resolve_insights_model(config, workspace, provider, source_model=source_model)
