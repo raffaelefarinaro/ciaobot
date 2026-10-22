@@ -66,6 +66,8 @@ web/
                            SettingsEngineLogin.vue; SettingsMemoryHandover.vue is the Memory handover card:
                            agreement rate and the operator-only per-workspace handover choice;
                            SettingsWorkspaceOverview.vue is the Workspace > Overview page;
+                           WorkspaceGoogleAccount.vue is its Google account row and
+                           GoogleConnectDialog.vue the Connect dialog;
                            SettingsManageWorkspaces.vue is the Manage workspaces page: boxed
                            rows, the short New workspace form and Archived), plus the
                            scoped CSS they share with it
@@ -80,8 +82,8 @@ web/
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
-                          useMcpServers, useModalFocus, useWorkspaceAdmin)
-    lib/                  pure helpers (api, time, safeMarkdown, etc.) — no Vue imports
+                          useMcpServers, useModalFocus, useWorkspaceAdmin, useGwsAccounts)
+    lib/                  pure helpers (api, time, safeMarkdown, gwsProfileId, etc.) — no Vue imports
 ```
 
 ## iOS PWA gotchas
@@ -423,7 +425,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - **Workspace > Overview (`/settings/workspace`).** The first item of the
   workspace rail group is the page for `projectStore.activeWorkspace`:
   `SettingsWorkspaceOverview.vue` draws the Workspace and Google account cards
-  (one editor, one Save changes / Discard row), then Memory handover, Update
+  (one editor, one Save changes / Discard row, in the Workspace card), then Memory handover, Update
   task history and, for an archivable workspace, Archive this workspace. The
   editor state is not in the component: `composables/useWorkspaceAdmin.ts` owns
   the registry forms, drafts, save, archive and restore, `SettingsView.vue` calls
@@ -434,6 +436,16 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   asks first through `projectStore.setWorkspaceSwitchGuard`. A File access link
   (`/settings/workspaces?workspace=NAME#file-access`) switches to NAME and lands
   on Overview with the selector focused; it never saves.
+  The Google account card is one row for the active workspace
+  (`WorkspaceGoogleAccount.vue`: connected, sign-in expired, or none) and the
+  `GoogleConnectDialog.vue` modal sheet behind its Connect / Sign in again
+  buttons. Both `inject` `useGwsAccounts` (`GWS_ACCOUNTS_KEY`), which holds every
+  Google account call and sign-in flow; `SettingsView.vue` calls it once. The
+  account id is derived from the workspace name (`lib/gwsProfileId.ts`, a mirror
+  of `gws_auth.slugify_profile`, pinned by `tests/test_gws_auth.py`) and never
+  typed. The workspace is linked when the account connects, through
+  `useWorkspaceAdmin.setWorkspaceGwsLink`; saving the Workspace card never sends
+  `gws_profile`.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General is split
   into four pages. General begins with the Updates section (compact to a title

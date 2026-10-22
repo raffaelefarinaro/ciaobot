@@ -51,10 +51,9 @@ export function useWorkspaceAdmin(deps: {
   notifySaved: (body: string, title?: string) => void
   notifyFailed: (title: string, detail: string) => void
   gwsProfileOptions: ComputedRef<GwsProfileOption[]>
-  workspaceCustomGwsProfile: (profile: string) => boolean
   fetchGwsIntegration: () => Promise<void>
 }) {
-  const { notifySaved, notifyFailed, gwsProfileOptions, workspaceCustomGwsProfile, fetchGwsIntegration } = deps
+  const { notifySaved, notifyFailed, gwsProfileOptions, fetchGwsIntegration } = deps
   const projectStore = useProjectStore()
   const router = useRouter()
   const workspaceProviderFieldLabel = 'Agent CLI/Runtime'
@@ -248,7 +247,6 @@ export function useWorkspaceAdmin(deps: {
         // adopted workspace's `memory-vault/<name>` root to a bare name.
         vault_root: form.vault_root.trim() || target,
         default_provider: form.default_provider,
-        gws_profile: form.gws_profile,
         disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
         claude_ai_connectors: form.claude_ai_connectors,
         color: form.color,
@@ -268,6 +266,32 @@ export function useWorkspaceAdmin(deps: {
     } finally {
       workspacesSaving.value = null
     }
+  }
+
+  // Mirrors a link made outside the Overview form (the Connect dialog, Stop
+  // using, Disconnect) into the form AND its baseline, so an unsaved edit is
+  // neither reset nor does the form turn dirty because of the link.
+  function mirrorGwsLink(name: string, profile: string): void {
+    const form = workspaceForms.value.find((f) => f.name === name)
+    if (!form) return
+    form.gws_profile = profile
+    const saved = workspaceBaseline.value[name]
+    if (saved !== undefined) {
+      workspaceBaseline.value[name] = JSON.stringify({ ...JSON.parse(saved), gws_profile: profile })
+    }
+  }
+
+  // PATCH { gws_profile } through projectStore.updateWorkspace. Throws on failure.
+  async function setWorkspaceGwsLink(name: string, profile: string): Promise<void> {
+    await projectStore.updateWorkspace(name, { gws_profile: profile })
+    mirrorGwsLink(name, profile)
+  }
+
+  // After profiles/remove, which unlinks every workspace that used the profile.
+  // Not fetchWorkspacesList: that rebuilds the forms and would drop a draft.
+  async function refreshGwsLinks(): Promise<void> {
+    await projectStore.fetchWorkspaces()
+    for (const ws of projectStore.workspaces) mirrorGwsLink(ws.name, ws.gws_profile || '')
   }
 
   async function createNewWorkspace() {
@@ -468,7 +492,8 @@ export function useWorkspaceAdmin(deps: {
     formatArchivedAt,
     restoreWorkspace,
     gwsProfileOptions,
-    workspaceCustomGwsProfile,
+    setWorkspaceGwsLink,
+    refreshGwsLinks,
   }
 }
 

@@ -454,6 +454,8 @@ const GET_ROUTES = {
   // rather than replacing these defaults for everybody: the other review specs
   // assert the empty and the plain states, which must stay the default.
   '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
+  // Settings > Workspace > Overview's Google account row: gws installed, no accounts.
+  '/api/integrations/gws': () => ({ installed: true, binary_path: '/usr/local/bin/gws', cli_available: true, profiles: [] }),
   // Settings > Workspace > Overview's Memory handover card.
   '/api/proposals/handover': (req, url) => ({
     workspace: url.searchParams.get('workspace') || WORKSPACES[0].name,

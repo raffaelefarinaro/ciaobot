@@ -9,7 +9,7 @@
           <p class="section-title">Workspace</p>
         </div>
         <p class="hint">
-          Name, colour, default provider and file access for this workspace. Save changes applies to both cards.
+          Name, colour, default provider and file access for this workspace.
         </p>
       </div>
       <div class="overview-body">
@@ -90,34 +90,6 @@
           </button>
         </div>
         <p class="hint hint--compact set-subrow-hint">Load your Claude account's connectors (Slack, Jira, …) in this workspace's Claude chats.</p>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="settings-card-header">
-        <p class="section-title">Google account</p>
-        <p :id="`workspace-gws-hint-${form.name}`" class="hint">
-          Which Google account this workspace uses. Accounts are added on Manage workspaces under Google Workspace.
-        </p>
-      </div>
-      <div class="overview-body">
-        <label class="settings-field set-subrow">
-          <span class="ws-label set-subrow-label">Google profile</span>
-          <select
-            class="routine-input routine-select workspace-select set-subrow-control"
-            v-model="form.gws_profile"
-            :disabled="workspacesSaving === form.name"
-            :aria-describedby="`workspace-gws-hint-${form.name}`"
-          >
-            <option value="">No Google account</option>
-            <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
-              {{ profile.label }} ({{ profile.email || profile.name }})
-            </option>
-            <option v-if="workspaceCustomGwsProfile(form.gws_profile)" :value="form.gws_profile">
-              Custom: {{ form.gws_profile }}
-            </option>
-          </select>
-        </label>
         <div v-if="workspaceDirty(form)" class="workspace-edit-actions">
           <button
             type="button"
@@ -132,6 +104,18 @@
             @click="discardWorkspace(form.name)"
           >Discard</button>
         </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="settings-card-header">
+        <p class="section-title">Google account</p>
+        <p class="hint">
+          Used by this workspace's chats and schedules for Gmail, Calendar, Drive, Docs, Sheets, Slides and Tasks. One account per workspace.
+        </p>
+      </div>
+      <div class="overview-body">
+        <WorkspaceGoogleAccount />
       </div>
     </div>
 
@@ -167,6 +151,7 @@ import SkeletonLoader from '../SkeletonLoader.vue'
 import WorkspaceTile from '../WorkspaceTile.vue'
 import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
+import WorkspaceGoogleAccount from './WorkspaceGoogleAccount.vue'
 import { WORKSPACE_COLOR_PRESETS } from '../../lib/workspaceColors'
 import {
   WORKSPACE_ADMIN_KEY,
@@ -191,8 +176,6 @@ const {
   fsScopeDefaultOptionLabel,
   workspaceProviderFieldLabel,
   workspaceProviderOptions,
-  gwsProfileOptions,
-  workspaceCustomGwsProfile,
   activeWorkspaceForm: form,
   clearWorkspaceLinkHighlight,
   workspaceDirty,
