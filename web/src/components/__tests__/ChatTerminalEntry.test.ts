@@ -255,9 +255,10 @@ describe('the ways into the browser terminal', () => {
     const { wrapper, terminal } = await mountChat(makeProject())
 
     const section = wrapper.get('.chat-rail-terminal')
-    expect(section.text()).toContain('Terminal')
+    // One row that is its own label: no separate "Terminal" heading above it.
+    expect(section.find('.rail-label').exists()).toBe(false)
     const button = section.get('button')
-    expect(button.text()).toBe('Open in Terminal')
+    expect(button.text()).toContain('Open in Terminal')
     await button.trigger('click')
     await flushPromises()
 

@@ -370,6 +370,36 @@ describe('ChatPanel Outputs section', () => {
     expect(new Set(rows.map(row => row.get('small').text().split(' · ')[0])).size).toBe(2)
   })
 
+  it('lists the five newest files first and keeps the rest behind Show all', async () => {
+    const { wrapper, store } = await mountPanel()
+    const card = (name: string, minute: number) => ({
+      role: 'system' as const,
+      tool_name: '_filecard',
+      content: `Workspace/${name}`,
+      file_path: `Workspace/${name}`,
+      action: 'created',
+      timestamp: `2026-09-20T09:${String(minute).padStart(2, '0')}:00Z`,
+    })
+    store.messages['chat-1'] = [
+      ...turnWithOutputs(),
+      ...['a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'f.md', 'g.md'].map((name, i) => card(name, 10 + i)),
+    ]
+    await flushPromises()
+
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+    const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
+    const names = () => files.findAll('.rail-item').map(row => row.get('span').text())
+    expect(names()).toHaveLength(5)
+    expect(names()[0]).toBe('g.md')
+    const more = files.get('.chat-rail-more')
+    expect(more.attributes('aria-expanded')).toBe('false')
+    expect(more.text()).toMatch(/^Show all \d+$/)
+    await more.trigger('click')
+    expect(names().length).toBeGreaterThan(5)
+    expect(more.text()).toBe('Show fewer')
+  })
+
   it('opens the memory source from the pass itself, not the browser chat list', async () => {
     // After a reload the archived source is not in the active chat list, so the
     // origin link has to read the path and title the engine sent on this pass.

@@ -32,22 +32,27 @@ test('the Repository section is compact and the rail does not scroll sideways', 
 
   await expect(page.locator('.chat-rail-agent-context').getByText('Always loaded', { exact: true })).toBeVisible()
 
-  // The branch is a disclosure: the summary stays one line, the full name and
-  // folder appear in its body when it is opened, and the checkout facts stay
-  // on the summary's line rather than dropping below the opened body.
-  const branch = section.locator('.chat-repo-branch-details')
-  const summary = branch.locator('summary')
-  await expect(branch.locator('.chat-repo-branch-body')).not.toBeInViewport()
-  await summary.click()
-  await expect(branch.locator('.chat-repo-branch-body')).toBeVisible()
-  await expect(branch.locator('.chat-repo-branch-value')).toHaveText(/\S/)
-  const facts = section.locator('.chat-repo-kind')
-  const summaryBox = (await summary.boundingBox())!
+  // The branch is a disclosure: its line stays one line with the checkout
+  // facts beside it, and the full name and folder open underneath at the
+  // section's full width, not in a column squeezed beside the facts.
+  const toggle = section.locator('button.chat-repo-branch')
+  const body = section.locator('.chat-repo-branch-body')
+  await expect(body).toBeHidden()
+  await toggle.click()
+  await expect(body).toBeVisible()
+  await expect(section.locator('.chat-repo-branch-value')).toHaveText(/\S/)
+  const facts = section.locator('.chat-repo-facts')
+  const toggleBox = (await toggle.boundingBox())!
   const factsBox = (await facts.boundingBox())!
-  expect(Math.abs(factsBox.y - summaryBox.y)).toBeLessThanOrEqual(2)
+  const bodyBox = (await body.boundingBox())!
+  const sectionBox = (await section.boundingBox())!
+  expect(Math.abs((factsBox.y + factsBox.height / 2) - (toggleBox.y + toggleBox.height / 2))).toBeLessThanOrEqual(3)
+  expect(bodyBox.y).toBeGreaterThanOrEqual(toggleBox.y + toggleBox.height - 1)
+  expect(bodyBox.width).toBeGreaterThanOrEqual(sectionBox.width - 2)
   const openOverflow = await section.evaluate(el => el.scrollWidth - el.clientWidth)
   expect(openOverflow).toBeLessThanOrEqual(0)
-  await summary.click()
+  await page.locator('.chat-rail').first().screenshot({ path: 'test-results/chat-details-rail-open.png' })
+  await toggle.click()
 
   const rail = page.locator('.chat-rail').first()
   const overflow = await rail.evaluate(el => el.scrollWidth - el.clientWidth)
