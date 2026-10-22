@@ -1285,8 +1285,8 @@
       </div>
       <!-- The terminal is not a repository feature. A chat with no linked
            folder still needs a shell — a provider sign-in, an install, an MCP
-           server that stopped answering — so the terminal has a section of
-           its own, outside the repository's, and every chat has one. -->
+           server that stopped answering — so every chat has a terminal row,
+           outside the repository's block; the row is its own label. -->
       <div class="chat-rail-terminal">
         <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
       </div>
@@ -1372,7 +1372,7 @@
           :aria-expanded="railShowAll.files"
           @click="railShowAll.files = !railShowAll.files"
         >{{ railShowAll.files ? 'Show fewer' : `Show all ${railOutputs.length}` }}</button>
-        <p v-else-if="!mentionedFiles.length" class="rail-note">None yet.</p>
+        <p v-if="!railOutputs.length && !mentionedFiles.length" class="rail-note">None yet.</p>
         <template v-if="mentionedFiles.length">
           <p class="rail-label chat-rail-sublabel">Mentioned in replies</p>
           <div class="rail-list">
@@ -2104,7 +2104,7 @@ const mentionedFiles = computed<string[]>(() => {
 const RAIL_LIST_MAX = 5
 const railShowAll = ref({ files: false, mentioned: false, tools: false })
 watch(() => chat.value?.chat_id, () => { railShowAll.value = { files: false, mentioned: false, tools: false } })
-const railOutputs = inspectorOutputs
+const railOutputs = computed(() => inspectorOutputs.value)
 const railMentioned = computed(() => [...mentionedFiles.value].reverse())
 const railTools = computed(() => [
   ...toolUsage.value.skills.map(skill => ({ ...skill, kind: 'skill' as const, tools: undefined as string[] | undefined })),
@@ -2196,16 +2196,20 @@ const detailsFocusEl = computed<HTMLElement | null>(() => {
 const contextRevealKey = ref(0)
 function showDetails(target: DetailsTarget = 'close') {
   detailsTarget.value = target
-  if (target === 'context') contextRevealKey.value += 1
+  // The rail may not be mounted yet (narrow drawer, or a wide rail that
+  // starts closed), and its watch is lazy: bump the key once it exists.
+  const reveal = () => { if (target === 'context') contextRevealKey.value += 1 }
   if (!isWidePane.value) {
     // The trap hands focus back to whatever held it on open: make that the
     // trigger, so Escape returns there and not to wherever the click came from.
     inspectorTrigger.value?.focus()
     inspectorOpen.value = true
+    void nextTick(reveal)
     return
   }
   railOpen.value = true
   void nextTick(() => {
+    reveal()
     const el = detailsFocusEl.value
     el?.focus()
     if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })

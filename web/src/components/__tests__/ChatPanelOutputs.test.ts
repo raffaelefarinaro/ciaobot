@@ -97,7 +97,7 @@ class MemoryStorage {
 
 const mounted: VueWrapper[] = []
 
-async function mountPanel(): Promise<{
+async function mountPanel(extraStubs: Record<string, unknown> = {}): Promise<{
   wrapper: VueWrapper
   store: ReturnType<typeof useProjectStore>
   pinia: ReturnType<typeof createPinia>
@@ -130,6 +130,7 @@ async function mountPanel(): Promise<{
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
+        ...extraStubs,
       },
     },
   })
@@ -398,6 +399,30 @@ describe('ChatPanel Outputs section', () => {
     await more.trigger('click')
     expect(names().length).toBeGreaterThan(5)
     expect(more.text()).toBe('Show fewer')
+  })
+
+  it('shows a short file list without "None yet." or Show all', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = turnWithOutputs()
+    await flushPromises()
+
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+    const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
+    expect(files.findAll('.rail-item').length).toBeGreaterThan(0)
+    expect(files.find('.rail-note').exists()).toBe(false)
+    expect(files.find('.chat-rail-more').exists()).toBe(false)
+  })
+
+  it('opens Always loaded from "See what Ciao knows" when the drawer was closed', async () => {
+    localStorage.removeItem('ciao.chatDetails.alwaysLoadedOpen')
+    const { wrapper } = await mountPanel({ AgentContextSection: false })
+    expect(wrapper.find('#chat-work-rail').exists()).toBe(false)
+    const link = wrapper.findAll('button').find(b => b.text() === 'See what Ciao knows')
+    expect(link).toBeTruthy()
+    await link!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('#chat-work-rail details.agent-context-loaded').attributes('open')).toBeDefined()
   })
 
   it('opens the memory source from the pass itself, not the browser chat list', async () => {
