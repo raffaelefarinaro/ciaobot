@@ -181,7 +181,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', theme: null, font_scale: null, revision: 'a0' } }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, revision: 'a0' } }
     sessions.set(id, state)
   }
   return state
@@ -827,7 +827,7 @@ const server = http.createServer(async (req, res) => {
     // had.
     if (req.method === 'PATCH' && pathname === '/api/settings/appearance') {
       const state = sessionOf(req)
-      for (const key of ['text_contrast', 'theme', 'font_scale']) {
+      for (const key of ['text_contrast', 'body_font', 'theme', 'font_scale']) {
         if (body && body[key] !== undefined) state.appearance[key] = body[key]
       }
       state.appearance.revision = `a${Number(state.appearance.revision.slice(1)) + 1}`

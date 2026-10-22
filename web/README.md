@@ -54,7 +54,7 @@ web/
   index.html              entry HTML, viewport meta, PWA manifest link
   src/
     main.ts               Vue bootstrap + iOS viewport / keyboard / zoom plumbing
-    App.vue               root component, global CSS tokens (--bg, --fg, --accent; `data-text-contrast="soft"` on `<html>` lowers --fg), wordmark + caret, shared focus utilities
+    App.vue               root component, global CSS tokens (--bg, --fg, --accent; `data-text-contrast="soft"` on `<html>` lowers --fg; `data-body-font` swaps --font), wordmark + caret, shared focus utilities
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /tasks,
                            /memory, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
@@ -269,7 +269,7 @@ archive, Needs you and closure logic continue to use delegation alone.
 CSS custom properties live in `App.vue` as `:root` declarations. The system is opinionated:
 
 - **Color**: Deep blue-violet surfaces (`--bg #1a1a2e`, `--bg2 #1f2240`, `--bg3 #2a2e54`, `--bg-elev #23264a`), orange accent (`--accent #fb923c`, `--accent-strong #ea580c`; per-workspace presets override it, and `neutral` grey stands in until the workspace's colour is known; labels on accent fills use `--on-accent #1a1a2e`), violet secondary (`--accent2 #6a47b8`). A clean light theme is supported via `.theme-light` overrides.
-- **Type**: Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
+- **Type**: Body font (Settings > Appearance: System, Serif or Mono) sets `data-body-font` on `<html>`, which swaps `--font`; components use `var(--font)`, never `var(--font-sans)`. Hybrid system: proportional system sans for prose and controls; monospace (SF Mono, Fira Code, Cascadia Code) for code, commands, IDs, schedules, timestamps, and technical labels. Base scale: 11/12/14/16px (`--text-xs`, `--text-sm`, `--text-base`, `--text-lg`), dynamically adjusted via the client-side `--font-scale` multiplier (from 0.8x to 1.5x, configured under Settings > Appearance).
 - **Geometry**: 10/6/14px radii (`--radius`, `--radius-sm`, `--radius-lg`). Spacing scale `--space-1` through `--space-6`.
 - **Motion**: `--ease: cubic-bezier(0.2, 0.8, 0.2, 1)`.
 - **Wordmark**: `.wordmark` (with size modifier `--lg|--md|--sm`) renders `› word` with an accent chevron prefix. Used in StartupView, UpdateProgressView, LoginView, ProjectSidebar brand, and empty states.
@@ -440,7 +440,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   as an app, Notifications, Keyboard shortcuts, Start at sign-in and Open
   source. Appearance is
   the Appearance card alone: Theme and Font size rows in `SettingsView.vue`, and
-  `settings/SettingsAppearance.vue` (Text contrast). Appearance is engine-wide:
+  `settings/SettingsAppearance.vue` (Text contrast, Body font). Appearance is engine-wide:
   `composables/useAppearanceSettings.ts` mirrors `/api/settings/appearance`, applies
   it through `lib/appearance.ts`, and keeps `ciao-theme`, `ciao-font-scale` and
   `ciao-appearance` as paint caches only. Access & devices holds the PWA password, Other
@@ -502,7 +502,7 @@ establish:
 | `task-board-lanes.spec.ts` | That every board lane is 310px wide at 1440, 1100, 900 and iPhone widths (computed flex included), that a review card's state word and action share one line, and that Done sits collapsed behind a 44px tab that expands, hides, persists across a reload, scrolls the Done lane into view and focuses its Hide button when the tab opens it, and accepts a dropped card (opening the completion sheet). The status filter still lists done tasks at full width. Widths and line boxes only exist in a real layout engine. |
 | `task-card-alignment.spec.ts` | That every text block under a task card's title (meta line, agent note, archived caption, the band's state word) starts at the title's text column, and the band's dot centres under the Done ring, at 1280px and under iPhone touch emulation where the checkbox box is 44px instead of 28px. The hanging indent leans on both netting 20px, which only layout can confirm. |
 | `webhook-actions.spec.ts` | Every trigger control and its delete menu stays within the viewport and passes corner hit-tests at desktop, 390px touch width and 200% page-zoom reflow, with History closed and open. Ancestor clipping can hide controls without causing document overflow. |
-| `appearance-settings.spec.ts` | Settings › Appearance is engine-wide. Soft text contrast resolves `--fg` to `#d2d2de` / `#2e2f46` in dark and light, text contrast and theme survive a reload with the local caches cleared (only the engine can restore them), and under Pixel 5 touch emulation every control in the card is at least 44×44px with no sideways scroll at 390px. |
+| `appearance-settings.spec.ts` | Settings › Appearance is engine-wide. Body font swaps the prose face while code stays monospace. Soft text contrast resolves `--fg` to `#d2d2de` / `#2e2f46` in dark and light, text contrast and theme survive a reload with the local caches cleared (only the engine can restore them), and under Pixel 5 touch emulation every control in the card is at least 44×44px with no sideways scroll at 390px. |
 | `touch-targets.spec.ts` | Home, chat, tasks, automations, every Memory section, the project, schedule and task detail pages and every Settings tab under iPhone touch emulation: every control at least 44×44px. It also clicks each menu, popover and dialog trigger and measures what opens (model pickers, the workspace form, chat details), and checks `.field-info` panels stay inside the viewport and beside their glyph. Measures buttons, links, ARIA widgets, inputs (checkboxes and radios through their label), `summary` and opened `<details>`; inline prose links and visually hidden keyboard controls are exempt. jsdom applies no CSS, so only a real engine under `(pointer: coarse)` can measure it. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. And that a project's archived list opens the transcript in the file viewer, with its "Continue this chat", instead of the chat's pinned side tile: the split view exists only in a real layout, so jsdom cannot see the tile the project route must not have. |

@@ -36,6 +36,7 @@ def test_get_defaults(tmp_path):
     client, _ = _client(tmp_path)
     body = client.get("/api/settings/appearance").json()
     assert body["text_contrast"] == "normal"
+    assert body["body_font"] == "system"
     assert body["theme"] is None
     assert body["font_scale"] is None
     assert re.fullmatch(r"[0-9a-f]{64}", body["revision"])
@@ -46,10 +47,11 @@ def test_patch_publishes_event_and_persists(tmp_path):
     revision = client.get("/api/settings/appearance").json()["revision"]
     response = client.patch(
         "/api/settings/appearance",
-        json={"text_contrast": "soft", "theme": "dark", "font_scale": 1.3, "revision": revision},
+        json={"text_contrast": "soft", "body_font": "serif", "theme": "dark", "font_scale": 1.3, "revision": revision},
     )
     assert response.status_code == 200
     assert response.json()["text_contrast"] == "soft"
+    assert response.json()["body_font"] == "serif"
     assert response.json()["theme"] == "dark"
     assert response.json()["font_scale"] == 1.3
     assert client.get("/api/settings/appearance").json() == response.json()
@@ -74,6 +76,7 @@ def test_missing_revision_is_400(tmp_path):
 
 @pytest.mark.parametrize("patch", [
     {"text_contrast": "loud"},
+    {"body_font": "comic"},
     {"theme": "blue"},
     {"font_scale": 3},
 ])
