@@ -1130,27 +1130,6 @@ def _gws_profile_names(config) -> list[str]:
     return gws_auth.known_profiles(config)
 
 
-def _ensure_gws_profile_registered(config, profile: str) -> None:
-    """Record ``profile`` in the account registry if it is not there yet.
-
-    Disconnecting deletes the credential files, which is also all that makes an
-    unregistered (pre-registry or terminal-created) account discoverable. The
-    account itself must survive that, or "Disconnect" would silently delete the
-    card and leave no way back to it.
-    """
-    from ciao import gws_auth
-
-    entries = gws_auth.load_profile_registry(config)
-    if any(entry["name"] == profile for entry in entries):
-        return
-    label = str(_GWS_PROFILE_META.get(profile, {}).get("label", "")) or f"{profile} Google account"
-    entries.append({"name": profile, "label": label})
-    try:
-        gws_auth.save_profile_registry(config, entries)
-    except OSError:
-        logger.exception("Failed to persist the Google account registry")
-
-
 def _valid_gws_profile(profile: object) -> str:
     """Return the profile slug, or "" when the name cannot address a directory."""
     from ciao import gws_auth
@@ -1491,43 +1470,6 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": f"Authentication exchange failed: {str(e)}"}, status_code=500)
-
-
-async def gws_disconnect(request: Request) -> JSONResponse:
-    config = request.app.state.config
-    try:
-        body = await request.json()
-        profile = body.get("profile")
-        delete_client_secret = bool(body.get("delete_client_secret", False))
-    except Exception:
-        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
-
-    profile = _valid_gws_profile(profile)
-    if not profile:
-        return JSONResponse({"error": "Invalid profile"}, status_code=400)
-
-    config_dir = _gws_profile_config_dir(config, profile)
-    if config_dir is None:
-        return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
-
-    # Disconnecting keeps the account; only "remove" deletes it.
-    _ensure_gws_profile_registered(config, profile)
-
-    try:
-        for name in ("credentials.json", "credentials.enc", "token_cache.json",
-                     "credentials.json.old", "credentials.enc.old", "token_cache.json.old"):
-            path = config_dir / name
-            if path.exists():
-                path.unlink()
-        
-        if delete_client_secret:
-            secret_path = config_dir / "client_secret.json"
-            if secret_path.exists():
-                secret_path.unlink()
-    except Exception as e:
-        return JSONResponse({"error": f"Failed to disconnect profile: {str(e)}"}, status_code=500)
-
-    return JSONResponse(_gws_integration_payload(config))
 
 
 async def gws_add_profile(request: Request) -> JSONResponse:
