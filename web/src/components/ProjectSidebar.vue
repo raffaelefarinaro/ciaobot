@@ -107,6 +107,23 @@
               <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(workspace.name) || workspaceInitial(workspace.name) }}</span>
               <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
             </button>
+            <div class="workspace-scope-divider" role="separator"></div>
+            <router-link
+              to="/settings/workspace"
+              role="menuitem"
+              class="workspace-scope-option workspace-scope-link"
+              @click="workspaceScopeOpen = false"
+            >
+              <span class="workspace-scope-name">Workspace settings</span>
+            </router-link>
+            <router-link
+              to="/settings/workspaces"
+              role="menuitem"
+              class="workspace-scope-option workspace-scope-link"
+              @click="workspaceScopeOpen = false"
+            >
+              <span class="workspace-scope-name">Manage workspaces</span>
+            </router-link>
             <router-link
               to="/settings/workspaces#new-workspace"
               role="menuitem"
@@ -1203,7 +1220,7 @@ function openWorkspaceMenu(): void {
   workspaceScopeOpen.value = true
   void nextTick(() => {
     workspaceScopeMenu.value
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+      ?.querySelector<HTMLElement>('[role="menuitem"]')
       ?.focus()
   })
 }
@@ -1234,7 +1251,7 @@ function selectWorkspaceScope(workspace: string): void {
 }
 
 function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
-  const items = Array.from(workspaceScopeMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  const items = Array.from(workspaceScopeMenu.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
   if (!items.length) return
   if (event.key === 'Escape') {
     event.preventDefault()
@@ -1246,7 +1263,7 @@ function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
     closeWorkspaceMenu(false)
     return
   }
-  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  const current = items.indexOf(document.activeElement as HTMLElement)
   let next = current
   if (event.key === 'Home') next = 0
   else if (event.key === 'End') next = items.length - 1
@@ -2886,13 +2903,19 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-scope-option.active {
   color: var(--accent);
 }
+.workspace-scope-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+.workspace-scope-link,
 .workspace-scope-new {
-  margin-top: 4px;
-  border-top: 1px solid var(--border);
-  border-radius: 0 0 5px 5px;
   color: var(--fg2);
   text-decoration: none;
 }
+/* Line the text up with the workspace names above (past the 22px tile). */
+.workspace-scope-link { padding-left: calc(var(--space-2) + 22px + var(--space-2)); }
+.workspace-scope-link:hover,
 .workspace-scope-new:hover { color: var(--fg); }
 .workspace-scope-mark--new {
   background: transparent;

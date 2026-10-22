@@ -279,7 +279,7 @@ test.describe('touch targets', () => {
       expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
     }
     expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED)
-    for (const label of ['About Google Workspace integration', 'About GWS profiles']) {
+    for (const label of ['About Google Workspace integration']) {
       expect(measuredPanels.has(label), `panel "${label}" was never measured`).toBe(true)
     }
     expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])

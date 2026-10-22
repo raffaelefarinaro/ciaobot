@@ -35,6 +35,31 @@ test.describe('workspace overview', () => {
     await expect(name).not.toHaveValue(first)
   })
 
+  test('the switcher lists the settings entries and Workspace settings opens Overview', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await boot(page, '/settings/workspaces', READY)
+    await expect(page.locator('.page-tag')).toContainText('Manage workspaces')
+    // Workspaces is not a rail item any more.
+    await expect(page.locator('.settings-nav, nav').getByRole('link', { name: 'Workspaces', exact: true })).toHaveCount(0)
+
+    await activeWorkspaceButton(page).click()
+    const items = page.locator('#workspace-scope-menu [role="menuitem"]')
+    const texts = (await items.allTextContents()).map(t => t.replace(/^\+\s*/, '').trim())
+    expect(texts.slice(-3)).toEqual(['Workspace settings', 'Manage workspaces', 'New workspace'])
+    await page.locator('#workspace-scope-menu').getByRole('menuitem', { name: 'Workspace settings' }).click()
+    await expect(page).toHaveURL(/\/settings\/workspace$/)
+    await expect(page.locator('.page-tag')).toContainText('Overview')
+  })
+
+  test('Rename on Manage workspaces opens Overview with the name field focused', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await boot(page, '/settings/workspaces', READY)
+    await page.getByRole('button', { name: /^Actions for workspace /i }).first().click()
+    await page.getByRole('menuitem', { name: /^Rename workspace /i }).click()
+    await expect(page).toHaveURL(/\/settings\/workspace#workspace-name$/)
+    await expect(page.locator('#workspace-name-input')).toBeFocused()
+  })
+
   test('the memory handover radiogroup takes arrow keys', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     // The fixture persists neither the workspace PATCH nor the handover, so
@@ -81,4 +106,31 @@ test.describe('workspace overview', () => {
       expect(overflow, `scrolls ${overflow}px sideways; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
     })
   }
+})
+
+test.describe('workspace switcher entries on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
+
+  test.beforeEach(async ({ page }, testInfo) => {
+    await isolate(page, `workspace-switcher-phone-${testInfo.workerIndex}`)
+  })
+
+  test('every menu item is at least 44px tall', async ({ page }) => {
+    await boot(page, '/settings/workspaces', READY)
+    await page.getByRole('button', { name: 'Open sidebar' }).click()
+    await activeWorkspaceButton(page).click()
+    const items = page.locator('.workspace-scope-menu [role="menuitem"]')
+    const count = await items.count()
+    expect(count).toBeGreaterThanOrEqual(5)
+    for (let i = 0; i < count; i++) {
+      const box = await items.nth(i).boundingBox()
+      expect(box?.height ?? 0, `menu item ${i}`).toBeGreaterThanOrEqual(44)
+    }
+  })
+
+  test('Manage workspaces does not scroll sideways', async ({ page }) => {
+    await boot(page, '/settings/workspaces', READY)
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(overflow, `scrolls ${overflow}px sideways; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
+  })
 })

@@ -84,6 +84,11 @@ describe('isAppRouteHref', () => {
     }
   })
 
+  it('still treats /settings/workspaces as an app link', () => {
+    expect(isAppRouteHref('/settings/workspaces')).toBe(true)
+    expect(isAppRouteHref('/settings/workspaces#new-workspace')).toBe(true)
+  })
+
   it('knows a task address by its full record id only', () => {
     expect(isAppRouteHref(`/tasks/${ID}`)).toBe(true)
     // `9920898d` is how a chat abbreviated ids; it names no task.
