@@ -54,7 +54,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/chats` | List all chats; `?active_only=1` returns only active chats plus compact memory-pass source metadata for Home |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
 | POST | `/api/chats/read-all` | Mark all chats read |
-| GET, PATCH, DELETE | `/api/chats/{chat_id}` | Read compact chat metadata (including archived chats), update, or delete chat. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below. A PATCH body may carry `code_mode: bool` (linked projects only; 400 when the project is unlinked or its repo is missing). `code_mode: false` is refused with 400 once the chat has messages (`ChatInfo.user_turn_count > 0`): code mode is one-way per chat, and only a project move turns it off afterwards |
+| GET, PATCH, DELETE | `/api/chats/{chat_id}` | Read compact chat metadata (including archived chats), update, or delete chat. A PATCH body must be a JSON object: a body that is not JSON, or JSON that is not an object (a list, a string, a number, a boolean, `null`), is **400** with a static message (`{"error": "invalid JSON body"}` / `{"error": "body must be a JSON object"}`) before the chat is looked up, and the raw body is never echoed back. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below. A PATCH body of `{"terminal_offer": {"expected_id": "<32 lowercase hex>"}}` dismisses the chat's suggested terminal command instead (409 when the id is not the current one); see **Assistant terminal offers** below. A PATCH body may carry `code_mode: bool` (linked projects only; 400 when the project is unlinked or its repo is missing). `code_mode: false` is refused with 400 once the chat has messages (`ChatInfo.user_turn_count > 0`): code mode is one-way per chat, and only a project move turns it off afterwards |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
@@ -772,6 +772,17 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 # on a started chat returns 400; use handover instead.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
+
+# Dismiss the chat's suggested terminal command — the assistant's suggested
+# command card. The body names the offer the caller saw (the chat's
+# `terminal_offer.id`, 32 lowercase hex characters) and nothing else: it
+# cannot be combined with the fields above. A stale id is 409 with the
+# current offer; a chat that has no offer is still 200. This is the
+# browser's own dismissal and it needs no terminal grant: nothing is run,
+# opened or unlocked by it.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
+  -H 'content-type: application/json' \
+  -d '{"terminal_offer":{"expected_id":"<the chat terminal_offer.id>"}}'
 
 # Handover — switch model/backend inside the same visible chat.
 # Body keys: provider = claude|opencode, model, messages
@@ -1648,6 +1659,99 @@ are written through the existing signed-session, origin-gated
   file touches never pin. Archiving a chat does not clear its pin; a fork or new
   chat starts without one.
 
+**Assistant terminal offers (#1840, #1843)**
+
+A chat may carry one suggested terminal command: plain text the assistant
+proposes so the user can read it, copy it and run it themselves. It is
+guidance, not an action. Nothing in the engine types it, runs it, pastes it,
+sends it to a host terminal or collects its output, and the engine neither
+verifies it nor calls it safe — the text is model-authored, so a model can be
+talked into emitting something else. The card that shows it carries the fixed
+label **Suggested command — review before running**, and the command is plain
+escaped text: no Markdown, no HTML, no link parsing, no action registry.
+
+- **The field**: every chat payload (`GET /api/chats`, `GET /api/chats/{id}`,
+  and the chat object of a `chat_created` event) always carries
+  `terminal_offer`: `{id, command}` or `null`. The key is never missing, so a
+  client never has to guess between "this chat has no offer" and "this field
+  was not sent".
+- **The id**: 16 random bytes as 32 lowercase hex characters, minted per
+  accepted change — never a counter and never a hash of the text. Offering the
+  same command again while it is already active is not a change: the id stays
+  and nothing is published. A dismissal followed by a new offer of the same
+  command mints a **new** id, so a tab that still holds the old one cannot
+  dismiss the new offer by quoting it. An id is not a credential, but it does
+  name one offer, so a client that leaks it leaks that offer.
+- **The text**: normalized (CRLF and a bare CR become line feeds, outer
+  whitespace is stripped) and bounded at 4096 UTF-8 bytes **before and after**
+  normalization. It is refused outright if it is not text, has no UTF-8 form
+  (a lone surrogate), is empty, or contains a control character, a DEL, or any
+  invisible or direction-changing character (Bidi controls, format characters,
+  line and paragraph separators): those change what the user copies into their
+  shell without changing what the card shows. There is no command denylist and
+  no safety claim — the user is the one who reviews and runs it. A refusal
+  names a static reason and never the rejected text: a command can carry a
+  credential, and an error string ends up in a log line and a telemetry field.
+- **The card's buttons**: "Copy command" writes exactly the displayed text to
+  the clipboard and claims "Copied" only when the clipboard write actually
+  succeeded — a failure is an explicit, retryable error, never a false
+  success. "Open terminal" opens the existing browser terminal for the
+  owning chat (the terminal pane's own `open({chat_id})` flow, which carries
+  the terminal's own door — its policy, the signed session and a live
+  terminal grant); the card does not create a terminal session, unlock the
+  terminal, send input or reach the host terminal itself, and it never
+  autofocuses a shell or auto-submits anything. Nothing on the card executes
+  the command, pastes it into a shell, grants a terminal or collects the
+  command's output — running it is the user's own act, in their own terminal.
+  Viewing, opening or copying the card never reports a login, an install or
+  an MCP connection as done.
+- **Dismiss**: `PATCH /api/chats/{chat_id}` with body
+  `{"terminal_offer": {"expected_id": "<32 lowercase hex>"}}`, and nothing else.
+  It is exclusive of every other chat update — `title`/`model`/`provider`/
+  `mode`/`project_id`/`thinking_level`/`code_mode`/`pin` (400) — because a
+  combined write could land the other change and then fail, leaving the chat
+  half-updated by a request the engine refused. The body names the offer the
+  caller saw and never supplies a command of its own: an unknown key inside
+  `terminal_offer` is refused (400), and `expected_id` must be exactly 32
+  lowercase hex characters (a number, a bool or an uppercase hex string is
+  refused, not coerced).
+- **Responses**: success returns the ordinary full `ChatInfo` payload, with
+  `terminal_offer` now `null`. A chat that has no offer is the same 200 (there
+  is nothing to dismiss) and publishes no event, which is what makes a retry
+  of a dismissal the browser never saw the answer to safe. An `expected_id`
+  that is not the current one is **409**
+  `{"error": "terminal_offer_conflict", "terminal_offer": {id, command}}`,
+  where `terminal_offer` is the current authoritative offer — a device that
+  raced a newer offer cannot silently remove the command the user is looking
+  at. Unknown chat is 404, and a malformed body is 400 **before** the chat is
+  looked up, so an invalid request cannot be used to probe which chats exist.
+  "Malformed" covers the body as a whole, not only the dismissal in it: a
+  body that is not JSON, or JSON that is not an object, is the same 400 with
+  a static message, refused before the chat is read. A refusal is a static
+  string: nothing the caller wrote is echoed back.
+- **Auth**: the ordinary signed-session, same-origin browser gate, unchanged.
+  A dismissal needs no terminal grant and no unlock — dropping a suggestion is
+  not a privileged act, so it opens no host terminal, creates no provider
+  session, executes nothing and mints no grant.
+- **Retention**: the offer is transient state in memory only. It is never
+  written to the chat registry, its audit log or a backup of either, it is
+  never copied into a fork or a continued chat, and it ends with the
+  conversation it was made in (archive, new provider session, handover) or
+  with an explicit dismissal. An engine restart ends it with everything else.
+  A provider's own tool-call transcript may still hold the arguments the model
+  was given; that record is the provider's, not Ciaobot's, and this engine
+  does not rewrite it — so a command's arguments are not guaranteed to be
+  gone from every trace, only from the ones Ciaobot keeps.
+- **Cross-device**: a real change emits `chat_terminal_offer_changed` with
+  `{chat_id, terminal_offer}`, where `terminal_offer` is the complete
+  `{id, command}` payload or `null` for a clear. A no-op change (the same
+  command offered again, or a dismissal of a chat that has no offer) publishes
+  nothing. The `/ws/events` connect `snapshot` carries `chat_terminal_offers`,
+  a **sparse and complete** map of chat id → the same payload for the chats
+  that have one. The map **REPLACES** the client's cache: a chat missing from
+  it has no offer, so a stale offer is cleared by its absence and a
+  reconnecting client converges.
+
 **WebSocket events**
 
 Global `/ws/events` payloads the PWA reacts to:
@@ -1656,6 +1760,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
 - `chat_runs_reported`: emitted on a chat once finished background command runs have been reported back to it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (the chat was mid-turn, so the wake was appended as a follow-up) or `"started"` (the chat was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
 - `chat_pin_changed`: the chat's pinned file changed (a manual pin write or an agent `file_surface`), on this or another device. Fields: `{chat_id, path, dismissed_paths, revision}`, where `path` is the canonical POSIX path or `""` for closed and `revision` is the per-chat counter a later pin PATCH must quote. The connect `snapshot` carries the same payloads for every chat under `chat_pins`, so a client that missed this event still converges.
+- `chat_terminal_offer_changed`: the chat's suggested terminal command changed (an assistant offer, or the user dismissing it), on this or another device. Fields: `{chat_id, terminal_offer}`, where `terminal_offer` is the complete `{id, command}` payload or `null` when the offer was cleared. The connect `snapshot` carries the same payloads under `chat_terminal_offers`, a sparse and complete map that REPLACES the client's cache: a chat missing from it has no offer, so a stale offer is cleared by its absence.
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
 - `chat_title`: auto-title finished.
