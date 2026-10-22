@@ -575,6 +575,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_read`               {chat_id, last_read_at}
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
     - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
+    - `chat_terminal_offer_changed` {chat_id, terminal_offer}  (null = cleared)
     - `chat_title`              {chat_id, title}
     - `server_restarting`       {message}  (restart drain began; show overlay)
 
@@ -626,6 +627,13 @@ async def ws_events(websocket: WebSocket) -> None:
             # reconnecting after a gap has to be able to close a pin the engine
             # no longer holds, and it cannot do that for a chat that is absent.
             "chat_pins": pcm.chat_pin_states,
+            # The active terminal offer of every chat that has one, each
+            # value the same `{id, command}` payload the
+            # `chat_terminal_offer_changed` event carries. Sparse and
+            # COMPLETE: the map REPLACES the client's cache, so a chat that
+            # is missing from it has no offer and a stale offer is cleared
+            # by its absence.
+            "chat_terminal_offers": pcm.chat_terminal_offer_states,
             "keyboard_shortcuts": (
                 websocket.app.state.app_settings.settings.keyboard_shortcuts or {}
                 if getattr(websocket.app.state, "app_settings", None) is not None else {}
