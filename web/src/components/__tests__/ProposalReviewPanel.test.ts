@@ -122,8 +122,7 @@ describe('ProposalReviewPanel', () => {
     // The store schedules timers of its own (a reconnection retry, a toast).
     // Disposing the pinia runs the store's onScopeDispose, which cancels them;
     // without it a timer can fire after this file's jsdom environment is gone.
-    ;(pinia as unknown as { _s: Map<string, { $dispose: () => void }> })
-      ._s.forEach((store) => store.$dispose())
+    useProjectStore(pinia).$dispose()
     document.body.innerHTML = ''
     vi.restoreAllMocks()
   })
