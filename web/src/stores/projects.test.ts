@@ -2445,6 +2445,7 @@ describe('server-owned chat pins', () => {
         type: 'snapshot',
         active_streams: [],
         chat_pins: { 'c-pin': { path: '', dismissed_paths: ['/workspace/report.md'], revision: 3 } },
+        chat_terminal_offers: {},
       }),
     })
     expect(store.pinnedFileFor('c-pin')).toBeUndefined()
@@ -2520,6 +2521,438 @@ describe('server-owned chat pins', () => {
     expect(store.toasts).toHaveLength(1)
     expect(store.toasts[0].title).toBe('Could not update pinned file')
     expect(store.toasts[0].errorText).toBe('Pinned file was changed on another device')
+  })
+})
+
+describe('transient terminal offers', () => {
+  // A command the assistant suggested in a chat. The engine owns it; this
+  // client holds a transient copy and reconciles it against three sources:
+  // a chat payload, a global event, and the reconnect snapshot. The rules
+  // below are the ones that keep a stale HTTP reply from undoing a newer
+  // change — a dismissed command coming back, or a fresh one disappearing.
+
+  function chatInfo(chatId: string, over: Partial<ChatInfo> = {}): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'T',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: false,
+      ...over,
+    }
+  }
+
+  const offer = (id: string, command = 'claude login') => ({ id, command })
+
+  function events(store: ReturnType<typeof useProjectStore>) {
+    store.connectEventsWs()
+    return fakeSockets[fakeSockets.length - 1]
+  }
+
+  const frame = (payload: unknown) => ({ data: JSON.stringify(payload) })
+
+  const snapshotFrame = (over: Record<string, unknown> = {}) => ({
+    type: 'snapshot',
+    active_streams: [],
+    chat_pins: {},
+    chat_terminal_offers: {},
+    ...over,
+  })
+
+  const offerChanged = (chatId: string, terminalOffer: unknown) => ({
+    type: 'chat_terminal_offer_changed',
+    chat_id: chatId,
+    terminal_offer: terminalOffer,
+  })
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  test('a fresh client holds no offer', () => {
+    const store = useProjectStore()
+    expect(store.terminalOffers).toEqual({})
+  })
+
+  test('the snapshot replaces the offer map wholesale', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-1': offer('a') } })))
+    expect(store.terminalOffers['c-1']).toEqual({ id: 'a', command: 'claude login' })
+
+    // The map is complete, not a merge: a chat the next snapshot does not
+    // name holds no offer.
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-2': offer('b') } })))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+    expect(store.terminalOffers['c-2']).toEqual({ id: 'b', command: 'claude login' })
+  })
+
+  test('the snapshot keeps an offer for a chat the chat list has not named', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-unlisted': offer('a') } })))
+    store.reconcileChatList([chatInfo('c-listed')])
+    expect(store.terminalOffers['c-unlisted']).toEqual({ id: 'a', command: 'claude login' })
+  })
+
+  test('a read that started before the snapshot cannot roll it back', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    // The list was asked for before the snapshot arrived, so it answers with
+    // the older "no offer" it read.
+    const readStartedAt = store.terminalOfferReadStart()
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-1': offer('a') } })))
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: null })], readStartedAt)
+    expect(store.terminalOffers['c-1']).toEqual({ id: 'a', command: 'claude login' })
+  })
+
+  test('a read that started after the snapshot may clear it', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-1': offer('a') } })))
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: null })], readStartedAt)
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a stale read cannot roll back a newer event', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    const readStartedAt = store.terminalOfferReadStart()
+    sock.onmessage?.(frame(offerChanged('c-1', offer('new'))))
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: offer('old') })], readStartedAt)
+    expect(store.terminalOffers['c-1']?.id).toBe('new')
+  })
+
+  test('a later-started read heals an event this client missed', () => {
+    const store = useProjectStore()
+    // The event never arrived (the socket was down), so nothing latched it:
+    // the next read carries the offer and heals the gap.
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: offer('healed') })], readStartedAt)
+    expect(store.terminalOffers['c-1']?.id).toBe('healed')
+  })
+
+  test('a later read replaces an earlier event\'s offer — the event does not latch', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('first'))))
+    expect(store.terminalOffers['c-1']?.id).toBe('first')
+
+    // A read started after that event carries the engine's newer offer. The
+    // earlier event is not a latch: the chat follows the newest thing the
+    // client is told, not the first thing it happened to see.
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: offer('second') })], readStartedAt)
+    expect(store.terminalOffers['c-1']?.id).toBe('second')
+  })
+
+  test('an event for another chat does not suppress this chat\'s read', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    const readStartedAt = store.terminalOfferReadStart()
+    sock.onmessage?.(frame(offerChanged('c-other', offer('x'))))
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: offer('mine') })], readStartedAt)
+    expect(store.terminalOffers['c-1']?.id).toBe('mine')
+    expect(store.terminalOffers['c-other']?.id).toBe('x')
+  })
+
+  test('a chat row without the field carries no offer', () => {
+    const store = useProjectStore()
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1')], readStartedAt)
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a fresh payload that omits the offer field clears it — no keep-state fallback', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    // A payload read after that event whose row carries no `terminal_offer`
+    // field at all. The engine holds no offer, so the client's must go: an
+    // absent field is read as "no offer", never as "keep what we had". A
+    // keep-state reading would leave a dismissed command on screen.
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1')], readStartedAt)
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('an archived chat is not given an offer by a late event', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', { archived: true })]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('an archived chat loses its offer and an archived row never brings it back', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    sock.onmessage?.(frame({ type: 'chat_archived', chat_id: 'c-1', project_id: 'p1' }))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+
+    // A preserved archived row must not resurrect it either.
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { archived: true, terminal_offer: offer('a') })], readStartedAt)
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a successful archive clears the offer and a failed one keeps it', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+
+    apiPost.mockRejectedValueOnce(new Error('archive refused'))
+    await expect(store.archiveChat('c-1')).rejects.toThrow('archive refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiPost.mockResolvedValueOnce({ ok: true })
+    await store.archiveChat('c-1')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a successful delete clears the offer and a failed one keeps it', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+
+    apiDel.mockRejectedValueOnce(new Error('delete refused'))
+    await expect(store.deleteChat('c-1')).rejects.toThrow('delete refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiDel.mockResolvedValueOnce({ deleted: true })
+    await store.deleteChat('c-1')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a deleted chat drops its offer', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    sock.onmessage?.(frame({ type: 'chat_deleted', chat_id: 'c-1', project_id: 'p1' }))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a deleted project drops its chats\' offers', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1'), chatInfo('c-2', { project_id: 'p2' })]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    sock.onmessage?.(frame(offerChanged('c-2', offer('b'))))
+    sock.onmessage?.(frame({ type: 'project_deleted', project_id: 'p1' }))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+    expect(store.terminalOffers['c-2']?.id).toBe('b')
+  })
+
+  // Every place the store drops a chat has to drop its offer with it, and
+  // only once the mutation actually succeeded: a refused archive or delete
+  // leaves the chat, and the command it offered, alone.
+  function seedProjectWithOffer(store: ReturnType<typeof useProjectStore>, projectId: string) {
+    store.projects = [
+      { project_id: projectId, name: 'W', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
+    store.chats = [chatInfo('c-1', { project_id: projectId })]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+  }
+
+  test('a deleted project clears its chats\' offers, and a refused delete keeps them', async () => {
+    const store = useProjectStore()
+    seedProjectWithOffer(store, 'p1')
+
+    apiDel.mockRejectedValueOnce(new Error('delete refused'))
+    await expect(store.deleteProject('p1')).rejects.toThrow('delete refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiDel.mockResolvedValueOnce({ ok: true, vault_entry_removed: false, removed_notes: 0, removed_files: 0, edited_backlinks: [] })
+    await store.deleteProject('p1')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a completed project clears its chats\' offers, and a refused completion keeps them', async () => {
+    const store = useProjectStore()
+    seedProjectWithOffer(store, 'p1')
+
+    apiPost.mockRejectedValueOnce(new Error('complete refused'))
+    await expect(store.completeProject('p1')).rejects.toThrow('complete refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiPost.mockResolvedValueOnce({ ok: true })
+    await store.completeProject('p1')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('an archived workspace clears its chats\' offers, and a refused archive keeps them', async () => {
+    const store = useProjectStore()
+    seedProjectWithOffer(store, 'p1')
+
+    apiPost.mockRejectedValueOnce(new Error('archive refused'))
+    await expect(store.archiveWorkspace('personal')).rejects.toThrow('archive refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiPost.mockResolvedValueOnce({ workspaces: [] })
+    await store.archiveWorkspace('personal')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a workspace-registry refresh that drops a project clears its chats\' offers', async () => {
+    const store = useProjectStore()
+    seedProjectWithOffer(store, 'p1')
+
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/workspaces') {
+        return Promise.resolve({
+          workspaces: [{ name: 'personal', vault_root: '', default_provider: 'claude' }],
+          active: 'personal',
+        })
+      }
+      // The project is gone server-side, so the registry refresh drops it.
+      if (url === '/api/projects') return Promise.resolve([])
+      return Promise.resolve({})
+    })
+    const sock = events(store)
+    vi.useFakeTimers()
+    try {
+      sock.onmessage?.(frame({ type: 'workspaces_changed' }))
+      await vi.advanceTimersByTimeAsync(300)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a dismissal sends exactly the expected id and nothing else', async () => {
+    const store = useProjectStore()
+    apiPatch.mockResolvedValue(chatInfo('c-1', { terminal_offer: null }))
+    const result = await store.dismissTerminalOffer('c-1', 'a'.repeat(32))
+    expect(result).toBe('dismissed')
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/api/chats/c-1',
+      { terminal_offer: { expected_id: 'a'.repeat(32) } },
+    )
+  })
+
+  test('a dismissal encodes the chat id', async () => {
+    const store = useProjectStore()
+    apiPatch.mockResolvedValue(chatInfo('c-1'))
+    await store.dismissTerminalOffer('c/../evil', 'x')
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/api/chats/c%2F..%2Fevil',
+      { terminal_offer: { expected_id: 'x' } },
+    )
+  })
+
+  test('a conflict adopts the engine offer and reports the conflict', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('old'))))
+
+    apiPatch.mockRejectedValue(Object.assign(new Error('terminal_offer_conflict'), {
+      status: 409,
+      payload: { error: 'terminal_offer_conflict', terminal_offer: offer('new') },
+    }))
+
+    await expect(store.dismissTerminalOffer('c-1', 'old')).resolves.toBe('conflict')
+    expect(store.terminalOffers['c-1']?.id).toBe('new')
+    // One write, no retry.
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+  })
+
+  test('a malformed conflict leaves the current offer and throws', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('old'))))
+
+    apiPatch.mockRejectedValue(Object.assign(new Error('terminal_offer_conflict'), {
+      status: 409,
+      payload: { error: 'terminal_offer_conflict', terminal_offer: { id: 'broken' } },
+    }))
+
+    await expect(store.dismissTerminalOffer('c-1', 'old')).rejects.toThrow('terminal_offer_conflict')
+    // Half an offer is not a state, and it is never repaired into "no offer".
+    expect(store.terminalOffers['c-1']?.id).toBe('old')
+  })
+
+  test('a deferred dismissal cannot roll back a newer event', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('old'))))
+
+    const pending = deferred<ChatInfo>()
+    apiPatch.mockReturnValue(pending.promise)
+    const dismissal = store.dismissTerminalOffer('c-1', 'old')
+    // Another device re-offers while the dismissal is in flight.
+    sock.onmessage?.(frame(offerChanged('c-1', offer('newer'))))
+    pending.resolve(chatInfo('c-1', { terminal_offer: null }))
+
+    await expect(dismissal).resolves.toBe('dismissed')
+    expect(store.terminalOffers['c-1']?.id).toBe('newer')
+  })
+
+  test('a deferred conflict cannot roll back a newer event', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('old'))))
+
+    const pending = deferred<ChatInfo>()
+    apiPatch.mockReturnValue(pending.promise)
+    const dismissal = store.dismissTerminalOffer('c-1', 'old')
+    sock.onmessage?.(frame(offerChanged('c-1', offer('newer'))))
+    pending.reject(Object.assign(new Error('terminal_offer_conflict'), {
+      status: 409,
+      payload: { error: 'terminal_offer_conflict', terminal_offer: offer('server') },
+    }))
+
+    await expect(dismissal).resolves.toBe('conflict')
+    expect(store.terminalOffers['c-1']?.id).toBe('newer')
+  })
+
+  test('a deferred rename response cannot roll back a newer offer', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+
+    const pending = deferred<ChatInfo>()
+    apiPatch.mockReturnValue(pending.promise)
+    const renaming = store.renameChat('c-1', 'renamed')
+    sock.onmessage?.(frame(offerChanged('c-1', offer('newer'))))
+    pending.resolve(chatInfo('c-1', { title: 'renamed', terminal_offer: offer('old') }))
+
+    await renaming
+    expect(store.terminalOffers['c-1']?.id).toBe('newer')
+  })
+
+  test('the offered command never reaches local storage', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged(
+      'c-1',
+      offer('a', 'npm login --registry=https://example.test'),
+    )))
+    await store.dismissTerminalOffer('c-1', 'a')
+
+    expect(Object.values(localStorageData).join('\n')).not.toContain('npm login')
   })
 })
 
@@ -4593,6 +5026,7 @@ describe('background agents indicator', () => {
         active_streams: [],
         background_agents: { 'c-live': 2 },
         chat_pins: {},
+        chat_terminal_offers: {},
       }),
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
@@ -4644,6 +5078,7 @@ describe('background agents indicator', () => {
         active_streams: [],
         background_runs: { 'c-live': [live] },
         chat_pins: {},
+        chat_terminal_offers: {},
       }),
     })
     expect(store.backgroundRuns['c-stale']).toBeUndefined()
@@ -5053,6 +5488,7 @@ describe('server restart overlay', () => {
         active_streams: [],
         restarting: true,
         chat_pins: {},
+        chat_terminal_offers: {},
       }),
     })
     expect(store.serverRestarting).toBe(true)
@@ -7852,7 +8288,12 @@ describe('delegated task signals', () => {
     const store = useProjectStore()
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    const snapshot = JSON.stringify({ type: 'snapshot', active_streams: [], chat_pins: {} })
+    const snapshot = JSON.stringify({
+      type: 'snapshot',
+      active_streams: [],
+      chat_pins: {},
+      chat_terminal_offers: {},
+    })
 
     // Before boot the workspace is not known yet; fetchAll reads it then.
     sock.onmessage?.({ data: snapshot })

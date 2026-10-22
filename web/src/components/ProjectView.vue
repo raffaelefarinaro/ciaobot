@@ -401,7 +401,7 @@
           <h3 id="project-closure-title">Close {{ project.name }}</h3>
           <button type="button" class="btn-icon" aria-label="Close" :disabled="closureBusy" @click="closeClosure">×</button>
         </header>
-        <form class="task-form" novalidate @submit.prevent="submitClosure(false)">
+        <form class="task-form" novalidate @submit.prevent="submitClosure()">
           <fieldset class="form-group">
             <legend>How did it end?</legend>
             <label><input v-model="closureOutcome" type="radio" value="completed" :disabled="closureBusy" /> Completed</label>
@@ -425,8 +425,7 @@
           </p>
           <p v-if="closureError" class="task-action-error" role="alert">{{ closureError }}</p>
           <div class="form-actions">
-            <button type="submit" class="btn-primary" :disabled="closureBusy || !closureNote.trim()">{{ closureBusy ? 'Closing…' : (closureOutcome === 'stopped' ? 'Stop project' : 'Complete project') }}</button>
-            <button type="button" class="btn-small" :disabled="closureBusy" @click="submitClosure(true)">Close without note</button>
+            <button type="submit" class="btn-primary" :disabled="closureBusy">{{ closureBusy ? 'Closing…' : (closureOutcome === 'stopped' ? 'Stop project' : 'Complete project') }}</button>
             <button type="button" class="btn-small" :disabled="closureBusy" @click="closeClosure">Cancel</button>
           </div>
         </form>
@@ -889,10 +888,11 @@ async function doComplete() {
   }
 }
 
-async function submitClosure(withoutNote: boolean) {
+async function submitClosure() {
   if (!project.value || closureBusy.value) return
-  const note = withoutNote ? '' : closureNote.value.trim()
-  if (!withoutNote && !note) return
+  // The note is optional in the field itself: a blank (or whitespace-only)
+  // note closes the project without a note, like the task board's completion sheet.
+  const note = closureNote.value.trim()
   closureBusy.value = true
   closureError.value = ''
   try {

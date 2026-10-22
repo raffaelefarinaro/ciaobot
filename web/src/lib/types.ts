@@ -319,6 +319,11 @@ export interface ChatInfo {
   pinned_file_path?: string
   dismissed_pin_paths?: string[]
   pin_revision?: number
+  // The chat's transient suggested command, when the assistant offered one.
+  // `null` when there is none. Optional only so the older fixture factories
+  // keep compiling; an absent field is read as "no offer", never as "keep
+  // what we had".
+  terminal_offer?: TerminalOffer | null
   // Server sends `{}` for no location; test `repo_location.path`, not the object.
   repo_location?: Partial<RepoLocation>
   // G1: always sent; optional for older payloads/test stubs.
@@ -338,6 +343,21 @@ export interface ChatPinState {
   path: string
   dismissed_paths: string[]
   revision: number
+}
+
+/**
+ * A command the assistant suggested in a chat.
+ *
+ * The command is untrusted, model-authored plain text: the engine never
+ * verifies it, the PWA never runs it, and the user reads it and runs it
+ * themselves. `id` is a random 128-bit hex minted for every accepted
+ * change; it is what a dismissal presents, so a stale tab cannot dismiss a
+ * newer offer of the same text. The command is shown as escaped text and is
+ * never parsed, linked or executed.
+ */
+export interface TerminalOffer {
+  id: string
+  command: string
 }
 
 /** The memory pass's step on an archived chat's postprocess record. */
@@ -617,9 +637,13 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string }
   | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
+  // A chat's suggested command changed: the offer, or `null` when the engine
+  // dropped it. Global (it travels on `/ws/events`, not the per-chat socket),
+  // because the engine can change a chat's offer from any session.
+  | { type: 'chat_terminal_offer_changed'; chat_id: string; terminal_offer: TerminalOffer | null }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
