@@ -192,10 +192,22 @@ function serve(sessions: Record<string, unknown>[] = [], status: Record<string, 
   })
 }
 
-async function mountPane() {
-  const wrapper = mount(TerminalPane, { attachTo: document.body })
+async function mountPane(props: { dockFits?: boolean } = {}) {
+  const wrapper = mount(TerminalPane, { props, attachTo: document.body })
   await flushPromises()
   return wrapper
+}
+
+/** The width jsdom starts with, so a test that changes it can put it back. */
+const DEFAULT_VIEWPORT_WIDTH = window.innerWidth
+
+/**
+ * The pane's shape follows the viewport, exactly as the layout's does: a
+ * column beside the chat on a wide pane, a full-screen drawer on a phone.
+ */
+function setViewportWidth(width: number): void {
+  Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: width })
+  window.dispatchEvent(new Event('resize'))
 }
 
 describe('TerminalPane', () => {
@@ -214,6 +226,7 @@ describe('TerminalPane', () => {
   afterEach(() => {
     useTerminalStore().dispose()
     document.body.innerHTML = ''
+    setViewportWidth(DEFAULT_VIEWPORT_WIDTH)
     vi.unstubAllGlobals()
   })
 
@@ -229,6 +242,65 @@ describe('TerminalPane', () => {
     expect(wrapper.get('.tp-unlock-input').attributes('type')).toBe('password')
     // The password is handed over once and not kept.
     expect(wrapper.text()).toContain('not kept')
+    wrapper.unmount()
+  })
+
+  it('docks beside the chat when the pane has room for both columns', async () => {
+    serve([sessionInfo('s1')])
+    setViewportWidth(1280)
+    const store = useTerminalStore()
+    const wrapper = await mountPane({ dockFits: true })
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const pane = wrapper.get('.terminal-pane')
+    expect(pane.classes()).toContain('terminal-pane--dock')
+    expect(pane.classes()).not.toContain('terminal-pane--drawer')
+    wrapper.unmount()
+  })
+
+  it('is a drawer when the pane is too narrow to hold both columns', async () => {
+    // A dock in a pane that cannot hold it would squeeze the chat to a
+    // sliver, so the pane that has no room gets the drawer instead.
+    serve([sessionInfo('s1')])
+    setViewportWidth(900)
+    const store = useTerminalStore()
+    const wrapper = await mountPane({ dockFits: false })
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const pane = wrapper.get('.terminal-pane')
+    expect(pane.classes()).toContain('terminal-pane--drawer')
+    expect(pane.classes()).not.toContain('terminal-pane--dock')
+    wrapper.unmount()
+  })
+
+  it('is a drawer on a phone-sized pane, however much room it is told it has', async () => {
+    // A shell on a phone wants the whole screen, whatever the layout says.
+    serve([sessionInfo('s1')])
+    setViewportWidth(375)
+    const store = useTerminalStore()
+    const wrapper = await mountPane({ dockFits: true })
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const pane = wrapper.get('.terminal-pane')
+    expect(pane.classes()).toContain('terminal-pane--drawer')
+    expect(pane.classes()).not.toContain('terminal-pane--dock')
+    wrapper.unmount()
+  })
+
+  it('is a drawer until the layout says the pane has room', async () => {
+    serve([sessionInfo('s1')])
+    setViewportWidth(1280)
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const pane = wrapper.get('.terminal-pane')
+    expect(pane.classes()).toContain('terminal-pane--drawer')
+    expect(pane.classes()).not.toContain('terminal-pane--dock')
     wrapper.unmount()
   })
 

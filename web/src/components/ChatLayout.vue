@@ -21,36 +21,208 @@
       aria-hidden="true"
       @click="sidebarCollapsed = true"
     />
-    <div ref="chatMainEl" class="chat-main" :class="{ 'chat-split': !!panelPath }">
-      <!-- Split view when a file is pinned -->
-      <template v-if="panelPath">
-        <div
-          class="chat-split-main"
-          :style="{
-            width: isMobile ? '100%' : (chatSplitRatio * 100) + '%',
-            flex: isMobile ? undefined : '0 0 auto',
-            transition: isDraggingSplit ? 'none' : undefined
-          }"
-        >
+    <div ref="chatMainEl" class="chat-main" :class="{ 'chat-main--terminal': terminalMounted }">
+      <!-- The chat column: everything the route shows, and the terminal's
+           dock beside it. The two are siblings inside .chat-main, so the
+           terminal is a column of the pane rather than a strip under the
+           conversation, and the pinned file's split stays a split of the
+           column. -->
+      <div ref="chatBodyEl" class="chat-body" :class="{ 'chat-split': !!panelPath }">
+        <!-- Split view when a file is pinned -->
+        <template v-if="panelPath">
+          <div
+            class="chat-split-main"
+            :style="{
+              width: isMobile ? '100%' : (chatSplitRatio * 100) + '%',
+              flex: isMobile ? undefined : '0 0 auto',
+              transition: isDraggingSplit ? 'none' : undefined
+            }"
+          >
+            <SubagentChatView
+              v-if="subagentRoute"
+              :key="subagentRoute.agentId"
+              :chat-id="subagentRoute.chatId"
+              :agent-id="subagentRoute.agentId"
+              @open-sidebar="sidebarCollapsed = false"
+            />
+            <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" file-pinned @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+            <!-- The route names a chat the catalog has not delivered yet: the
+                 pane is on its way, so it shows the skeleton rather than
+                 nothing (#1651). -->
+            <ChatPaneSkeleton v-else-if="chatRoutePending" />
+            <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
+              <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
+              <div class="home-boot-body">
+                <!-- Skeleton of the home screen this will become (lane header
+                     with the face+status row inside it, housekeeping tile, chat
+                     rows) — a spinner pill read as "nothing is coming", while
+                     the shapes promise the layout that is about to land. -->
+                <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
+                  <div class="boot-tile" aria-hidden="true">
+                    <span class="boot-line boot-shimmer" style="width: 38%"></span>
+                    <span class="boot-line boot-shimmer" style="width: 88%"></span>
+                    <span class="boot-line boot-shimmer" style="width: 62%"></span>
+                  </div>
+                  <div class="boot-lane" aria-hidden="true">
+                    <div class="boot-lane-header">
+                      <span class="boot-chip boot-shimmer"></span>
+                      <span class="boot-line boot-shimmer" style="width: 26%"></span>
+                      <span class="boot-pill boot-shimmer"></span>
+                    </div>
+                    <div class="boot-status">
+                      <span class="boot-face boot-shimmer" aria-hidden="true"></span>
+                      <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
+                    </div>
+                    <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
+                    <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
+                    <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 44%"></span><span class="boot-meta boot-shimmer"></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- On mobile, the sidebar already lists every active chat. Showing the
+                 homepage behind it after closing a chat would just duplicate the
+                 same list. Hide the empty-state whenever the mobile sidebar is open. -->
+            <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
+              <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
+              <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
+                <!-- The glanceable status (face + summary) lives inside the active
+                     workspace's lane header now (HomeRecentChats.vue), right under
+                     the workspace name it summarizes. This header only remains for
+                     the first-run greeting face, which is the sole greeting-bubble
+                     owner: beside a status line that reads "nothing needs you" the
+                     bubble used to collide with it. -->
+                <div v-if="!hasHomeActivity" class="empty-home-header">
+                  <div class="empty-mark">
+                    <button
+                      type="button"
+                      class="empty-face-btn"
+                      aria-label="Say hello"
+                      @click="onFaceClick"
+                      @mouseenter="onFaceEnter"
+                      @mouseleave="onFaceLeave"
+                    >
+                      <Transition name="face-bubble">
+                        <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                          {{ speechGreeting }}
+                        </div>
+                      </Transition>
+                      <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
+                    </button>
+                  </div>
+                </div>
+                <div class="home-workbench">
+                  <div class="home-main">
+                    <HomeIntake />
+                    <template v-if="!homeAlertsInRail">
+                      <HomeNoticeReopen />
+                      <HousekeepingStrip />
+                    </template>
+                    <HomeWelcomeCard />
+                    <HomeSetupCard />
+                    <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
+                    <div v-if="showGlobalNewChatActions" class="empty-actions">
+                      <button
+                        v-for="action in generalWorkspaceActions"
+                        :key="action.workspace"
+                        class="btn-primary"
+                        :data-workspace-color="action.color"
+                        :disabled="action.isCreating"
+                        @click="chooseNewChat(action.workspace)"
+                      >
+                        {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
+                      </button>
+                    </div>
+                  </div>
+                  <div class="home-rail">
+                    <template v-if="homeAlertsInRail">
+                      <HomeNoticeReopen />
+                      <HousekeepingStrip />
+                    </template>
+                    <HomeReviewSummary />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div
+            v-if="!isMobile"
+            class="chat-split-resizer"
+            :class="{ 'is-dragging': isDraggingSplit }"
+            @mousedown="startSplitDrag"
+          />
+          <!-- Takes whatever the chat pane and gutter leave, so the tile's inset
+               margin never pushes the pair past 100%. -->
+          <div class="chat-split-side">
+            <PinnedFilePanel ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
+          </div>
+        </template>
+        <template v-else>
+          <SettingsView v-if="viewMode === 'settings'" @open-sidebar="sidebarCollapsed = false" />
+          <SchedulePanel
+            v-else-if="viewMode === 'schedules'"
+            :show-new="showNewSchedule"
+            @created="showNewSchedule = false"
+            @close="showNewSchedule = false"
+            @open-sidebar="sidebarCollapsed = false"
+          />
+          <TaskBoardView
+            v-else-if="viewMode === 'tasks'"
+            @open-sidebar="sidebarCollapsed = false"
+          />
+          <MemoryMapView
+            v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
+            @open-sidebar="sidebarCollapsed = false"
+          />
+          <ProjectView
+            v-else-if="projectIdParam"
+            :project-id="projectIdParam"
+            @close="closeProject"
+            @open-sidebar="sidebarCollapsed = false"
+          />
           <SubagentChatView
-            v-if="subagentRoute"
+            v-else-if="subagentRoute"
             :key="subagentRoute.agentId"
             :chat-id="subagentRoute.chatId"
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" file-pinned @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
-          <!-- The route names a chat the catalog has not delivered yet: the
-               pane is on its way, so it shows the skeleton rather than
-               nothing (#1651). -->
+          <template v-else-if="store.activeChat">
+            <!-- Narrow shared pin: a compact native opener for the chat's
+                 server-owned pin, not a forced split pane and never an
+                 auto-opened modal. -->
+            <div v-if="narrowSharedPin" class="narrow-pin-opener">
+              <button
+                type="button"
+                class="narrow-pin-btn"
+                :aria-label="`Open pinned file ${narrowSharedPinBase}`"
+                :title="narrowSharedPin"
+                @click="openNarrowSharedPin"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
+                <span class="narrow-pin-name">{{ narrowSharedPinBase }}</span>
+              </button>
+              <button
+                type="button"
+                class="narrow-pin-close btn-icon"
+                aria-label="Unpin file"
+                :disabled="pinWritePending"
+                @click="unpinCurrent"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          </template>
+          <!-- The route names a chat the catalog has not delivered yet: the pane
+               is on its way, so it shows the skeleton rather than nothing
+               (#1651). -->
           <ChatPaneSkeleton v-else-if="chatRoutePending" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
-              <!-- Skeleton of the home screen this will become (lane header
-                   with the face+status row inside it, housekeeping tile, chat
-                   rows) — a spinner pill read as "nothing is coming", while
-                   the shapes promise the layout that is about to land. -->
+              <!-- Same skeleton as the split-view copy above; only one is ever
+                   mounted, so the two must stay identical. -->
               <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
                 <div class="boot-tile" aria-hidden="true">
                   <span class="boot-line boot-shimmer" style="width: 38%"></span>
@@ -138,179 +310,14 @@
               </div>
             </div>
           </div>
-        </div>
-        <div
-          v-if="!isMobile"
-          class="chat-split-resizer"
-          :class="{ 'is-dragging': isDraggingSplit }"
-          @mousedown="startSplitDrag"
-        />
-        <!-- Takes whatever the chat pane and gutter leave, so the tile's inset
-             margin never pushes the pair past 100%. -->
-        <div class="chat-split-side">
-          <PinnedFilePanel ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
-        </div>
-      </template>
-      <template v-else>
-        <SettingsView v-if="viewMode === 'settings'" @open-sidebar="sidebarCollapsed = false" />
-        <SchedulePanel
-          v-else-if="viewMode === 'schedules'"
-          :show-new="showNewSchedule"
-          @created="showNewSchedule = false"
-          @close="showNewSchedule = false"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <TaskBoardView
-          v-else-if="viewMode === 'tasks'"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <MemoryMapView
-          v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <ProjectView
-          v-else-if="projectIdParam"
-          :project-id="projectIdParam"
-          @close="closeProject"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <SubagentChatView
-          v-else-if="subagentRoute"
-          :key="subagentRoute.agentId"
-          :chat-id="subagentRoute.chatId"
-          :agent-id="subagentRoute.agentId"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <template v-else-if="store.activeChat">
-          <!-- Narrow shared pin: a compact native opener for the chat's
-               server-owned pin, not a forced split pane and never an
-               auto-opened modal. -->
-          <div v-if="narrowSharedPin" class="narrow-pin-opener">
-            <button
-              type="button"
-              class="narrow-pin-btn"
-              :aria-label="`Open pinned file ${narrowSharedPinBase}`"
-              :title="narrowSharedPin"
-              @click="openNarrowSharedPin"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
-              <span class="narrow-pin-name">{{ narrowSharedPinBase }}</span>
-            </button>
-            <button
-              type="button"
-              class="narrow-pin-close btn-icon"
-              aria-label="Unpin file"
-              :disabled="pinWritePending"
-              @click="unpinCurrent"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-          </div>
-          <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         </template>
-        <!-- The route names a chat the catalog has not delivered yet: the pane
-             is on its way, so it shows the skeleton rather than nothing
-             (#1651). -->
-        <ChatPaneSkeleton v-else-if="chatRoutePending" />
-        <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
-          <div class="home-boot-body">
-            <!-- Same skeleton as the split-view copy above; only one is ever
-                 mounted, so the two must stay identical. -->
-            <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
-              <div class="boot-tile" aria-hidden="true">
-                <span class="boot-line boot-shimmer" style="width: 38%"></span>
-                <span class="boot-line boot-shimmer" style="width: 88%"></span>
-                <span class="boot-line boot-shimmer" style="width: 62%"></span>
-              </div>
-              <div class="boot-lane" aria-hidden="true">
-                <div class="boot-lane-header">
-                  <span class="boot-chip boot-shimmer"></span>
-                  <span class="boot-line boot-shimmer" style="width: 26%"></span>
-                  <span class="boot-pill boot-shimmer"></span>
-                </div>
-                <div class="boot-status">
-                  <span class="boot-face boot-shimmer" aria-hidden="true"></span>
-                  <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
-                </div>
-                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
-                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
-                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 44%"></span><span class="boot-meta boot-shimmer"></span></div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <!-- On mobile, the sidebar already lists every active chat. Showing the
-             homepage behind it after closing a chat would just duplicate the
-             same list. Hide the empty-state whenever the mobile sidebar is open. -->
-        <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
-          <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
-            <!-- The glanceable status (face + summary) lives inside the active
-                 workspace's lane header now (HomeRecentChats.vue), right under
-                 the workspace name it summarizes. This header only remains for
-                 the first-run greeting face, which is the sole greeting-bubble
-                 owner: beside a status line that reads "nothing needs you" the
-                 bubble used to collide with it. -->
-            <div v-if="!hasHomeActivity" class="empty-home-header">
-              <div class="empty-mark">
-                <button
-                  type="button"
-                  class="empty-face-btn"
-                  aria-label="Say hello"
-                  @click="onFaceClick"
-                  @mouseenter="onFaceEnter"
-                  @mouseleave="onFaceLeave"
-                >
-                  <Transition name="face-bubble">
-                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                      {{ speechGreeting }}
-                    </div>
-                  </Transition>
-                  <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
-                </button>
-              </div>
-            </div>
-            <div class="home-workbench">
-              <div class="home-main">
-                <HomeIntake />
-                <template v-if="!homeAlertsInRail">
-                  <HomeNoticeReopen />
-                  <HousekeepingStrip />
-                </template>
-                <HomeWelcomeCard />
-                <HomeSetupCard />
-                <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
-                <div v-if="showGlobalNewChatActions" class="empty-actions">
-                  <button
-                    v-for="action in generalWorkspaceActions"
-                    :key="action.workspace"
-                    class="btn-primary"
-                    :data-workspace-color="action.color"
-                    :disabled="action.isCreating"
-                    @click="chooseNewChat(action.workspace)"
-                  >
-                    {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-                  </button>
-                </div>
-              </div>
-              <div class="home-rail">
-                <template v-if="homeAlertsInRail">
-                  <HomeNoticeReopen />
-                  <HousekeepingStrip />
-                </template>
-                <HomeReviewSummary />
-              </div>
-            </div>
-          </div>
-        </div>
-      </template>
-      <!-- The browser terminal's panel: a strip under the chat on a wide
-           pane, a full-height drawer on a phone. It is loaded the first time
-           a terminal is asked for and kept afterwards, so the screen it holds
-           survives a hide — and so a chat page that never opens a terminal
-           does not download it. -->
-      <TerminalPane v-if="terminalMounted" />
+      </div>
+      <!-- The browser terminal's panel: a column beside the chat on a wide
+           pane, a full-height drawer on a phone or on a pane too narrow to
+           hold both. It is loaded the first time a terminal is asked for and
+           kept afterwards, so the screen it holds survives a hide — and so a
+           chat page that never opens a terminal does not download it. -->
+      <TerminalPane v-if="terminalMounted" :dock-fits="terminalDockFits" />
     </div>
     <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
     <ItemPeekHost v-if="itemPeekMounted" />
@@ -531,7 +538,10 @@ function startSplitDrag(e: MouseEvent) {
   isDraggingSplit.value = true
   dragStartX = e.clientX
   
-  const splitContainer = document.querySelector('.chat-main')
+  // The split is a split of the chat column, so the ratio is measured against
+  // that column and not against the whole pane: the terminal dock beside it
+  // is not part of what the resizer divides.
+  const splitContainer = chatBodyEl.value
   if (splitContainer) {
     const rect = splitContainer.getBoundingClientRect()
     dragContainerWidth = rect.width
@@ -757,16 +767,38 @@ const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
 
 /** Mirrors `@container chat-pane (max-width: 940px)` in the styles below: the
- *  same element (.chat-main), the same box (content inline size), the same
+ *  same element (.chat-body), the same box (content inline size), the same
  *  threshold. Home's alerts sit in the rail only while the rail is beside the
  *  column; stacked, they stay under the composer instead of below every chat. */
 const HOME_RAIL_MIN_PANE_PX = 940
+/** The chat column: the route's content, and the box the panes answer to. */
+const chatBodyEl = ref<HTMLElement | null>(null)
+/** The pane: the chat column and the terminal's dock, side by side. */
 const chatMainEl = ref<HTMLElement | null>(null)
 const chatPaneWidth = ref<number | null>(null)
 const homeAlertsInRail = computed(() => chatPaneWidth.value === null
   ? !isMobile.value
   : chatPaneWidth.value > HOME_RAIL_MIN_PANE_PX)
+
+// The terminal's shape is decided by the room the pane actually has, not by
+// the window: a dock takes its own width, and a chat squeezed to a sliver
+// beside it is not a chat anyone can read.
+//
+// 360px is the chat column's floor when the terminal docks. It is the width
+// the app's own narrow chat uses (the details sit in a drawer under 940px),
+// and it is the same floor the dock has, so a pane that holds one holds the
+// other. Below that the terminal takes the drawer, which is always usable.
+const TERMINAL_CHAT_MIN_PX = 360
+/** The dock's own floor: clamp(360px, 38%, 620px) in TerminalPane.vue. */
+const TERMINAL_DOCK_MIN_PX = 360
+/** The pane has to hold both columns for the dock to be the right shape. */
+const TERMINAL_DOCK_MIN_PANE_PX = TERMINAL_CHAT_MIN_PX + TERMINAL_DOCK_MIN_PX
+/** The pane's width, measured: the space the columns have to share. */
+const chatMainWidth = ref<number | null>(null)
+const terminalDockFits = computed(() => chatMainWidth.value !== null
+  && chatMainWidth.value >= TERMINAL_DOCK_MIN_PANE_PX)
 let chatPaneObserver: ResizeObserver | null = null
+let chatMainObserver: ResizeObserver | null = null
 let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
 
 // Only for the true empty state. Every lane carries its own "+ new" and lanes
@@ -1460,12 +1492,24 @@ function onTouchEnd(e: TouchEvent) {
 }
 
 onMounted(() => {
-  if (chatMainEl.value && typeof ResizeObserver !== 'undefined') {
-    chatPaneObserver = new ResizeObserver(entries => {
-      const entry = entries[entries.length - 1]
-      if (entry) chatPaneWidth.value = entry.contentRect.width
-    })
-    chatPaneObserver.observe(chatMainEl.value)
+  if (typeof ResizeObserver !== 'undefined') {
+    // Two observers, one per box: the chat column and the pane that holds
+    // it. The column's width decides where Home's alerts sit; the pane's
+    // decides whether the terminal can dock beside the chat at all.
+    if (chatBodyEl.value) {
+      chatPaneObserver = new ResizeObserver(entries => {
+        const entry = entries[entries.length - 1]
+        if (entry) chatPaneWidth.value = entry.contentRect.width
+      })
+      chatPaneObserver.observe(chatBodyEl.value)
+    }
+    if (chatMainEl.value) {
+      chatMainObserver = new ResizeObserver(entries => {
+        const entry = entries[entries.length - 1]
+        if (entry) chatMainWidth.value = entry.contentRect.width
+      })
+      chatMainObserver.observe(chatMainEl.value)
+    }
   }
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchend', onTouchEnd, { passive: true })
@@ -1477,6 +1521,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   chatPaneObserver?.disconnect()
+  chatMainObserver?.disconnect()
   stopLatestStatusSync()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
@@ -1506,8 +1551,30 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  /* PaneHeader must respond to the space left after the resizable sidebar,
-     not only to the browser viewport width. */
+  /* Layout containment (it used to come with the container type below) keeps
+     this box the containing block for the terminal drawer's absolute inset, so
+     the phone drawer still covers the pane it is in. */
+  contain: layout style;
+}
+
+/* The terminal dock is a column beside the chat, so the pane is a row once
+   the terminal has been asked for. A hidden dock takes no room, so the row is
+   the same layout as the column until the pane is actually opened. */
+.chat-main--terminal {
+  flex-direction: row;
+}
+
+/* The chat column: the route's content, and the box the panes answer to.
+   PaneHeader must respond to the space left after the resizable sidebar and
+   the terminal dock, not only to the browser viewport width, so this is the
+   element the `chat-pane` container is declared on. */
+.chat-body {
+  flex: 1 1 0%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   container-type: inline-size;
   container-name: chat-pane;
 }
@@ -1960,7 +2027,9 @@ onBeforeUnmount(() => {
 
 /* Split-screen layout for pinned file viewer. Both panes share width 50/50
    by default; min-width is a soft floor during drag so a compressed window
-   can still show chat and the pinned document side by side. */
+   can still show chat and the pinned document side by side. The split is a
+   split of the chat column, so the terminal dock stands to its right as the
+   third column. */
 .chat-split {
   flex-direction: row;
 }

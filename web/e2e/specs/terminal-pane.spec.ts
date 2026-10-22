@@ -99,6 +99,80 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   await expect.poll(async () => (await readSession()).cols).not.toBe(before.cols)
 })
 
+test('the terminal docks on the right of the chat when the pane holds both columns', async ({ page }) => {
+  // 1280×900 with the sidebar open leaves the pane 940px: room for a chat
+  // column and the dock's floor, so the dock is the shape it takes.
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await boot(page, CHAT_PATH, COMPOSER)
+
+  // At this width the chat details are a drawer, so the terminal's way in
+  // is one click deeper.
+  await page.locator('.work-inspector-trigger').click()
+  const details = page.locator('#chat-work-rail')
+  await expect(details).toBeVisible()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+  // The wide shape is a column beside the chat, the way the pinned file
+  // panel is one — not a strip under the conversation.
+  await expect(pane).toHaveClass(/terminal-pane--dock/)
+
+  // The chat column is the box the dock stands beside. ChatPanel has a
+  // .chat-body of its own, so the column is named by where it sits.
+  const column = page.locator('.chat-main > .chat-body')
+  const main = page.locator('.chat-main')
+  const columnBox = (await column.boundingBox())!
+  const paneBox = (await pane.boundingBox())!
+  const mainBox = (await main.boundingBox())!
+
+  // To the right of the chat, not under it.
+  expect(paneBox.x).toBeGreaterThanOrEqual(columnBox.x + columnBox.width - 1)
+  // The full height of the pane: a shell wants the vertical room.
+  expect(paneBox.height).toBeGreaterThanOrEqual(mainBox.height - 1)
+  // The width it asks for: the clamp, between its floor and its ceiling.
+  expect(paneBox.width).toBeGreaterThanOrEqual(360)
+  expect(paneBox.width).toBeLessThanOrEqual(620)
+  // And the chat keeps a column worth reading: the dock never squeezes the
+  // conversation to a sliver.
+  expect(columnBox.width).toBeGreaterThanOrEqual(360)
+})
+
+test('a pane too narrow for both columns gets the drawer, not a squeezed chat', async ({ page }) => {
+  // 900×800 with the sidebar open leaves the pane 560px: too narrow for a
+  // chat column and the dock's 360px floor side by side.
+  await page.setViewportSize({ width: 900, height: 800 })
+  await boot(page, CHAT_PATH, COMPOSER)
+  await page.locator('.work-inspector-trigger').click()
+  const details = page.locator('#chat-work-rail')
+  await expect(details).toBeVisible()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+  // The drawer, not a dock in a pane that cannot hold it.
+  await expect(pane).toHaveClass(/terminal-pane--drawer/)
+
+  const main = page.locator('.chat-main')
+  const column = page.locator('.chat-main > .chat-body')
+  const mainBox = (await main.boundingBox())!
+  const paneBox = (await pane.boundingBox())!
+  const columnBox = (await column.boundingBox())!
+
+  // The drawer covers the pane it is in.
+  expect(paneBox.width).toBeGreaterThanOrEqual(mainBox.width - 1)
+  expect(paneBox.height).toBeGreaterThanOrEqual(mainBox.height - 1)
+  // The chat keeps the width it had: the drawer is over the chat, not beside
+  // it, so nothing is taken from the conversation.
+  expect(columnBox.width).toBeGreaterThanOrEqual(mainBox.width - 1)
+
+  // And hiding the terminal gives the chat back exactly what it had.
+  await pane.getByRole('button', { name: 'Hide' }).click()
+  await expect(pane).toBeHidden()
+  const after = (await column.boundingBox())!
+  expect(after.width).toBeGreaterThanOrEqual(columnBox.width - 1)
+})
+
 test('a chat with no repository opens the terminal too', async ({ page }) => {
   // The engine is asked about this chat's own sessions, so the requests are
   // watched rather than the answer's shape.

@@ -159,11 +159,13 @@ iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `
 ### The browser terminal
 
 The chat's and the project's *Open in Terminal* opens a terminal **inside the
-app**: a strip under the chat on a wide pane, a full-height drawer on a phone.
-It is a shell on the engine's own machine, and the pane says so before
-anything is typed. The native host terminal keeps its own button
-(`HostTerminalButton.vue`) for the actions that need a real window on the
-engine's computer: provider sign-in, skill updates, the engine's own update.
+app**: a column beside the chat on a wide pane — a right dock, the full
+height of the pane and `clamp(360px, 38%, 620px)` wide — and a full-height
+drawer on a phone. It is a shell on the engine's own machine, and the pane
+says so before anything is typed. The native host terminal keeps its own
+button (`HostTerminalButton.vue`) for the actions that need a real window on
+the engine's computer: provider sign-in, skill updates, the engine's own
+update.
 
 - **One entry per surface, outside the repository.** A chat's Chat details
   carries a *Terminal* section of its own — under *Repository*, above *Always
@@ -174,6 +176,22 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   a project without a repository — an auto-managed project included — has one
   too. The button is `components/BrowserTerminalButton.vue` and it is the only
   way in; opening the panel starts no shell.
+- **Two shapes, one threshold.** A viewport of 768px or wider docks the pane
+  beside the chat (`terminal-pane--dock`): `.chat-main` is a row, the chat
+  column (`.chat-body`) and the terminal are its two children, and the dock
+  takes `clamp(360px, 38%, 620px)` and the pane's full height. Its body
+  stacks, screen above sessions, because a dock is narrow. Below 768px the
+  pane is a full-screen drawer (`terminal-pane--drawer`) positioned inside
+  `.chat-main`. There is no strip under the chat any more: a shell is kept
+  open while the chat is read, so it takes the vertical room.
+- **The shape comes from the room, not from the window.** A dock needs the
+  chat column's floor (360px — the width the app's own narrow chat uses) and
+  the dock's own floor (360px, the clamp's), so a pane narrower than 720px
+  cannot hold both and gets the drawer instead. `ChatLayout` measures the
+  pane with a `ResizeObserver` and passes `dock-fits` to the pane, which
+  defaults to the drawer; the phone rule still wins over both, so a
+  phone-sized pane is always a drawer. The dock's width is never negotiated:
+  it is the clamp, or the drawer.
 - `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
   bounded renderer backpressure and the replay offsets. The pane
   (`components/TerminalPane.vue`) owns the screen and the controls around it;

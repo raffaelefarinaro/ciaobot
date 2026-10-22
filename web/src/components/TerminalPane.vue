@@ -41,6 +41,16 @@ import type { TerminalRenderer } from '../lib/terminalRenderer'
 
 const store = useTerminalStore()
 
+/**
+ * Whether the pane has room for the dock beside the chat.
+ *
+ * The layout measures its own space and says so; the pane only draws the
+ * shape it is told. It defaults to false — the drawer — because the drawer
+ * is always usable, while a dock in a pane too narrow for it would squeeze
+ * the conversation to a sliver.
+ */
+const props = withDefaults(defineProps<{ dockFits?: boolean }>(), { dockFits: false })
+
 /** The element the screen is mounted into. It exists for the pane's whole life. */
 const surfaceEl = ref<HTMLElement | null>(null)
 /** The control that leaves the terminal, so the focus escape has somewhere to go. */
@@ -63,8 +73,16 @@ let opener: HTMLElement | null = null
 const password = ref('')
 /** The field itself, so what was typed is cleared the moment it is handed over. */
 const passwordEl = ref<HTMLInputElement | null>(null)
-/** A phone-sized pane is a drawer; a wide one is a panel under the chat. */
+/** A phone-sized pane is a drawer; a wide one docks beside the chat. */
 const isMobile = ref(false)
+/**
+ * The shape this pane is in.
+ *
+ * A phone-sized pane is always a drawer, whatever the room: a shell on a
+ * narrow screen wants the whole screen. A wide one docks beside the chat
+ * only when the layout says the pane holds both columns.
+ */
+const isDock = computed(() => !isMobile.value && props.dockFits)
 
 const hasScreen = computed(() => renderer.value !== null)
 const canEnd = computed(() => store.activeSession !== null && !store.ending)
@@ -287,7 +305,11 @@ onBeforeUnmount(() => {
 <template>
   <section
     class="terminal-pane"
-    :class="{ 'terminal-pane--open': store.visible, 'terminal-pane--drawer': isMobile }"
+    :class="{
+      'terminal-pane--open': store.visible,
+      'terminal-pane--drawer': !isDock,
+      'terminal-pane--dock': isDock,
+    }"
     aria-label="Terminal"
     @keydown.capture="onPaneKeydownCapture"
     @keydown="onPaneKeydown"
@@ -411,14 +433,28 @@ onBeforeUnmount(() => {
 .terminal-pane--open {
   display: flex;
   flex-direction: column;
-  /* The panel sits under the chat on a wide pane: it takes its own height and
-     never squeezes the conversation out of the column. */
-  flex: 0 0 auto;
-  height: min(42vh, 420px);
-  min-height: 180px;
   background: var(--bg2);
   color: var(--fg);
-  border-top: 1px solid var(--border);
+}
+
+/* The dock: a column beside the chat, the way the pinned file panel is one.
+   A shell is something people keep open while they read, so it takes the
+   pane's height and its own width, and the conversation keeps its measure
+   instead of being squeezed by a strip underneath it. */
+.terminal-pane--dock.terminal-pane--open {
+  flex: 0 0 auto;
+  width: clamp(360px, 38%, 620px);
+  min-height: 0;
+  border-left: 1px solid var(--border);
+}
+/* A dock is narrow, so the body stacks: the screen takes the room and the
+   session list keeps a slice of the height under it. */
+.terminal-pane--dock .tp-body {
+  flex-direction: column;
+}
+.terminal-pane--dock .tp-sessions {
+  flex: 0 0 auto;
+  max-height: 30%;
 }
 .tp-head {
   display: flex;
@@ -617,8 +653,8 @@ onBeforeUnmount(() => {
 }
 
 /* A phone-sized pane is a drawer: it covers the chat column, because a shell
-   needs the whole screen to be useful and a half-height panel over a chat is
-   neither. The class is set from the same width the layout uses, so the two
+   needs the whole screen to be useful, and a narrow column beside a chat is
+   not. The class is set from the same width the layout uses, so the two
    cannot disagree about which shape the pane is in. */
 .terminal-pane--drawer.terminal-pane--open {
   position: absolute;
@@ -626,7 +662,6 @@ onBeforeUnmount(() => {
   z-index: 60;
   height: auto;
   min-height: 0;
-  border-top: 0;
   padding-bottom: var(--safe-bottom);
 }
 .terminal-pane--drawer .tp-body {
@@ -638,12 +673,15 @@ onBeforeUnmount(() => {
 }
 /* On a phone the header stacks: the buttons take their own row, so the
    status line gets the full width and the path is a line of it rather
-   than a column. */
-.terminal-pane--drawer .tp-head {
+   than a column. A dock stacks it for the same reason: it is a narrow
+   column, and a row of three buttons leaves the title no room. */
+.terminal-pane--drawer .tp-head,
+.terminal-pane--dock .tp-head {
   flex-direction: column;
   align-items: stretch;
 }
-.terminal-pane--drawer .tp-actions {
+.terminal-pane--drawer .tp-actions,
+.terminal-pane--dock .tp-actions {
   justify-content: flex-start;
 }
 @media (pointer: coarse) {
