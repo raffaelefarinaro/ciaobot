@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tools to pair with Ciaobot · Ciaobot</title>
+  <meta name="description" content="Ciaobot stays focused on your personal agent and second brain. For dictation, keeping the computer awake, giving the agent a browser and checking your usage, here are the open-source tools I use, and how to have your agent install them.">
+  <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/companions.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ciaobot">
+  <meta property="og:title" content="Tools to pair with Ciaobot · Ciaobot">
+  <meta property="og:description" content="Ciaobot stays focused on your personal agent and second brain. For dictation, keeping the computer awake, giving the agent a browser and checking your usage, here are the open-source tools I use, and how to have your agent install them.">
+  <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/companions.html">
+  <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Tools to pair with Ciaobot · Ciaobot">
+  <meta name="twitter:description" content="Ciaobot stays focused on your personal agent and second brain. For dictation, keeping the computer awake, giving the agent a browser and checking your usage, here are the open-source tools I use, and how to have your agent install them.">
+  <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="./">Home</a>
+        <a href="guide.html">Get started</a>
+        <a href="features.html">Features</a>
+        <a href="memory.html">Memory</a>
+        <a href="terminal.html">Terminal</a>
+        <a href="companions.html" aria-current="page">Companions</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot/releases">What's new</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <p class="eyebrow">Companions</p>
+      <h1>Tools to pair with Ciaobot</h1>
+      <p class="lead">Ciaobot does one thing: it gives you a personal agent that remembers, and a second brain you own. Everything around that, like talking instead of typing or giving the agent a browser, is left to tools you pick yourself.</p>
+      <ul class="toc" aria-label="On this page">
+        <li><a href="#why">Why these aren't built in</a></li>
+        <li><a href="#dictation">Dictation</a></li>
+        <li><a href="#awake">Keeping the computer awake</a></li>
+        <li><a href="#browser">A browser for the agent</a></li>
+        <li><a href="#usage">How much usage is left</a></li>
+      </ul>
+    </section>
+
+    <section id="why">
+      <h2>Why these aren't built in</h2>
+      <p>Voice models, agent browsers and usage trackers change every few months, and a better one keeps appearing. If Ciaobot shipped its own, you would be stuck with my choice and with however fast I can keep up. Instead, Ciaobot stays small and focused on memory and continuity, and you plug in whatever works best for you.</p>
+      <p>Below is what I use with my own setup. Each one is open source. You don't need to install anything by hand: copy the line under each tool into a Ciaobot chat and the agent installs it for you.</p>
+    </section>
+
+    <section id="dictation">
+      <h2>Dictation</h2>
+      <p>Talking is faster than typing, especially on longer requests. A system-wide dictation app works in Ciaobot's composer and everywhere else on your computer.</p>
+      <div class="card">
+        <h3><a href="https://github.com/altic-dev/FluidVoice">FluidVoice</a></h3>
+        <p>On-device speech-to-text for macOS, so what you say isn't sent to a server to be transcribed. An open-source alternative to Wispr Flow.</p>
+        <p class="note ask">Ask Ciaobot: <code>Install FluidVoice from https://github.com/altic-dev/FluidVoice</code></p>
+      </div>
+    </section>
+
+    <section id="awake">
+      <h2>Keeping the computer awake</h2>
+      <p>Schedules, automations and long background runs only happen while the computer running Ciaobot is awake. If it sleeps, a morning briefing doesn't arrive and a phone can't reach it.</p>
+      <div class="card">
+        <h3><a href="https://github.com/newmarcel/KeepingYouAwake">KeepingYouAwake</a></h3>
+        <p>A small menu-bar app that stops your Mac from going to sleep, for as long as you choose or indefinitely. Closing a laptop's lid can still put it to sleep.</p>
+        <p class="note ask">Ask Ciaobot: <code>Install KeepingYouAwake from https://github.com/newmarcel/KeepingYouAwake and start it at login</code></p>
+      </div>
+      <p>On Linux and Windows, set the computer's own power settings to never sleep.</p>
+    </section>
+
+    <section id="browser">
+      <h2>A browser for the agent</h2>
+      <p>Many tasks need a web page: checking a booking, filling a form, reading a site that has no API. An agent browser lets the agent open pages, click and read them, ideally using the accounts you are already signed in to.</p>
+      <div class="card">
+        <h3><a href="https://github.com/citrolabs/ego-lite">ego lite</a></h3>
+        <p>A browser built for agents such as Claude Code and Codex. It shares your logged-in browser state with the agent without taking over the window you are using.</p>
+        <p class="note ask">Ask Ciaobot: <code>Install ego lite from https://github.com/citrolabs/ego-lite and set it up for this agent</code></p>
+      </div>
+      <p>The agent acts with your accounts in that browser, so treat it like handing someone your unlocked laptop.</p>
+    </section>
+
+    <section id="usage">
+      <h2>How much usage is left</h2>
+      <p>Claude and other subscriptions limit how much you can use them in a session and in a week. A usage tracker shows how much is left before a long task stops halfway.</p>
+      <div class="card">
+        <h3><a href="https://github.com/robinebers/openusage">OpenUsage</a></h3>
+        <p>Shows how much of each AI subscription you have used and how much is left, so you can see a limit coming.</p>
+        <p class="note ask">Ask Ciaobot: <code>Install OpenUsage from https://github.com/robinebers/openusage</code></p>
+      </div>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="terminal.html">← Terminal</a>
+      <a class="btn btn-primary" href="builtin.html">What's built in →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>

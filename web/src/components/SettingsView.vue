@@ -229,6 +229,10 @@
               Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
             </p>
             <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
+            <p class="hint">
+              Dictation, keeping this computer awake, a browser for the agent and usage tracking are left to tools you choose.
+            </p>
+            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/companions.html" target="_blank" rel="noopener noreferrer">Tools to pair with Ciaobot</a>
           </div>
         </div>
 
