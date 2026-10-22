@@ -3922,15 +3922,12 @@ watch(() => chat.value?.chat_id, (id) => notifyChatFocused(id))
 
 const knownFilePaths = computed(() => touchedFiles.value.map(f => f.file_path))
 
-// The conversations this reader can open, by id and human title. A message
-// that names one of them links to it (see lib/chatLinks.ts). A remote chat's
-// session lives on another device and an archived one is a transcript, so
-// neither is a destination a reference should offer: a link to a
-// conversation that cannot be opened is worse than plain text.
+// The conversations the @-mention picker offers are the conversations this
+// reader can open. Use that same set for message references so a reference
+// can never link a chat the picker omits (see lib/chatLinks.ts).
 function reachableChatLinks(): [string, string][] {
   const pairs: [string, string][] = []
-  for (const chat of store.chats) {
-    if (chat.archived || chat.local === false) continue
+  for (const chat of mentionChats.value) {
     if (!isChatId(chat.chat_id)) continue
     pairs.push([chat.chat_id, chat.title || ''])
   }

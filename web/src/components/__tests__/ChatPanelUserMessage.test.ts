@@ -261,4 +261,29 @@ describe('ChatPanel chat references', () => {
     await flushPromises()
     expect(wrapper.get('.message-wrap.assistant .message-content a.chat-link').text()).toBe('Budget review, final')
   })
+
+  it('only links chats offered by the openable-chat list', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.projects = []
+    store.messages['chat-1'] = [
+      { role: 'assistant', content: 'see chat-0123abcd', timestamp: '2026-08-30T13:23:10Z' },
+    ]
+    await flushPromises()
+
+    expect(wrapper.find('.message-wrap.assistant .message-content a.chat-link').exists()).toBe(false)
+  })
+
+  it('keeps the chat-link map instance when only activity time changes', async () => {
+    const { wrapper, store } = await mountPanel()
+    const setupState = (wrapper.vm as unknown as {
+      $: { setupState: { knownChatLinks: Map<string, string> } }
+    }).$.setupState
+    const originalMap = setupState.knownChatLinks
+    const linkedChat = store.chats.find(item => item.chat_id === 'chat-0123abcd')!
+
+    linkedChat.last_activity_at = '2026-10-22T12:00:00Z'
+    await flushPromises()
+
+    expect(setupState.knownChatLinks).toBe(originalMap)
+  })
 })
