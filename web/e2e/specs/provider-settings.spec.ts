@@ -33,7 +33,7 @@ for (const mobile of [false, true]) {
       }
       await route.fulfill({ json: settings })
     })
-    await boot(page, '/settings/models', '.provider-inline-defaults')
+    await boot(page, '/settings/providers', '.provider-inline-defaults')
     await expect(page.locator('.startup-overlay')).toHaveCount(0)
     const defaults = page.locator('.provider-inline-defaults').first()
     // The picker names the model the way every picker does; the raw id is

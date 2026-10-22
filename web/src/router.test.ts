@@ -15,12 +15,15 @@ function makeRouter() {
 }
 
 describe('router', () => {
-  it('redirects the retired providers tab to the chat providers card on models', async () => {
+  it('redirects the renamed models tab to providers, keeping query and hash', async () => {
     const router = makeRouter()
-    await router.push('/settings/providers')
-    expect(router.currentRoute.value.path).toBe('/settings/models')
-    expect(router.currentRoute.value.hash).toBe('#chat-providers')
-    expect(router.currentRoute.value.params.tab).toBe('models')
+    await router.push('/settings/models?x=1#chat-providers')
+    const route = router.currentRoute.value
+    expect(route.path).toBe('/settings/providers')
+    expect(route.hash).toBe('#chat-providers')
+    expect(route.query).toEqual({ x: '1' })
+    expect(route.params.tab).toBe('providers')
+    expect(route.name).toBe('settings-tab')
   })
 
   it('leaves the other settings tabs on the generic tab route', async () => {

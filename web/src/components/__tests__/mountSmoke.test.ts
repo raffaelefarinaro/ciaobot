@@ -725,9 +725,9 @@ describe('component mount smoke', () => {
     }
   })
 
-  it('SettingsView models tab stacks chat providers and background models', async () => {
+  it('SettingsView providers tab shows the chat providers card, and its Status rail with one card', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -737,8 +737,10 @@ describe('component mount smoke', () => {
     await nextTick()
 
     const titles = wrapper.findAll('.section-title').map((el) => el.text())
-    expect(titles).toEqual(['Chat providers', 'Background models'])
+    expect(titles).toEqual(['Chat providers'])
     expect(wrapper.find('#chat-providers').exists()).toBe(true)
+    expect(wrapper.findAll('.settings-toc-item')).toHaveLength(0)
+    expect(wrapper.find('.settings-rail-status').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -748,7 +750,7 @@ describe('component mount smoke', () => {
     const scrolled = vi.fn()
     proto.scrollIntoView = scrolled
     const router = makeRouter()
-    await router.push('/settings/models#chat-providers')
+    await router.push('/settings/providers#chat-providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     // Attached, so document.getElementById can find the card.
@@ -771,7 +773,7 @@ describe('component mount smoke', () => {
 
       // An in-app link to the anchor (this view stays mounted) scrolls again.
       await router.push('/settings/skills')
-      await router.push('/settings/models#chat-providers')
+      await router.push('/settings/providers#chat-providers')
       await flushPromises()
       await nextTick()
       expect(scrolled).toHaveBeenCalledTimes(2)
@@ -802,7 +804,7 @@ describe('component mount smoke', () => {
       },
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -848,7 +850,7 @@ describe('component mount smoke', () => {
     }
     testApi.setResponse('/api/settings/providers', { ...original, connections })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -948,7 +950,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView labels every provider connection from the backend registry', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -973,7 +975,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView Connect reports the terminal it opened', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -996,7 +998,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView Connect on a remote browser shows the command to run on the host', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1062,7 +1064,7 @@ describe('component mount smoke', () => {
       },
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1089,7 +1091,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView renders no API-key entry UI even when the payload advertises keys', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1111,7 +1113,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView shows per-provider defaults and saves a default model', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1171,7 +1173,7 @@ describe('component mount smoke', () => {
       return originalGet(path)
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1201,7 +1203,7 @@ describe('component mount smoke', () => {
       return originalGet(path)
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1220,7 +1222,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView offers a per-provider default permission mode', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1254,7 +1256,7 @@ describe('component mount smoke', () => {
       opencode_models: [],
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1299,7 +1301,7 @@ describe('component mount smoke', () => {
       opencode_models: opencodeModels,
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {

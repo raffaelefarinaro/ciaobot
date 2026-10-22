@@ -459,7 +459,7 @@ const GET_ROUTES = {
     providers: [{ id: 'claude', label: 'Claude', short_label: 'Claude', capabilities: {} }],
     thinking_levels: { claude: ['low', 'high'] },
   }),
-  // Settings → Models reads these. The real endpoints always send every
+  // Settings → Providers reads these. The real endpoints always send every
   // field; an empty object crashed the tab, so the stub mirrors the shape.
   '/api/settings/routines': () => ({
     insights_enabled: true,

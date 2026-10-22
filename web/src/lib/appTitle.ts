@@ -9,8 +9,8 @@ export function formatDocumentTitle(pageTitle?: string | null, unread = 0): stri
 
 export function settingsTabTitle(tab: string | undefined): string {
   switch (tab) {
-    case 'models':
-      return 'models & providers'
+    case 'providers':
+      return 'providers'
     case 'workspaces':
       return 'workspaces'
     case 'skills':

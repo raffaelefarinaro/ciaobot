@@ -56,7 +56,7 @@ async function copy() {
     <summary class="signin-hint-summary">How to sign in again</summary>
     <div class="signin-hint-body">
       <p v-if="loading" class="signin-hint-status">Looking up the sign-in command…</p>
-      <p v-else-if="loadError" class="signin-hint-status" role="alert">{{ loadError }} Settings → Models has the provider's sign-in button.</p>
+      <p v-else-if="loadError" class="signin-hint-status" role="alert">{{ loadError }} Settings → Providers has the provider's sign-in button.</p>
       <ol v-else-if="connection" class="signin-hint-steps">
         <li>On the computer running Ciaobot, open a terminal (Terminal on a Mac, PowerShell on Windows), or use Run in Terminal below when you are on that computer.</li>
         <li>

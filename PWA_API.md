@@ -154,7 +154,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, stale_after_days, enabled, builtin, note_count}`. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, a negative `stale_after_days`, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
-| GET | `/api/mcp/status` | Read-only provider-native MCP inventory for `?workspace=<name>` (or the primary workspace). Returns `{workspace, agent_root, providers}`. Each provider row has `{provider, available, inventory_state, servers, setup}`. Server rows contain safe metadata `{name, scope, source, kind, enabled, allowed, connections}`; connections are per-chat `{chat_id, state, error?}` with state `connected`, `failed`, `disabled`, `needs_auth`, or `unknown`. `allowed` is `false` when Claude workspace policy blocks the server, `true` when a project server is permitted, and `null` when policy is not applicable/known. No running session produces an empty connections array. Invalid native config yields `inventory_state: "unknown"`; secrets, endpoint URLs, arguments and raw provider errors are never returned. The route does not start providers or MCP servers. Use the provider's own CLI to add/authenticate servers; `setup.add` and `setup.authenticate` give workspace-specific instructions |
+| GET | `/api/mcp/status` | Read-only provider-native MCP inventory for `?workspace=<name>` (or the primary workspace). Returns `{workspace, agent_root, providers}`. Each provider row has `{provider, available, inventory_state, servers}`. Top level also has `shell: {kind, cd_prefix}`, the engine shell's change-directory prefix for the workspace folder. Server rows contain safe metadata `{name, scope, source, kind, enabled, allowed, connections}`; connections are per-chat `{chat_id, state, error?}` with state `connected`, `failed`, `disabled`, `needs_auth`, or `unknown`. `allowed` is `false` when Claude workspace policy blocks the server, `true` when a project server is permitted, and `null` when policy is not applicable/known. No running session produces an empty connections array. Invalid native config yields `inventory_state: "unknown"`; secrets, endpoint URLs, arguments and raw provider errors are never returned. The route does not start providers or MCP servers. Use the provider's own CLI to add/authenticate servers; `setup.add` and `setup.authenticate` give workspace-specific instructions |
 | GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
 | GET | `/api/startup-status` | Read startup phase progress. The payload carries `phases` (each `{name, status, message, started_at, finished_at}`), `overall_ready`, and `port_in_use` — a boolean that is `true` only when the engine could not bind its port (#1654), so a client can tell "the port is taken" from "still starting" without reading a phase's prose |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
@@ -1025,7 +1025,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
   -H 'content-type: application/json' -d '{"profile":"personal"}'
 ```
 
-**Routine settings (Settings → General / Models)**
+**Routine settings (Settings → General / Providers)**
 
 ```bash
 # Read internal-routine settings: the automatic-session-insights switch and the
@@ -1873,7 +1873,7 @@ use those rather than curl when you are in one.
 
 ```bash
 # Configure a trigger. The launched turn runs in the new-chat default permission
-# mode (Settings → Models & providers); a sender can never change it.
+# mode (Settings → Providers); a sender can never change it.
 # The reply carries the secret, ONCE — only its SHA-256 is stored, so copy it
 # into the sender's configuration now. There is no way to read it back.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/webhooks" \

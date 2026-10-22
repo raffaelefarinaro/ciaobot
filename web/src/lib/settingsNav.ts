@@ -1,13 +1,29 @@
-// Settings tabs, in rail order. /settings is the General tab (route kept as-is).
-export const SETTINGS_NAV = [
-  { to: '/settings', label: 'General' },
-  { to: '/settings/workspaces', label: 'Workspaces' },
-  { to: '/settings/models', label: 'Models & providers' },
-  { to: '/settings/skills', label: 'Skills' },
-  { to: '/settings/subagents', label: 'Subagents' },
-  { to: '/settings/commands', label: 'Commands' },
-  { to: '/settings/mcp', label: 'MCP servers' },
-] as const
+// Settings tabs, in rail order, in two groups: Ciaobot (engine-wide) and the
+// active workspace (its name and tile, filled in by the sidebar). /settings is
+// the General tab (route kept as-is).
+export type SettingsNavItem = { readonly to: string; readonly label: string }
+export type SettingsNavGroup = {
+  readonly id: 'engine' | 'workspace'
+  // null: the sidebar shows the active workspace's name and tile instead.
+  readonly label: string | null
+  readonly items: readonly SettingsNavItem[]
+}
+
+export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
+  { id: 'engine', label: 'Ciaobot', items: [
+    { to: '/settings', label: 'General' },
+    { to: '/settings/providers', label: 'Providers' },
+    { to: '/settings/workspaces', label: 'Workspaces' },
+  ] },
+  { id: 'workspace', label: null, items: [
+    { to: '/settings/skills', label: 'Skills' },
+    { to: '/settings/subagents', label: 'Subagents' },
+    { to: '/settings/commands', label: 'Commands' },
+    { to: '/settings/mcp', label: 'MCP servers' },
+  ] },
+]
+
+export const SETTINGS_NAV: readonly SettingsNavItem[] = SETTINGS_NAV_GROUPS.flatMap(group => group.items)
 
 // The label of the tab a settings path shows, for the pane header. A path
 // outside the list (an old or unknown tab) falls back to "Settings".

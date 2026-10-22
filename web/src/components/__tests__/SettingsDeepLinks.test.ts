@@ -379,7 +379,7 @@ describe('Settings > Workspaces File access deep link', () => {
         `${WORKSPACES}?workspace=work#other`,
         `${WORKSPACES}?workspace=work&action=save#file-access`,
         `${WORKSPACES}?workspace=work&workspace=personal#file-access`,
-        `/settings/models?workspace=work#file-access`,
+        `/settings/providers?workspace=work#file-access`,
       ]) {
         await router.push(path)
         await settle()

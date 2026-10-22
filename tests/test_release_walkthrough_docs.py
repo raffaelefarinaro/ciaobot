@@ -93,7 +93,7 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
     for route in (
         "`/settings`",
         "`/settings/workspaces`",
-        "`/settings/models`",
+        "`/settings/providers`",
         "`/settings/skills`",
         "`/settings/subagents`",
         "`/settings/commands`",
