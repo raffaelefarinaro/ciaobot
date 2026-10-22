@@ -18,7 +18,7 @@
 
 ## Offering a command
 
-- **The agent can offer a command; the user runs it.** `ciao chat terminal-offer --command-file FILE` puts a suggested command into the chat that asked for it, as a card. The file holds the literal command text, and the offer belongs to that one chat.
+- **The agent can offer a command; the user runs it.** `ciao chat terminal-offer --command-file FILE` puts a suggested command into the chat that asked for it, as a card. The file holds the command text (outer whitespace and line endings are normalized), and the offer belongs to that one chat.
 - **The card is guidance, not a verdict.** It is labelled **Suggested command — review before running**, because the text is model-authored and the engine has not checked it. The card copies the command, opens the terminal, and can be dismissed. It never types the command, never runs it, never unlocks the terminal, and never brings the shell's output back into the chat.
 - **The plain entry is always there.** **Open in Terminal** works with or without a card, so an offer adds a shortcut and is never a gate.
 - **The offer is transient.** It lives in the running engine only: it is not written into the chat's saved state, the audit log or a backup, it is not copied into a fork or a continued chat, and it is gone after a restart, a new provider session, an archive, a handover, or the user dismissing it. The provider's own transcript may still hold the tool arguments, so never promise that a suggested command leaves no trace anywhere.

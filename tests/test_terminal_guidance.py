@@ -216,7 +216,11 @@ def test_the_documented_offer_form_is_the_form_the_parser_accepts() -> None:
     """The guidance's command form is the form the real parser takes."""
     guidance = _reference("terminal.md")
     assert "ciao chat terminal-offer --command-file FILE" in guidance
-    assert "--command-file FILE" in _offer_help(), "the parser renders another form"
+    # The flag and its metavar as one token, so a metavar change to
+    # FILEPATH (a substring match) cannot pass unnoticed.
+    assert re.search(r"--command-file\s+FILE(?!\w)", _offer_help()), (
+        "the parser renders another form"
+    )
     parsed = agent_cli.build_parser().parse_args(
         ["chat", "terminal-offer", "--command-file", "command.txt"]
     )
@@ -234,8 +238,11 @@ def test_the_offer_takes_a_command_file_and_nothing_else() -> None:
     assert _refused(
         ["chat", "terminal-offer", "--command-file", "command.txt", "--chat", "other"]
     ), "the offer takes no target"
+    # With the required file present, the only objection left is `--command`
+    # itself; without it argparse would refuse for the missing file and the
+    # assertion could never observe an inline option.
     assert _refused(
-        ["chat", "terminal-offer", "--command", "echo hello"]
+        ["chat", "terminal-offer", "--command-file", "command.txt", "--command", "echo hello"]
     ), "the offer takes no inline command"
     assert _refused(
         ["chat", "terminal-offer", "--command-file", "command.txt", "echo hello"]
