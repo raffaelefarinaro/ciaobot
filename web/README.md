@@ -465,7 +465,8 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   of `gws_auth.slugify_profile`; `tests/test_gws_auth.py` pins only its reserved-name list) and never
   typed. The workspace is linked when the account connects, through
   `useWorkspaceAdmin.setWorkspaceGwsLink`; saving the form cards never sends
-  `gws_profile`.
+  `gws_profile`. Manage workspaces has no Google card: an account no
+  workspace links to has no screen.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General is split
   into four pages. General begins with the Updates section (compact to a title

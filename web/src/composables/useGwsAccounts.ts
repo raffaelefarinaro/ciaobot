@@ -1,6 +1,5 @@
 import { computed, onUnmounted, ref, type InjectionKey } from 'vue'
 import { api } from '../lib/api'
-import { askConfirm } from '../lib/confirm'
 import { errorMessage } from '../lib/errorMessage'
 import { isLoopbackHostname } from '../lib/loopback'
 import { useProjectStore } from '../stores/projects'
@@ -22,20 +21,6 @@ export function useGwsAccounts(deps: {
   const gwsIntegration = ref<GwsIntegrationSettings | null>(null)
   const gwsIntegrationLoaded = ref(false)
   const gwsIntegrationError = ref('')
-
-  function gwsProfileStatus(profile: GwsProfile): string {
-    if (profile.configured && profile.needs_relogin) return 'Login expired'
-    if (profile.configured) return 'Authenticated'
-    if (profile.client_secret_present) return 'Ready to auth'
-    return 'Needs OAuth client'
-  }
-
-  function gwsProfileBadgeClass(profile: GwsProfile): string {
-    if (profile.configured && profile.needs_relogin) return 'badge--error'
-    if (profile.configured) return 'badge--success'
-    if (profile.client_secret_present) return 'badge--warn'
-    return 'badge--error'
-  }
 
   // Only the accounts this install actually has. No built-in personal/work pair:
   // a fresh install has none until the user connects one from a workspace's Overview.
@@ -308,33 +293,6 @@ export function useGwsAccounts(deps: {
     delete gwsRedirectUrls.value[profileName]
   }
 
-  async function disconnectGwsProfile(profileName: string, deleteClientSecret: boolean) {
-    const message = deleteClientSecret
-      ? `Are you sure you want to delete the OAuth Client Secret for the ${profileName} profile?`
-      : `Are you sure you want to disconnect/sign out the ${profileName} Google account?`
-
-    if (!await askConfirm(message, {
-      title: deleteClientSecret ? 'Delete OAuth Client Secret' : 'Disconnect Google account',
-      confirmLabel: deleteClientSecret ? 'Delete secret' : 'Disconnect',
-      destructive: true,
-    })) return
-
-    gwsSavingProfile.value = profileName
-    try {
-      const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/disconnect', {
-        profile: profileName,
-        delete_client_secret: deleteClientSecret,
-      })
-      gwsIntegration.value = updated
-      cancelGwsAuth(profileName)
-    } catch (e) {
-      notifyFailed('Could not update the profile connection', errorMessage(e, 'The request failed.'))
-    } finally {
-      gwsSavingProfile.value = null
-    }
-  }
-
-
   /** POST /api/integrations/gws/profiles/add {name, label}. Sets gwsIntegration from the reply; false (and notifyFailed) on error. No confirm. */
   async function registerGwsProfile(name: string, label: string): Promise<boolean> {
     try {
@@ -370,8 +328,6 @@ export function useGwsAccounts(deps: {
     gwsIntegration,
     gwsIntegrationLoaded,
     gwsIntegrationError,
-    gwsProfileStatus,
-    gwsProfileBadgeClass,
     gwsProfileOptions,
     fetchGwsIntegration,
     installGwsInChat,
@@ -391,12 +347,10 @@ export function useGwsAccounts(deps: {
     startGwsAuth,
     exchangeGwsCode,
     cancelGwsAuth,
-    disconnectGwsProfile,
     registerGwsProfile,
     removeGwsAccount,
   }
 }
 
 export type GwsAccounts = ReturnType<typeof useGwsAccounts>
-export type GwsProfile = GwsIntegrationSettings['profiles'][number]
 export const GWS_ACCOUNTS_KEY: InjectionKey<GwsAccounts> = Symbol('gws-accounts')

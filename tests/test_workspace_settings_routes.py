@@ -18,7 +18,6 @@ from ciao.web.routes_api import (
     gws_save_client_secret,
     gws_auth_url,
     gws_exchange_code,
-    gws_disconnect,
     gws_add_profile,
     gws_remove_profile,
     list_workspaces,
@@ -119,11 +118,6 @@ def _client(
             Route(
                 "/api/integrations/gws/exchange",
                 gws_exchange_code,
-                methods=["POST"],
-            ),
-            Route(
-                "/api/integrations/gws/disconnect",
-                gws_disconnect,
                 methods=["POST"],
             ),
             Route(
@@ -826,26 +820,6 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     profiles = {p["name"]: p for p in data["profiles"]}
     assert profiles["personal"]["configured"] is True
     assert profiles["personal"]["email"] == "test-email@example.com"
-
-    # 4. Test disconnect
-    resp = client.post(
-        "/api/integrations/gws/disconnect",
-        json={"profile": "personal", "delete_client_secret": False}
-    )
-    assert resp.status_code == 200
-    profiles = {p["name"]: p for p in resp.json()["profiles"]}
-    assert profiles["personal"]["configured"] is False
-    assert profiles["personal"]["client_secret_present"] is True
-
-    # Disconnect and delete client secret
-    resp = client.post(
-        "/api/integrations/gws/disconnect",
-        json={"profile": "personal", "delete_client_secret": True}
-    )
-    assert resp.status_code == 200
-    profiles = {p["name"]: p for p in resp.json()["profiles"]}
-    assert profiles["personal"]["configured"] is False
-    assert profiles["personal"]["client_secret_present"] is False
 
 
 def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):

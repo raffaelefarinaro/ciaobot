@@ -665,8 +665,7 @@ it('collapses Updates to its title and an up-to-date badge when nothing is in pr
   )
   try {
     // The first card on General is Updates. Its title stays; the status sits in
-    // the corner as the same badge the Google Workspace section uses, and the
-    // copy and the engine panel are not rendered at all.
+    // the corner as a badge, and the copy and the engine panel are not rendered at all.
     const card = wrapper.get('.card')
     expect(card.get('.section-title').text()).toBe('Updates')
     expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 0.20.0')

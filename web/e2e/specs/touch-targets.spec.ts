@@ -107,19 +107,16 @@ const MAX_SKIPPED = 3
 
 /**
  * Measure every open `.field-info-panel`: report those whose box leaves the
- * viewport or sits more than 12px from the visible glyph's bottom, and name
- * the ones measured so the caller can prove the check ran.
+ * viewport or sits more than 12px from the visible glyph's bottom.
  */
 async function panelProblems(page: Page) {
   return page.evaluate(() => {
     const out: string[] = []
-    const measured: string[] = []
     const w = window.innerWidth
     for (const el of Array.from(document.querySelectorAll('.field-info-panel'))) {
       const r = el.getBoundingClientRect()
       if (r.width === 0) continue
       const summary = el.parentElement?.querySelector('summary')
-      measured.push(summary?.getAttribute('aria-label') ?? '')
       if (r.left < -0.5 || r.right > w + 0.5) out.push(`panel overflows viewport: left ${Math.round(r.left)} right ${Math.round(r.right)} of ${w}`)
       const s = summary?.getBoundingClientRect()
       // The 20px glyph sits centred in the 44px hit area, so its bottom is the
@@ -127,7 +124,7 @@ async function panelProblems(page: Page) {
       const glyphBottom = s ? s.bottom - 12 : 0
       if (s && Math.abs(r.top - glyphBottom) > 12.5) out.push(`panel ${Math.round(r.top - glyphBottom)}px from the glyph`)
     }
-    return { out, measured }
+    return { out }
   })
 }
 
@@ -232,7 +229,6 @@ test.describe('touch targets', () => {
   test('controls inside menus and dialogs are at least 44×44 on touch', async ({ page }) => {
     const small: string[] = []
     const panels: string[] = []
-    const measuredPanels = new Set<string>()
     const opened: string[] = []
     const skipped: string[] = []
     for (const [route, ready] of POPUP_SURFACES) {
@@ -265,7 +261,6 @@ test.describe('touch targets', () => {
         const found = await measure(page)
         for (const f of found.bad) if (!baseline.has(f)) small.push(`${name}: ${f}`)
         const p = await panelProblems(page)
-        p.measured.forEach((m) => measuredPanels.add(m))
         for (const m of p.out) panels.push(`${name}: ${m}`)
         await page.keyboard.press('Escape')
         // Escape leaves forms open on Settings, and a trigger may navigate: start those clean.
@@ -279,9 +274,6 @@ test.describe('touch targets', () => {
       expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
     }
     expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED)
-    for (const label of ['About Google Workspace integration']) {
-      expect(measuredPanels.has(label), `panel "${label}" was never measured`).toBe(true)
-    }
     expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
     expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
   })

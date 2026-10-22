@@ -33,6 +33,7 @@ Debug only in dev mode). `/settings/access` carries the PWA password card,
 Other devices and Network access. `/settings/appearance` is the Appearance card
 alone. Watch for:
 
+- Google account card on `/settings/workspace`: one row (Connect Google account when none; Connected with a ··· menu when linked); open Connect and confirm Escape closes it and focus returns.
 - The online backup card shows state and last successful upload; scope,
   repository and raw diagnostics sit behind a native `<details>` disclosure.
 - The "What can Ciaobot do?" card at the top links out to the public
