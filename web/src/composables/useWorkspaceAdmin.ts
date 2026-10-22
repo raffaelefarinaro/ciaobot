@@ -9,7 +9,8 @@ import {
   normalizeWorkspaceColor,
   type WorkspaceColorId,
 } from '../lib/workspaceColors'
-import type { ArchivedWorkspace, WorkspaceInfo, WorkspaceProvider } from '../lib/types'
+import { normalizeOverrides } from '../lib/workspaceOverrides'
+import type { ArchivedWorkspace, ProviderOverrides, WorkspaceInfo, WorkspaceProvider } from '../lib/types'
 
 // The per-workspace admin state behind Settings: the workspace registry as
 // editable forms, the save/archive/restore actions, and the dirty tracking.
@@ -28,6 +29,9 @@ export type WorkspaceForm = {
   // '' is "no choice": the key is left out of a create, and an update sends
   // null, so the engine keeps or returns the workspace to its default.
   agent_fs_scope: FsScopeChoice
+  // Sparse per-provider overrides of the engine defaults; always built with
+  // normalizeOverrides/setOverride so JSON.stringify(form) stays a stable dirty check.
+  provider_overrides: ProviderOverrides
 }
 
 export type FsScopeChoice = 'workspace' | 'machine' | ''
@@ -92,6 +96,7 @@ export function useWorkspaceAdmin(deps: {
       claude_ai_connectors: true,
       color: DEFAULT_WORKSPACE_COLOR,
       agent_fs_scope: '',
+      provider_overrides: {},
     }
   }
 
@@ -120,6 +125,7 @@ export function useWorkspaceAdmin(deps: {
       claude_ai_connectors: ws.claude_ai_connectors !== false,
       color: normalizeWorkspaceColor(ws.color),
       agent_fs_scope: fsScopeChoice(ws.agent_fs_scope),
+      provider_overrides: normalizeOverrides(ws.provider_overrides),
     }
   }
 
@@ -260,6 +266,12 @@ export function useWorkspaceAdmin(deps: {
         // as null, which clears an earlier explicit choice.
         ...(form.agent_fs_scope !== fsScopeChoice(projectStore.workspaces.find(w => w.name === name)?.agent_fs_scope)
           ? { agent_fs_scope: form.agent_fs_scope || null }
+          : {}),
+        // Sent whole only when changed; an emptied map goes as {} and clears.
+        ...(JSON.stringify(form.provider_overrides) !== JSON.stringify(normalizeOverrides(
+          projectStore.workspaces.find(w => w.name === name)?.provider_overrides,
+        ))
+          ? { provider_overrides: form.provider_overrides }
           : {}),
       })
       notifySaved(renaming ? `Workspace "${name}" renamed to "${target}".` : `Workspace "${name}" saved.`, 'Workspaces')

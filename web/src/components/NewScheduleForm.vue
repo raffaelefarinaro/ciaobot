@@ -211,6 +211,7 @@ import type { RuntimeProvider, ScheduleArchivePolicy } from '../lib/types'
 import ModelSelector from '../components/ModelSelector.vue'
 import { providerForModelSection, sectionsFromModelsResponse } from '../lib/modelSections'
 import { contextBindsFixedChat } from '../lib/scheduleBinding'
+import { effectiveWorkspaceDefaultModel } from '../lib/workspaceOverrides'
 const emit = defineEmits<{ created: []; cancel: [] }>()
 const store = useTaskStore()
 const projectStore = useProjectStore()
@@ -283,11 +284,7 @@ const inheritedModelLabel = computed(() => {
   const provider = projectStore.workspaceProviderOptions.find(
     option => option.value === workspace?.default_provider,
   )?.label || workspace?.default_provider || 'provider'
-  // Workspaces no longer pin a model: the effective default is the
-  // provider's own default from the Models tab.
-  const model = store.models?.provider_defaults?.[workspace?.default_provider || '']
-    || store.models?.default
-    || ''
+  const model = effectiveWorkspaceDefaultModel(workspace, store.models)
   return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`
 })
 
