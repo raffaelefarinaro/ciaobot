@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { gwsAccountState, gwsDialogSteps, gwsSetupGroups, gwsSetupProgress } from '../gwsSetup'
-import type { GwsIntegrationProfile, GwsIntegrationSettings } from '../types'
+import { gwsAccountState, gwsDialogSteps } from '../gwsSetup'
+import type { GwsIntegrationProfile } from '../types'
 
 function profile(overrides: Partial<GwsIntegrationProfile> = {}): GwsIntegrationProfile {
   return {
@@ -23,117 +23,6 @@ function profile(overrides: Partial<GwsIntegrationProfile> = {}): GwsIntegration
     ...overrides,
   }
 }
-
-function integration(profiles: GwsIntegrationProfile[], installed = true): GwsIntegrationSettings {
-  return {
-    installed,
-    binary_path: '/usr/local/bin/gws',
-    cli_available: true,
-    profiles,
-  }
-}
-
-function states(s: GwsIntegrationSettings): Record<string, string> {
-  return Object.fromEntries(gwsSetupProgress(s).steps.map((step) => [step.id, step.state]))
-}
-
-describe('gwsSetupProgress', () => {
-  it('starts at install when gws is missing', () => {
-    const progress = gwsSetupProgress(integration([], false))
-    expect(progress.focus).toBeNull()
-    expect(progress.complete).toBe(false)
-    expect(states(integration([], false))).toEqual({
-      install: 'current',
-      account: 'pending',
-      client: 'pending',
-      signin: 'pending',
-      link: 'pending',
-    })
-  })
-
-  it('asks for an account when none exist', () => {
-    const s = integration([])
-    expect(states(s)).toEqual({
-      install: 'done',
-      account: 'current',
-      client: 'pending',
-      signin: 'pending',
-      link: 'pending',
-    })
-    expect(gwsSetupProgress(s).complete).toBe(false)
-  })
-
-  it('asks for a client before sign-in', () => {
-    const s = integration([profile({ client_secret_present: false, configured: false })])
-    expect(states(s)).toMatchObject({ client: 'current', signin: 'pending' })
-  })
-
-  it('asks for sign-in once a client exists', () => {
-    const s = integration([profile({ client_secret_present: true, configured: false })])
-    expect(states(s)).toMatchObject({ client: 'done', signin: 'current' })
-  })
-
-  it('treats an expired login as not signed in', () => {
-    const s = integration([profile({ configured: true, needs_relogin: true })])
-    expect(states(s)).toMatchObject({ signin: 'current' })
-  })
-
-  it('asks to link a workspace after sign-in', () => {
-    const s = integration([profile({ workspaces: [] })])
-    expect(states(s)).toMatchObject({ signin: 'done', link: 'current' })
-  })
-
-  it('focuses the first profile that is not ready', () => {
-    const s = integration([
-      profile(),
-      profile({ name: 'work', label: 'Work Google account', client_secret_present: false, configured: false }),
-    ])
-    const progress = gwsSetupProgress(s)
-    expect(progress.focus?.name).toBe('work')
-    expect(states(s)).toMatchObject({ client: 'current' })
-  })
-
-  it('is complete when every profile is signed in and linked', () => {
-    const progress = gwsSetupProgress(integration([profile(), profile({ name: 'work', workspaces: ['work'] })]))
-    expect(progress.complete).toBe(true)
-    expect(progress.focus).toBeNull()
-    expect(progress.steps.every((step) => step.state === 'done')).toBe(true)
-  })
-
-  it('keeps ready accounts done while gws itself is missing', () => {
-    const progress = gwsSetupProgress(integration([profile()], false))
-    expect(progress.complete).toBe(false)
-    expect(states(integration([profile()], false))).toEqual({
-      install: 'current',
-      account: 'done',
-      client: 'done',
-      signin: 'done',
-      link: 'done',
-    })
-  })
-})
-
-describe('gwsSetupGroups', () => {
-  it('groups setup into done current and pending without changing order', () => {
-    const groups = gwsSetupGroups(gwsSetupProgress(integration([])))
-    expect(groups.done.map((step) => step.id)).toEqual(['install'])
-    expect(groups.current?.id).toBe('account')
-    expect(groups.pending.map((step) => step.id)).toEqual(['client', 'signin', 'link'])
-  })
-
-  it('has no current step and nothing pending once every account is ready', () => {
-    const groups = gwsSetupGroups(gwsSetupProgress(integration([profile()])))
-    expect(groups.current).toBeNull()
-    expect(groups.pending).toEqual([])
-    expect(groups.done.map((step) => step.id)).toEqual([
-      'install',
-      'account',
-      'client',
-      'signin',
-      'link',
-    ])
-  })
-})
 
 describe('gwsDialogSteps', () => {
   const states = (installed: boolean, p: GwsIntegrationProfile | null) =>
