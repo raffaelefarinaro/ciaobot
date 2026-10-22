@@ -68,7 +68,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/client-secret": "browser GWS integration client_secret upload",
     "/api/integrations/gws/auth-url": "browser GWS integration auth url request",
     "/api/integrations/gws/exchange": "browser GWS integration oauth token exchange",
-    "/api/integrations/gws/disconnect": "browser GWS integration disconnect/removal",
     "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
     "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",
