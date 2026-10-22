@@ -13,6 +13,7 @@ import pytest
 from ciao.execution_modes import harness_skill_overrides
 from ciao.fs_sandbox import FsSandboxUnavailable
 from ciao.models import AgentRequest, ImageAttachment, ResultEvent
+from ciao.providers import claude
 from ciao.providers.base import (
     build_claude_message_content,
     build_prompt,
@@ -3004,6 +3005,65 @@ def test_initialize_timeout_matches_only_the_initialize_subtype() -> None:
     assert _is_initialize_timeout(Exception("Control request timeout: initialize"))
     assert not _is_initialize_timeout(Exception("Control request timeout: get_context_usage"))
     assert not _is_initialize_timeout(Exception("ProcessTransport is not ready for writing"))
+
+
+def test_claude_connect_deadline_outlives_the_sdk_initialize_deadline() -> None:
+    # Our outer wait must outlive the SDK's own initialize budget, or it fires
+    # first with a bare TimeoutError and the SDK never names the cause.
+    assert claude._CONNECT_TIMEOUT_S > claude._INITIALIZE_TIMEOUT_MS / 1000
+
+
+@pytest.mark.asyncio
+async def test_claude_connect_uses_the_connect_budget(monkeypatch) -> None:
+    # Pins that the helper waits on _CONNECT_TIMEOUT_S, not a literal: the
+    # other connect tests pass whichever deadline the helper uses, because
+    # a raising connect() never reaches asyncio.wait_for's timer, and a
+    # literal (e.g. 120) would still raise ClaudeInitializeTimeout here,
+    # just two minutes later.
+    monkeypatch.setattr(claude, "_CONNECT_TIMEOUT_S", 0.01)
+
+    class HangingClient:
+        async def connect(self) -> None:
+            await asyncio.sleep(3600)
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(ClaudeInitializeTimeout):
+        await claude._connect_with_deadline(HangingClient())
+    assert asyncio.get_running_loop().time() - started < 1.0
+
+
+@pytest.mark.asyncio
+async def test_claude_connect_timeout_is_an_initialize_miss() -> None:
+    class FakeClient:
+        async def connect(self) -> None:
+            raise asyncio.TimeoutError()
+
+    with pytest.raises(ClaudeInitializeTimeout):
+        await claude._connect_with_deadline(FakeClient())
+
+
+@pytest.mark.asyncio
+async def test_claude_initialize_message_is_still_classified() -> None:
+    class FakeClient:
+        async def connect(self) -> None:
+            raise Exception("Control request timeout: initialize")
+
+    with pytest.raises(ClaudeInitializeTimeout):
+        await claude._connect_with_deadline(FakeClient())
+
+
+@pytest.mark.asyncio
+async def test_claude_connect_other_errors_propagate_unchanged() -> None:
+    boom = ValueError("boom")
+
+    class FakeClient:
+        async def connect(self) -> None:
+            raise boom
+
+    with pytest.raises(ValueError) as excinfo:
+        await claude._connect_with_deadline(FakeClient())
+
+    assert excinfo.value is boom
 
 
 @pytest.mark.asyncio

@@ -93,13 +93,27 @@ function clearDeferred(id: string) {
 // replaces the row's actions in place, the same shape the leak confirmation
 // already used (which now folds into the card rather than stacking a second
 // confirmation on top of it).
+//
+// The reason is on that card, not behind a disclosure: the decision log is
+// only as good as the reasons in it, and a "Why?" nobody opened is a reason
+// nobody gave. It stays optional — a blank reason is a decision to skip it,
+// and the button says so.
+const CONTINUE_WITHOUT_REASON = 'Continue without a reason'
 const previewId = ref('')
 const editingPreview = ref(false)
 const editBuffer = ref('')
-// The optional "why" typed on a decision card, per row, and whether its
-// disclosure is open. Both live only as long as the card: Cancel discards them.
+// The optional "why" typed on a decision card, per row. It lives only as long
+// as the card: Cancel discards it, a switch to another row discards it, and a
+// successful decision discards it. A dismissal carries its own, and the two
+// never share: an acceptance rationale is not a reason to dismiss.
 const reasonById = ref<Record<string, string>>({})
-const whyOpenById = ref<Record<string, boolean>>({})
+
+/** The row whose dismissal is being confirmed.
+ *
+ * One at a time: the card replaces the row's actions, so two open cards would
+ * leave two rows half-decided with no clear way back to either.
+ */
+const dismissId = ref('')
 
 function reasonFor(id: string): string {
   return cleanReason(reasonById.value[id] ?? '')
@@ -107,7 +121,49 @@ function reasonFor(id: string): string {
 
 function clearReason(id: string) {
   delete reasonById.value[id]
-  delete whyOpenById.value[id]
+}
+
+/** The decision cards on screen, so the focus can be put in the one that just
+ * opened. Keyed by row, and kept apart per kind: a card that is closing must
+ * never take the place of the one that is opening. */
+const acceptCards = new Map<string, HTMLElement>()
+const dismissCards = new Map<string, HTMLElement>()
+
+function bindAcceptCard(id: string, el: unknown) {
+  if (el instanceof HTMLElement) acceptCards.set(id, el)
+  else acceptCards.delete(id)
+}
+
+function bindDismissCard(id: string, el: unknown) {
+  if (el instanceof HTMLElement) dismissCards.set(id, el)
+  else dismissCards.delete(id)
+}
+
+/** Put the focus in the field a card is asking about.
+ *
+ * The reason is what the card adds, and a keyboard user who opened it is
+ * there to answer it: the focus lands where the answer goes, not back on the
+ * row it came from. */
+function focusField(scope: HTMLElement | undefined, selector = '.decision-reason textarea') {
+  scope?.querySelector<HTMLElement>(selector)?.focus()
+}
+
+/** Hand the focus back to a row's own action.
+ *
+ * The control that opened the card is gone by then — the card replaced the
+ * row's actions — so the row's action of the same kind takes the focus. When
+ * the row has none, the row itself does: it is focusable, and a keyboard user
+ * is never left with the focus on the body. */
+function focusRowAction(id: string, actions: string[]) {
+  const row = rowEls.get(id)
+  for (const action of actions) {
+    const button = row?.querySelector<HTMLElement>(`[data-pr-action="${action}"]`)
+    if (button) {
+      button.focus()
+      return
+    }
+  }
+  row?.focus()
 }
 
 const openPreview = computed(() => (previewId.value ? store.previews[previewId.value] : undefined))
@@ -117,15 +173,36 @@ function isPreviewOpen(row: ProposalRow): boolean {
   return previewId.value === row.id
 }
 
-async function reviewAccept(row: ProposalRow) {
+/** Which row, if any, is showing its dismissal confirmation. */
+function isDismissOpen(row: ProposalRow): boolean {
+  return dismissId.value === row.id
+}
+
+/** Which row action opened the card now open, so Cancel can give the focus
+ *  back to it. */
+const previewTrigger = ref('accept')
+
+async function reviewAccept(row: ProposalRow, trigger = 'accept') {
   // Moving to another row's card walks away from this one: close it the same
   // way Cancel does, so an edited wording it re-previewed does not stay on its
   // row as the preview the row's own accept button would then commit.
   if (previewId.value && previewId.value !== row.id) closePreview()
+  // A dismissal being confirmed is walked away from too, and its reason with
+  // it: one decision card at a time, and no reason carried across the switch.
+  if (dismissId.value) closeDismiss()
   previewId.value = row.id
+  previewTrigger.value = trigger
   editingPreview.value = false
   editBuffer.value = row.text
-  await store.loadPreview(row.id)
+  // The row's prefetched preview is already what the operator is looking at,
+  // and its revision is what the accept pins. Re-fetching it here would add a
+  // round trip they wait behind, and a failed one would strip a working
+  // preview from under the card. A destination that moved since is refused by
+  // the revision check, and the conflict path re-shows the refreshed preview
+  // with the reason still typed — so freshness does not depend on this call.
+  if (!store.previews[row.id]) await store.loadPreview(row.id)
+  await nextTick()
+  focusField(acceptCards.get(row.id))
 }
 
 function closePreview() {
@@ -146,11 +223,23 @@ function closePreview() {
   }
 }
 
+/** Close the card and give the focus back to the row it was opened from. */
+async function cancelPreview() {
+  const id = previewId.value
+  const trigger = previewTrigger.value
+  closePreview()
+  await nextTick()
+  focusRowAction(id, [trigger, 'accept', 'review'])
+}
+
 /** Open the card straight into editing: the row's "Edit first". */
 async function editFirst(row: ProposalRow) {
-  await reviewAccept(row)
+  await reviewAccept(row, 'edit')
   // Another card may have been opened while the preview loaded.
-  if (previewId.value === row.id) startEditingPreview()
+  if (previewId.value !== row.id) return
+  startEditingPreview()
+  await nextTick()
+  focusField(acceptCards.get(row.id), '.pr-card-edit-input')
 }
 
 function startEditingPreview() {
@@ -187,6 +276,31 @@ function previewPrimaryLabel(row: ProposalRow): string {
   return `Save to ${preview.destination || 'memory'}`
 }
 
+/** The words on the one primary action.
+ *
+ * With a reason typed, the button names the destination it writes to. With no
+ * reason, it says plainly that the decision goes through without one: the
+ * reason is optional, and a button that named the destination anyway would
+ * read as if one were required to get there. */
+function confirmLabel(row: ProposalRow): string {
+  return reasonFor(row.id) ? previewPrimaryLabel(row) : CONTINUE_WITHOUT_REASON
+}
+
+/** The same for a dismissal, whose reason is optional in exactly the same way. */
+function dismissLabel(row: ProposalRow): string {
+  return reasonFor(row.id) ? 'Dismiss' : CONTINUE_WITHOUT_REASON
+}
+
+/** What the decision will do, in a sentence above the button.
+ *
+ * The button says "Continue without a reason" when nothing was typed, so the
+ * card itself has to name the action: what the decision does, and where it
+ * lands, in one line. */
+function pendingAction(row: ProposalRow): string {
+  const label = previewPrimaryLabel(row)
+  return `This will ${label.charAt(0).toLowerCase()}${label.slice(1)}.`
+}
+
 const OPERATION_LABELS: Record<string, string> = {
   add: 'Add',
   update: 'Update',
@@ -208,6 +322,9 @@ function previewChanges(preview: ProposalPreview): LineChange[] {
  * computed against. A destination that moved since then comes back as a
  * conflict with a refreshed preview, and the card stays open on it. */
 async function confirmPreview(row: ProposalRow, workspace = '', reconcile = false) {
+  // A second press on a button that is already writing would queue the same
+  // decision twice.
+  if (store.isBusy(row.id)) return
   const preview = store.previews[row.id]
   if (!preview) return
   const edited = preview.text !== row.text ? preview.text : ''
@@ -1138,11 +1255,51 @@ function moveTargets(row: ProposalRow): string[] {
   return [...new Set(ordered)]
 }
 
+/** Open the confirmation for a dismissal.
+ *
+ * A dismissal used to write straight from the row: the reason was optional and
+ * hidden behind a disclosure nobody opened, so the decision log recorded that
+ * the proposal was dropped and never why. The confirmation asks first, and the
+ * answer stays optional — a blank reason is a decision to skip it, not a
+ * blocked one.
+ */
 function doDismiss(row: ProposalRow) {
-  // A row-level Dismiss with no card open has no reason; from the card it
-  // carries what was typed there.
-  void store.act(row.id, 'dismiss', '', { reason: reasonFor(row.id) })
-  clearReason(row.id)
+  // The card that is open walks away: one decision card at a time, and no
+  // reason carried across the switch (an acceptance rationale is not a reason
+  // to dismiss).
+  if (previewId.value) closePreview()
+  if (dismissId.value && dismissId.value !== row.id) closeDismiss()
+  dismissId.value = row.id
+  void nextTick(() => focusField(dismissCards.get(row.id)))
+}
+
+/** Close the dismissal confirmation and throw away what was typed in it. */
+function closeDismiss() {
+  const id = dismissId.value
+  dismissId.value = ''
+  if (id) clearReason(id)
+}
+
+/** Cancel: no write, and the focus goes back to the row action that opened
+ * the confirmation. */
+async function cancelDismiss() {
+  const id = dismissId.value
+  closeDismiss()
+  await nextTick()
+  focusRowAction(id, ['dismiss'])
+}
+
+/** Write the dismissal, with the reason the confirmation collected.
+ *
+ * A refusal keeps the card and the reason: the operator wrote that reason for
+ * THIS dismissal, and a retry that lost it would ask for the same sentence
+ * again. A success closes the card and clears it. */
+async function confirmDismiss(row: ProposalRow) {
+  if (store.isBusy(row.id)) return
+  const reason = reasonFor(row.id)
+  const result = await store.act(row.id, 'dismiss', '', { reason })
+  if (!result.ok) return
+  closeDismiss()
 }
 
 async function openWorkspaceChatInBackground(workspace: string, title: string, helper: ProposalHelper) {
@@ -1710,7 +1867,7 @@ watch(
                     <span v-if="line.op !== 'context'" class="mr-sr-only">{{ line.op }}</span>
                   </li>
                 </ol>
-                <p v-if="rowDiff(row)!.more" class="mr-box-foot">{{ rowDiff(row)!.more }} more {{ rowDiff(row)!.more === 1 ? 'line' : 'lines' }}. <button type="button" class="mr-link" @click="reviewAccept(row)">Show all</button></p>
+                <p v-if="rowDiff(row)!.more" class="mr-box-foot">{{ rowDiff(row)!.more }} more {{ rowDiff(row)!.more === 1 ? 'line' : 'lines' }}. <button type="button" class="mr-link" data-pr-action="show-all" @click="reviewAccept(row, 'show-all')">Show all</button></p>
                 <p v-if="rowDiff(row)!.note" class="mr-box-foot">{{ rowDiff(row)!.note }}</p>
               </div>
               <p v-if="rowReason(row)" class="pr-row-reason">{{ rowReason(row) }}</p>
@@ -1721,9 +1878,28 @@ watch(
                It replaces the row's actions until answered, confirms against the
                revision it shows, and keeps edit, check, discuss and dismiss as
                its secondaries. The leak warning rides on it too. -->
-          <div v-if="isPreviewOpen(row)" class="pr-card" role="group" :aria-label="`Review ${rowTitle(row)}`">
-            <p v-if="store.isPreviewLoading(row.id) && !store.previews[row.id]" class="pr-card-note" role="status">Reading the destination…</p>
-            <p v-else-if="store.previewErrors[row.id]" class="pr-card-error" role="alert">{{ store.previewErrors[row.id] }}</p>
+          <div
+            v-if="isPreviewOpen(row)"
+            class="pr-card"
+            role="group"
+            :aria-label="`Review ${rowTitle(row)}`"
+            :ref="el => bindAcceptCard(row.id, el)"
+          >
+            <div v-if="store.isPreviewLoading(row.id) && !store.previews[row.id]" class="pr-card-status">
+              <p class="pr-card-note" role="status">Reading the destination…</p>
+              <div class="pr-actions pr-actions--card">
+                <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
+              </div>
+            </div>
+            <div v-else-if="store.previewErrors[row.id]" class="pr-card-status">
+              <p class="pr-card-error" role="alert">{{ store.previewErrors[row.id] }}</p>
+              <!-- A preview that could not be read is not a decision: the card
+                   replaced the row's actions, so it owes the operator a way
+                   back instead of trapping the row behind an error. -->
+              <div class="pr-actions pr-actions--card">
+                <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
+              </div>
+            </div>
 
             <template v-else-if="store.previews[row.id]">
               <p v-if="store.conflictIds.has(row.id)" class="pr-card-conflict" role="alert">
@@ -1788,18 +1964,14 @@ watch(
 
               <p v-if="store.previews[row.id].reason" class="pr-card-reason">{{ store.previews[row.id].reason }}</p>
 
+              <!-- The reason, on the card itself: the decision log is only as
+                   good as the reasons in it, and a "Why?" behind a disclosure
+                   was a reason nobody gave. It stays optional — a blank answer
+                   is a decision to skip it, not a blocked one. -->
               <div class="pr-card-why">
-                <button
-                  type="button"
-                  class="btn-small btn-chip pr-card-why-toggle"
-                  :aria-expanded="Boolean(whyOpenById[row.id])"
-                  :aria-controls="`pr-why-${row.id}`"
-                  @click="whyOpenById[row.id] = !whyOpenById[row.id]"
-                >Why? (optional)</button>
                 <DecisionReason
-                  v-if="whyOpenById[row.id]"
                   :id="`pr-why-${row.id}`"
-                  label="Reason (optional)"
+                  label="Why keep this? (optional)"
                   :chips="MEMORY_REASON_CHIPS"
                   :id-prefix="`pr-why-${row.id}`"
                   :model-value="reasonById[row.id] ?? ''"
@@ -1808,6 +1980,11 @@ watch(
                 />
               </div>
 
+              <!-- The pending action, named above the button that carries it
+                   out: with no reason typed the button only says it continues,
+                   so the card itself has to say what the decision does. -->
+              <p class="pr-confirm-action">{{ pendingAction(row) }}</p>
+
               <div class="pr-actions pr-actions--card">
                 <button
                   v-if="store.previews[row.id].can_accept"
@@ -1815,7 +1992,7 @@ watch(
                   class="btn-small btn-primary"
                   :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
                   @click="confirmPreview(row)"
-                >{{ store.isBusy(row.id) ? 'working…' : previewPrimaryLabel(row) }}</button>
+                >{{ store.isBusy(row.id) ? 'working…' : confirmLabel(row) }}</button>
                 <!-- The same write with a reconcile in front of it. A chip, not
                      a second primary: it costs a model call. -->
                 <button
@@ -1829,10 +2006,44 @@ watch(
                 <button v-if="!editingPreview && isEditable(row)" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
                 <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
                 <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
-                <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
-                <button type="button" class="btn-small btn-chip" @click="closePreview">Cancel</button>
+                <button type="button" class="btn-small btn-chip" data-pr-action="dismiss-card" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+                <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
               </div>
             </template>
+          </div>
+
+          <!-- The dismissal confirmation: it names the proposal, asks why, and
+               writes nothing until it is confirmed. It is the same card shape
+               as the decision card, not a second modal over it. -->
+          <div
+            v-else-if="isDismissOpen(row)"
+            class="pr-card pr-card--dismiss"
+            role="group"
+            :aria-label="`Dismiss ${rowTitle(row)}`"
+            :ref="el => bindDismissCard(row.id, el)"
+          >
+            <p class="pr-card-text">{{ rowTitle(row) }}</p>
+            <div class="pr-card-why">
+              <DecisionReason
+                :id="`pr-dismiss-why-${row.id}`"
+                label="Why dismiss this? (optional)"
+                :chips="MEMORY_REASON_CHIPS"
+                :id-prefix="`pr-dismiss-why-${row.id}`"
+                :model-value="reasonById[row.id] ?? ''"
+                :disabled="store.isBusy(row.id)"
+                @update:model-value="reasonById[row.id] = $event"
+              />
+            </div>
+            <p class="pr-confirm-action">This will dismiss the proposal.</p>
+            <div class="pr-actions pr-actions--card">
+              <button
+                type="button"
+                class="btn-small btn-primary"
+                :disabled="store.isBusy(row.id)"
+                @click="confirmDismiss(row)"
+              >{{ store.isBusy(row.id) ? 'working…' : dismissLabel(row) }}</button>
+              <button type="button" class="btn-small btn-chip" @click="cancelDismiss">Cancel</button>
+            </div>
           </div>
 
           <!-- Deferred: the last accept reconciled this fact against the region
@@ -1871,7 +2082,7 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
             <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
             <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
@@ -1896,7 +2107,7 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="implementSkill(row)"
             >{{ store.isBusy(row.id) ? 'starting…' : 'Improve skill' }}</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
             <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open discussion</button>
             <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
@@ -1917,54 +2128,38 @@ watch(
                  names the change, and the accept is pinned to the revision the
                  row is showing (a destination that moved comes back as a
                  conflict with the new preview). Neutral, not pink: every row is
-                 the same routine choice. Before the preview arrives, Review
-                 opens the card that loads it. No accept at all when nothing
-                 backs a destination. -->
+                 the same routine choice. The verb opens the decision card,
+                 which is where the reason is asked for and the write is
+                 confirmed. Before the preview arrives, Review opens the card
+                 that loads it. No accept at all when nothing backs a
+                 destination. -->
             <button
               v-if="canAccept(row) && store.previews[row.id] && rowChange(row).verb"
               type="button"
               class="mr-btn pr-row-accept"
+              data-pr-action="accept"
               :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
-              @click="confirmPreview(row)"
+              @click="reviewAccept(row, 'accept')"
             >{{ store.isBusy(row.id) ? 'working…' : rowChange(row).verb }}</button>
             <button
               v-else-if="canAccept(row) && !store.previews[row.id]"
               type="button"
               class="mr-btn pr-row-action"
+              data-pr-action="review"
               :disabled="store.isBusy(row.id)"
-              @click="reviewAccept(row)"
+              @click="reviewAccept(row, 'review')"
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
             <button
               v-if="canAccept(row) && !isRehome(row) && isEditable(row)"
               type="button"
               class="mr-link pr-edit-first"
+              data-pr-action="edit"
               @click="editFirst(row)"
             >Edit first</button>
             <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
             <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
-            <!-- The optional reason, offered here as well as on the card so the
-                 one-click Accept and Dismiss above stay one click. -->
-            <button
-              v-if="canAccept(row) && !isRehome(row) && !isPreviewOpen(row)"
-              type="button"
-              class="mr-link pr-row-why"
-              :aria-expanded="Boolean(whyOpenById[row.id])"
-              :aria-controls="`pr-why-${row.id}`"
-              @click="whyOpenById[row.id] = !whyOpenById[row.id]"
-            >Why?</button>
           </div>
-          <DecisionReason
-            v-if="whyOpenById[row.id] && canAccept(row) && !isRehome(row) && !isPreviewOpen(row)"
-            :id="`pr-why-${row.id}`"
-            class="pr-row-reason"
-            label="Reason (optional)"
-            :chips="MEMORY_REASON_CHIPS"
-            :id-prefix="`pr-why-${row.id}`"
-            :model-value="reasonById[row.id] ?? ''"
-            :disabled="store.isBusy(row.id)"
-            @update:model-value="reasonById[row.id] = $event"
-          />
           </template>
         </li>
         </ul>
@@ -2338,18 +2533,28 @@ watch(
   min-width: 0;
 }
 
-@media (pointer: coarse) {
-  .pr-row-why {
-    min-height: 2.75rem;
-  }
-}
-
+/* The reason is on the card itself now, so it takes the card's width: a
+   narrow field under a full-width card reads as an afterthought. */
 .pr-card-why {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   gap: var(--space-2);
   min-width: 0;
+  width: 100%;
+}
+
+.pr-card-why :deep(.decision-reason textarea) {
+  width: 100%;
+}
+
+/* The pending action, named in words above the button that carries it out.
+   With no reason typed the button only says it continues, so the card itself
+   has to say what the decision does. */
+.pr-confirm-action {
+  margin: var(--space-2) 0 0;
+  color: var(--fg2);
+  font-size: 0.85rem;
 }
 
 /* The card's actions run across, not down: the column layout above exists to

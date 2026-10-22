@@ -1042,7 +1042,7 @@ describe('talk about it', () => {
     await flushPromises()
 
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss', 'Why?'])
+    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss'])
 
     const store = useProposalsStore()
     const act = vi.spyOn(store, 'act')
@@ -1079,7 +1079,7 @@ describe('talk about it', () => {
     await flushPromises()
 
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat', 'Why?'])
+    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat'])
     await wrapper
       .findAll('.pr-actions button')
       .find((b) => b.text() === 'Open chat')!
@@ -1096,7 +1096,7 @@ describe('talk about it', () => {
     projects.chats = chats
     await flushPromises()
     expect(reloaded.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat', 'Why?'])
+      .toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat'])
     await testArchiveDropsLink(reloaded)
   })
 
@@ -1106,7 +1106,7 @@ describe('talk about it', () => {
     projects.chats.find((c) => c.chat_id === 'chat-d')!.archived = true
     await flushPromises()
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss', 'Why?'])
+      .toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss'])
     wrapper.unmount()
   }
 })
@@ -1527,8 +1527,11 @@ describe('Queue / History tabs', () => {
     const before = historyCalls()
 
     apiPost.mockResolvedValue({} as never)
-    // The preview is on the row, so the row's own button accepts it.
+    // The row's accept opens the decision card; the write is confirmed there.
     await wrapper.find('.pr-row .pr-row-accept').trigger('click')
+    await flushPromises()
+    expect(apiPost).not.toHaveBeenCalled()
+    await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
     await flushPromises()
 
     expect(apiPost).toHaveBeenCalledWith('/api/proposals/a/accept', { expected_revision: 'rev-1' })
@@ -1657,8 +1660,10 @@ describe('decision card', () => {
     ])
     expect(card.text()).toContain('accepting bumps its recurrence count')
     expect(card.find('.pr-actions--card .btn-primary').text()).toBe(
-      'Save to Workspace/Learnings.md',
+      'Continue without a reason',
     )
+    expect(card.find('.pr-confirm-action').text())
+      .toBe('This will save to Workspace/Learnings.md.')
     // A learnings row is not reconcilable, so the check-first chip stays away.
     expect(wrapper.findAll('.pr-actions--card button').map(b => b.text())).not.toContain(
       'Check first',
@@ -1672,7 +1677,10 @@ describe('decision card', () => {
     const wrapper = await openCard()
 
     const actions = wrapper.findAll('.pr-actions--card button').map(b => b.text())
-    expect(actions[0]).toBe('Save to ciao:memory')
+    // With no reason typed the button says the decision goes through without
+    // one; the card names the action itself, above it.
+    expect(actions[0]).toBe('Continue without a reason')
+    expect(wrapper.find('.pr-confirm-action').text()).toBe('This will save to ciao:memory.')
     // "check first" is the same write with a reconcile in front of it, so it is
     // a secondary beside edit/discuss/dismiss rather than a second primary.
     expect(actions.slice(1)).toEqual([
@@ -1696,39 +1704,122 @@ describe('decision card', () => {
     wrapper.unmount()
   })
 
-  describe('the optional Why field', () => {
-    async function expandWhy(wrapper: ReturnType<typeof mount>) {
-      await wrapper.find('.pr-card-why-toggle').trigger('click')
-      await flushPromises()
-    }
-
-    it('is collapsed and Save posts the same body as before when untouched', async () => {
+  describe('the optional reason', () => {
+    /** The queue with one row and its preview, and no card open. */
+    async function mountRow() {
       mockQueue()
       apiPost.mockResolvedValue({} as never)
-      const wrapper = await openCard()
-
-      const toggle = wrapper.find('.pr-card-why-toggle')
-      expect(toggle.text()).toBe('Why? (optional)')
-      expect(toggle.attributes('aria-expanded')).toBe('false')
-      expect(wrapper.find('.decision-reason').exists()).toBe(false)
-
-      await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
       await flushPromises()
-      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', { expected_revision: 'rev-1' })
+      return wrapper
+    }
+
+    /** The same, attached to the document, so the focus can be asserted. */
+    async function mountAttached() {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = mount(ProposalReviewPanel, {
+        attachTo: document.body,
+        global: { plugins: [pinia] },
+      })
+      await flushPromises()
+      return wrapper
+    }
+
+    /** The row's accept, which opens the decision card. */
+    async function openFromRow(wrapper: ReturnType<typeof mount>) {
+      await wrapper.find('.pr-row .pr-row-accept').trigger('click')
+      await flushPromises()
+      await nextTick()
+    }
+
+    /** The card's one primary action. */
+    function confirm(wrapper: ReturnType<typeof mount>) {
+      return wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+    }
+
+    it('is on the card itself, with no disclosure to open', async () => {
+      const wrapper = await mountRow()
+      await openFromRow(wrapper)
+
+      // The old "Why?" toggle is gone: the question is asked, not hidden.
+      expect(wrapper.find('.pr-card-why-toggle').exists()).toBe(false)
+      const field = wrapper.find('.pr-card .decision-reason')
+      expect(field.exists()).toBe(true)
+      expect(field.text()).toContain('Why keep this? (optional)')
+      // Opening the card wrote nothing.
+      expect(apiPost).not.toHaveBeenCalled()
       wrapper.unmount()
     })
 
-    it('sends a chip plus free text as reason on Save', async () => {
-      mockQueue()
-      apiPost.mockResolvedValue({} as never)
-      const wrapper = await openCard()
-      await expandWhy(wrapper)
-      expect(wrapper.find('.pr-card-why-toggle').attributes('aria-expanded')).toBe('true')
+    it('says plainly that the decision goes through without a reason', async () => {
+      const wrapper = await mountRow()
+      await openFromRow(wrapper)
 
-      const chip = wrapper.findAll('.decision-reason .btn-chip').find(b => b.text() === 'one-off')!
+      expect(wrapper.find('.pr-actions--card .btn-primary').text()).toBe('Continue without a reason')
+      // And the card still names what the decision does.
+      expect(wrapper.find('.pr-confirm-action').text()).toBe('This will save to ciao:memory.')
+      wrapper.unmount()
+    })
+
+    it('does not re-read a destination the row already previewed', async () => {
+      const wrapper = await mountRow()
+      const previewCalls = () =>
+        apiGet.mock.calls.filter(([path]) => String(path).includes('/preview')).length
+      const before = previewCalls()
+      await openFromRow(wrapper)
+
+      // The row was already showing this preview, and its revision is what the
+      // accept pins. Opening the card must not spend a second round trip: a
+      // failed one used to strip a working preview out from under the card.
+      expect(wrapper.find('.pr-card').exists()).toBe(true)
+      expect(previewCalls()).toBe(before)
+      wrapper.unmount()
+    })
+
+    it('offers a way back when the destination cannot be read', async () => {
+      // The card takes the row's actions away, so a preview that failed has to
+      // hand the row back — otherwise the row is stranded behind an error with
+      // no Cancel, no dismiss and no accept until the page reloads.
+      apiGet.mockImplementation((url: string) => {
+        if (url.startsWith('/api/proposals/history')) {
+          return Promise.resolve({ rows: [], total: 0, truncated: false })
+        }
+        if (url.includes('/preview')) return Promise.reject(new Error('destination unreadable'))
+        return Promise.resolve({ rows: [row()] })
+      })
+      const wrapper = mount(ProposalReviewPanel, {
+        attachTo: document.body,
+        global: { plugins: [pinia] },
+      })
+      await flushPromises()
+
+      // No preview means the row offers "Review" rather than an accept verb.
+      await wrapper.find('.pr-row [data-pr-action="review"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('.pr-card-error').text()).toContain('destination unreadable')
+
+      const cancel = wrapper.findAll('.pr-card-status button').find(b => b.text() === 'Cancel')
+      expect(cancel, 'the error card offers no way back').toBeTruthy()
+      await cancel!.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('.pr-card').exists()).toBe(false)
+      // And the focus goes back to the row action that opened it.
+      expect(document.activeElement?.getAttribute('data-pr-action')).toBe('review')
+      wrapper.unmount()
+    })
+
+    it('sends a chip plus free text as the reason on the confirm', async () => {
+      const wrapper = await mountRow()
+      await openFromRow(wrapper)
+
+      const chip = wrapper.findAll('.pr-card .decision-reason .btn-chip').find(b => b.text() === 'one-off')!
       await chip.trigger('click')
-      await wrapper.find('.decision-reason textarea').setValue('one-off, only this chat')
-      await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+      await wrapper.find('.pr-card .decision-reason textarea').setValue('one-off, only this chat')
+      // With a reason the button names the destination again.
+      expect(wrapper.find('.pr-actions--card .btn-primary').text()).toBe('Save to ciao:memory')
+      await confirm(wrapper)
       await flushPromises()
 
       expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
@@ -1738,95 +1829,241 @@ describe('decision card', () => {
       wrapper.unmount()
     })
 
-    it('sends the reason when Dismiss is clicked from the card', async () => {
-      mockQueue()
-      apiPost.mockResolvedValue({} as never)
-      const wrapper = await openCard()
-      await expandWhy(wrapper)
-      await wrapper.find('.decision-reason textarea').setValue('already known')
-
-      const dismiss = wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Dismiss')!
-      await dismiss.trigger('click')
-      await flushPromises()
-
-      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', { reason: 'already known' })
-      wrapper.unmount()
-    })
-
-    it('sends no reason when Dismiss is clicked from the row without a card', async () => {
-      mockQueue()
-      apiPost.mockResolvedValue({} as never)
-      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
-      await flushPromises()
-
-      const dismiss = wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!
-      await dismiss.trigger('click')
-      await flushPromises()
-
-      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', {})
-      wrapper.unmount()
-    })
-
-    async function mountRow() {
-      mockQueue()
-      apiPost.mockResolvedValue({} as never)
-      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
-      await flushPromises()
-      return wrapper
-    }
-
-    async function typeRowReason(wrapper: ReturnType<typeof mount>, text: string) {
-      const toggle = wrapper.find('.pr-row .pr-row-why')
-      expect(toggle.attributes('aria-expanded')).toBe('false')
-      await toggle.trigger('click')
-      expect(wrapper.find('.pr-row .pr-row-why').attributes('aria-expanded')).toBe('true')
-      await wrapper.find('.pr-row-reason textarea').setValue(text)
-    }
-
-    it('offers Why? on the row and posts the reason with the row Dismiss', async () => {
+    it('sends no reason when the confirm is taken without one', async () => {
       const wrapper = await mountRow()
-      await typeRowReason(wrapper, 'already known')
-
-      await wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!.trigger('click')
-      await flushPromises()
-
-      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', { reason: 'already known' })
-      wrapper.unmount()
-    })
-
-    it('posts the reason with the row primary accept', async () => {
-      const wrapper = await mountRow()
-      await typeRowReason(wrapper, 'one-off')
-
-      await wrapper.find('.pr-row .pr-row-accept').trigger('click')
-      await flushPromises()
-
-      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
-        expected_revision: 'rev-1',
-        reason: 'one-off',
-      })
-      wrapper.unmount()
-    })
-
-    it('an untouched row accept posts exactly the revision', async () => {
-      const wrapper = await mountRow()
-
-      await wrapper.find('.pr-row .pr-row-accept').trigger('click')
+      await openFromRow(wrapper)
+      await confirm(wrapper)
       await flushPromises()
 
       expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', { expected_revision: 'rev-1' })
       wrapper.unmount()
     })
 
-    it('a refused row accept does not leak its reason onto a later Dismiss', async () => {
+    it('discards the reason on Cancel and writes nothing', async () => {
       const wrapper = await mountRow()
-      await typeRowReason(wrapper, 'one-off')
+      await openFromRow(wrapper)
+      await wrapper.find('.pr-card .decision-reason textarea').setValue('typed then abandoned')
+
+      const cancel = wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Cancel')!
+      await cancel.trigger('click')
+      await flushPromises()
+      expect(apiPost).not.toHaveBeenCalled()
+
+      // Reopening the card starts from nothing.
+      await openFromRow(wrapper)
+      expect((wrapper.find('.pr-card .decision-reason textarea').element as HTMLTextAreaElement).value).toBe('')
+      wrapper.unmount()
+    })
+
+    it('clears the reason when the card moves to another row', async () => {
+      apiGet.mockImplementation((url: string) => {
+        if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+        const m = /^\/api\/proposals\/([^/]+)\/preview/.exec(url)
+        if (m) return Promise.resolve({ ok: true, preview: preview({ id: m[1], text: m[1] === 'row-2' ? 'Another fact' : 'Remember the thing' }) })
+        return Promise.resolve({ rows: [row({ id: 'row-1' }), row({ id: 'row-2', text: 'Another fact' })] })
+      })
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+      await flushPromises()
+
+      const rows = wrapper.findAll('.pr-row')
+      await rows[0].find('.pr-row-accept').trigger('click')
+      await flushPromises()
+      await wrapper.find('.pr-card .decision-reason textarea').setValue('kept for this row')
+
+      await rows[1].find('.pr-row-accept').trigger('click')
+      await flushPromises()
+
+      expect((wrapper.find('.pr-card .decision-reason textarea').element as HTMLTextAreaElement).value).toBe('')
+      expect(apiPost).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it('keeps the reason when the destination moved and the card shows the refreshed preview', async () => {
+      const wrapper = await mountRow()
+      await openFromRow(wrapper)
+      await wrapper.find('.pr-card .decision-reason textarea').setValue('still the right reason')
+      apiPost.mockRejectedValue(Object.assign(new Error('the destination changed'), {
+        payload: { conflict: true, preview: preview({ revision: 'rev-2' }) },
+      }))
+
+      await confirm(wrapper)
+      await flushPromises()
+
+      // The card stays open on the refreshed preview, with the reason it had.
+      expect(wrapper.find('.pr-card').exists()).toBe(true)
+      expect((wrapper.find('.pr-card .decision-reason textarea').element as HTMLTextAreaElement).value)
+        .toBe('still the right reason')
+      wrapper.unmount()
+    })
+
+    it('puts the focus in the reason field, and back on the row when the card is cancelled', async () => {
+      const wrapper = await mountAttached()
+      await openFromRow(wrapper)
+      expect(document.activeElement).toBe(wrapper.find('.pr-card .decision-reason textarea').element)
+
+      await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Cancel')!.trigger('click')
+      await flushPromises()
+      await nextTick()
+      expect(document.activeElement).toBe(wrapper.find('.pr-row .pr-row-accept').element)
+      wrapper.unmount()
+    })
+
+    describe('the dismissal confirmation', () => {
+      /** The row's Dismiss, which opens the confirmation. */
+      async function openDismissal(wrapper: ReturnType<typeof mount>) {
+        await wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!.trigger('click')
+        await flushPromises()
+        await nextTick()
+      }
+
+      it('opens on the row and writes nothing until it is confirmed', async () => {
+        const wrapper = await mountRow()
+        await openDismissal(wrapper)
+
+        expect(apiPost).not.toHaveBeenCalled()
+        const card = wrapper.find('.pr-card--dismiss')
+        expect(card.exists()).toBe(true)
+        // It names the proposal and asks why.
+        expect(card.text()).toContain('Remember the thing')
+        expect(card.find('.decision-reason').text()).toContain('Why dismiss this? (optional)')
+        // And it names the action it is about to take.
+        expect(card.find('.pr-confirm-action').text()).toBe('This will dismiss the proposal.')
+        expect(card.find('.btn-primary').text()).toBe('Continue without a reason')
+        wrapper.unmount()
+      })
+
+      it('sends the reason typed in it', async () => {
+        const wrapper = await mountRow()
+        await openDismissal(wrapper)
+        await wrapper.find('.pr-card--dismiss .decision-reason textarea').setValue('already known')
+        expect(wrapper.find('.pr-card--dismiss .btn-primary').text()).toBe('Dismiss')
+
+        await wrapper.find('.pr-card--dismiss .btn-primary').trigger('click')
+        await flushPromises()
+
+        expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', { reason: 'already known' })
+        // The card goes with the row.
+        expect(wrapper.find('.pr-card--dismiss').exists()).toBe(false)
+        wrapper.unmount()
+      })
+
+      it('sends no reason when it is confirmed without one', async () => {
+        const wrapper = await mountRow()
+        await openDismissal(wrapper)
+        await wrapper.find('.pr-card--dismiss .btn-primary').trigger('click')
+        await flushPromises()
+
+        expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', {})
+        wrapper.unmount()
+      })
+
+      it('cancels without a write and throws the reason away', async () => {
+        const wrapper = await mountRow()
+        await openDismissal(wrapper)
+        await wrapper.find('.pr-card--dismiss .decision-reason textarea').setValue('typed then abandoned')
+
+        const cancel = wrapper.findAll('.pr-card--dismiss button').find(b => b.text() === 'Cancel')!
+        await cancel.trigger('click')
+        await flushPromises()
+
+        expect(apiPost).not.toHaveBeenCalled()
+        expect(wrapper.find('.pr-card--dismiss').exists()).toBe(false)
+        // Reopening starts from nothing.
+        await openDismissal(wrapper)
+        expect((wrapper.find('.pr-card--dismiss .decision-reason textarea').element as HTMLTextAreaElement).value)
+          .toBe('')
+        wrapper.unmount()
+      })
+
+      it('keeps the reason and the card when the dismissal is refused, so it can be retried', async () => {
+        const wrapper = await mountRow()
+        await openDismissal(wrapper)
+        await wrapper.find('.pr-card--dismiss .decision-reason textarea').setValue('already known')
+        apiPost.mockRejectedValueOnce(new Error('the server said no'))
+
+        await wrapper.find('.pr-card--dismiss .btn-primary').trigger('click')
+        await flushPromises()
+
+        expect(apiPost).toHaveBeenCalledTimes(1)
+        expect(wrapper.find('.pr-card--dismiss').exists()).toBe(true)
+        expect((wrapper.find('.pr-card--dismiss .decision-reason textarea').element as HTMLTextAreaElement).value)
+          .toBe('already known')
+
+        apiPost.mockResolvedValue({} as never)
+        await wrapper.find('.pr-card--dismiss .btn-primary').trigger('click')
+        await flushPromises()
+
+        expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/dismiss', { reason: 'already known' })
+        wrapper.unmount()
+      })
+
+      it('will not submit the same dismissal twice', async () => {
+        const wrapper = await mountRow()
+        await openDismissal(wrapper)
+        let release!: (value: unknown) => void
+        apiPost.mockImplementation(() => new Promise((resolve) => { release = resolve }))
+
+        await wrapper.find('.pr-card--dismiss .btn-primary').trigger('click')
+        await flushPromises()
+        expect(apiPost).toHaveBeenCalledTimes(1)
+        // The button is disabled while the write is in flight, so a second
+        // press cannot queue a second dismissal.
+        expect(wrapper.find('.pr-card--dismiss .btn-primary').attributes('disabled')).toBeDefined()
+        await wrapper.find('.pr-card--dismiss .btn-primary').trigger('click')
+        await flushPromises()
+        expect(apiPost).toHaveBeenCalledTimes(1)
+
+        release({})
+        await flushPromises()
+        wrapper.unmount()
+      })
+
+      it('does not reuse the acceptance reason for the dismissal', async () => {
+        const wrapper = await mountRow()
+        await openFromRow(wrapper)
+        await wrapper.find('.pr-card .decision-reason textarea').setValue('because I want it')
+
+        // The card's own Dismiss opens the dismissal confirmation.
+        await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Dismiss')!.trigger('click')
+        await flushPromises()
+
+        expect(wrapper.find('.pr-card--dismiss').exists()).toBe(true)
+        expect((wrapper.find('.pr-card--dismiss .decision-reason textarea').element as HTMLTextAreaElement).value)
+          .toBe('')
+        wrapper.unmount()
+      })
+
+      it('puts the focus in the reason field, and back on the row when it is cancelled', async () => {
+        const wrapper = await mountAttached()
+        await openDismissal(wrapper)
+        expect(document.activeElement)
+          .toBe(wrapper.find('.pr-card--dismiss .decision-reason textarea').element)
+
+        await wrapper.findAll('.pr-card--dismiss button').find(b => b.text() === 'Cancel')!.trigger('click')
+        await flushPromises()
+        await nextTick()
+        expect(document.activeElement)
+          .toBe(wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!.element)
+        wrapper.unmount()
+      })
+    })
+
+    it('a refused accept does not leak its reason onto a later dismissal', async () => {
+      const wrapper = await mountRow()
+      await openFromRow(wrapper)
+      await wrapper.find('.pr-card .decision-reason textarea').setValue('one-off')
       apiPost.mockRejectedValueOnce(new Error('refused'))
 
-      await wrapper.find('.pr-row .pr-row-accept').trigger('click')
+      await confirm(wrapper)
       await flushPromises()
+      // The card closed and the reason went with it.
+      expect(wrapper.find('.pr-card').exists()).toBe(false)
+
       apiPost.mockResolvedValue({} as never)
       await wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!.trigger('click')
+      await flushPromises()
+      await wrapper.find('.pr-card--dismiss .btn-primary').trigger('click')
       await flushPromises()
 
       expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/dismiss', {})
@@ -1836,13 +2073,17 @@ describe('decision card', () => {
     it('batch accept and dismiss never carry a reason typed on a row', async () => {
       apiGet.mockImplementation((url: string) => {
         if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
-        if (url.startsWith('/api/proposals/row-1/preview')) return Promise.resolve({ ok: true, preview: preview() })
-        return Promise.resolve({ rows: [row(), row({ id: 'row-2', text: 'Another fact' })] })
+        const m = /^\/api\/proposals\/([^/]+)\/preview/.exec(url)
+        if (m) return Promise.resolve({ ok: true, preview: preview({ id: m[1], text: m[1] === 'row-2' ? 'Another fact' : 'Remember the thing' }) })
+        return Promise.resolve({ rows: [row({ id: 'row-1' }), row({ id: 'row-2', text: 'Another fact' })] })
       })
       apiPost.mockResolvedValue({} as never)
       const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
       await flushPromises()
-      await typeRowReason(wrapper, 'typed on a row')
+      // A reason typed on one row's card.
+      await wrapper.findAll('.pr-row')[0].find('.pr-row-accept').trigger('click')
+      await flushPromises()
+      await wrapper.find('.pr-card .decision-reason textarea').setValue('typed on a row')
 
       await enterSelectMode(wrapper)
       await wrapper.find('.pr-group-select input').setValue(true)
@@ -1875,8 +2116,7 @@ describe('decision card', () => {
         mockQueue({ text: 'Remember the other thing' })
         const wrapper = await openCard()
         if (reason) {
-          await expandWhy(wrapper)
-          await wrapper.find('.decision-reason textarea').setValue(reason)
+          await wrapper.find('.pr-card .decision-reason textarea').setValue(reason)
         }
         apiPost.mockRejectedValueOnce(deferred)
         await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Check first')!.trigger('click')
@@ -1905,26 +2145,6 @@ describe('decision card', () => {
         })
         wrapper.unmount()
       })
-    })
-
-    it('discards the reason on Cancel', async () => {
-      mockQueue()
-      const wrapper = await openCard()
-      await expandWhy(wrapper)
-      await wrapper.find('.decision-reason textarea').setValue('typed then abandoned')
-
-      const cancel = wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Cancel')!
-      await cancel.trigger('click')
-      await flushPromises()
-      await wrapper.find('.pr-row .pr-edit-first').trigger('click')
-      await flushPromises()
-      await wrapper.findAll('.pr-card button').find(b => b.text() === 'Cancel edit')!.trigger('click')
-      await flushPromises()
-
-      expect(wrapper.find('.pr-card-why-toggle').attributes('aria-expanded')).toBe('false')
-      await expandWhy(wrapper)
-      expect((wrapper.find('.decision-reason textarea').element as HTMLTextAreaElement).value).toBe('')
-      wrapper.unmount()
     })
   })
 
@@ -2113,7 +2333,7 @@ describe('reconcile before writing', () => {
     apiPost.mockResolvedValue({} as never)
     const wrapper = await openCard()
 
-    await clickCard(wrapper, 'Save to ciao:memory')
+    await clickCard(wrapper, 'Continue without a reason')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
       expected_revision: 'rev-1',
@@ -2137,7 +2357,7 @@ describe('reconcile before writing', () => {
     const wrapper = await openCard()
 
     expect(cardLabels(wrapper)).toEqual([
-      'Save to Workspace/Learnings.md', 'Edit suggestion', 'Discuss', 'Dismiss', 'Cancel',
+      'Continue without a reason', 'Edit suggestion', 'Discuss', 'Dismiss', 'Cancel',
     ])
     wrapper.unmount()
   })
@@ -2147,7 +2367,7 @@ describe('reconcile before writing', () => {
     const wrapper = await openCard()
 
     expect(cardLabels(wrapper)).toEqual([
-      'Save to ciao:memory', 'Check first', 'Edit suggestion', 'Discuss', 'Dismiss', 'Cancel',
+      'Continue without a reason', 'Check first', 'Edit suggestion', 'Discuss', 'Dismiss', 'Cancel',
     ])
     // One primary: the check is the same write, not a competing decision.
     expect(wrapper.findAll('.pr-actions--card .btn-primary')).toHaveLength(1)
@@ -2245,7 +2465,7 @@ describe('reconcile before writing', () => {
     await nextTick()
     expect(wrapper.find('.pr-actions--deferred').exists()).toBe(false)
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Add entry', 'Dismiss', 'Edit first', 'Discuss', 'Why?'])
+      .toEqual(['Add entry', 'Dismiss', 'Edit first', 'Discuss'])
     wrapper.unmount()
   })
 
@@ -2376,7 +2596,12 @@ describe('the change on the row', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
+    // The row opens the decision card, where the reason is asked for.
     await wrapper.get('.pr-row-accept').trigger('click')
+    await flushPromises()
+    expect(apiPost).not.toHaveBeenCalled()
+
+    await wrapper.get('.pr-actions--card .btn-primary').trigger('click')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith('/api/proposals/p/accept', { expected_revision: 'rev-p' })
     wrapper.unmount()
@@ -2395,9 +2620,14 @@ describe('the change on the row', () => {
 
     await wrapper.get('.pr-row-accept').trigger('click')
     await flushPromises()
+    await wrapper.get('.pr-actions--card .btn-primary').trigger('click')
+    await flushPromises()
     expect(wrapper.get('.pr-row').text()).toContain('The destination changed since this preview')
-    expect(wrapper.get('.pr-diff .mr-box-head').text()).toBe('1 line added after line 4')
     expect(useProposalsStore().previews.d.revision).toBe('rev-d2')
+    // Closing the card leaves the row showing the same refreshed change.
+    await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Cancel')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.pr-diff .mr-box-head').text()).toBe('1 line added after line 4')
     wrapper.unmount()
   })
 
