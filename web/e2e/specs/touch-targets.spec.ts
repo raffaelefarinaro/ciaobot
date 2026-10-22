@@ -9,6 +9,9 @@ import { BOOTED, COMPOSER, boot, isolate } from '../support/app'
 const TOUCH_MIN = 44
 const TABS = [
   '/settings',
+  '/settings/appearance',
+  '/settings/access',
+  '/settings/advanced',
   '/settings/workspaces',
   '/settings/providers',
   '/settings/skills',
@@ -41,6 +44,7 @@ const POPUP_SURFACES: Array<[string, string]> = [
   ['/chat/alpha-chat-1', COMPOSER],
   ['/settings/workspaces', '.settings-main'],
   ['/settings/providers', '.settings-main'],
+  ['/settings/advanced', '.settings-main'],
 ]
 
 /**

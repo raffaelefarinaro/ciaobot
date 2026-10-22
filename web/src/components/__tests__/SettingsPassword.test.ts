@@ -12,8 +12,8 @@ afterEach(() => vi.restoreAllMocks())
 async function mountSettings(onHost?: boolean) {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
-  await router.push('/settings')
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab', component: stub }] })
+  await router.push('/settings/access')
   await router.isReady()
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
     if (path === '/api/auth/settings') return (onHost === undefined ? { password_configured: true } : { password_configured: true, on_host: onHost }) as never

@@ -27,7 +27,7 @@ small browser fixture; asset readiness alone does not measure Home's data wait.
 
 Linux production and every installer-managed macOS install restart the engine
 from Settings through `POST /api/admin/restart`; developer mode (Settings →
-General → Developer, with the source checkout set there) on a source checkout
+Advanced → Developer, with the source checkout set there) on a source checkout
 retains the source deploy workflow.
 
 ```bash
@@ -616,7 +616,7 @@ file outside the scope is not, a clean run creates nothing). `tests/test_local_r
 covers the three routes. The five-minute interval is the named constant
 `BACKUP_INTERVAL_S` in `ciao/backup_service.py`, and its runs are recorded in
 `job_runs` under the id `branch_backup`.
-Settings → General shows a compact online backup state and last successful upload;
+Settings → Advanced shows a compact online backup state and last successful upload;
 the configured scope, repository, and raw diagnostic are in a native "Backup details"
 disclosure ("Review details" when attention is needed). A coverage gap — paths git
 already tracks that the scope refuses to commit, so a repository that is also a

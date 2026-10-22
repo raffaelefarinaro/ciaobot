@@ -37,7 +37,7 @@ alone, and `ciao desktop uninstall` removes it by hand. That command takes the
 bundle (`~/Applications`, or `/Applications` for older installs; `--app-dir`
 points elsewhere) with its LaunchAgents and any `~/.local/bin/ciao` shim that
 pointed inside it. Your workspace folder and its notes are kept. Updates after
-that are the same one-liner again, or **Settings → Home** in the PWA, which
+that are the same one-liner again, or **Settings → General** in the PWA, which
 stages and applies the engine package update in the background; there is no
 in-app app updater.
 
@@ -217,7 +217,7 @@ Note: many adapters require the Browser Bridge Chrome extension and a logged-in 
 
 ### PWA workspace keyboard navigation
 
-The Settings → Home → Keyboard shortcuts card lets you disable or rebind the
+The Settings → General → Keyboard shortcuts card lets you disable or rebind the
 PWA's global shortcuts, including the workspace number slots, and choose
 Cmd/Ctrl+Enter or Enter to send. These preferences live in the engine's
 `.runtime/app_settings.json` and are shared with connected devices. No
@@ -375,12 +375,12 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 - `PWA_AUTH_TOKEN` (required): the dashboard password, doubling as the pre-shared
   token for PWA auth and the session-signing secret. The first-run wizard asks for
-  it and Settings → PWA password changes it. There is one engine per install, so
+  it and Settings → Access & devices → PWA password changes it. There is one engine per install, so
   this is the only password that install has: a second device runs its own engine
   and its own token.
 - `PWA_PORT` (default `8443`). The bind address is no longer an env var: the
   server binds all interfaces by default so the PWA is reachable over LAN and
-  Tailscale, and Settings → General → Network access → "This computer only"
+  Tailscale, and Settings → Access & devices → Network access → "This computer only"
   makes it loopback-only (takes effect after a restart).
 - `CIAO_RUNTIME_ROOT` (service-provided, process environment only):
   runtime-state directory. The runtime root is `<workspace>/.runtime` unless the
@@ -416,7 +416,7 @@ See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recover
 
 - `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** The permission mode is now set per provider in Settings → Providers (Manual asks before every action, Auto lets safe reads and edits run silently and asks before destructive operations, Bypass allows everything); a provider with no pin uses Auto.
 - `PWA_AUTH_REQUIRED`: **removed and no longer read.** Password protection is always on; `ciao setup --no-auth` is gone with it. An install that still sets it to `false` gets a `legacy-env-ignored` operator tile; the `true` that setup used to write is ignored silently. A workspace `.env` with no `PWA_AUTH_TOKEN` signs sessions with a generated `.runtime/session-secret` and is still protected: put a password in `PWA_AUTH_TOKEN` and restart, or sign in once with `ciao setup-url`.
-- `PWA_HOST`, `CIAO_LOG_LEVEL`, `CIAO_DEV_MODE`, `CIAO_APP_REPO`: **moved to Settings and no longer read.** They are Settings → General → Network access (the bind address, default `0.0.0.0`; read at startup) and Settings → General → Developer (developer mode — the Debug card, `/api/debug/issues` and a source-checkout deploy from Settings → Restart; the source checkout path for that deploy; and the log level, read at startup, where `debug` also attaches a rotating `.runtime/server_debug.log` of 10 MB × 2 backups that the dev-mode `/api/debug/issues` report and the `{{ISSUE_REPORT}}` placeholder surface alongside the error tail). All four are stored in `.runtime/app_settings.json` and exposed on `/api/settings/routines`. On the first server start after upgrading, any of them still set in `.env` is imported into Settings once (an unusable host or log level is skipped with a warning); the `legacy_env_imported` flag in that file makes the import one-shot, so a value later changed in Settings stays changed. After that the variables are inert: the `legacy-env-ignored` operator tile asks you to remove them from `.env`.
+- `PWA_HOST`, `CIAO_LOG_LEVEL`, `CIAO_DEV_MODE`, `CIAO_APP_REPO`: **moved to Settings and no longer read.** They are Settings → Access & devices → Network access (the bind address, default `0.0.0.0`; read at startup) and Settings → Advanced → Developer (developer mode — the Debug card, `/api/debug/issues` and a source-checkout deploy from Settings → Restart; the source checkout path for that deploy; and the log level, read at startup, where `debug` also attaches a rotating `.runtime/server_debug.log` of 10 MB × 2 backups that the dev-mode `/api/debug/issues` report and the `{{ISSUE_REPORT}}` placeholder surface alongside the error tail). All four are stored in `.runtime/app_settings.json` and exposed on `/api/settings/routines`. On the first server start after upgrading, any of them still set in `.env` is imported into Settings once (an unusable host or log level is skipped with a warning); the `legacy_env_imported` flag in that file makes the import one-shot, so a value later changed in Settings stays changed. After that the variables are inert: the `legacy-env-ignored` operator tile asks you to remove them from `.env`.
 - `CIAO_VAULT_MODE`: **no longer written or read.** Setup records the vault mode (`scratch` initializes the current vault layout; `existing` preserves the selected notes folder and starts an initial inventory/curation chat, where clear material may be reorganized and ambiguous material is left in place) on the second line of `.runtime/setup-completed-at`, which only the first-run onboarding chat reads. A value left in `.env` is ignored silently: setup wrote it, so it is not a setting the operator chose.
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
@@ -479,7 +479,7 @@ Ciaobot runs on macOS under launchd.
 - `ciao setup --workspace <path> --load-launchd` renders and loads the LaunchAgent.
 - The packaged launchd template is `ciao/stock/deploy/com.ciao.server.plist.tmpl`.
 - Start and stop: `ciao service start` / `ciao service stop` (or `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`). Both refuse while chats are actively running unless `--force` is passed.
-- Updates: re-run the one-line installer, or use **Settings → Home** in the PWA, which stages and applies the engine package update in the background. There is no in-app app updater.
+- Updates: re-run the one-line installer, or use **Settings → General** in the PWA, which stages and applies the engine package update in the background. There is no in-app app updater.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
 - A dropped non-image chat file is converted locally: supported documents are
   converted from the drop's own source and only Markdown is kept in the active

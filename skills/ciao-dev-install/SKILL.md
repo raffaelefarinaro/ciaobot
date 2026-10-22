@@ -229,7 +229,7 @@ Watch for at least a minute. Issues to flag to the user:
   curl -s http://127.0.0.1:8443/ | grep -oE 'assets/index-[A-Za-z0-9_-]+\.js'
   ```
 - **Version mismatch** — the served version should match the checkout:
-  `.venv/bin/ciao --version` vs Settings → Home.
+  `.venv/bin/ciao --version` vs Settings → General.
 
 Sanity probes:
 

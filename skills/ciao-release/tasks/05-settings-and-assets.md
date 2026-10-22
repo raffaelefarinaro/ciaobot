@@ -12,20 +12,24 @@ is where a partial change shows up.
 Settings is **not a single page that scrolls**. Each section has its own route,
 listed in the sidebar, and each renders only its own cards:
 
-`/settings` (General, the default), `/settings/providers`, `/settings/workspaces`,
-`/settings/skills`, `/settings/subagents`, `/settings/commands`,
-`/settings/mcp`.
+`/settings` (General, the default), `/settings/appearance`,
+`/settings/access`, `/settings/providers`, `/settings/advanced`,
+`/settings/workspaces`, `/settings/skills`, `/settings/subagents`,
+`/settings/commands`, `/settings/mcp`.
 
 Visit each route in turn. On each one, **wait for that route's own heading or
 load state to resolve** — do not sleep a fixed interval and call it loaded.
 `/settings/models` redirects to `/settings/providers`; it is not a section of
-its own. The sidebar rail has two groups: Ciaobot (General, Providers,
-Workspaces) and the active workspace (Skills, Subagents, Commands, MCP servers).
+its own. The sidebar rail has two groups: Ciaobot (General, Appearance,
+Access & devices, Providers, Advanced, Workspaces) and the active workspace (Skills, Subagents, Commands, MCP servers).
 
-`/settings` (General) carries What can Ciaobot do?, Appearance, This host,
-memory backup, insights, Updates, the main workspace, workspace health, the PWA
-password card, Other devices, app install, notifications, keyboard shortcuts,
-open source (and Debug only in dev mode). Watch for:
+`/settings` (General) carries What can Ciaobot do?, Updates, app install,
+notifications, keyboard shortcuts, update task history, start at sign-in,
+memory handover, insights and open source. `/settings/advanced` carries This
+host, memory backup, the Ciaobot folder, workspace health and Developer (and
+Debug only in dev mode). `/settings/access` carries the PWA password card,
+Other devices and Network access. `/settings/appearance` is the Appearance card
+alone. Watch for:
 
 - The online backup card shows state and last successful upload; scope,
   repository and raw diagnostics sit behind a native `<details>` disclosure.
@@ -34,7 +38,7 @@ open source (and Debug only in dev mode). Watch for:
 
 The **"On this page" rail is route-specific**: it is built from the cards the
 current tab rendered (`tocItems` in `web/src/components/SettingsView.vue`), so
-it lists the sections of *that* route, not the seven Settings sections on one
+it lists the sections of *that* route, not the ten Settings sections on one
 scroll. A rail that names another route's cards is a finding.
 
 On `/settings/providers`, compare each provider row's version (OpenCode and Claude)

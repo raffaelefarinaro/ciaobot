@@ -28,7 +28,7 @@
 import { computed } from 'vue'
 import type { RoutineSettings } from '../../lib/types'
 
-// The routines settings are owned by SettingsView, which the Models tab shares.
+// The routines settings are owned by SettingsView, which the Providers tab shares.
 const props = defineProps<{
   routines: RoutineSettings | null
   routinesSaving: boolean

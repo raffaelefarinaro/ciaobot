@@ -6778,7 +6778,7 @@ def _pip_install_hint(output: str) -> str:
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
-    The source checkout setting (Settings → General → Developer) wins over the
+    The source checkout setting (Settings → Advanced → Developer) wins over the
     module path for developer-mode deploys. A
     packaged app does not resolve a checkout for production updates.
     """
@@ -6990,7 +6990,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     problem = _checkout_problem(codebase_root)
     if problem:
         hint = (
-            f"{problem}. Set the source checkout in Settings → General → Developer "
+            f"{problem}. Set the source checkout in Settings → Advanced → Developer "
             "to the ciaobot checkout so Restart can "
             "pull, reinstall, and rebuild from source."
         )

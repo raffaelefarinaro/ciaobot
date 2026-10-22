@@ -15,8 +15,8 @@ const ROOT = '/Users/me/ciaobot'
 async function mountSettings(move: Record<string, unknown>) {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
-  await router.push('/settings')
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab', component: stub }] })
+  await router.push('/settings/advanced')
   await router.isReady()
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
     if (path === '/api/settings/routines') {

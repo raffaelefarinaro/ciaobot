@@ -437,7 +437,7 @@ def test_the_capabilities_catalog_describes_the_memory_backup() -> None:
     """The catalog has to name the three entry points a user will look for in
     Settings, and say that the engine then runs on its own."""
     skill = " ".join(_stock("skills/ciao-capabilities/references/memory.md").split())
-    assert "**Memory backup** (Settings → General → Memory backup)" in skill
+    assert "**Memory backup** (Settings → Advanced → Memory backup)" in skill
     assert "**Set up in Ciaobot**" in skill
     assert "**Copy setup prompt**" in skill
     assert "GitHub CLI signed in" in skill
