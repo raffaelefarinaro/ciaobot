@@ -71,6 +71,26 @@ function mountNote(tasks: Task[], chat = CHAT) {
   })
 }
 
+/**
+ * The focus tests need a real document: focus only exists on an element that
+ * is attached to one. Every mount is registered for cleanup, so a test that
+ * fails on an assertion cannot leave its tree behind for the next one.
+ */
+const cleanups: Array<() => void> = []
+
+function mountAttached(tasks: Task[]) {
+  const signals = useTaskSignalsStore()
+  signals.tasks = tasks
+  signals.loadedWorkspace = 'personal'
+  const wrapper = mount(TaskOriginNote, {
+    props: { chat: CHAT },
+    attachTo: document.body,
+    global: { stubs: { RouterLink: RouterLinkStub } },
+  })
+  cleanups.push(() => wrapper.unmount())
+  return wrapper
+}
+
 describe('TaskOriginNote', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -80,7 +100,10 @@ describe('TaskOriginNote', () => {
     askConfirm.mockResolvedValue(true)
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [] })
   })
-  afterEach(() => { vi.restoreAllMocks() })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
 
   it('names the task, links to its editor, and says the agent is running', async () => {
     const wrapper = mountNote([task()])
@@ -184,30 +207,15 @@ describe('TaskOriginNote', () => {
   it('moves focus into the note field when the prompt opens', async () => {
     // Attached to the document, so focus is real: the button that opened the
     // prompt leaves the DOM, and the keyboard must land in the field.
-    const signals = useTaskSignalsStore()
-    signals.tasks = [task()]
-    signals.loadedWorkspace = 'personal'
-    const wrapper = mount(TaskOriginNote, {
-      props: { chat: CHAT },
-      attachTo: document.body,
-      global: { stubs: { RouterLink: RouterLinkStub } },
-    })
+    const wrapper = mountAttached([task()])
     await wrapper.get('button').trigger('click')
     await flushPromises()
 
     expect(document.activeElement).toBe(wrapper.get('#task-origin-resolution').element)
-    wrapper.unmount()
   })
 
   it('gives the keyboard back to the button that opened the prompt when Cancel closes it', async () => {
-    const signals = useTaskSignalsStore()
-    signals.tasks = [task()]
-    signals.loadedWorkspace = 'personal'
-    const wrapper = mount(TaskOriginNote, {
-      props: { chat: CHAT },
-      attachTo: document.body,
-      global: { stubs: { RouterLink: RouterLinkStub } },
-    })
+    const wrapper = mountAttached([task()])
     await wrapper.get('button').trigger('click')
     await flushPromises()
     await wrapper.findAll('button').find((b) => b.text() === 'Cancel')!.trigger('click')
@@ -217,23 +225,15 @@ describe('TaskOriginNote', () => {
     const opener = wrapper.get('button')
     expect(opener.text()).toBe('Mark done')
     expect(document.activeElement).toBe(opener.element)
-    wrapper.unmount()
   })
 
   it('puts focus back on the note after a refused save', async () => {
     const reviewed = task({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
-    const signals = useTaskSignalsStore()
-    signals.tasks = [reviewed]
-    signals.loadedWorkspace = 'personal'
     // The save is held open, so the refusal lands while the test watches.
     let refuse: (reason: unknown) => void = () => {}
     apiPost.mockImplementation(() => new Promise((_resolve, reject) => { refuse = reject }))
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, revision: 'b'.repeat(64) }] })
-    const wrapper = mount(TaskOriginNote, {
-      props: { chat: CHAT },
-      attachTo: document.body,
-      global: { stubs: { RouterLink: RouterLinkStub } },
-    })
+    const wrapper = mountAttached([reviewed])
     await wrapper.get('button').trigger('click')
     await flushPromises()
     await wrapper.get('#task-origin-resolution').setValue('Done')
@@ -254,7 +254,6 @@ describe('TaskOriginNote', () => {
     expect(wrapper.get('[role="alert"]').text()).toBe('This task changed since it was read. Check it and approve again.')
     expect((wrapper.get('#task-origin-resolution').element as HTMLTextAreaElement).value).toBe('Done')
     expect(document.activeElement).toBe(wrapper.get('#task-origin-resolution').element)
-    wrapper.unmount()
   })
 
   it('answers a stale-revision refusal with a short line and a reload', async () => {

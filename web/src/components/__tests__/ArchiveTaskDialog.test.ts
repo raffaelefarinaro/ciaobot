@@ -178,6 +178,7 @@ describe('ArchiveTaskDialog', () => {
     const dialog = find<HTMLElement>('[role="dialog"]')
     expect([...dialog.querySelectorAll('button')].map(b => b.textContent?.trim())).toEqual(['Back', 'Mark done'])
     expect(dialog.textContent).not.toContain('Complete without note')
+    expect(find('label[for="archive-task-resolution"]').textContent).toBe('How was this completed? (optional)')
   })
 
   it('a 409 shows the refusal and keeps the dialog open', async () => {
