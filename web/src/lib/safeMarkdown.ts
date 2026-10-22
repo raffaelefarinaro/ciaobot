@@ -16,6 +16,60 @@ type FileMarkdownOptions = {
 
 const MARKDOWN_OPTIONS = { breaks: true }
 
+// The class a refused link is rendered as: inert text, not an anchor.
+const DEAD_LINK_CLASS = 'markdown-dead-link'
+
+/**
+ * Whether a link target can be followed. The sanitizer's own URI policy
+ * decides, so the two cannot drift apart: it keeps relative paths,
+ * fragments and the ordinary web schemes, and drops `file:`, `data:`,
+ * `javascript:` and every other scheme it does not know.
+ */
+function isUsableHref(href: string | null | undefined): boolean {
+  const value = (href || '').trim()
+  if (!value) return false
+  return DOMPurify.isValidAttribute('a', 'href', value)
+}
+
+/**
+ * The path a `file:` link points at, or '' when the target is not a file.
+ *
+ * The scheme is dropped and the path is kept, so the reader can still copy
+ * it. An authority is part of the path: `file://server/share` is
+ * `//server/share`, not `/share`.
+ */
+function localPathOf(target: string): string {
+  if (!/^file:/i.test(target)) return ''
+  let path = target.slice('file:'.length)
+  let authority = ''
+  if (path.startsWith('//')) {
+    const rest = path.slice(2)
+    const slash = rest.indexOf('/')
+    authority = slash === -1 ? rest : rest.slice(0, slash)
+    path = slash === -1 ? '' : rest.slice(slash)
+  }
+  try {
+    path = decodeURIComponent(path)
+  } catch {
+    // Shown as written when it is not valid percent-encoding.
+  }
+  if (authority) return `//${authority}${path}`
+  // A Windows path keeps its drive letter: `file:///C:/notes` is `C:/notes`.
+  return path.replace(/^\/([A-Za-z]:)/, '$1')
+}
+
+/**
+ * A link the sanitizer will drop: the label stays readable, and a file path
+ * stays visible as text the reader can copy. The path goes inside the
+ * anchor, whose content `linkifyHtml` skips.
+ */
+function deadLinkHtml(renderer: Renderer, token: Tokens.Link): string {
+  const label = renderer.parser.parseInline(token.tokens)
+  const path = localPathOf(token.href)
+  const shown = path ? ` (${escapeAttr(path)})` : ''
+  return `<a href="${escapeAttr(token.href)}">${label}${shown}</a>`
+}
+
 const chatMarkdownRenderer = new Renderer()
 chatMarkdownRenderer.table = function table(token: Tokens.Table): string {
   return [
@@ -110,6 +164,8 @@ chatMarkdownRenderer.link = function link(this: Renderer, token: Tokens.Link): s
     if (token.text === token.href && token.href.length > LONG_BARE_LINK && /^https?:\/\//i.test(token.href)) {
       return `<a href="${escapeAttr(token.href)}" title="${escapeAttr(token.href)}">${escapeAttr(shortLinkLabel(token.href))}</a>`
     }
+    // A target the sanitizer drops is inert text, not a link.
+    if (!isUsableHref(token.href)) return deadLinkHtml(this, token)
     return Renderer.prototype.link.call(this, token)
   }
   const label = this.parser.parseInline(token.tokens)
@@ -158,6 +214,35 @@ function escapeAttr(value: string): string {
     .replace(/'/g, '&#39;')
 }
 
+/**
+ * Replace the anchors the sanitizer left without a target. An anchor with no
+ * href is not a link but still looks like one — the panes paint `a` with the
+ * accent colour and an underline — so it becomes plain text, with the inline
+ * formatting it was written with.
+ *
+ * This runs last, after `linkifyHtml`: that pass skips the content of an
+ * anchor, so a dead link's label is never turned into a workspace file link.
+ */
+function neutralizeDeadAnchors(html: string): string {
+  if (!html.includes('<a')) return html
+  const template = document.createElement('template')
+  template.innerHTML = html
+  const anchors = Array.from(template.content.querySelectorAll('a'))
+  if (!anchors.length) return html
+  let changed = false
+  for (const anchor of anchors) {
+    if (isUsableHref(anchor.getAttribute('href'))) continue
+    changed = true
+    const span = document.createElement('span')
+    span.className = DEAD_LINK_CLASS
+    const title = anchor.getAttribute('title')
+    if (title) span.setAttribute('title', title)
+    span.innerHTML = anchor.innerHTML
+    anchor.replaceWith(span)
+  }
+  return changed ? template.innerHTML : html
+}
+
 // No chat is known unless the caller says so: the renderers are used by
 // panes that have no chat list of their own.
 const NO_KNOWN_CHATS: ReadonlyMap<string, string> = new Map()
@@ -178,9 +263,11 @@ export function renderMarkdown(
   try {
     const html = chatMarkdownParser.parse(text) as string
     const linked = linkifyChatIds(html, knownChats)
-    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths)
+    return neutralizeDeadAnchors(
+      linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths),
+    )
   } catch {
-    return sanitizeHtml(text)
+    return neutralizeDeadAnchors(sanitizeHtml(text))
   }
 }
 
@@ -218,7 +305,9 @@ export function renderUserMarkdown(
   try {
     const html = userMarkdownParser.parse(text) as string
     const linked = linkifyChatIds(html, knownChats)
-    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths)
+    return neutralizeDeadAnchors(
+      linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths),
+    )
   } catch {
     return escapeAttr(text)
   }
@@ -242,6 +331,8 @@ export function renderFileMarkdown(text: string, options: FileMarkdownOptions): 
       return `<img src="${escapeAttr(src)}" alt="${escapeAttr(alt ?? '')}"${titleAttr} loading="lazy" />`
     },
     link(this: Renderer, token: Tokens.Link): string {
+      // A target the sanitizer drops is inert text, not a link.
+      if (!isUsableHref(token.href)) return deadLinkHtml(this, token)
       if (!linkIndex || !linkPathSet) return Renderer.prototype.link.call(this, token)
       const ref = vaultNoteRefFromHref(token.href)
       // External URLs, absolute paths, in-page anchors and non-note targets
@@ -259,8 +350,8 @@ export function renderFileMarkdown(text: string, options: FileMarkdownOptions): 
   }
   const parser = new Marked({ ...MARKDOWN_OPTIONS, renderer })
   try {
-    return sanitizeHtml(parser.parse(text) as string)
+    return neutralizeDeadAnchors(sanitizeHtml(parser.parse(text) as string))
   } catch {
-    return sanitizeHtml(text)
+    return neutralizeDeadAnchors(sanitizeHtml(text))
   }
 }
