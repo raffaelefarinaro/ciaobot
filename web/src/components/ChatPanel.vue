@@ -1940,7 +1940,10 @@ watch(
     const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.queued-chip')
     const id = held?.dataset.queueId
     if (!id || ids.includes(id)) return
-    void nextTick(() => inputEl.value?.focus())
+    void nextTick(() => {
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else composerBarEl.value?.focus()
+    })
   },
   { flush: 'pre' },
 )
