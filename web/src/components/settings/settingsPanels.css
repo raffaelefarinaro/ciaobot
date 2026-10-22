@@ -935,49 +935,6 @@
 .workspace-edit-actions .btn-small {
   flex: 0 0 auto;
 }
-.workspace-color-swatches {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-/* 26px swatch; the selected one carries a ring in the text colour so the
-   choice reads without relying on the swatch hue. */
-.workspace-color-swatch {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: var(--swatch);
-  cursor: pointer;
-  transition: box-shadow 120ms var(--ease), transform 120ms var(--ease);
-}
-.workspace-color-swatch:hover:not(:disabled) {
-  transform: scale(1.08);
-}
-.workspace-color-swatch.active {
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
-}
-@media (pointer: coarse) {
-  .workspace-color-swatch {
-    width: var(--touch);
-    height: var(--touch);
-    background: radial-gradient(circle at center, var(--swatch) 0 13px, transparent 14px);
-  }
-  .workspace-color-swatch.active {
-    box-shadow: none;
-    background: radial-gradient(circle at center, var(--swatch) 0 13px, var(--bg) 14px 15px, var(--fg) 16px 17px, transparent 18px);
-  }
-}
-.workspace-color-swatch:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.workspace-color-swatch:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
 .workspace-select {
   appearance: none;
   -webkit-appearance: none;

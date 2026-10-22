@@ -532,6 +532,15 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
     assert "color" in bad.json()["error"]
 
 
+def test_new_accent_ids_accepted():
+    from ciao.config import coerce_workspace_color
+
+    for color in ("blue", "teal", "lime", "fuchsia"):
+        assert coerce_workspace_color(color) == color
+    with pytest.raises(ValueError):
+        coerce_workspace_color("red")
+
+
 def test_provider_config_offers_no_api_keys(tmp_path, monkeypatch):
     """Settings -> Models & providers has no key fields left to type into.
 

@@ -62,7 +62,7 @@ export interface WorkspaceInfo {
   /** Operator-only; absent or 'off': shadow verdicts only. */
   memory_handover?: MemoryHandover
   gws_profile: string
-  // PWA accent preset: amber | pink | cyan | emerald | violet. Missing → amber (Ciao orange).
+  // PWA accent preset: amber | pink | cyan | emerald | violet | blue | teal | lime | fuchsia. Missing → amber (Ciao orange).
   color?: string
   // Filesystem scope for the agent and its shell. Absent or null: the workspace
   // never chose one and runs under the engine's default_agent_fs_scope.

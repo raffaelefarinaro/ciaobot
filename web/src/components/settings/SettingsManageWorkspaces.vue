@@ -30,26 +30,11 @@
         </label>
         <div class="settings-field settings-field--wide">
           <span class="ws-label" id="new-workspace-color-label">Accent color</span>
-          <div
-            class="workspace-color-swatches"
-            role="radiogroup"
-            aria-labelledby="new-workspace-color-label"
-          >
-            <button
-              v-for="preset in WORKSPACE_COLOR_PRESETS"
-              :key="`new-color-${preset.id}`"
-              type="button"
-              class="workspace-color-swatch"
-              role="radio"
-              :aria-checked="newWorkspaceForm.color === preset.id"
-              :aria-label="preset.label"
-              :title="preset.label"
-              :disabled="workspacesSaving === 'new'"
-              :class="{ active: newWorkspaceForm.color === preset.id }"
-              :style="{ '--swatch': preset.swatch }"
-              @click="newWorkspaceForm.color = preset.id"
-            />
-          </div>
+          <WorkspaceColorPicker
+            v-model="newWorkspaceForm.color"
+            labelledby="new-workspace-color-label"
+            :disabled="workspacesSaving === 'new'"
+          />
         </div>
         <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
           <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
@@ -237,7 +222,7 @@ import {
 } from 'reka-ui'
 import SkeletonLoader from '../SkeletonLoader.vue'
 import WorkspaceTile from '../WorkspaceTile.vue'
-import { WORKSPACE_COLOR_PRESETS } from '../../lib/workspaceColors'
+import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
 import { workspaceLabel } from '../../lib/workspaceLabel'
 import { moveAnnouncement, moveName } from '../../lib/workspaceOrder'
 import { useProjectStore } from '../../stores/projects'

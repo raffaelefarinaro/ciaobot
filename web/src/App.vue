@@ -340,6 +340,22 @@ watch(shouldPollStartup, (shouldPoll) => {
   --accent: #a78bfa;
   --accent-strong: #9670f7;
 }
+[data-workspace-color="blue"] {
+  --accent: #60a5fa;
+  --accent-strong: #3b82f6;
+}
+[data-workspace-color="teal"] {
+  --accent: #2dd4bf;
+  --accent-strong: #14b8a6;
+}
+[data-workspace-color="lime"] {
+  --accent: #a3e635;
+  --accent-strong: #84cc16;
+}
+[data-workspace-color="fuchsia"] {
+  --accent: #e879f9;
+  --accent-strong: #d946ef;
+}
 :root.theme-light [data-workspace-color="pink"] {
   --accent: #d81b60;
   --accent-strong: #b00d46;
@@ -359,6 +375,22 @@ watch(shouldPollStartup, (shouldPoll) => {
 :root.theme-light [data-workspace-color="violet"] {
   --accent: #7c3aed;
   --accent-strong: #6d28d9;
+}
+:root.theme-light [data-workspace-color="blue"] {
+  --accent: #1d4ed8;
+  --accent-strong: #1e40af;
+}
+:root.theme-light [data-workspace-color="teal"] {
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+}
+:root.theme-light [data-workspace-color="lime"] {
+  --accent: #4d7c0f;
+  --accent-strong: #3f6212;
+}
+:root.theme-light [data-workspace-color="fuchsia"] {
+  --accent: #a21caf;
+  --accent-strong: #86198f;
 }
 
 /* In standalone/fullscreen PWA the home indicator is live, so restore the
