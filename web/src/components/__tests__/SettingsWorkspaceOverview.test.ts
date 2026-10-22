@@ -75,12 +75,12 @@ function workspaces(names: string[], primary = 'personal'): WorkspacesResponse {
   }
 }
 
-async function mountOverview(active = 'work') {
+async function mountOverview(active = 'work', path = '/settings/workspace') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
   })
-  await router.push('/settings/workspace')
+  await router.push(path)
   await router.isReady()
   const store = useProjectStore()
   store.activeWorkspace = active
@@ -123,6 +123,17 @@ describe('Settings > Workspace Overview', () => {
       ])
       expect(nameValue(wrapper)).toBe('work')
       expect(wrapper.find('.workspace-tile').exists()).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('#workspace-name focuses the name field', async () => {
+    const { wrapper } = await mountOverview('work', '/settings/workspace#workspace-name')
+    try {
+      await flushPromises()
+      await nextTick()
+      expect(document.activeElement).toBe(wrapper.get('#workspace-name-input').element)
     } finally {
       wrapper.unmount()
     }

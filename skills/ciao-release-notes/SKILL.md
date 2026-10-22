@@ -50,7 +50,7 @@ GitHub Desktop, Obsidian):
 
 1. **Lead with the benefit, in the user's words.** "Rename a workspace from
    Settings" — not "add PATCH name support to the registry". Name the screen
-   where it lives (Settings → Workspaces, the task board, a chat).
+   where it lives (Settings → Manage workspaces, the task board, a chat).
 2. **One line per item.** If it needs two sentences, the second is how to use
    it. No paragraphs, no "we're excited to".
 3. **No internals.** No file, function, module or class names, no test counts,

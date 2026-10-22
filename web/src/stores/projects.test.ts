@@ -6910,7 +6910,7 @@ describe('update-available notification', () => {
 })
 
 describe('gws health toast', () => {
-  test('surfaces an error toast whose Fix action routes to Settings → Workspaces', () => {
+  test('surfaces an error toast whose Fix action routes to Settings → Manage workspaces', () => {
     const store = useProjectStore()
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
@@ -6921,7 +6921,7 @@ describe('gws health toast', () => {
         token_valid: false,
         token_error: 'expired',
         title: 'Google Workspace login needs attention',
-        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Workspaces.',
+        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Manage workspaces.',
       }),
     })
 
@@ -8986,5 +8986,76 @@ describe('retry origin on the wire', () => {
     expect(frames).toHaveLength(1)
     expect(frames[0].text).toBe('forged origin')
     expect('origin' in frames[0]).toBe(false)
+  })
+})
+
+describe('reorderWorkspaces', () => {
+  const ws = (name: string) => ({ name, vault_root: name, default_provider: 'claude' })
+  const optionNames = (store: ReturnType<typeof useProjectStore>) =>
+    store.workspaceOptions.map(w => w.name)
+
+  function seed(store: ReturnType<typeof useProjectStore>) {
+    store.workspaces = [ws('alpha'), ws('beta'), ws('gamma')] as typeof store.workspaces
+    store.activeWorkspace = 'beta'
+  }
+
+  test('posts the order, reorders at once and again from the response', async () => {
+    const store = useProjectStore()
+    seed(store)
+    let resolvePost: (value: unknown) => void = () => {}
+    apiPost.mockImplementation(() => new Promise(resolve => { resolvePost = resolve }))
+
+    const pending = store.reorderWorkspaces(['gamma', 'alpha', 'beta'])
+
+    expect(apiPost).toHaveBeenCalledWith('/api/workspaces/reorder', { order: ['gamma', 'alpha', 'beta'] })
+    expect(optionNames(store)).toEqual(['gamma', 'alpha', 'beta'])
+    resolvePost({ workspaces: [ws('gamma'), ws('beta'), ws('alpha')], active: 'gamma' })
+    await pending
+    expect(optionNames(store)).toEqual(['gamma', 'beta', 'alpha'])
+    expect(store.activeWorkspace).toBe('beta')
+  })
+
+  test('failure restores the previous order and rethrows', async () => {
+    const store = useProjectStore()
+    seed(store)
+    apiPost.mockRejectedValue(new Error('boom'))
+
+    await expect(store.reorderWorkspaces(['beta', 'alpha', 'gamma'])).rejects.toThrow('boom')
+
+    expect(optionNames(store)).toEqual(['alpha', 'beta', 'gamma'])
+    expect(store.activeWorkspace).toBe('beta')
+  })
+
+  test('does not post a list that is not the current workspaces', async () => {
+    const store = useProjectStore()
+    seed(store)
+
+    await store.reorderWorkspaces(['alpha', 'beta'])
+
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(optionNames(store)).toEqual(['alpha', 'beta', 'gamma'])
+  })
+
+  test('a workspaces_changed frame picks up an order set elsewhere', async () => {
+    const store = useProjectStore()
+    seed(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') {
+        return { workspaces: [ws('gamma'), ws('alpha'), ws('beta')], active: 'gamma' }
+      }
+      if (path === '/api/projects') return []
+      return {}
+    })
+    const revision = store.workspaceRegistryRevision
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed' }) })
+
+    await vi.waitFor(() => {
+      expect(store.workspaceRegistryRevision).toBe(revision + 1)
+    })
+    expect(optionNames(store)).toEqual(['gamma', 'alpha', 'beta'])
+    expect(store.activeWorkspace).toBe('beta')
   })
 })

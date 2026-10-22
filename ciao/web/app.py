@@ -171,6 +171,7 @@ from ciao.web.routes_api import (
     startup_status_endpoint,
     menubar_chats_endpoint,
     status_endpoint,
+    reorder_workspaces,
     upsert_workspace_setting,
     vault_backlinks,
     vault_delete_note,
@@ -409,6 +410,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Projects
         Route("/api/workspaces", list_workspaces, methods=["GET"]),
         Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
+        Route("/api/workspaces/reorder", reorder_workspaces, methods=["POST"]),
         Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
         # Literal `archived` paths precede the {name} pattern. DELETE is kept as
         # an alias of archive for existing scripts: it no longer deletes.

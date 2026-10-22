@@ -6,7 +6,7 @@ This document is for agents and operators working inside an installed Ciaobot wo
 
 - `CIAO_CUSTOMIZATION.md`: this guide.
 - `.env`: server config (auth, host/port) and runtime paths.
-- `.runtime/workspaces.json`: logical workspaces, managed from Settings → Workspaces.
+- `.runtime/workspaces.json`: logical workspaces, managed from Settings → Manage workspaces.
 - `.claude/agents/`: project agents available to Claude-backed chats.
 - `.claude/commands/`: slash commands available to Claude-backed chats.
 - `.claude/skills/`: skills available to Claude-backed chats.
@@ -23,7 +23,7 @@ Ciaobot has two workspace concepts:
 - `CIAO_WORKSPACE`: the filesystem root for this local Ciaobot instance. It contains `.env`, `.runtime/`, `.claude/`, and usually `memory-vault/`.
 - Logical workspaces: named chat spaces such as `default`, `personal`, `work`, or `client-a`. These appear in the PWA sidebar and route projects, chats, vault roots, model defaults, and integration profiles.
 
-Logical workspaces are managed from Settings → Workspaces and stored in `.runtime/workspaces.json`, the only source of the workspace list. `.env` does not configure them: the retired `CIAO_WORKSPACES` variable is ignored (a server start imports it into the registry once, then warns until it is removed from `.env`).
+Logical workspaces are managed from Settings → Manage workspaces and stored in `.runtime/workspaces.json`, the only source of the workspace list. `.env` does not configure them: the retired `CIAO_WORKSPACES` variable is ignored (a server start imports it into the registry once, then warns until it is removed from `.env`).
 
 Example `.runtime/workspaces.json`:
 
@@ -50,7 +50,7 @@ Example `.runtime/workspaces.json`:
 
 `vault_root` is relative to `CIAO_WORKSPACE` unless it is absolute.
 
-`color` is an optional PWA accent preset (`amber`, `pink`, `cyan`, `emerald`, `violet`). Missing values default to Ciao orange (`amber`). Only accent tokens change; canvas colors stay fixed.
+`color` is an optional PWA accent preset (`amber`, `pink`, `cyan`, `emerald`, `violet`, `blue`, `teal`, `lime`, `fuchsia`). Missing values default to Ciao orange (`amber`). Only accent tokens change; canvas colors stay fixed.
 
 ## Providers and Models
 
@@ -139,7 +139,7 @@ Important fields:
 
 Safe workspace-level changes:
 
-- Manage workspaces in Settings → Workspaces.
+- Manage workspaces in Settings → Manage workspaces.
 - Add project docs, vault references, and memory pages.
 - Add or update canonical `skills/`, `subagents/`, and `commands/` assets, then run `ciao sync-skills`.
 

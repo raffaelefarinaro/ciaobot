@@ -107,6 +107,23 @@
               <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(workspace.name) || workspaceInitial(workspace.name) }}</span>
               <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
             </button>
+            <div class="workspace-scope-divider" role="separator"></div>
+            <router-link
+              to="/settings/workspace"
+              role="menuitem"
+              class="workspace-scope-option workspace-scope-link"
+              @click="workspaceScopeOpen = false"
+            >
+              <span class="workspace-scope-name">Workspace settings</span>
+            </router-link>
+            <router-link
+              to="/settings/workspaces"
+              role="menuitem"
+              class="workspace-scope-option workspace-scope-link"
+              @click="workspaceScopeOpen = false"
+            >
+              <span class="workspace-scope-name">Manage workspaces</span>
+            </router-link>
             <router-link
               to="/settings/workspaces#new-workspace"
               role="menuitem"
@@ -1203,7 +1220,7 @@ function openWorkspaceMenu(): void {
   workspaceScopeOpen.value = true
   void nextTick(() => {
     workspaceScopeMenu.value
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+      ?.querySelector<HTMLElement>('[role="menuitem"]')
       ?.focus()
   })
 }
@@ -1234,7 +1251,7 @@ function selectWorkspaceScope(workspace: string): void {
 }
 
 function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
-  const items = Array.from(workspaceScopeMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  const items = Array.from(workspaceScopeMenu.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
   if (!items.length) return
   if (event.key === 'Escape') {
     event.preventDefault()
@@ -1246,7 +1263,7 @@ function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
     closeWorkspaceMenu(false)
     return
   }
-  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  const current = items.indexOf(document.activeElement as HTMLElement)
   let next = current
   if (event.key === 'Home') next = 0
   else if (event.key === 'End') next = items.length - 1
@@ -2278,7 +2295,7 @@ async function confirmDeleteChat(chatId: string) {
   font-variant-numeric: tabular-nums;
 }
 .nav-item[data-count]::after { content: attr(data-count); }
-.nav-item[data-note]::after { content: attr(data-note); color: var(--warning); font-family: var(--font-sans); }
+.nav-item[data-note]::after { content: attr(data-note); color: var(--warning); font-family: var(--font); }
 .nav-item[href="/"][data-count]::after { color: var(--accent); font-weight: 600; }
 
 /* Coarse pointers get the full 44px target on every rail row. */
@@ -2428,7 +2445,7 @@ async function confirmDeleteChat(chatId: string) {
   margin: 4px 0 0;
   padding: 6px 10px 5px;
   color: var(--fg3);
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
 }
 
 /* Flat rows rather than a bordered box per project: the tree keeps its
@@ -2886,13 +2903,19 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-scope-option.active {
   color: var(--accent);
 }
+.workspace-scope-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+.workspace-scope-link,
 .workspace-scope-new {
-  margin-top: 4px;
-  border-top: 1px solid var(--border);
-  border-radius: 0 0 5px 5px;
   color: var(--fg2);
   text-decoration: none;
 }
+/* Line the text up with the workspace names above (past the 22px tile). */
+.workspace-scope-link { padding-left: calc(var(--space-2) + 22px + var(--space-2)); }
+.workspace-scope-link:hover,
 .workspace-scope-new:hover { color: var(--fg); }
 .workspace-scope-mark--new {
   background: transparent;
@@ -3002,7 +3025,7 @@ async function confirmDeleteChat(chatId: string) {
   border-radius: var(--radius-sm);
   background: none;
   color: var(--accent);
-  font: 600 var(--text-xs)/1 var(--font-sans);
+  font: 600 var(--text-xs)/1 var(--font);
   cursor: pointer;
 }
 .sidebar-label-link:hover { background: var(--bg3); }
@@ -3224,7 +3247,7 @@ async function confirmDeleteChat(chatId: string) {
   margin: 4px 0 0;
   padding: 6px 10px 5px;
   color: var(--fg3);
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
 }
 .schedule-group-items {
   display: flex;
@@ -3364,7 +3387,7 @@ async function confirmDeleteChat(chatId: string) {
 /* Same register as the chat rail's "Projects" label: 11px sans, sentence
    case. The old uppercase tracked labels read as a second kind of heading. */
 .mm-sidebar-scroll h3 {
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
   color: var(--fg3);
   margin: var(--space-4) 0 var(--space-1);
   padding: 0 8px;

@@ -1,11 +1,11 @@
-import { computed, onScopeDispose, ref, watch, type ComputedRef, type InjectionKey } from 'vue'
+import { computed, onScopeDispose, ref, watch, type ComputedRef, type InjectionKey, type Ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { apiErrorMessage, errorMessage } from '../lib/errorMessage'
 import { askConfirm } from '../lib/confirm'
 import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '../lib/workspaceArchive'
 import { useProjectStore } from '../stores/projects'
 import {
   DEFAULT_WORKSPACE_COLOR,
-  WORKSPACE_COLOR_PRESETS,
   normalizeWorkspaceColor,
   type WorkspaceColorId,
 } from '../lib/workspaceColors'
@@ -60,6 +60,7 @@ export function useWorkspaceAdmin(deps: {
 }) {
   const { notifySaved, notifyFailed, gwsProfileOptions, workspaceCustomGwsProfile, fetchGwsIntegration } = deps
   const projectStore = useProjectStore()
+  const router = useRouter()
   const workspaceProviderFieldLabel = 'Agent CLI/Runtime'
 
   const workspacesLoaded = ref(false)
@@ -168,26 +169,21 @@ export function useWorkspaceAdmin(deps: {
     workspaceNameDraft.value = name
   }
 
-  function workspaceSwatch(color: WorkspaceColorId): string {
-    return WORKSPACE_COLOR_PRESETS.find((preset) => preset.id === color)?.swatch || 'var(--accent)'
-  }
-
-  // The File access a workspace actually gets: its own choice, else the engine's
-  // default. Empty until the list has loaded, when the default is not yet known.
-  function workspaceFsScopeBadge(choice: FsScopeChoice): string {
-    const effective = choice || fsScopeEngineDefault.value
-    return effective ? WORKSPACE_FS_SCOPE_LABEL[effective] : ''
-  }
-
+  // `provider · file access · Google email`, the one-line summary on the
+  // Manage workspaces rows. File access is the effective one (own choice, else
+  // the engine's default) and is dropped until the default has loaded.
   function workspaceSummary(form: WorkspaceForm): string {
     const provider = workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
       || form.default_provider
-    const profile = form.gws_profile
-      ? gwsProfileOptions.value.find((option) => option.name === form.gws_profile)?.label || form.gws_profile
-      : ''
-    const parts = [provider, profile ? `Google: ${profile}` : 'No Google account']
-    if (form.name === primaryWorkspace.value) parts.push('Main workspace')
-    return parts.join(' · ')
+    const effectiveScope = form.agent_fs_scope || fsScopeEngineDefault.value
+    const fsLabel = effectiveScope ? WORKSPACE_FS_SCOPE_LABEL[effectiveScope] : ''
+    const linked = form.gws_profile
+      ? gwsProfileOptions.value.find((option) => option.name === form.gws_profile)
+      : undefined
+    const google = form.gws_profile
+      ? linked?.email || linked?.label || linked?.name || form.gws_profile
+      : 'no Google'
+    return [provider, fsLabel, google].filter(Boolean).join(' · ')
   }
 
   const workspaceProviderOptions = computed(() =>
@@ -224,7 +220,7 @@ export function useWorkspaceAdmin(deps: {
     const message = `Rename "${from}" to "${to}". Projects and automations keep their ids and follow the new name.`
     // Without a workspace named `personal`, the first one in the list is the
     // main workspace, and a rename keeps its place in the list (#1188).
-    const first = workspaceForms.value[0]?.name
+    const first = projectStore.workspaceOptions[0]?.name
     if (from === 'personal' && first !== from) return `${message} "${first}" becomes the main workspace.`
     // A workspace named `personal` is the main one whatever its place in the list.
     if (to === 'personal' && (primaryWorkspace.value ?? first) !== from) return `${message} It becomes the main workspace.`
@@ -294,23 +290,26 @@ export function useWorkspaceAdmin(deps: {
     }
     workspacesSaving.value = 'new'
     workspacesResult.value = ''
+    let created = ''
     try {
       await projectStore.createWorkspace({
         name: form.name.trim(),
-        // The "Vault name" field is optional and defaults to the workspace name.
-        vault_root: form.vault_root.trim() || form.name.trim(),
+        vault_root: form.name.trim(),
         default_provider: form.default_provider,
-        gws_profile: form.gws_profile,
+        // Google is linked afterwards, in the new workspace's Overview.
+        gws_profile: '',
         disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
         color: form.color,
         // Sent only when the user picked a value, so the server applies its default.
         ...(form.agent_fs_scope ? { agent_fs_scope: form.agent_fs_scope } : {}),
       })
-      notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
+      const createdName = form.name.trim()
+      notifySaved(`Workspace "${createdName}" created.`, 'Workspaces')
       showNewWorkspace.value = false
       newWorkspaceForm.value = blankWorkspaceForm()
       await fetchWorkspacesList()
       void fetchGwsIntegration()
+      created = createdName
     } catch (e) {
       const detail = apiErrorMessage(e, 'The workspace could not be created.')
       workspacesResult.value = `Error: ${detail}`
@@ -318,6 +317,21 @@ export function useWorkspaceAdmin(deps: {
     } finally {
       workspacesSaving.value = null
     }
+    // Outside the try: a failed switch is not a failed create.
+    if (created && !await openWorkspaceSettings(created)) {
+      workspaceLinkStatus.value =
+        `Created "${created}"; your unsaved changes to "${projectStore.activeWorkspace}" were kept.`
+    }
+  }
+
+  // Makes `name` the active workspace and opens its Overview. transition:false
+  // keeps the user in Settings. A declined discard of an unsaved draft leaves
+  // the active workspace unchanged, and then nothing navigates.
+  async function openWorkspaceSettings(name: string, hash = ''): Promise<boolean> {
+    await projectStore.switchWorkspace(name, { transition: false })
+    if (projectStore.activeWorkspace !== name) return false
+    await router.push({ path: '/settings/workspace', hash })
+    return true
   }
 
   // The primary workspace and the last one cannot be archived; the server
@@ -452,8 +466,7 @@ export function useWorkspaceAdmin(deps: {
     clearWorkspaceLinkHighlight,
     workspaceDirty,
     discardWorkspace,
-    workspaceSwatch,
-    workspaceFsScopeBadge,
+    openWorkspaceSettings,
     workspaceSummary,
     workspaceProviderOptions,
     disallowedToolsPayload,
@@ -472,4 +485,11 @@ export function useWorkspaceAdmin(deps: {
 }
 
 export type WorkspaceAdmin = ReturnType<typeof useWorkspaceAdmin>
-export const WORKSPACE_ADMIN_KEY: InjectionKey<WorkspaceAdmin> = Symbol('workspace-admin')
+// What SettingsView provides: the admin state plus the shared row-menu helpers
+// (one "..." menu open at a time, Esc handled before ChatLayout's handler).
+export type WorkspaceAdminContext = WorkspaceAdmin & {
+  settingsMenu: Ref<string | null>
+  setSettingsMenu: (key: string, open: boolean) => void
+  closeSettingsMenuOnEscape: (event: KeyboardEvent) => void
+}
+export const WORKSPACE_ADMIN_KEY: InjectionKey<WorkspaceAdminContext> = Symbol('workspace-admin')

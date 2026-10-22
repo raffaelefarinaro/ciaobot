@@ -733,7 +733,7 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     assert [w["name"] for w in registry] == ["life"]
     assert registry[0]["vault_root"] == "life/memory-vault"
     # Setup links no Google account: which accounts exist is the user's choice,
-    # made in Settings → Workspaces after onboarding.
+    # made in Settings → Manage workspaces after onboarding.
     assert registry[0]["gws_profile"] == ""
 
 

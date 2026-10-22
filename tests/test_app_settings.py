@@ -498,3 +498,63 @@ def test_huge_integer_font_scale_is_invalid_not_a_crash(tmp_path):
         AppSettingsStore(path).update({"font_scale": huge})
     path.write_text('{"font_scale": 1' + "0" * 400 + "}")
     assert AppSettingsStore(path).appearance_payload()["font_scale"] is None
+
+
+def test_body_font_roundtrip_and_rejects_unknown(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.appearance_payload()["body_font"] == "system"
+
+    for choice in ("serif", "mono"):
+        store.update({"body_font": choice})
+        assert AppSettingsStore(path).settings.body_font == choice
+        assert AppSettingsStore(path).appearance_payload()["body_font"] == choice
+    store.update({"body_font": "system"})
+    assert AppSettingsStore(path).settings.body_font == ""
+    assert AppSettingsStore(path).appearance_payload()["body_font"] == "system"
+
+    with pytest.raises(ValueError, match="body_font must be system, serif or mono"):
+        store.update({"body_font": "comic"})
+
+    path.write_text(json.dumps({"body_font": 5}))
+    assert AppSettingsStore(path).settings.body_font == ""
+    path.write_text(json.dumps({"body_font": "comic"}))
+    assert AppSettingsStore(path).settings.body_font == ""
+
+
+def test_custom_colors_validation(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.appearance_payload()["custom_colors"] == {}
+
+    store.update({"custom_colors": {"dark": {"bg": "#1A1A2E", "fg": "#e8e8f0"}}})
+    assert AppSettingsStore(path).settings.custom_colors == {
+        "dark": {"bg": "#1a1a2e", "fg": "#e8e8f0"}
+    }
+    assert AppSettingsStore(path).appearance_payload()["custom_colors"] == {
+        "dark": {"bg": "#1a1a2e", "fg": "#e8e8f0"}
+    }
+
+    for bad in (
+        {"dark": {"bg": "red", "fg": "#e8e8f0"}},
+        {"dark": {"bg": "#12345", "fg": "#e8e8f0"}},
+        {"dark": {"bg": "#1a1a2e"}},
+        {"dark": {"bg": "#1a1a2e", "fg": "#e8e8f0", "x": "#000000"}},
+        {"sepia": {"bg": "#1a1a2e", "fg": "#e8e8f0"}},
+        {"dark": "#1a1a2e"},
+    ):
+        with pytest.raises(ValueError, match="custom_colors entries must be"):
+            store.update({"custom_colors": bad})
+    with pytest.raises(ValueError, match="custom_colors must be an object"):
+        store.update({"custom_colors": "red"})
+
+    store.update({"custom_colors": {}})
+    assert AppSettingsStore(path).settings.custom_colors is None
+    store.update({"custom_colors": {"light": {"bg": "#ffffff", "fg": "#000000"}}})
+    store.update({"custom_colors": None})
+    assert AppSettingsStore(path).settings.custom_colors is None
+
+    path.write_text(json.dumps({"custom_colors": {"dark": {"bg": "red", "fg": "#fff"}}}))
+    assert AppSettingsStore(path).settings.custom_colors is None
+    path.write_text(json.dumps({"custom_colors": "nope"}))
+    assert AppSettingsStore(path).settings.custom_colors is None

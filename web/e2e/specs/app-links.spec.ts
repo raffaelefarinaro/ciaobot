@@ -50,7 +50,7 @@ test.describe('an app page link in a chat reply', () => {
     await link.click()
     await expect(page).toHaveURL(/\/settings\/workspaces$/)
     await expect(page.locator(SETTINGS)).toBeVisible()
-    await expect(page.locator('.page-tag')).toHaveText('Workspaces')
+    await expect(page.locator('.page-tag')).toHaveText('Manage workspaces')
     expect(await page.evaluate(() => (window as unknown as { __kept?: boolean }).__kept)).toBe(true)
     expect(context.pages()).toHaveLength(1)
     await page.screenshot({ path: testInfo.outputPath('desktop-settings.png'), fullPage: true })

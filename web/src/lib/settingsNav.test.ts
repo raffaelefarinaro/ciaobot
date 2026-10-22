@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SETTINGS_NAV, SETTINGS_NAV_GROUPS, settingsTabLabel } from './settingsNav'
+import { SETTINGS_HIDDEN_PAGES, SETTINGS_NAV, SETTINGS_NAV_GROUPS, settingsTabLabel } from './settingsNav'
 
 describe('settingsTabLabel', () => {
   it('names every settings tab by its sidebar label', () => {
@@ -16,12 +16,22 @@ describe('settingsTabLabel', () => {
   })
 })
 
+describe('SETTINGS_HIDDEN_PAGES', () => {
+  it('keeps Workspaces off the rail but names the page', () => {
+    expect(SETTINGS_NAV_GROUPS[0].items.map(i => i.label)).toEqual(['General', 'Appearance', 'Access & devices', 'Providers', 'Advanced'])
+    expect(SETTINGS_NAV.some(i => i.to === '/settings/workspaces')).toBe(false)
+    expect(SETTINGS_HIDDEN_PAGES.map(i => i.to)).toEqual(['/settings/workspaces'])
+    expect(settingsTabLabel('/settings/workspaces')).toBe('Manage workspaces')
+    expect(settingsTabLabel('/settings/workspace')).toBe('Overview')
+  })
+})
+
 describe('SETTINGS_NAV_GROUPS', () => {
   it('puts Overview first in the workspace group', () => {
     expect(SETTINGS_NAV_GROUPS.map(g => g.id)).toEqual(['engine', 'workspace'])
     const [engine, workspace] = SETTINGS_NAV_GROUPS
     expect(engine.label).toBe('Ciaobot')
-    expect(engine.items.map(i => i.label)).toEqual(['General', 'Appearance', 'Access & devices', 'Providers', 'Advanced', 'Workspaces'])
+    expect(engine.items.map(i => i.label)).toEqual(['General', 'Appearance', 'Access & devices', 'Providers', 'Advanced'])
     expect(workspace.label).toBeNull()
     expect(workspace.items.map(i => i.label)).toEqual(['Overview', 'Skills', 'Subagents', 'Commands', 'MCP servers'])
     expect(SETTINGS_NAV).toEqual([...engine.items, ...workspace.items])
@@ -36,7 +46,6 @@ describe('SETTINGS_NAV_GROUPS', () => {
       ['Access & devices', '/settings/access'],
       ['Providers', '/settings/providers'],
       ['Advanced', '/settings/advanced'],
-      ['Workspaces', '/settings/workspaces'],
     ])
     expect(settingsTabLabel('/settings/access')).toBe('Access & devices')
   })

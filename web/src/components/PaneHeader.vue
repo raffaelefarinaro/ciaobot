@@ -210,7 +210,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
       overflow: hidden;
       clip: auto;
       color: var(--fg);
-      font-family: var(--font-sans);
+      font-family: var(--font);
       font-size: var(--text-lg);
       font-weight: 650;
       letter-spacing: -0.01em;

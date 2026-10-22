@@ -35,11 +35,45 @@ test.describe('workspace overview', () => {
     await expect(name).not.toHaveValue(first)
   })
 
+  test('the switcher lists the settings entries and Workspace settings opens Overview', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await boot(page, '/settings/workspaces', READY)
+    await expect(page.locator('.page-tag')).toContainText('Manage workspaces')
+    // Workspaces is not a rail item any more.
+    await expect(page.locator('.settings-nav, nav').getByRole('link', { name: 'Workspaces', exact: true })).toHaveCount(0)
+
+    await activeWorkspaceButton(page).click()
+    const items = page.locator('#workspace-scope-menu [role="menuitem"]')
+    const texts = (await items.allTextContents()).map(t => t.replace(/^\+\s*/, '').trim())
+    expect(texts.slice(-3)).toEqual(['Workspace settings', 'Manage workspaces', 'New workspace'])
+    await page.locator('#workspace-scope-menu').getByRole('menuitem', { name: 'Workspace settings' }).click()
+    await expect(page).toHaveURL(/\/settings\/workspace$/)
+    await expect(page.locator('.page-tag')).toContainText('Overview')
+  })
+
+  test('Rename on Manage workspaces opens Overview with the name field focused', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await boot(page, '/settings/workspaces', READY)
+    await page.getByRole('button', { name: /^Actions for workspace /i }).first().click()
+    await page.getByRole('menuitem', { name: /^Rename workspace /i }).click()
+    await expect(page).toHaveURL(/\/settings\/workspace#workspace-name$/)
+    await expect(page.locator('#workspace-name-input')).toBeFocused()
+  })
+
   test('the memory handover radiogroup takes arrow keys', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
-    // The fixture has no write route.
+    // The fixture persists neither the workspace PATCH nor the handover, so
+    // the save would silently revert and the second arrow would have nothing
+    // to move from. Keep the chosen value here and answer both routes from it.
+    let handover = 'off'
+    await page.route('**/api/proposals/handover*', async (route) => {
+      const real = await (await page.request.get(route.request().url())).json()
+      await route.fulfill({ json: { ...real, handover } })
+    })
     await page.route('**/api/workspaces/*', async (route) => {
       if (route.request().method() === 'PATCH') {
+        const body = route.request().postDataJSON() as { memory_handover?: string } | null
+        if (body?.memory_handover) handover = body.memory_handover
         // Answer with the registry itself: the store replaces its list from the reply.
         await route.fulfill({ json: await (await page.request.get('/api/workspaces')).json() })
         return
@@ -56,7 +90,10 @@ test.describe('workspace overview', () => {
     await page.keyboard.press('ArrowRight')
     const dismiss = group.getByRole('radio', { name: 'Dismiss', exact: true })
     await expect(dismiss).toBeFocused()
-    // Focus survives the save, so a second arrow still moves on.
+    // Focus moves at once; the save is still in flight, and the group ignores
+    // arrows until it settles (no second write mid-save). Wait for the save,
+    // then the next arrow moves on with focus intact.
+    await expect(dismiss).not.toHaveAttribute('aria-disabled', 'true')
     await page.keyboard.press('ArrowLeft')
     await expect(off).toBeFocused()
   })
@@ -69,4 +106,31 @@ test.describe('workspace overview', () => {
       expect(overflow, `scrolls ${overflow}px sideways; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
     })
   }
+})
+
+test.describe('workspace switcher entries on a phone', () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
+
+  test.beforeEach(async ({ page }, testInfo) => {
+    await isolate(page, `workspace-switcher-phone-${testInfo.workerIndex}`)
+  })
+
+  test('every menu item is at least 44px tall', async ({ page }) => {
+    await boot(page, '/settings/workspaces', READY)
+    await page.getByRole('button', { name: 'Open sidebar' }).click()
+    await activeWorkspaceButton(page).click()
+    const items = page.locator('.workspace-scope-menu [role="menuitem"]')
+    const count = await items.count()
+    expect(count).toBeGreaterThanOrEqual(5)
+    for (let i = 0; i < count; i++) {
+      const box = await items.nth(i).boundingBox()
+      expect(box?.height ?? 0, `menu item ${i}`).toBeGreaterThanOrEqual(44)
+    }
+  })
+
+  test('Manage workspaces does not scroll sideways', async ({ page }) => {
+    await boot(page, '/settings/workspaces', READY)
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(overflow, `scrolls ${overflow}px sideways; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
+  })
 })

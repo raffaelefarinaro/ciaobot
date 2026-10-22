@@ -15,6 +15,9 @@
  *   POST /__fixture__/update-tasks                   give this session update tasks
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
  *   POST /__fixture__/terminal-offer { chat_id, command }  offer a suggested command
+ *
+ * Workspace order is per session too: POST /api/workspaces/reorder stores a
+ * permutation of the workspace names and GET /api/workspaces answers in it.
  */
 import http from 'node:http'
 import fs from 'node:fs'
@@ -176,12 +179,40 @@ const FOLD_TRANSCRIPT = [
 
 const sessions = new Map()
 
+/** The workspace registry as this session sees it: a saved Memory handover shows on its workspace. */
+function workspacesPayload(state) {
+  const ordered = orderedWorkspaces(state)
+  return {
+    workspaces: ordered.map(w => (state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w)),
+    active: ordered[0].name,
+    provider_options: [{ value: 'claude', label: 'Claude' }],
+  }
+}
+
+/** The workspaces in this session's order (the fixture's own until a reorder). */
+function orderedWorkspaces(state) {
+  if (!state.workspaceOrder) return WORKSPACES
+  return state.workspaceOrder.map(name => WORKSPACES.find(w => w.name === name))
+}
+
+/** Store a reorder when `order` is exactly a permutation of the workspace names. */
+function reorderWorkspaces(state, order) {
+  const names = WORKSPACES.map(w => w.name)
+  const valid = Array.isArray(order)
+    && order.length === names.length
+    && new Set(order).size === names.length
+    && order.every(name => names.includes(name))
+  if (!valid) return false
+  state.workspaceOrder = order
+  return true
+}
+
 function sessionOf(req) {
   const cookie = req.headers.cookie || ''
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', theme: null, font_scale: null, revision: 'a0' } }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null }
     sessions.set(id, state)
   }
   return state
@@ -421,11 +452,7 @@ const GET_ROUTES = {
     auth_required: false,
     update_available: false,
   }),
-  '/api/workspaces': () => ({
-    workspaces: WORKSPACES,
-    active: WORKSPACES[0].name,
-    provider_options: [{ value: 'claude', label: 'Claude' }],
-  }),
+  '/api/workspaces': (req) => workspacesPayload(sessionOf(req)),
   // /api/projects, /api/chats and /api/schedules are bare arrays, not envelopes.
   '/api/projects': () => PROJECTS,
   // The chat list carries this session's suggested commands: a chat holds the
@@ -450,16 +477,16 @@ const GET_ROUTES = {
   // assert the empty and the plain states, which must stay the default.
   '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
   // Settings > Workspace > Overview's Memory handover card.
-  '/api/proposals/handover': () => ({
-    workspace: WORKSPACES[0].name,
-    handover: 'off',
+  '/api/proposals/handover': (req, url) => ({
+    workspace: url.searchParams.get('workspace') || WORKSPACES[0].name,
+    handover: sessionOf(req).handover[url.searchParams.get('workspace') || WORKSPACES[0].name] || 'off',
     acting_available: true,
     agreement: { decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9, predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0, suggest_handover: false },
   }),
   '/api/proposals/history': (req) => (sessionOf(req).verification ? VERIFICATION_HISTORY : { rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
   '/api/vault/graph': (req) => (sessionOf(req).verification
-    ? { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
-    : { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
+    ? { workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }
+    : { workspace: WORKSPACES[0].name, workspaces: orderedWorkspaces(sessionOf(req)).map(w => w.name), nodes: MEMORY_NODES, edges: MEMORY_EDGES }),
   '/api/vault/review': (req) => (sessionOf(req).verification ? VERIFICATION_REVIEW : { candidates: [], trashed: [], cleared: [] }),
   '/api/memory/entity-types': () => ({ workspace: WORKSPACES[0].name, vault: '/fixture/vault', types: MEMORY_CATEGORIES }),
   '/api/models': () => ({
@@ -827,11 +854,29 @@ const server = http.createServer(async (req, res) => {
     // had.
     if (req.method === 'PATCH' && pathname === '/api/settings/appearance') {
       const state = sessionOf(req)
-      for (const key of ['text_contrast', 'theme', 'font_scale']) {
+      for (const key of ['text_contrast', 'body_font', 'theme', 'font_scale', 'custom_colors']) {
         if (body && body[key] !== undefined) state.appearance[key] = body[key]
       }
       state.appearance.revision = `a${Number(state.appearance.revision.slice(1)) + 1}`
       return sendJson(res, state.appearance)
+    }
+    if (req.method === 'POST' && pathname === '/api/workspaces/reorder') {
+      const state = sessionOf(req)
+      if (!reorderWorkspaces(state, body?.order)) {
+        return sendJson(res, { error: 'order must list every registered workspace exactly once' }, 400)
+      }
+      return sendJson(res, workspacesPayload(state))
+    }
+    // A workspace PATCH keeps the Memory handover it saves, per session, and
+    // answers with the registry (the store replaces its list from the reply).
+    const workspacePatch = req.method === 'PATCH' ? /^\/api\/workspaces\/([^/]+)$/.exec(pathname) : null
+    if (workspacePatch) {
+      const state = sessionOf(req)
+      const name = decodeURIComponent(workspacePatch[1])
+      if (body && WORKSPACES.some(w => w.name === name) && typeof body.memory_handover === 'string') {
+        state.handover[name] = body.memory_handover
+      }
+      return sendJson(res, workspacesPayload(state))
     }
     if (req.method === 'PATCH') {
       const chatId = chatIdFromPath(pathname)

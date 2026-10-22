@@ -52,6 +52,41 @@ def test_workspace_open_missing_path(workspace: Path) -> None:
     assert resp.status_code == 404
 
 
+def test_workspace_open_opens_a_directory(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An agent that points at a folder points at a thing the reader wants to
+    # see: the OS default app for a directory is the file manager, so the
+    # route opens it instead of refusing it like the file readers do.
+    ws = workspace / "photos"
+    ws.mkdir()
+    (ws / "img.png").write_bytes(b"fake-png")
+    opened: list[str] = []
+
+    def _fake_open(path: Path) -> None:
+        opened.append(str(path))
+
+    monkeypatch.setattr("ciao.web.routes_api._open_path_with_default_app", _fake_open)
+    client = _make_client(workspace)
+    resp = client.post("/api/workspace-open", json={"path": "photos"})
+    assert resp.status_code == 200
+    assert opened == [str(ws.resolve())]
+
+
+def test_workspace_open_opens_a_directory_outside_the_workspace(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same anywhere-on-disk freedom the file viewer endpoints already have.
+    outside = workspace.parent / "zendesk-images"
+    outside.mkdir()
+    opened: list[str] = []
+
+    monkeypatch.setattr(
+        "ciao.web.routes_api._open_path_with_default_app",
+        lambda path: opened.append(str(path)),
+    )
+    client = _make_client(workspace)
+    resp = client.post("/api/workspace-open", json={"path": str(outside)})
+    assert resp.status_code == 200
+    assert opened == [str(outside.resolve())]
+
+
 def test_workspace_open_requires_path(workspace: Path) -> None:
     client = _make_client(workspace)
     resp = client.post("/api/workspace-open", json={})

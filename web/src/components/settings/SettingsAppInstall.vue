@@ -279,7 +279,7 @@ const originDetail = secureOrigin
   gap: var(--space-2);
   margin: 0;
   color: var(--fg);
-  font-family: var(--font-sans);
+  font-family: var(--font);
   font-size: var(--text-sm);
   font-weight: 600;
   line-height: 1.4;

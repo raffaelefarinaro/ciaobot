@@ -82,7 +82,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-binary` | Read allowed binary file |
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
-| POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
+| POST | `/api/workspace-open` | Open a workspace file (or directory) with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
 | GET | `/api/host/terminal` | Can this browser open a terminal on the engine's machine: {available, platform, reason, terminal, actions}; a non-host browser (wrong peer, wrong `Host`, or a browser origin that is not this engine's exact origin) gets available:false, reason:"not_on_host" |
 | GET | `/api/terminal/status` | Signed session + terminal origin/transport policy; returns {available, reason, platform, host, unlock_expires_in, detached_ttl_seconds}. Status grants nothing and includes no credential. |
 | POST | `/api/terminal/unlock` | Issues the terminal grant to a signed-in, same-origin browser; no body (a body is 400 bad_request, one over 4096 bytes is 413). 200 {ok:true, expires_in:900} plus HttpOnly grant cookie; 401 unsigned session, 403 policy, 429 grant capacity. Never launches a shell. |
@@ -175,6 +175,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
+| POST | `/api/workspaces/reorder` | Persist a new workspace order: body `{order: [name, ...]}` must list every registered (non-archived) workspace exactly once, else 400. The order is the registry's list order: it drives the switcher, the 1-9 shortcuts and every workspace list. Returns the `GET /api/workspaces` payload. When no workspace is named `personal` the first one is the main workspace and stays first: an order that would change it is refused with 409. A restored workspace is appended last |
 | POST | `/api/workspaces/{name}/archive` | Archive a workspace: unregister it, archive its chats, take its user schedules, and move its folder intact into `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/`. Refuses the primary or last workspace, a workspace with a running chat, and layouts it cannot move safely (409) |
 | DELETE | `/api/workspaces/{name}` | Alias of `POST /api/workspaces/{name}/archive`, kept for existing scripts; it no longer deletes anything |
 | GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, disallowed_tools, schedules, schedules_dropped, restorable, blocked_reason}]}`. The settings and `schedules` count are what a restore would apply after validation (`archive.json` syncs through git, so it is treated as untrusted); the PWA shows them in the restore confirmation |
@@ -924,7 +925,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider, provider_overrides,
-# gws_profile, color (pink|cyan|amber|emerald|violet; default
+# gws_profile, color (pink|cyan|amber|emerald|violet|blue|teal|lime|fuchsia; default
 # pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
 # null = defaults), claude_ai_connectors (boolean, default true). When false,
 # Claude chats in the workspace start with ENABLE_CLAUDEAI_MCP_SERVERS=false, so
@@ -942,6 +943,15 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/worksp
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
   -H 'content-type: application/json' \
   -d '{"disallowed_tools":"mcp__n8n_mcp"}'
+
+# Reorder. The order is the registry's list order and drives the switcher, the
+# 1-9 shortcuts and every workspace list. List every active workspace exactly
+# once (400 otherwise). When no workspace is named `personal`, the first one is
+# the main workspace and must stay first (409 otherwise). A restored workspace
+# is appended last.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces/reorder" \
+  -H 'content-type: application/json' \
+  -d '{"order":["work","personal"]}'
 
 # Override provider defaults for one workspace. provider_overrides maps a
 # provider id to {model, thinking, permission_mode (manual|auto|bypass),
@@ -1104,9 +1114,12 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
 
 ```bash
 # Read the engine-shared appearance: `text_contrast` ("normal" or "soft"),
+# `body_font` ("system", "serif" or "mono"),
 # `theme` ("dark", "light" or "system"; `null` until a browser first stores one,
 # and "system" still resolves per device from its OS), `font_scale` (0.8 to 1.5
-# in steps of 0.05; `null` until first stored) and `revision`.
+# in steps of 0.05; `null` until first stored), `custom_colors` (`{}` or
+# `{"dark": {"bg": "#rrggbb", "fg": "#rrggbb"}, "light": {...}}`, either mode
+# optional) and `revision`.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/appearance"
 
 # Include the revision returned by GET; a stale revision gets 409. Engine-shared,
@@ -1115,6 +1128,15 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/appea
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/appearance" \
   -H 'content-type: application/json' \
   -d '{"revision":"<revision-from-GET>","text_contrast":"soft","theme":"dark","font_scale":1.25}'
+
+# Custom colours: the engine validates hex shape only (`#rrggbb`, stored
+# lowercase; a malformed entry or unknown mode is 400; `{}` or `null` resets).
+# The readability rule (WCAG AA 4.5:1 for body text) is enforced by the PWA, not
+# the server: a hand-sent unreadable pair is stored but the PWA never paints it,
+# and Settings › Appearance › Reset recovers.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/appearance" \
+  -H 'content-type: application/json' \
+  -d '{"revision":"<revision-from-GET>","custom_colors":{"dark":{"bg":"#101018","fg":"#e8e8f0"}}}'
 ```
 
 **MCP inventory and status (Settings → MCP)**
@@ -1808,7 +1830,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
 - `chat_code_mode`: a chat's code mode was switched. Fields: `{chat_id, project_id, code_mode, actor: "user"|"agent", at}`. Switching off also publishes `chat_repo_location` with `{}`.
 - `chat_postprocess`: the memory pass queued by archiving a chat reporting on that chat. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{steps: {memory_pass: {status: "queued"|"running"|"ok"|"attention", extra: {chat_id}}}, updated_at}` and `extra.chat_id` is the pass's own chat. The same object is persisted on the archived chat and returned as `ChatInfo.postprocess`, so it can still link to its memory pass after a reload.
-- `workspaces_changed`: a workspace was archived or restored (any tab or device). No payload; clients refetch `GET /api/workspaces` and `GET /api/projects`, so the sidebar and pickers stop offering an archived workspace without a reload.
+- `workspaces_changed`: a workspace was archived, restored or reordered (any tab or device). No payload; clients refetch `GET /api/workspaces` and `GET /api/projects`, so the sidebar and pickers stop offering an archived workspace without a reload.
 - `schedules_changed`: an automation was created, edited, paused, resumed, or deleted (REST route, Automations page, or the `schedule_*` MCP tools mid-turn). No payload; the client refetches `GET /api/schedules`, which is where the computed `next_run` / `missed` / `context_available` fields are assembled. Without it an automation created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload. The deprecated `loops_changed` alias was removed with the loop MCP tools (#441); existing clients listen for `schedules_changed`.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 

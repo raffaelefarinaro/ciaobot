@@ -27,8 +27,7 @@ The default is `CIAO_VAULT_ROOT` or `./memory-vault`, and on an install whose
 workspaces have been separated into per-workspace roots there is no
 `memory-vault` at the install root at all — the command then exits 1 without
 writing anything. That layout has no workspace segment in its paths, so the plan
-finds nothing there either, which is why this task does not appear on one. Each
-workspace's own vault is listed in Settings → Workspaces; on a shared-layout
+finds nothing there either, which is why this task does not appear on one. On a shared-layout
 install every workspace's vault is under the one `<install>/memory-vault`.
 
 Leave `--runtime-root` alone unless you have checked where the receipt belongs.
