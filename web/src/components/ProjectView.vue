@@ -130,7 +130,6 @@
                 :disabled="repoBusy"
                 @click="openRepoInstructions"
               >Open AGENTS.md</button>
-              <BrowserTerminalButton :project-id="project.project_id" />
             </p>
           </template>
           <p v-else class="empty-row">No repository linked. Link one to give this project's chats the repository's agent instructions and skills.</p>
@@ -141,6 +140,22 @@
             :current-path="project.repo?.path ?? null"
             @close="repoPickerOpen = false"
           />
+        </section>
+
+        <!-- The terminal is not a repository feature. A project without a
+             repository still needs a shell — a provider sign-in, an install,
+             an MCP server that stopped answering — so the terminal has a
+             section of its own, outside the repository's, and every project
+             has one. -->
+        <section class="project-section project-terminal" aria-labelledby="project-terminal-title">
+          <div class="section-head">
+            <h3 id="project-terminal-title">Terminal</h3>
+          </div>
+          <p class="section-hint">
+            A shell on the engine's own machine, in the linked repository or the
+            workspace folder. Nothing runs until you start a session.
+          </p>
+          <BrowserTerminalButton :project-id="project.project_id" />
         </section>
 
         <section class="project-section" aria-labelledby="project-chats-title">
@@ -1282,6 +1297,16 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 
 .repo-meta :deep(.host-terminal-link) { color: var(--accent); font-size: var(--text-sm); min-height: 32px; text-decoration: none; }
 .repo-meta :deep(.host-terminal-link:hover:not(:disabled)) { text-decoration: underline; text-underline-offset: 3px; }
+
+/* The terminal's button is a block of its own under the section's sentence,
+   so it is a 44px target on touch — the same box the chat rail gives it.
+   The colour is the page's action colour: this page's actions are links, and
+   a quiet grey one alone under a heading would read as prose. */
+.project-terminal :deep(.terminal-button) {
+  display: block;
+  margin-top: var(--space-2);
+  color: var(--accent);
+}
 
 .text-action:disabled {
   cursor: default;

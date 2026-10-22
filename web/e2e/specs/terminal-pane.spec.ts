@@ -14,6 +14,11 @@ import { COMPOSER, activeWorkspaceButton, boot, isolate } from '../support/app'
  * terminal and open it again — and find the shell still there.
  */
 const CHAT_PATH = '/chat/alpha-chat-1'
+/**
+ * A chat whose project has no linked repository — the fixture's notes project.
+ * The terminal is not a repository feature, so this chat has one too.
+ */
+const NO_REPO_CHAT_PATH = '/chat/alpha-chat-2'
 const OUTPUT = 'ciao-terminal'
 
 test.use({ viewport: { width: 1440, height: 900 } })
@@ -25,8 +30,9 @@ test.beforeEach(async ({ page }, testInfo) => {
 test('the terminal opens from a chat, takes a command, and keeps its session when hidden', async ({ page }, testInfo) => {
   await boot(page, CHAT_PATH, COMPOSER)
 
-  // The chat's Repository section is the way into the browser terminal.
-  const open = page.locator('.chat-repo-section').getByRole('button', { name: 'Open in Terminal' })
+  // The chat's own Terminal section is the way into the browser terminal: it
+  // is outside the repository's, so a chat without one has it as well.
+  const open = page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' })
   await expect(open).toBeVisible()
   await open.click()
 
@@ -93,6 +99,38 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   await expect.poll(async () => (await readSession()).cols).not.toBe(before.cols)
 })
 
+test('a chat with no repository opens the terminal too', async ({ page }) => {
+  // The engine is asked about this chat's own sessions, so the requests are
+  // watched rather than the answer's shape.
+  const scopeQueries: string[] = []
+  page.on('request', request => {
+    const url = new URL(request.url())
+    if (url.pathname === '/api/terminal/sessions') scopeQueries.push(url.search)
+  })
+
+  await boot(page, NO_REPO_CHAT_PATH, COMPOSER)
+
+  // The chat's project has no linked folder, so there is no Repository
+  // section — and the terminal has a section of its own.
+  await expect(page.locator('.chat-repo-section')).toHaveCount(0)
+  const section = page.locator('.chat-rail-terminal')
+  await expect(section).toBeVisible()
+  const open = section.getByRole('button', { name: 'Open in Terminal' })
+  await expect(open).toBeVisible()
+  await open.click()
+
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+  await expect(pane.locator('.tp-warning')).toContainText('not a sandbox')
+  // The pane is scoped to this chat, not to another one.
+  await expect.poll(() => scopeQueries.join(' ')).toContain('chat_id=alpha-chat-2')
+
+  // A shell starts here like any other: opening the panel starts nothing.
+  await expect(pane.locator('.tp-session')).toHaveCount(0)
+  await pane.getByRole('button', { name: 'New session' }).click()
+  await expect(pane.locator('.tp-session')).toHaveCount(1)
+})
+
 test.describe('on a phone', () => {
   test.use({ viewport: { width: 375, height: 667 }, hasTouch: true, isMobile: true })
 
@@ -105,10 +143,18 @@ test.describe('on a phone', () => {
     await page.locator('.work-inspector-trigger').click()
     const details = page.locator('#chat-work-rail')
     await expect(details).toBeVisible()
-    await details.getByRole('button', { name: 'Open in Terminal' }).click()
+    await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
 
     const pane = page.locator('.terminal-pane')
     await expect(pane).toBeVisible()
+    // The chat details step aside: the terminal is the whole screen now, and
+    // a modal drawer on top of it would be a dead, inert pane.
+    await expect(details).toHaveCount(0)
+    // The keyboard goes back to the control that opened the drawer — the
+    // chat details tab — because the button that was pressed left with it.
+    // The terminal takes the keyboard only once it has a screen, which is
+    // when a session starts; the desktop journey covers that.
+    await expect(page.locator('.work-inspector-trigger')).toBeFocused()
     // A drawer, not a strip: the pane covers the page it is on.
     const box = (await pane.boundingBox())!
     expect(box.height).toBeGreaterThanOrEqual(600)
