@@ -498,3 +498,25 @@ def test_huge_integer_font_scale_is_invalid_not_a_crash(tmp_path):
         AppSettingsStore(path).update({"font_scale": huge})
     path.write_text('{"font_scale": 1' + "0" * 400 + "}")
     assert AppSettingsStore(path).appearance_payload()["font_scale"] is None
+
+
+def test_body_font_roundtrip_and_rejects_unknown(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.appearance_payload()["body_font"] == "system"
+
+    for choice in ("serif", "mono"):
+        store.update({"body_font": choice})
+        assert AppSettingsStore(path).settings.body_font == choice
+        assert AppSettingsStore(path).appearance_payload()["body_font"] == choice
+    store.update({"body_font": "system"})
+    assert AppSettingsStore(path).settings.body_font == ""
+    assert AppSettingsStore(path).appearance_payload()["body_font"] == "system"
+
+    with pytest.raises(ValueError, match="body_font must be system, serif or mono"):
+        store.update({"body_font": "comic"})
+
+    path.write_text(json.dumps({"body_font": 5}))
+    assert AppSettingsStore(path).settings.body_font == ""
+    path.write_text(json.dumps({"body_font": "comic"}))
+    assert AppSettingsStore(path).settings.body_font == ""

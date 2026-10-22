@@ -38,6 +38,41 @@ test.describe('Settings › Appearance', () => {
     await expect.poll(() => fg(page)).toBe('#e8e8f0')
   })
 
+  test('body font follows the choice and code stays monospace', async ({ page }) => {
+    await boot(page, '/settings/appearance', SETTINGS)
+    const family = (selector: string) =>
+      page.evaluate((sel) => getComputedStyle(document.querySelector(sel) as Element).fontFamily, selector)
+    const token = (name: string) =>
+      page.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name)
+    const group = page.getByRole('radiogroup', { name: 'Body font' })
+
+    await group.getByRole('radio', { name: 'Serif' }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-body-font', 'serif')
+    await expect.poll(() => family('body')).toMatch(/Charter|Georgia/)
+    expect(await family('.settings-main .routine-name')).toBe(await family('body'))
+    expect(await family('.settings-main .routine-detail')).toBe(await family('body'))
+
+    await group.getByRole('radio', { name: 'Mono' }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-body-font', 'mono')
+    await expect.poll(() => family('body')).toBe(await token('--font-mono'))
+
+    await group.getByRole('radio', { name: 'System' }).click()
+    await expect(page.locator('html')).not.toHaveAttribute('data-body-font', /.+/)
+    // Chromium rewrites BlinkMacSystemFont, so compare the face, not the string.
+    expect(await family('body')).toMatch(/sans-serif$/)
+    expect(await family('body')).not.toMatch(/Charter|Georgia/)
+  })
+
+  test('body font survives a reload from the engine', async ({ page }) => {
+    await boot(page, '/settings/appearance', SETTINGS)
+    await page.getByRole('radiogroup', { name: 'Body font' }).getByRole('radio', { name: 'Serif' }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-body-font', 'serif')
+    await page.evaluate(() => localStorage.removeItem('ciao-appearance'))
+    await page.reload()
+    await expect(page.locator(SETTINGS)).toBeVisible()
+    await expect(page.locator('html')).toHaveAttribute('data-body-font', 'serif')
+  })
+
   test('settings persist across reload from the engine', async ({ page }) => {
     await boot(page, '/settings/appearance', SETTINGS)
     await contrastGroup(page).getByRole('radio', { name: 'Soft' }).click()

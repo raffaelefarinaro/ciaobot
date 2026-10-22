@@ -7070,7 +7070,7 @@ details[open] > .activity-summary::before {
   border-radius: 5px;
   background: var(--bg-elev);
   color: var(--fg2);
-  font-family: var(--font-sans);
+  font-family: var(--font);
   font-size: var(--text-sm);
   font-weight: 600;
   line-height: 1;

@@ -236,6 +236,8 @@ class AppSettings:
     # font_scale from its own local values, after which the engine wins.
     # text_contrast: "" = normal, "soft" = dimmer body text.
     text_contrast: str = ""
+    # body_font: "" = system sans, "serif" or "mono".
+    body_font: str = ""
     # "dark", "light" or "system" (resolved per device from its OS).
     theme: str = ""
     font_scale: float = 0.0
@@ -261,6 +263,7 @@ class AppSettings:
 
 
 THEMES = ("dark", "light", "system")
+_BODY_FONTS = ("serif", "mono")
 MIN_FONT_SCALE = 0.8
 MAX_FONT_SCALE = 1.5
 FONT_SCALE_STEP = 0.05
@@ -318,6 +321,8 @@ def _parse_settings(raw: object) -> AppSettings:
         settings.mid_turn_delivery = ""
     if settings.text_contrast != "soft":
         settings.text_contrast = ""
+    if settings.body_font not in _BODY_FONTS:
+        settings.body_font = ""
     if settings.theme not in THEMES:
         settings.theme = ""
     raw_scale = raw.get("font_scale")
@@ -487,6 +492,11 @@ class AppSettingsStore:
                     raise ValueError("text_contrast must be normal or soft")
                 updated.text_contrast = "soft" if value == "soft" else ""
                 continue
+            if key == "body_font":
+                if not isinstance(value, str) or value not in {"system", *_BODY_FONTS}:
+                    raise ValueError("body_font must be system, serif or mono")
+                updated.body_font = "" if value == "system" else value
+                continue
             if key == "theme":
                 if not isinstance(value, str) or value not in THEMES:
                     raise ValueError("theme must be dark, light or system")
@@ -526,6 +536,7 @@ class AppSettingsStore:
         """
         body: dict[str, object] = {
             "text_contrast": self.settings.text_contrast or "normal",
+            "body_font": self.settings.body_font or "system",
             "theme": self.settings.theme or None,
             "font_scale": self.settings.font_scale or None,
         }

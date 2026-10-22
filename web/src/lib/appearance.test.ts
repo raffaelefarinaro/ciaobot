@@ -34,6 +34,45 @@ describe('applyAppearanceToRoot', () => {
   })
 })
 
+describe('applyAppearanceToRoot body font', () => {
+  it('sets data-body-font for serif and mono and removes it for system', () => {
+    const root = document.createElement('html')
+    applyAppearanceToRoot({ body_font: 'serif' }, root)
+    expect(root.dataset.bodyFont).toBe('serif')
+    applyAppearanceToRoot({ body_font: 'mono' }, root)
+    expect(root.dataset.bodyFont).toBe('mono')
+    applyAppearanceToRoot({ body_font: 'system' }, root)
+    expect(root.dataset.bodyFont).toBeUndefined()
+  })
+
+  it('ignores an unknown value', () => {
+    const root = document.createElement('html')
+    applyAppearanceToRoot({ body_font: 'serif' }, root)
+    applyAppearanceToRoot({ body_font: 'comic' as never }, root)
+    expect(root.dataset.bodyFont).toBe('serif')
+  })
+
+  it('restores the body font from the paint cache', () => {
+    writeAppearanceCache({ ...DEFAULT_APPEARANCE, body_font: 'mono', revision: 'r' })
+    const root = document.createElement('html')
+    restoreAppearanceFromCache(root)
+    expect(root.dataset.bodyFont).toBe('mono')
+  })
+})
+
+describe('font tokens', () => {
+  const sources = import.meta.glob('../**/*.{vue,css}', { query: '?raw', eager: true, import: 'default' }) as Record<string, string>
+
+  it('no component uses var(--font-sans) outside App.vue', () => {
+    const offenders = Object.entries(sources)
+      .filter(([path, text]) => !path.endsWith('/App.vue') && text.includes('var(--font-sans)'))
+      .map(([path]) => path)
+    expect(offenders).toEqual([])
+    expect(Object.keys(sources).some((path) => path.endsWith('/App.vue'))).toBe(true)
+    expect(Object.keys(sources).some((path) => path.endsWith('settingsPanels.css'))).toBe(true)
+  })
+})
+
 describe('theme', () => {
   it('applies explicit choices and caches them', () => {
     applyTheme('light')
