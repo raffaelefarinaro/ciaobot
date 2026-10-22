@@ -20,6 +20,11 @@ for (const mobile of [false, true]) {
       const surface = page.locator('#chat-work-rail')
       if (mobile) await page.locator('.work-inspector-trigger').click()
       await expect(surface).toBeVisible()
+      // Always loaded starts closed; its summary opens it.
+      const loaded = surface.locator('details.agent-context-loaded')
+      await expect(loaded).not.toHaveAttribute('open')
+      await loaded.locator('summary').click()
+      await expect(loaded).toHaveAttribute('open')
       await expect(surface.locator('.agent-context-description')).toContainText('Synthetic')
       await expect(surface.locator('pre')).toHaveCount(0)
       await expect(surface).not.toContainText('project_context=')
