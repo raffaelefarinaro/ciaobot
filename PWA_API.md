@@ -82,7 +82,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-binary` | Read allowed binary file |
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
-| POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
+| POST | `/api/workspace-open` | Open a workspace file (or directory) with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
 | GET | `/api/host/terminal` | Can this browser open a terminal on the engine's machine: {available, platform, reason, terminal, actions}; a non-host browser (wrong peer, wrong `Host`, or a browser origin that is not this engine's exact origin) gets available:false, reason:"not_on_host" |
 | GET | `/api/terminal/status` | Signed session + terminal origin/transport policy; returns {available, reason, platform, host, unlock_expires_in, detached_ttl_seconds}. Status grants nothing and includes no credential. |
 | POST | `/api/terminal/unlock` | Issues the terminal grant to a signed-in, same-origin browser; no body (a body is 400 bad_request, one over 4096 bytes is 413). 200 {ok:true, expires_in:900} plus HttpOnly grant cookie; 401 unsigned session, 403 policy, 429 grant capacity. Never launches a shell. |
