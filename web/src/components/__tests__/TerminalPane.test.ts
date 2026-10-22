@@ -259,7 +259,7 @@ describe('TerminalPane', () => {
     wrapper.unmount()
   })
 
-  it('is a drawer when the pane is too narrow to hold both columns', async () => {
+  it('is a drawer when the layout did not give it the slot', async () => {
     // A tile in a pane that cannot hold it would squeeze the chat to a
     // sliver, so a pane that has no room gets the drawer instead.
     serve([sessionInfo('s1')])
@@ -568,7 +568,50 @@ describe('TerminalPane', () => {
     expect(rules).not.toMatch(/border/)
     expect(rules).not.toMatch(/border-radius/)
     expect(rules).not.toMatch(/margin:/)
+    // No shadow of its own either: the window it sits in already has one.
+    expect(rules).not.toMatch(/box-shadow/)
     // The flush dock is gone: the tile is the only column shape.
     expect(source).not.toMatch(/terminal-pane--dock/)
+  })
+
+  it('binds a screen to the session that is already open when it mounts again', async () => {
+    // The pane moves between the slot and the drawer, so it unmounts and
+    // mounts again while the shell is still running. The session is still
+    // the one the screen belongs to, and the new pane must draw it — a
+    // second screen for the same session would be two histories at once.
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const first = await mountPane({ inTile: true })
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    expect(screen.FakeScreen.instances).toHaveLength(1)
+    expect(screen.FakeScreen.instances[0].sessionId).toBe('s1')
+    expect(screen.FakeScreen.instances[0].disposed).toBe(false)
+    const firstElement = screen.FakeScreen.instances[0].element
+
+    first.unmount()
+    await flushPromises()
+    // The old screen goes with the old pane.
+    expect(screen.FakeScreen.instances[0].disposed).toBe(true)
+    expect(firstElement.isConnected).toBe(false)
+
+    const second = await mountPane({ inTile: false })
+    await flushPromises()
+
+    // The new pane made its own screen, and it is bound to the same
+    // session the old one drew.
+    expect(screen.FakeScreen.instances).toHaveLength(2)
+    expect(screen.FakeScreen.instances[1].sessionId).toBe('s1')
+    expect(screen.FakeScreen.instances[1].disposed).toBe(false)
+    // It is a live screen in the live DOM, not a dead pane.
+    expect(screen.FakeScreen.instances[1].element.isConnected).toBe(true)
+    expect(screen.FakeScreen.instances[1].element).not.toBe(firstElement)
+    // And the store is drawing on it again: the session is attached, so the
+    // pane reconnects to it.
+    expect(store.activeSession?.session_id).toBe('s1')
+    expect(sockets).toHaveLength(2)
+    expect(sockets[1].closed).toBe(false)
+    second.unmount()
   })
 })

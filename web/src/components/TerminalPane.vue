@@ -662,10 +662,11 @@ onBeforeUnmount(() => {
   max-width: 46ch;
 }
 
-/* A phone-sized pane is a drawer: it covers the chat column, because a shell
-   needs the whole screen to be useful, and a narrow column beside a chat is
-   not. The class is set from the same width the layout uses, so the two
-   cannot disagree about which shape the pane is in. */
+/* The drawer: the terminal covers the pane it is in, because a shell needs
+   the whole screen to be useful, and a narrow column beside a chat is not.
+   The layout decides the shape — it measured the room and told the pane
+   whether it could have the slot — and the viewport has the last word: a
+   phone-sized pane is a drawer whatever the layout says. */
 .terminal-pane--drawer.terminal-pane--open {
   position: absolute;
   inset: 0;

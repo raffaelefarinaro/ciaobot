@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import { COMPOSER, activeWorkspaceButton, boot, isolate } from '../support/app'
 
 /**
@@ -20,6 +20,53 @@ const CHAT_PATH = '/chat/alpha-chat-1'
  */
 const NO_REPO_CHAT_PATH = '/chat/alpha-chat-2'
 const OUTPUT = 'ciao-terminal'
+
+/** The window the slot's tile is drawn in: its chrome, measured. */
+interface TileChrome {
+  margin: string
+  radius: string
+  border: string
+  background: string
+  /** The shadow as a value, not as a yes: a frame of the terminal's own
+   *  would be a different shadow, and a boolean would call it equal. */
+  shadow: string
+}
+
+/** The computed chrome of the slot's tile. */
+async function readTileChrome(tile: Locator): Promise<TileChrome> {
+  return tile.evaluate(el => {
+    const style = getComputedStyle(el)
+    return {
+      margin: style.margin,
+      radius: style.borderRadius,
+      border: style.borderTopWidth,
+      background: style.backgroundColor,
+      shadow: style.boxShadow,
+    }
+  })
+}
+
+/** What a design token resolves to on screen, so a tile can be compared to it. */
+async function readTokenBackground(page: Page, token: string): Promise<string> {
+  return page.evaluate((name) => {
+    const probe = document.createElement('div')
+    probe.style.background = `var(${name})`
+    document.body.appendChild(probe)
+    const value = getComputedStyle(probe).backgroundColor
+    probe.remove()
+    return value
+  }, token)
+}
+
+/** Drag the slot's divider to an absolute x, the way a person drags it. */
+async function dragDivider(page: Page, divider: Locator, toX: number): Promise<void> {
+  const box = (await divider.boundingBox())!
+  const y = box.y + box.height / 2
+  await page.mouse.move(box.x + box.width / 2, y)
+  await page.mouse.down()
+  await page.mouse.move(toX, y, { steps: 8 })
+  await page.mouse.up()
+}
 
 test.use({ viewport: { width: 1440, height: 900 } })
 
@@ -76,6 +123,10 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   // Hide detaches; it never ends. The shell keeps running on the engine.
   await pane.getByRole('button', { name: 'Hide' }).click()
   await expect(pane).toBeHidden()
+  // The slot goes back to the chat: no divider, and no tile beside it.
+  await expect(page.locator('.chat-split-resizer')).toHaveCount(0)
+  await expect(page.locator('.chat-split')).toHaveCount(0)
+  await expect(page.locator('.chat-split-side')).toBeHidden()
   const sessions = await page.evaluate(async () => {
     const res = await fetch('/__fixture__/terminal')
     return (await res.json()).sessions.length
@@ -120,18 +171,18 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   // And the tile is that window: the same inset, radius and border the
   // file panel's tile has.
   const tile = page.locator('.chat-split-side')
-  const chrome = await tile.evaluate(el => {
-    const style = getComputedStyle(el)
-    return {
-      margin: style.margin,
-      radius: style.borderRadius,
-      border: style.borderTopWidth,
-      background: style.backgroundColor,
-    }
-  })
+  const chrome = await readTileChrome(tile)
   expect(chrome.margin).toBe('16px 16px 16px 0px')
-  expect(chrome.radius).not.toBe('0px')
+  // The radius is the shared --radius-lg token.
+  expect(chrome.radius).toBe('14px')
   expect(chrome.border).toBe('1px')
+  // The tile carries the shadow — the window's own.
+  expect(chrome.shadow).not.toBe('none')
+  // And the tone is the tile's own --bg2, not a frame of the terminal's.
+  expect(chrome.background).toBe(await readTokenBackground(page, '--bg2'))
+  // The terminal inside it draws no shadow of its own: the window it sits
+  // in already has one, and a second would be a frame of its own.
+  expect(await pane.evaluate(el => getComputedStyle(el).boxShadow)).toBe('none')
 
   // The divider between the chat and the tile, and it is a separator.
   const divider = page.locator('.chat-split-resizer')
@@ -151,10 +202,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
 
   // The divider drags: the chat gives up the room and the tile takes it.
   const dividerBox = (await divider.boundingBox())!
-  await page.mouse.move(dividerBox.x + dividerBox.width / 2, dividerBox.y + dividerBox.height / 2)
-  await page.mouse.down()
-  await page.mouse.move(dividerBox.x - 100, dividerBox.y + dividerBox.height / 2, { steps: 8 })
-  await page.mouse.up()
+  await dragDivider(page, divider, dividerBox.x - 100)
 
   const columnAfter = (await column.boundingBox())!
   const paneAfter = (await pane.boundingBox())!
@@ -162,6 +210,45 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   expect(paneAfter.width).toBeGreaterThan(paneBox.width + 50)
   // And the chat never goes below the floor the drag holds it to.
   expect(columnAfter.width).toBeGreaterThanOrEqual(360)
+
+  // Dragged as far left as it goes, the chat column stops at its 360px
+  // floor: the divider cannot squeeze the conversation to a sliver.
+  await dragDivider(page, divider, 120)
+  const columnLeft = (await column.boundingBox())!
+  expect(columnLeft.width).toBeGreaterThanOrEqual(360)
+  expect(columnLeft.width).toBeLessThanOrEqual(362)
+  // And the drag stopped there: the remembered ratio is that split.
+  const leftRatio = await page.evaluate(() => Number(localStorage.getItem('ciao:chat-split-ratio')))
+  expect(leftRatio * mainBox.width).toBeCloseTo(columnLeft.width, 0)
+
+  // Dragged as far right as it goes, the tile stops at its 360px floor.
+  await dragDivider(page, divider, 2000)
+  const tileBox = (await tile.boundingBox())!
+  expect(tileBox.width).toBeGreaterThanOrEqual(360)
+  expect(tileBox.width).toBeLessThanOrEqual(362)
+  // And it is inside the pane: the floor is a floor, not a clipping.
+  expect(tileBox.x + tileBox.width).toBeLessThanOrEqual(mainBox.x + mainBox.width)
+  // The drag stopped at that split and wrote it down: the remembered ratio
+  // and the split on screen are the same one.
+  const columnRight = (await column.boundingBox())!
+  const ratio = await page.evaluate(() => Number(localStorage.getItem('ciao:chat-split-ratio')))
+  expect(ratio * mainBox.width).toBeCloseTo(columnRight.width, 0)
+
+  // The terminal's tile is the pinned file's tile: the same window, with the
+  // same chrome, so a frame of the terminal's own cannot slip in.
+  await pane.getByRole('button', { name: 'Hide' }).click()
+  await expect(pane).toBeHidden()
+  await boot(page, '/chat/beta-chat-1', COMPOSER)
+  const fileTile = page.locator('.chat-split-side')
+  await expect(fileTile).toBeVisible()
+  const fileChrome = await readTileChrome(fileTile)
+  expect(fileChrome.radius).toBe(chrome.radius)
+  expect(fileChrome.margin).toBe(chrome.margin)
+  expect(fileChrome.border).toBe(chrome.border)
+  // The shadow as a value: a shadow of the terminal's own would be a
+  // different one, and a yes/no would call it the same.
+  expect(fileChrome.shadow).toBe(chrome.shadow)
+  expect(fileChrome.background).toBe(chrome.background)
 })
 
 test('a pane too narrow for both columns gets the drawer, not a squeezed chat', async ({ page }) => {
@@ -185,9 +272,13 @@ test('a pane too narrow for both columns gets the drawer, not a squeezed chat', 
   const paneBox = (await pane.boundingBox())!
   const columnBox = (await column.boundingBox())!
 
-  // The drawer covers the pane it is in.
-  expect(paneBox.width).toBeGreaterThanOrEqual(mainBox.width - 1)
-  expect(paneBox.height).toBeGreaterThanOrEqual(mainBox.height - 1)
+  // The drawer covers exactly the pane it is in — its containing block — and
+  // not the window: a drawer the size of the viewport would reach over the
+  // sidebar too.
+  expect(Math.abs(paneBox.x - mainBox.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(paneBox.y - mainBox.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(paneBox.width - mainBox.width)).toBeLessThanOrEqual(1)
+  expect(Math.abs(paneBox.height - mainBox.height)).toBeLessThanOrEqual(1)
   // The chat keeps the width it had: the drawer is over the chat, not beside
   // it, so nothing is taken from the conversation.
   expect(columnBox.width).toBeGreaterThanOrEqual(mainBox.width - 1)
@@ -196,7 +287,7 @@ test('a pane too narrow for both columns gets the drawer, not a squeezed chat', 
   await pane.getByRole('button', { name: 'Hide' }).click()
   await expect(pane).toBeHidden()
   const after = (await column.boundingBox())!
-  expect(after.width).toBeGreaterThanOrEqual(columnBox.width - 1)
+  expect(Math.abs(after.width - columnBox.width)).toBeLessThanOrEqual(1)
 })
 
 test('a pinned file keeps the slot and the terminal falls back to the drawer', async ({ page }) => {

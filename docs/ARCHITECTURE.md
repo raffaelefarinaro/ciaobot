@@ -377,17 +377,26 @@ web/                           Vue 3 PWA frontend.
                                refused), and one owned ResizeObserver measures the screen. xterm and
                                its fit addon are imported dynamically, so no page that shows no
                                terminal carries them.
-                               The pane around that screen is `TerminalPane.vue`: a strip under the
-                               chat on a wide pane, a full-height drawer on a phone, mounted the
-                               first time a terminal is asked for (`terminalPanel.ts` carries the
-                               one-bit signal) and kept after that, so the screen survives a hide.
-                               It owns one screen per session and never rebinds one, enables input
-                               only for a live, unlocked session it owns, and isolates the app's
-                               shortcuts in the bubble phase on its own root — the shell keeps
-                               Escape, Tab, the arrows, Ctrl+C and Ctrl+D, and Shift+Tab is the one
-                               key intercepted in the capture phase, to hand the keyboard back to
-                               the panel's controls. Hide detaches; End asks the engine to stop
-                               the shell.
+                               The pane around that screen is `TerminalPane.vue`, mounted the
+                               first time a terminal is asked for (`terminalPanel.ts` carries
+                               the one-bit signal) and kept after that, so the screen survives
+                               a hide. It has two shapes, and the layout picks between them:
+                               in the right-hand slot it is the pinned file's own tile
+                               (`.chat-split-side` — the same inset, radius, tone and animation,
+                               behind the same draggable `chat-split-resizer` and the same
+                               remembered `ciao:chat-split-ratio`), which it takes only when no
+                               file owns the slot and the pane is at least 360px of chat
+                               column + 360px of tile + 24px of slot chrome = 744px wide; and
+                               otherwise it is a full-height drawer over the pane, which is what
+                               a phone gets and what a pane too narrow for both columns gets,
+                               and what a terminal gets when a pinned file owns the slot.
+                               It owns one screen per session and never rebinds one, enables
+                               input only for a live, unlocked session it owns, and isolates
+                               the app's shortcuts in the bubble phase on its own root — the
+                               shell keeps Escape, Tab, the arrows, Ctrl+C and Ctrl+D, and
+                               Shift+Tab is the one key intercepted in the capture phase, to
+                               hand the keyboard back to the panel's controls. Hide detaches;
+                               End asks the engine to stop the shell.
   package.json                 npm deps and scripts (build, typecheck, test).
   Vite + TypeScript. Build outputs to ciao/web/static/.
 

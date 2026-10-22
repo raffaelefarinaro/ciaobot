@@ -3090,16 +3090,34 @@ describe('ChatLayout chat route without a catalog entry', () => {
       setup: () => () => h('div', { 'data-testid': 'pinned-file-panel' }),
     })
 
+    /**
+     * The observers the layout created, so a test can report a new width to
+     * them the way a real resize does, and the width they last reported.
+     */
+    let observers: Array<(width: number) => void> = []
+    let reportedWidth = 0
+
     afterEach(() => {
       globalThis.ResizeObserver = originalObserver
       terminalPanelWanted.value = false
+      observers = []
     })
 
-    async function mountSlot(paneWidth: number, options: { pinned?: boolean } = {}) {
+    async function mountSlot(
+      paneWidth: number,
+      options: { pinned?: boolean; visible?: boolean } = {},
+    ) {
+      observers = []
+      reportedWidth = paneWidth
       globalThis.ResizeObserver = class {
         constructor(private readonly cb: ResizeObserverCallback) {}
         observe() {
-          this.cb([{ contentRect: { width: paneWidth } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+          const report = (width: number) => this.cb(
+            [{ contentRect: { width } } as ResizeObserverEntry],
+            this as unknown as ResizeObserver,
+          )
+          observers.push(report)
+          report(reportedWidth)
         }
         unobserve() {}
         disconnect() {}
@@ -3128,7 +3146,7 @@ describe('ChatLayout chat route without a catalog entry', () => {
       // The terminal's panel is asked for, and the terminal is open: the
       // pane owns that state and tells the layout about it.
       terminalPanelWanted.value = true
-      useTerminalStore().visible = true
+      useTerminalStore().visible = options.visible !== false
 
       const { default: ChatLayout } = await import('../ChatLayout.vue')
       const wrapper = mount(ChatLayout, {
@@ -3147,6 +3165,12 @@ describe('ChatLayout chat route without a catalog entry', () => {
       })
       await flushPromises()
       return wrapper
+    }
+
+    /** A resize: the layout's observers report the new width. */
+    function resizePane(width: number) {
+      reportedWidth = width
+      for (const notify of observers) notify(width)
     }
 
     it('gives the tile to the terminal when no file is pinned and the pane has room', async () => {
@@ -3183,6 +3207,57 @@ describe('ChatLayout chat route without a catalog entry', () => {
       // And the terminal is the drawer over the pane.
       expect(wrapper.find('.terminal-pane--drawer').exists()).toBe(true)
       expect(wrapper.find('.terminal-pane--tile').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('needs room for the chat column, the tile and the slot chrome before the tile is used', async () => {
+      // 360 chat + 360 tile + 24 of chrome = 744. A pane one pixel short of
+      // that cannot hold both, so the terminal is the drawer.
+      const narrow = await mountSlot(730)
+      expect(narrow.find('.chat-split-side--closed').exists()).toBe(true)
+      expect(narrow.find('.terminal-pane--drawer').exists()).toBe(true)
+      narrow.unmount()
+
+      const exact = await mountSlot(744)
+      expect(exact.find('.chat-split-side--terminal').exists()).toBe(true)
+      expect(exact.find('.terminal-pane--tile').exists()).toBe(true)
+      exact.unmount()
+    })
+
+    it('moves the terminal between the tile and the drawer as the pane narrows and widens', async () => {
+      const wrapper = await mountSlot(1200)
+      expect(wrapper.find('.terminal-pane--tile').exists()).toBe(true)
+
+      // The pane narrows: there is no longer room for both columns, so the
+      // terminal becomes the drawer over the pane.
+      resizePane(700)
+      await flushPromises()
+      expect(wrapper.find('.terminal-pane--tile').exists()).toBe(false)
+      expect(wrapper.find('.terminal-pane--drawer').exists()).toBe(true)
+      // It moved; it did not close.
+      expect(wrapper.find('.terminal-pane--open').exists()).toBe(true)
+
+      // And back again.
+      resizePane(1200)
+      await flushPromises()
+      expect(wrapper.find('.terminal-pane--tile').exists()).toBe(true)
+      expect(wrapper.find('.terminal-pane--drawer').exists()).toBe(false)
+      expect(wrapper.find('.terminal-pane--open').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('gives the slot back when the terminal is hidden', async () => {
+      const wrapper = await mountSlot(1200, { visible: false })
+      // The slot is closed: no row, no divider, and the chat column takes
+      // the whole pane (it carries no width of its own).
+      expect(wrapper.find('.chat-split').exists()).toBe(false)
+      expect(wrapper.find('.chat-split-resizer').exists()).toBe(false)
+      expect(wrapper.find('.chat-split-side--closed').exists()).toBe(true)
+      expect(wrapper.find('.chat-body').attributes('style')).toBeUndefined()
+      // The terminal is still mounted behind the closed slot, and it is not
+      // on screen.
+      expect(wrapper.find('.terminal-pane').exists()).toBe(true)
+      expect(wrapper.find('.terminal-pane--open').exists()).toBe(false)
       wrapper.unmount()
     })
   })
