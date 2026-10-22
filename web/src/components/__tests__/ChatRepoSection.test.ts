@@ -44,14 +44,20 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
   })
 
-  it('keeps a full branch behind a closed disclosure', () => {
+  it('keeps a full branch behind a closed disclosure', async () => {
     const wrapper = mountSection(repo, {})
-    const details = wrapper.get('details.chat-repo-branch-details')
-    expect(details.attributes('open')).toBeUndefined()
-    expect(details.get('summary.chat-repo-branch').text()).toContain('main')
+    const toggle = wrapper.get('button.chat-repo-branch')
+    const body = wrapper.get('.chat-repo-branch-body')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.attributes('aria-controls')).toBe(body.attributes('id'))
+    expect(body.isVisible()).toBe(false)
+    expect(toggle.text()).toContain('main')
     // The whole branch and the folder the chat works in are one click away.
-    expect(details.get('.chat-repo-branch-value').text()).toBe('main')
-    expect(details.get('.chat-repo-path-value').text()).toBe('/r/app')
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(body.isVisible()).toBe(true)
+    expect(body.get('.chat-repo-branch-value').text()).toBe('main')
+    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app')
     wrapper.unmount()
   })
 
@@ -72,22 +78,20 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
   })
 
-  it('puts the whole branch and path inside the disclosure, and the facts outside it', () => {
+  it('opens the branch details under the line, with the facts staying on it', () => {
     const wrapper = mountSection(repo, { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true })
-    const details = wrapper.get('details.chat-repo-branch-details')
-    const summary = details.get('summary.chat-repo-branch')
-    // The interactive disclosure is the summary; the body is its content, and
-    // the checkout facts stay beside it on the same line rather than inside it.
-    expect(summary.element.tagName).toBe('SUMMARY')
-    expect(details.element.firstElementChild).toBe(summary.element)
-    expect(details.get('.chat-repo-branch-body').text()).toContain('feat-x')
-    expect(details.find('.chat-repo-kind').exists()).toBe(false)
     const line = wrapper.get('.chat-repo-branch-line')
+    const body = wrapper.get('.chat-repo-branch-body')
+    // The body is a sibling below the line, not inside it, so it takes the
+    // section's full width instead of a column beside the facts.
+    expect(line.element.nextElementSibling).toBe(body.element)
+    expect(body.text()).toContain('feat-x')
+    expect(body.find('.chat-repo-kind').exists()).toBe(false)
     expect(line.get('.chat-repo-kind').text()).toBe('worktree')
     // Exactly one focusable control in the branch row: the disclosure itself.
     const focusables = line.findAll('summary, button, a, input, select, textarea, [tabindex]')
     expect(focusables).toHaveLength(1)
-    expect(focusables[0].element).toBe(summary.element)
+    expect(focusables[0].element).toBe(wrapper.get('button.chat-repo-branch').element)
     wrapper.unmount()
   })
 
@@ -219,8 +223,8 @@ describe('ChatRepoSection', () => {
   it('names a locked code mode without changing switch semantics', () => {
     const wrapper = mountSection(repo, {}, { codeMode: true, codeModeLocked: true })
     const note = wrapper.get('.repo-code-lock-note')
-    expect(note.text()).toBe('locked for this chat')
-    // The note sits beside the switch, not inside it: the switch still reads On.
+    expect(note.text()).toBe('Locked on for this chat')
+    // The note sits under the label, not inside the switch: the switch still reads On.
     const sw = wrapper.get('[role=switch]')
     expect(sw.text()).toBe('On')
     expect(sw.find('.repo-code-lock-note').exists()).toBe(false)

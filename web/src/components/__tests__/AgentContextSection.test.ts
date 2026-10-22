@@ -31,30 +31,42 @@ async function mountSection(props: Partial<InstanceType<typeof AgentContextSecti
 describe('AgentContextSection', () => {
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
-  it('heads the file list with Always loaded', async () => {
+  it('keeps Always loaded closed behind a summary that names its cost', async () => {
+    localStorage.removeItem('ciao.chatDetails.alwaysLoadedOpen')
     const wrapper = await mountSection()
-    const label = wrapper.get('.rail-label')
-    expect(label.text()).toBe('Always loaded')
-    expect(label.element.nextElementSibling?.classList.contains('rail-list')).toBe(true)
+    const details = wrapper.get('details.agent-context-loaded')
+    expect(details.attributes('open')).toBeUndefined()
+    const summary = details.get('summary')
+    expect(details.element.firstElementChild).toBe(summary.element)
+    expect(summary.get('.agent-context-summary-label').text()).toBe('Always loaded')
+    // The guide (1k) and the brief together, so the closed row still says what it costs.
+    expect(summary.get('.agent-context-meta').text()).toMatch(/tokens$/)
+    expect(details.find('.rail-list').exists()).toBe(true)
   })
 
-  it('gives context usage and always loaded their own headings', async () => {
+  it('remembers an opened Always loaded and opens when pointed at', async () => {
+    localStorage.removeItem('ciao.chatDetails.alwaysLoadedOpen')
+    const wrapper = await mountSection()
+    const details = wrapper.get('details.agent-context-loaded')
+    ;(details.element as HTMLDetailsElement).open = true
+    await details.trigger('toggle')
+    expect(localStorage.getItem('ciao.chatDetails.alwaysLoadedOpen')).toBe('1')
+    localStorage.setItem('ciao.chatDetails.alwaysLoadedOpen', '0')
+    const closed = await mountSection()
+    expect(closed.get('details.agent-context-loaded').attributes('open')).toBeUndefined()
+    await closed.setProps({ revealKey: 1 })
+    expect(closed.get('details.agent-context-loaded').attributes('open')).toBeDefined()
+  })
+
+  it('gives context usage its own heading, apart from Always loaded', async () => {
     const wrapper = await mountSection({ contextPct: 42 })
-    const sections = wrapper.findAll('section.rail-section')
-    expect(sections).toHaveLength(2)
-    const usage = sections[0]
-    const always = sections[1]
+    const usage = wrapper.get('section.rail-section')
     const usageLabel = usage.get('.rail-label')
-    const alwaysLabel = always.get('.rail-label')
     expect(usageLabel.text()).toBe('Context usage')
-    expect(alwaysLabel.text()).toBe('Always loaded')
-    // Each group is named by its own heading.
     expect(usage.attributes('aria-labelledby')).toBe(usageLabel.attributes('id'))
-    expect(always.attributes('aria-labelledby')).toBe(alwaysLabel.attributes('id'))
-    expect(alwaysLabel.attributes('id')).toBe('agent-context-label')
     // The file list belongs to the always-loaded group, not to the usage one.
     expect(usage.find('.rail-list').exists()).toBe(false)
-    expect(always.find('.rail-list').exists()).toBe(true)
+    expect(wrapper.get('details.agent-context-loaded').find('.rail-list').exists()).toBe(true)
   })
 
   it('describes reported context usage in words', async () => {
@@ -68,7 +80,7 @@ describe('AgentContextSection', () => {
     expect(wrapper.find('[role="meter"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('of context window used')
     // The always-loaded group stands on its own without a reported figure.
-    expect(wrapper.get('.rail-label').text()).toBe('Always loaded')
+    expect(wrapper.get('.agent-context-summary-label').text()).toBe('Always loaded')
   })
 
   it('lists the guide and the project brief with their sizes', async () => {

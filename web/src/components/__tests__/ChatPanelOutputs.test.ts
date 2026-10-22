@@ -97,7 +97,7 @@ class MemoryStorage {
 
 const mounted: VueWrapper[] = []
 
-async function mountPanel(): Promise<{
+async function mountPanel(extraStubs: Record<string, unknown> = {}): Promise<{
   wrapper: VueWrapper
   store: ReturnType<typeof useProjectStore>
   pinia: ReturnType<typeof createPinia>
@@ -130,6 +130,7 @@ async function mountPanel(): Promise<{
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
+        ...extraStubs,
       },
     },
   })
@@ -368,6 +369,68 @@ describe('ChatPanel Outputs section', () => {
     const rows = files.findAll('.rail-item')
     expect(rows).toHaveLength(2)
     expect(new Set(rows.map(row => row.get('small').text().split(' · ')[0])).size).toBe(2)
+  })
+
+  it('lists the five newest files first and keeps the rest behind Show all', async () => {
+    const { wrapper, store } = await mountPanel()
+    const card = (name: string, minute: number) => ({
+      role: 'system' as const,
+      tool_name: '_filecard',
+      content: `Workspace/${name}`,
+      file_path: `Workspace/${name}`,
+      action: 'created',
+      timestamp: `2026-09-20T09:${String(minute).padStart(2, '0')}:00Z`,
+    })
+    store.messages['chat-1'] = [
+      ...turnWithOutputs(),
+      ...['a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'f.md', 'g.md'].map((name, i) => card(name, 10 + i)),
+    ]
+    await flushPromises()
+
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+    const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
+    const names = () => files.findAll('.rail-item').map(row => row.get('span').text())
+    expect(names()).toHaveLength(5)
+    expect(names()[0]).toBe('g.md')
+    const more = files.get('.chat-rail-more')
+    expect(more.attributes('aria-expanded')).toBe('false')
+    expect(more.text()).toMatch(/^Show all \d+$/)
+    await more.trigger('click')
+    expect(names().length).toBeGreaterThan(5)
+    expect(more.text()).toBe('Show fewer')
+  })
+
+  it('shows a short file list without "None yet." or Show all', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = turnWithOutputs()
+    await flushPromises()
+
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+    const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
+    expect(files.findAll('.rail-item').length).toBeGreaterThan(0)
+    expect(files.find('.rail-note').exists()).toBe(false)
+    expect(files.find('.chat-rail-more').exists()).toBe(false)
+  })
+
+  it('leaves Always loaded closed on a plain Chat details open', async () => {
+    localStorage.removeItem('ciao.chatDetails.alwaysLoadedOpen')
+    const { wrapper } = await mountPanel({ AgentContextSection: false })
+    await wrapper.get('.work-inspector-trigger').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('#chat-work-rail details.agent-context-loaded').attributes('open')).toBeUndefined()
+  })
+
+  it('opens Always loaded from "See what Ciao knows" when the drawer was closed', async () => {
+    localStorage.removeItem('ciao.chatDetails.alwaysLoadedOpen')
+    const { wrapper } = await mountPanel({ AgentContextSection: false })
+    expect(wrapper.find('#chat-work-rail').exists()).toBe(false)
+    const link = wrapper.findAll('button').find(b => b.text() === 'See what Ciao knows')
+    expect(link).toBeTruthy()
+    await link!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('#chat-work-rail details.agent-context-loaded').attributes('open')).toBeDefined()
   })
 
   it('opens the memory source from the pass itself, not the browser chat list', async () => {
