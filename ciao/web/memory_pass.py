@@ -611,14 +611,14 @@ class MemoryPassCoordinator:
         archive path is recorded. ``resolution`` is hashed exactly as given, and
         the same text on the same completion dedupes to the pass already queued.
 
-        Returns the pass's chat id, or ``None`` when Session insights is off, the
-        resolution is blank, or the workspace is unknown. Raises ``ValueError``
-        for a resolution too long for its helper or one that holds the closing
+        Returns the pass's chat id, or ``None`` when the resolution is
+        blank or the workspace is unknown. Raises ``ValueError`` for a
+        resolution too long for its helper or one that holds the closing
         fence token. Those are the caller's to refuse; nothing is queued.
         """
         host = self._host
         config = host._config
-        if not workspace or not config.insights_enabled or not resolution.strip():
+        if not workspace or not resolution.strip():
             return None
         if len(resolution) > chat_service.MEMORY_PASS_RESOLUTION_MAX:
             raise ValueError("resolution is too long to learn from")
@@ -684,7 +684,7 @@ class MemoryPassCoordinator:
         """
         host = self._host
         config = host._config
-        if not workspace or not config.insights_enabled:
+        if not workspace:
             return None
         if outcome not in {"completed", "stopped"}:
             raise ValueError("outcome must be completed or stopped")

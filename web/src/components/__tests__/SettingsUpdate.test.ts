@@ -444,17 +444,21 @@ it('does not pull focus for a run this tab did not start', async () => {
     { install_mode: 'installer', can_update: true, operation: operation('downloading') },
     undefined, { attach: true },
   )
+  // The control the user is on: any focusable element outside the update card
+  // (Restart, which used to be on this page, now lives on Advanced).
+  const elsewhere = document.createElement('button')
+  elsewhere.textContent = 'Elsewhere'
+  document.body.appendChild(elsewhere)
   try {
-    const restart = button(wrapper, 'Restart')!
-    expect(restart).toBeDefined()
-    restart.element.focus()
-    expect(document.activeElement).toBe(restart.element)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
 
     await flushPromises()
     expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
     expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-    expect(document.activeElement).toBe(restart.element)
+    expect(document.activeElement).toBe(elsewhere)
   } finally {
+    elsewhere.remove()
     wrapper.unmount()
   }
 })

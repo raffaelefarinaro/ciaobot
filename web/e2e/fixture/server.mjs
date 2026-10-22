@@ -466,7 +466,6 @@ const GET_ROUTES = {
   // Settings → Providers reads these. The real endpoints always send every
   // field; an empty object crashed the tab, so the stub mirrors the shape.
   '/api/settings/routines': () => ({
-    insights_enabled: true,
     provider_default_models: {},
     provider_default_modes: {},
     provider_default_thinking: {},

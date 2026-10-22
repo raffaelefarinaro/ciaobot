@@ -665,14 +665,13 @@ class CiaoConfig:
     # it into ``.runtime/workspaces.json`` once and then ignores it.
     legacy_workspaces_env: str = field(default="", repr=False)
     legacy_gws_profile: str = field(default="", repr=False)
-    legacy_insights_disabled: bool | None = field(default=None, repr=False)
     # Raw values of the retired `.env` server variables
     # (`app_settings.LEGACY_ENV_SETTINGS`) this install still sets. Never read
     # as settings; server startup imports them into Settings once.
     legacy_env_settings: dict[str, str] = field(default_factory=dict, repr=False)
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
-    # the PWA Settings → Models & providers tab (runtime settings store). A missing
+    # the PWA Settings → Providers tab (runtime settings store). A missing
     # entry uses ``claude_mode`` for every provider.
     provider_default_modes: dict[str, str] = field(default_factory=dict)
     # Per-provider default model for new chats, set from the PWA Settings →
@@ -680,19 +679,19 @@ class CiaoConfig:
     # own catalog default.
     provider_default_models: dict[str, str] = field(default_factory=dict)
     # Per-provider default thinking level for new chats, set from the PWA
-    # Settings → Models tab. A missing entry uses the provider's own default.
+    # Settings → Providers tab. A missing entry uses the provider's own default.
     provider_default_thinking: dict[str, str] = field(default_factory=dict)
     # Per-provider Session insights model (memory pass, chat titles, schedule
-    # attention check), set on each provider's card in Settings → Models. A
+    # attention check), set on each provider's card in Settings → Providers. A
     # missing entry uses the source chat's model.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
     pwa_port: int = 8443
     # The server binds all interfaces by default so the PWA is reachable over
     # LAN and Tailscale; the dashboard password + login rate limit are the
-    # access control. Settings → General → Network access sets "127.0.0.1"
+    # access control. Settings → Access & devices → Network access sets "127.0.0.1"
     # for loopback-only (`app_settings.DEFAULT_PWA_HOST` is this default).
     pwa_host: str = "0.0.0.0"
-    # Root log level name (Settings → General → Developer).
+    # Root log level name (Settings → Advanced → Developer).
     log_level: str = "info"
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
@@ -700,7 +699,6 @@ class CiaoConfig:
     # Claude model for the review-queue folds that run without a chat behind
     # them. Chat-driven calls use :func:`ciao.insights.resolve_insights_model`.
     insights_model: str = "sonnet"
-    insights_enabled: bool = True
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -1314,7 +1312,7 @@ class CiaoConfig:
 
         The workspace no longer pins a model: the answer is the effective
         provider's operator default (``provider_default_models``, surfaced in
-        the PWA Settings → Models tab), falling back to the provider's own
+        the PWA Settings → Providers tab), falling back to the provider's own
         catalog default.
 
         ``provider``, when given, is the provider the chat/schedule will
@@ -1337,7 +1335,7 @@ class CiaoConfig:
                 # provider. Checking `default_model_config_key` before this
                 # meant Claude — the one provider that has such a key — always
                 # returned its env-backed value, so a Claude default chosen in
-                # Settings → Models was stored, echoed back by the UI, and
+                # Settings → Providers was stored, echoed back by the UI, and
                 # never actually used.
                 operator_default = self._operator_default_model(descriptor)
                 if operator_default:
@@ -1353,7 +1351,7 @@ class CiaoConfig:
     def _operator_default_model(self, descriptor: "ProviderDescriptor") -> str:
         """The operator-settable default model for a provider, or ``""`` when unset.
 
-        ``provider_default_models`` is what Settings → Models writes for every
+        ``provider_default_models`` is what Settings → Providers writes for every
         provider, so it is the authority. The per-provider settings dataclass is
         consulted only as a fallback, for providers that mirror the same value
         there (``app_settings`` copies it across for those).
@@ -1394,7 +1392,7 @@ class CiaoConfig:
     def default_mode_for_provider(self, provider: str) -> BridgeMode:
         """The default execution (permission) mode for new chats on ``provider``.
 
-        An operator pin (Settings → Models & providers → permission mode) wins;
+        An operator pin (Settings → Providers → permission mode) wins;
         otherwise every provider falls back to ``claude_mode`` (auto).
         ``manual`` maps to the BridgeMode ``normal`` — ask for every
         action; ``bypass`` allows everything; ``auto`` runs the permissive
@@ -1673,15 +1671,6 @@ class CiaoConfig:
             if str(source.get(name, "") or "").strip()
         }
 
-        legacy_insights_raw = str(
-            source.get("CIAO_INSIGHTS_DISABLED", "") or ""
-        ).strip().lower()
-        legacy_insights_disabled = (
-            None
-            if not legacy_insights_raw
-            else legacy_insights_raw not in {"0", "false", "no", "off"}
-        )
-
         return cls(
             pwa_auth_token=pwa_auth_token,
             workspace_root=workspace_root,
@@ -1699,7 +1688,6 @@ class CiaoConfig:
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
             legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),
-            legacy_insights_disabled=legacy_insights_disabled,
         )
 
 

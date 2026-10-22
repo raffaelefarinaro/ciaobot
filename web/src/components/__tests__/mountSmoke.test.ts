@@ -18,8 +18,6 @@ import { api } from '../../lib/api'
 
 vi.mock('../../lib/api', () => {
   let routineSettings = {
-    insights_enabled: true,
-
     model_options: {
       anthropic: ['haiku', 'sonnet', 'opus', 'fable'],
     },
@@ -463,9 +461,9 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
-  it('SettingsView shows the memory backup section on /settings', async () => {
+  it('SettingsView shows the memory backup section on /settings/advanced', async () => {
     const router = makeRouter()
-    await router.push('/settings')
+    await router.push('/settings/advanced')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -568,7 +566,7 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView shows the session insights switch on the General tab', async () => {
+  it('SettingsView has no session insights switch on the General tab', async () => {
     const router = makeRouter()
     await router.push('/settings')
     await router.isReady()
@@ -579,8 +577,8 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const toggle = wrapper.get('[aria-label="Automatic session insights"]')
-    expect(toggle.attributes('aria-checked')).toBe('true')
+    expect(wrapper.find('[aria-label="Automatic session insights"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Automatic session insights')
     expect(wrapper.text()).not.toContain('Trajectory capture')
     wrapper.unmount()
   })

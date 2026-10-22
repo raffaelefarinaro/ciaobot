@@ -1647,22 +1647,6 @@ def test_task_completion_enqueue_has_no_chat_and_quotes_the_resolution(
     assert streams.chat_ids == [chat_id]
 
 
-def test_task_completion_enqueue_does_nothing_when_insights_are_off(
-    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
-) -> None:
-    manager = _make_manager(tmp_path)
-    manager._config.insights_enabled = False
-    assert manager.enqueue_task_completion(
-        workspace="work",
-        task_path=_TASK_PATH,
-        completion_id=_COMPLETION_ID,
-        resolution=_RESOLUTION,
-        completed_at="2026-10-08T10:00:00+00:00",
-    ) is None
-    assert _memory_pass_helpers(manager) == []
-    assert streams.calls == []
-
-
 def test_approved_focus_fences_the_user_resolution_and_round_trips() -> None:
     focus = {
         "focus": "approved_task",

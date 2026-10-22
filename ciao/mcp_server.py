@@ -1376,7 +1376,7 @@ async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: s
             quietly running it somewhere else.
 
     The launched turn runs in the permission mode a new chat defaults to
-    (Settings → Models & providers). A sender can never choose it.
+    (Settings → Providers). A sender can never choose it.
 
     The reply is the trigger **plus its secret, shown once**: only a hash of it
     is kept, so it cannot be read back — hand it to the sender now, or rotate and

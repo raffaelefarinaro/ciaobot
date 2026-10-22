@@ -174,7 +174,7 @@
           />
           <span class="hint">Ciaobot is password-protected: this is what you type to open it
             in a browser, and what another device needs to connect as a client. At least
-            {{ minPasswordLength }} characters — you can change it later in Settings → PWA password.</span>
+            {{ minPasswordLength }} characters — you can change it later in Settings → Access & devices → PWA password.</span>
           <span v-if="passwordProblem" class="hint hint--warn">{{ passwordProblem }}</span>
         </div>
 
@@ -728,7 +728,7 @@ async function hostSignIn() {
   try {
     await api.post('/api/auth/host-sign-in')
     hostSignInStatus.value =
-      'A signed-in Ciaobot tab is opening in your default browser. Then choose a new password in Settings → PWA password.'
+      'A signed-in Ciaobot tab is opening in your default browser. Then choose a new password in Settings → Access & devices → PWA password.'
     startHostSignInPoll()
   } catch (e) {
     const { status, payload } = e as { status?: number; payload?: { reason?: string } }

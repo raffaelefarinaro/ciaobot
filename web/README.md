@@ -93,7 +93,7 @@ browser supports sharing that file type, alongside the existing Download.
 Safari/iOS may not expose the installed app as a share target; ordinary file
 attachment remains available there. PWA features need HTTPS or localhost.
 
-Permanent install guidance lives in Settings → Home → **Use Ciaobot as an app**
+Permanent install guidance lives in Settings → General → **Use Ciaobot as an app**
 (`components/settings/SettingsAppInstall.vue`), not in the Home setup reminder:
 that reminder can be closed for good, and its X is the only dismissal control
 it has. The card keeps the general facts — installing is optional, the browser
@@ -113,8 +113,8 @@ only in the component's state and is cleared on dismiss and unmount. Only the
 engine decides `on_host` (from `GET /api/welcome`); the PWA never infers it.
 The X dismisses engine-wide through `/api/welcome/dismiss`, not per browser.
 
-Phone setup lives permanently in Settings → Other devices
-(`settings/SettingsDevices.vue`, anchor `#other-devices`); on the computer running
+Phone setup lives permanently in Settings → Access & devices → Other devices
+(`settings/SettingsDevices.vue`, anchor `#other-devices` on `/settings/access`); on the computer running
 Ciaobot, the Home setup card keeps its three phone instructions and that link
 inside a closed native disclosure. Setup task labels stay quiet, help links use
 neutral bordered actions aligned with the row buttons, and narrow panes make
@@ -417,13 +417,21 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   unpin removes the opener and, if its clean shared-pin preview is open, closes
   that preview — a separately opened viewer or a dirty edit is left untouched.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
-  way, one tab at a time, into `components/settings/`. General begins with the
-  Updates section (compact to a title and an "Up to date" status when nothing is
-  in progress), then the capability-help section linking to the public feature
-  guide, then Use Ciaobot as an app, Notifications, Keyboard shortcuts and the
-  update task history.
+  way, one tab at a time, into `components/settings/`. General is split
+  into four pages. General begins with the Updates section (compact to a title
+  and an "Up to date" status when nothing is in progress), then the
+  capability-help section linking to the public feature guide, then Use Ciaobot
+  as an app, Notifications, Keyboard shortcuts, the update task history, Start
+  at sign-in, Memory handover, Session insights and Open source. Appearance is
+  the Appearance card alone. Access & devices holds the PWA password, Other
+  devices (`#other-devices` lives on `/settings/access`) and Network access.
+  Advanced holds This host, Memory backup, the Ciaobot folder, Workspace health,
+  the Developer switches and, in developer mode, Debug. `SettingsServer` takes a
+  `section` prop (`network` or `developer`) so its two cards render on
+  different pages.
   The Settings rail has two groups (`SETTINGS_NAV_GROUPS` in `lib/settingsNav.ts`):
-  Ciaobot (General, Providers, Workspaces) and the active workspace, headed by
+  Ciaobot (General, Appearance, Access & devices, Providers, Advanced,
+  Workspaces) and the active workspace, headed by
   its name and tinted initial tile. Providers is one card, so its page rail
   shows Status only, with no "On this page" list.
   The "On this page" navigation is built from the rendered sections in DOM order,

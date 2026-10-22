@@ -42,7 +42,7 @@
 
           <h3 class="mhw-sub">How it flows</h3>
           <ol class="mhw-list">
-            <li>Archive a chat, with Session insights on, and a memory pass starts.</li>
+            <li>Archive a chat and a memory pass starts.</li>
             <li>The pass is a chat of its own. Open it from Home to read it or steer it.</li>
             <li>Facts it is sure of are written straight away.</li>
             <li>Facts it is unsure of wait in To decide.</li>

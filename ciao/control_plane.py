@@ -3809,8 +3809,6 @@ class CiaoControlPlane:
         task_path, latest = await asyncio.to_thread(
             self._resolution_to_review, workspace, clean, str(expected_revision or "")
         )
-        if not self.config.insights_enabled:
-            return {"queued": False, "reason": "session insights off"}
         try:
             chat_id = self._enqueue_task_resolution(workspace, task_path, latest)
         except ValueError as exc:

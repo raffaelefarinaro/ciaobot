@@ -181,7 +181,7 @@ function hide() {
             <li>Make Ciaobot reachable from the phone: Settings shows the address and the one command.</li>
             <li>On the phone, open the address or scan its QR code, sign in with your Ciaobot password, then Add to Home Screen.</li>
           </ol>
-          <RouterLink class="btn-small home-setup-action" to="/settings#other-devices">Phone setup</RouterLink>
+          <RouterLink class="btn-small home-setup-action" to="/settings/access#other-devices">Phone setup</RouterLink>
         </details>
       </li>
     </ol>

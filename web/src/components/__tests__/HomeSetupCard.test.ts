@@ -122,7 +122,7 @@ describe('HomeSetupCard', () => {
     const view = await mountCard()
 
     expect(button(view, 'Enable').classes()).toContain('btn-primary')
-    for (const to of ['/settings#install-app', '/settings#other-devices']) {
+    for (const to of ['/settings#install-app', '/settings/access#other-devices']) {
       const help = linkTo(view, to)
       expect(help.classes(), to).toContain('home-setup-action')
       expect(help.classes(), to).not.toContain('btn-primary')
@@ -343,7 +343,7 @@ describe('HomeSetupCard', () => {
     expect(view.text()).toContain('Install Tailscale')
     expect(view.text()).toContain('Add to Home Screen')
     expect(
-      view.findAllComponents(RouterLinkStub).some(l => l.props('to') === '/settings#other-devices'),
+      view.findAllComponents(RouterLinkStub).some(l => l.props('to') === '/settings/access#other-devices'),
     ).toBe(true)
   })
 
@@ -358,7 +358,7 @@ describe('HomeSetupCard', () => {
     expect(view.text()).toContain('Install Tailscale')
     expect(view.text()).toContain('Make Ciaobot reachable from the phone')
     expect(view.text()).toContain('Add to Home Screen')
-    const phone = linkTo(view, '/settings#other-devices')
+    const phone = linkTo(view, '/settings/access#other-devices')
     expect(phone.element.closest('details')?.classList.contains('home-setup-phone')).toBe(true)
   })
 

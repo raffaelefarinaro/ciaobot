@@ -176,7 +176,7 @@ new terminal, install [Git for Windows](https://gitforwindows.org/).
 
 ## Update and rollback
 
-Engine updates work the same way as on macOS: Settings -> Home, or from a
+Engine updates work the same way as on macOS: Settings -> General, or from a
 terminal:
 
 ```powershell

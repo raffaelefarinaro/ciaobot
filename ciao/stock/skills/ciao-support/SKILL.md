@@ -33,7 +33,7 @@ fixed from a log tail alone.
 
 ## Check whether an update already fixes it
 
-Before recommending a new issue, compare the installed version (`version` from `ciao context logs`, or Settings → Home)
+Before recommending a new issue, compare the installed version (`version` from `ciao context logs`, or Settings → General)
 with the [releases](https://github.com/raffaelefarinaro/ciaobot/releases) and
 [changelog](https://github.com/raffaelefarinaro/ciaobot/blob/main/CHANGELOG.md).
 Search [existing issues](https://github.com/raffaelefarinaro/ciaobot/issues)

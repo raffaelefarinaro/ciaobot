@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { h } from 'vue'
 import SettingsServer from '../settings/SettingsServer.vue'
 import type { RoutineSettings } from '../../lib/types'
 
@@ -11,9 +12,12 @@ const DEFAULTS = {
 
 function mountCard(extra: Partial<RoutineSettings> | null, saveRoutines = vi.fn(() => Promise.resolve())) {
   const routines = extra === null ? null : ({ ...DEFAULTS, ...extra } as RoutineSettings)
-  const wrapper = mount(SettingsServer, {
-    props: { routines, routinesSaving: false, saveRoutines },
-  })
+  // The page shows the two cards on different tabs; most cases here exercise
+  // both, so they render side by side.
+  const wrapper = mount(
+    () => h('div', (['network', 'developer'] as const).map(section =>
+      h(SettingsServer, { section, routines, routinesSaving: false, saveRoutines }))),
+  )
   return { wrapper, saveRoutines }
 }
 
@@ -65,5 +69,15 @@ describe('SettingsServer', () => {
     const { wrapper } = mountCard(null)
     expect(wrapper.get('[role="switch"]').attributes('disabled')).toBeDefined()
     expect(wrapper.findAll('select')[0].attributes('disabled')).toBeDefined()
+  })
+
+  it('renders only the section it is given', () => {
+    const props = { routines: null, routinesSaving: false, saveRoutines: vi.fn(() => Promise.resolve()) }
+    const network = mount(SettingsServer, { props: { section: 'network', ...props } })
+    expect(network.text()).toContain('Network access')
+    expect(network.text()).not.toContain('Developer')
+    const developer = mount(SettingsServer, { props: { section: 'developer', ...props } })
+    expect(developer.text()).toContain('Developer')
+    expect(developer.text()).not.toContain('Network access')
   })
 })

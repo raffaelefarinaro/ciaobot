@@ -15,7 +15,6 @@ class FakeConfig:
 
     def __init__(self) -> None:
         self.insights_model = "sonnet"
-        self.insights_enabled = True
         # Per-provider default models / thinking / routine models; no
         # env-backed defaults.
         self.provider_default_models: dict[str, str] = {}
@@ -26,29 +25,6 @@ class FakeConfig:
 def test_load_missing_file_gives_defaults(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     assert store.settings == AppSettings()
-    assert store.settings.insights_enabled is True
-
-
-def test_insights_enabled_persists_and_applies(tmp_path):
-    path = tmp_path / "app_settings.json"
-    store = AppSettingsStore(path)
-    config = FakeConfig()
-
-    store.update({"insights_enabled": False})
-    store.apply_to_config(config)
-
-    assert config.insights_enabled is False
-    assert json.loads(path.read_text())["insights_enabled"] is False
-    assert AppSettingsStore(path).settings.insights_enabled is False
-
-    store.update({"insights_enabled": True})
-    assert json.loads(path.read_text())["insights_enabled"] is True
-
-
-def test_insights_enabled_rejects_non_boolean(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
-    with pytest.raises(ValueError, match="must be a boolean"):
-        store.update({"insights_enabled": "false"})
 
 
 def test_keyboard_preferences_persist_and_validate(tmp_path):
@@ -74,39 +50,20 @@ def test_keyboard_preferences_reject_invalid_values(tmp_path, changes):
         AppSettingsStore(tmp_path / "app_settings.json").update(changes)
 
 
-def test_legacy_insights_opt_out_migrates_once(tmp_path):
-    path = tmp_path / "app_settings.json"
-    store = AppSettingsStore(path)
-
-    assert store.migrate_legacy_insights_enabled(True) is False
-    assert json.loads(path.read_text())["insights_enabled"] is False
-    assert store.migrate_legacy_insights_enabled(False) is None
-    assert json.loads(path.read_text())["insights_enabled"] is False
-
-
-def test_explicit_insights_setting_wins_over_legacy_migration(tmp_path):
-    path = tmp_path / "app_settings.json"
-    path.write_text(json.dumps({"insights_enabled": True}))
-    store = AppSettingsStore(path)
-
-    assert store.migrate_legacy_insights_enabled(True) is None
-    assert store.settings.insights_enabled is True
-
-
 def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
     path = tmp_path / "app_settings.json"
     path.write_text(
         json.dumps(
             {
                 "bogus": "x",
-                "insights_enabled": "false",
+                "insights_enabled": False,
                 # Retired with trajectory capture: an old file still carries it.
                 "trajectories_enabled": "false",
             }
         )
     )
     store = AppSettingsStore(path)
-    assert store.settings.insights_enabled is True
+    assert not hasattr(store.settings, "insights_enabled")
     assert not hasattr(store.settings, "trajectories_enabled")
 
 
@@ -119,14 +76,14 @@ def test_load_corrupt_file_gives_defaults(tmp_path):
 def test_update_persists_and_roundtrips(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)
-    store.update({"insights_enabled": False, "ignored": "x"})
+    store.update({"dev_mode": True, "ignored": "x"})
     assert json.loads(path.read_text()) == {
-        "insights_enabled": False,
+        "dev_mode": True,
         "backup_enabled": True,
         "backup_paused": False,
     }
     # Fresh instance sees the persisted value.
-    assert AppSettingsStore(path).settings.insights_enabled is False
+    assert AppSettingsStore(path).settings.dev_mode is True
 
 
 def test_update_rejects_a_non_string_value(tmp_path):
@@ -173,9 +130,29 @@ def test_global_insights_model_moves_to_its_provider(tmp_path, legacy, existing,
 
 def test_a_file_without_the_global_insights_model_is_not_rewritten(tmp_path):
     path = tmp_path / "app_settings.json"
-    path.write_text('{"insights_enabled": false}')
+    path.write_text('{"backup_enabled": false}')
     AppSettingsStore(path)
+    assert path.read_text() == '{"backup_enabled": false}'
+
+
+def test_a_persisted_insights_enabled_key_is_ignored_and_dropped_on_next_save(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text('{"insights_enabled": false}')
+
+    store = AppSettingsStore(path)
+
+    assert not hasattr(store.settings, "insights_enabled")
     assert path.read_text() == '{"insights_enabled": false}'
+    store.update({"dev_mode": True})
+    assert "insights_enabled" not in json.loads(path.read_text())
+
+
+def test_update_ignores_insights_enabled(tmp_path):
+    path = tmp_path / "app_settings.json"
+
+    AppSettingsStore(path).update({"insights_enabled": False})
+
+    assert "insights_enabled" not in json.loads(path.read_text())
 
 
 def test_provider_routine_models_persist_and_apply(tmp_path):
@@ -191,7 +168,6 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
     assert config.provider_default_thinking == {"claude": "high"}
     path = tmp_path / "app_settings.json"
     assert json.loads(path.read_text()) == {
-        "insights_enabled": True,
         "backup_enabled": True,
         "backup_paused": False,
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},

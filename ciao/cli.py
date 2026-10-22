@@ -6868,7 +6868,7 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     _load_env_file(workspace_root / ".env")
 
-    # The bind address (Settings → General → Network access) is where the
+    # The bind address (Settings → Access & devices → Network access) is where the
     # server listens. For a loopback/wildcard bind we emit "localhost" so the
     # printed chat link matches the host the browser is authenticated on (the
     # menu bar, setup, and login URLs all use localhost). The session cookie is
@@ -8077,7 +8077,7 @@ def build_parser() -> argparse.ArgumentParser:
             "every agent root) to TARGET on the same disk, repair what recorded "
             "the old path, repoint the engine's service and restart it. Prints "
             "the plan by default and changes nothing; --apply performs it. "
-            "Settings -> Main workspace runs the same move. To undo, move it back."
+            "Settings -> Advanced -> Ciaobot folder runs the same move. To undo, move it back."
         ),
     )
     move_parser.add_argument("target", help="The new folder. It must not exist, or be empty.")

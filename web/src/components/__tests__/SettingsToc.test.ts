@@ -11,7 +11,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-async function mountSettings(routines?: unknown) {
+async function mountSettings(routines?: unknown, tab = '') {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
   const router = createRouter({
@@ -21,7 +21,7 @@ async function mountSettings(routines?: unknown) {
       { path: '/settings/:tab', component: stub },
     ],
   })
-  await router.push('/settings')
+  await router.push(`/settings${tab ? `/${tab}` : ''}`)
   await router.isReady()
   vi.spyOn(api, 'get').mockImplementation(async (url: string) => {
     if (url === '/api/settings/routines' && routines) return routines as never
@@ -53,7 +53,10 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
       'Keyboard shortcuts',
       'Update task history',
     ])
-    expect(labels.slice(6, 8)).toEqual(['Appearance', 'This host'])
+    expect(labels.slice(6)).toEqual(['Start at sign-in', 'Memory handover', 'Open source'])
+    expect(labels).not.toContain('Session insights')
+    expect(labels).not.toContain('Appearance')
+    expect(labels).not.toContain('This host')
     expect(labels.indexOf('Open source')).toBeGreaterThan(labels.indexOf('Keyboard shortcuts'))
     // The client/role callout is a notice, not a section to jump to.
     expect(labels).not.toContain('Connection role unavailable')
@@ -66,19 +69,20 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
   }
 })
 
-it('lists Main workspace on the rail, in page order, once its routines load', async () => {
+it('lists Ciaobot folder on the rail, in page order, once its routines load', async () => {
   // The card only renders when the routines payload carries a workspace
   // context, which arrives after mount, so the rail has to pick it up then.
   const { wrapper } = await mountSettings({
     workspace_context: { workspace_root: '/srv/ciao' },
-  })
+  }, 'advanced')
   try {
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
-    const at = labels.indexOf('Main workspace')
+    const at = labels.indexOf('Ciaobot folder')
     expect(at).toBeGreaterThan(-1)
-    expect(labels[at - 1]).toBe('Session insights')
+    expect(labels).not.toContain('Session insights')
+    expect(labels[at - 1]).toBe('Memory backup')
     expect(labels[at + 1]).toBe('Workspace health')
-    expect(wrapper.find('#settings-main-workspace').exists()).toBe(true)
+    expect(wrapper.find('#settings-ciaobot-folder').exists()).toBe(true)
   } finally {
     wrapper.unmount()
   }
