@@ -66,10 +66,16 @@ web/
                            SettingsEngineLogin.vue; SettingsMemoryHandover.vue is the Memory handover card:
                            agreement rate and the operator-only per-workspace handover choice;
                            SettingsWorkspaceOverview.vue is the Workspace > Overview page;
+                           SettingsWorkspaceModels.vue is its Chats and models card;
                            WorkspaceGoogleAccount.vue is its Google account row and
                            GoogleConnectDialog.vue the Connect dialog;
                            SettingsManageWorkspaces.vue is the Manage workspaces page: boxed
-                           rows, the short New workspace form and Archived), plus the
+                           rows, the short New workspace form and Archived; rows reorder by
+                           drag, Alt/Option+Up/Down on the handle, or Move up / Move down in
+                           the row menu, through `store.reorderWorkspaces`, with the polite
+                           announcement text from `lib/workspaceOrder.ts`; WorkspaceColorPicker.vue is the accent
+                           swatch group both use: five base presets plus a dashed "+" disclosure for
+                           blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
@@ -82,8 +88,9 @@ web/
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
-                          useMcpServers, useModalFocus, useWorkspaceAdmin, useGwsAccounts)
-    lib/                  pure helpers (api, time, safeMarkdown, gwsProfileId, etc.) — no Vue imports
+                          useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices,
+                          useGwsAccounts)
+    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, etc.) — no Vue imports
 ```
 
 ## iOS PWA gotchas
@@ -295,6 +302,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters it out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Chat details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind.
 - Project, Memory, and file rows are native buttons or links whenever they perform work. Context menus use `role="menu"` / `role="menuitem"`, open focus on the first action, support Arrow/Home/End/Escape, and restore the trigger. Pointer-only rows and right-click-only actions are not acceptable.
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content. User chat bubbles use `renderUserMarkdown`, which escapes raw HTML (except the comment-context tags) so typed text shows as typed; assistant output uses `renderMarkdown`. A message that names a conversation the reader knows links to it under its human title (`lib/chatLinks.ts`): a bare id or the app's own `@chat/<id>` mention is linked, only for an id in the reader's own openable chat list, the raw id stays in the tooltip and in `data-chat-id`, and the label is built as text, so a title can never become markup.
+- **After sanitization an anchor has a target or it is not an anchor.** The sanitizer drops a `file:`, `javascript:` or `data:` href, and the anchor used to survive it: still painted with the accent colour and an underline, still swallowing the click, pointing nowhere. `lib/safeMarkdown.ts` now renders such a link as inert text — a `<span class="markdown-dead-link">`, never an `<a>` — with the label and its inline formatting intact, and a file path kept visible as copyable text (a network path keeps its authority: `file://server/share` reads `//server/share`). The sanitizer's own URI policy decides (`DOMPurify.isValidAttribute`), so the two cannot drift apart, and the policy is not widened. One exception to the inert text: a local file path, in a surface that opted in and on the engine's own machine. A pane opts in by passing `{ openLocal: true }` to `renderMarkdown`/`renderUserMarkdown` (the chat bubbles in `ChatPanel`) or `renderVaultMarkdown(..., true)` (the file viewer and the pinned-file panel), and it may only ever opt in if its click chain acts on the button — the delegated `handleOpenLocalFileClick` handler. There the dead link becomes a real `<button class="markdown-dead-link--openable" data-local-path="...">` (the label and the visible, copyable path), and the handler asks the engine to open that path with the OS default application through `POST /api/workspace-open` (`lib/openWorkspaceFile.ts`). Every other markdown surface (`TaskNoteFeed`, `TaskPeek`, `TaskBoardView`, `SubagentChatView`, `HousekeepingStrip`, …) renders the dead local link as inert copyable text, because a clickable-looking control whose click goes nowhere is the very defect this bullet fixes. Off the engine's own machine — a phone or another computer on the LAN — the button is not rendered either, and the link stays inert text, because `/api/workspace-open` is loopback-gated on the TCP peer. `file://` navigation still never happens: there is no anchor left, and the engine request carries only the path. The neutralising pass runs last, after `linkifyHtml`, because that pass skips the content of an anchor and a dead link's label must not be turned into a workspace file link; it walks anchors only, so the openable button is left alone. This holds for `renderMarkdown`, `renderUserMarkdown` and `renderFileMarkdown` alike.
 - **A link into the app navigates in place.** `lib/appLinks.ts` is the one allowlist: `/`, `/tasks`, `/schedules`, `/automations`, `/memory` and its review/map/categories/import/retired/history sections, `/settings`, `/settings/home` and the tabs in `SETTINGS_NAV` and `SETTINGS_HIDDEN_PAGES`, the documented anchors (`#install-app`, `/settings/providers#chat-providers`, `/settings/workspaces#new-workspace`), one task record by its full 32-hex id, and one conversation by its own id (`/chat/chat-0123abcd`, the shape the engine mints). It also accepts exactly one workspace File access target, `/settings/workspaces?workspace=NAME#file-access`, where `NAME` is an engine-accepted workspace name (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`). `parseWorkspaceFileAccessHref` exports that parse for `SettingsView`, and the whole address is validated: one `workspace` parameter, the literal `#file-access` fragment, no extra or duplicate parameter, no other path, hash or origin. On arrival `SettingsView` expands that row, scrolls the settings pane itself (measured from its `scrollTop`, never `scrollIntoView`), focuses the File access select with `preventScroll`, and briefly tints the row. Reduced motion drops the tint and keeps the focus ring. This is navigation only: it never chooses or saves a value, issues no write, and never switches the active workspace. A missing workspace is named in a status that says nothing changed; a different row with unsaved edits stays open, its single name draft untouched, and the status asks the user to save or discard before the linked workspace is opened. A load failure stays the tab's error, not a missing-workspace claim. Renderers leave those anchors without `target="_blank"`, and the delegated handlers (`ChatPanel`, `PinnedFilePanel`, `FileViewerModal`) push the route in the same window, so Back and an unsent draft survive. A plain click on a task address (`/tasks/<id>`) from a chat, a pinned file, the file viewer or the delegated-chat note opens `TaskPeek` over the current view through `stores/itemPeek.ts`, with no URL change and no history entry; on `/tasks` routes, and for a task already open on the board, it pushes as before. `parseTaskHref` and `isPlainLeftClick` in `lib/appLinks.ts` are the shared parse and modifier check. Modified clicks and the middle button stay the browser's (new tab/window), and a dirty dialog's refused close cancels the navigation. Every other href — an unknown path, an extra query, a different hash, `/api`, `/ws`, a protocol-relative or external URL — stays an ordinary link in a new tab. File links are separate: opening a file still goes through `data-file-path` to the viewer, not through a page address.
 - Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
@@ -424,8 +432,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   that preview — a separately opened viewer or a dirty edit is left untouched.
 - **Workspace > Overview (`/settings/workspace`).** The first item of the
   workspace rail group is the page for `projectStore.activeWorkspace`:
-  `SettingsWorkspaceOverview.vue` draws the Workspace and Google account cards
-  (one editor, one Save changes / Discard row, in the Workspace card), then Memory handover, Update
+  `SettingsWorkspaceOverview.vue` draws the Workspace, Chats and models and
+  Google account cards (one editor, one Save changes / Discard row, in the last
+  form card, Chats and models), then Memory handover, Update
   task history and, for an archivable workspace, Archive this workspace. The
   editor state is not in the component: `composables/useWorkspaceAdmin.ts` owns
   the registry forms, drafts, save, archive and restore, `SettingsView.vue` calls
@@ -436,6 +445,17 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   asks first through `projectStore.setWorkspaceSwitchGuard`. A File access link
   (`/settings/workspaces?workspace=NAME#file-access`) switches to NAME and lands
   on Overview with the selector focused; it never saves.
+  `SettingsWorkspaceModels.vue` (Chats and models) edits the same form: the
+  default provider switch and, for the selected provider, the workspace's
+  `provider_overrides` (model, thinking, permission mode, session insights
+  model). It loads the engine defaults itself (`/api/settings/routines`,
+  `/api/models`) and builds its option lists with
+  `composables/useProviderChoices.ts` (shared with the Providers page). The
+  first option of every field is `Engine default (<value>)`, and an empty
+  choice deletes the override. All edits go through
+  `lib/workspaceOverrides.ts` (`normalizeOverrides`, `setOverride`) so
+  `JSON.stringify(form)` stays a stable dirty check;
+  `effectiveWorkspaceDefaultModel` feeds the schedule forms' "Inherit" label.
   The Google account card is one row for the active workspace
   (`WorkspaceGoogleAccount.vue`: connected, sign-in expired, or none) and the
   `GoogleConnectDialog.vue` modal sheet behind its Connect / Sign in again
@@ -444,7 +464,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   account id is derived from the workspace name (`lib/gwsProfileId.ts`, a mirror
   of `gws_auth.slugify_profile`; `tests/test_gws_auth.py` pins only its reserved-name list) and never
   typed. The workspace is linked when the account connects, through
-  `useWorkspaceAdmin.setWorkspaceGwsLink`; saving the Workspace card never sends
+  `useWorkspaceAdmin.setWorkspaceGwsLink`; saving the form cards never sends
   `gws_profile`. Manage workspaces has no Google card: an account no
   workspace links to has no screen.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
@@ -455,7 +475,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   as an app, Notifications, Keyboard shortcuts, Start at sign-in and Open
   source. Appearance is
   the Appearance card alone: Theme and Font size rows in `SettingsView.vue`, and
-  `settings/SettingsAppearance.vue` (Text contrast, Body font). Appearance is engine-wide:
+  `settings/SettingsAppearance.vue` (Text contrast, Body font, Custom colours with `settings/CustomColorsDialog.vue`; `lib/contrast.ts` holds the WCAG maths and refuses unreadable pairs). Appearance is engine-wide:
   `composables/useAppearanceSettings.ts` mirrors `/api/settings/appearance`, applies
   it through `lib/appearance.ts`, and keeps `ciao-theme`, `ciao-font-scale` and
   `ciao-appearance` as paint caches only. Access & devices holds the PWA password, Other
@@ -469,7 +489,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   active workspace, headed by its name and tinted initial tile. Workspaces has
   no rail item: Manage workspaces (`/settings/workspaces`, named by
   `SETTINGS_HIDDEN_PAGES`) is reached from the workspace switcher, whose menu
-  ends with Workspace settings, Manage workspaces and New workspace. Providers is one card, so its page rail
+  ends with Workspace settings, Manage workspaces and New workspace. The workspace
+  order is the server registry's list order: Manage workspaces reorders it with
+  `store.reorderWorkspaces` (optimistic, rolled back on failure, `moveName` and
+  `moveAnnouncement` in `lib/workspaceOrder.ts`; with no workspace named `personal` the main workspace is pinned first), and every list, the switcher and the
+  1-9 shortcuts read `store.workspaceOptions` in that order. Providers is one card, so its page rail
   shows Status only, with no "On this page" list.
   The "On this page" navigation is built from the rendered sections in DOM order,
   so it follows that order. The MCP tab shows the provider inventory plus an
@@ -519,7 +543,7 @@ establish:
 | `task-board-lanes.spec.ts` | That every board lane is 310px wide at 1440, 1100, 900 and iPhone widths (computed flex included), that a review card's state word and action share one line, and that Done sits collapsed behind a 44px tab that expands, hides, persists across a reload, scrolls the Done lane into view and focuses its Hide button when the tab opens it, and accepts a dropped card (opening the completion sheet). The status filter still lists done tasks at full width. Widths and line boxes only exist in a real layout engine. |
 | `task-card-alignment.spec.ts` | That every text block under a task card's title (meta line, agent note, archived caption, the band's state word) starts at the title's text column, and the band's dot centres under the Done ring, at 1280px and under iPhone touch emulation where the checkbox box is 44px instead of 28px. The hanging indent leans on both netting 20px, which only layout can confirm. |
 | `webhook-actions.spec.ts` | Every trigger control and its delete menu stays within the viewport and passes corner hit-tests at desktop, 390px touch width and 200% page-zoom reflow, with History closed and open. Ancestor clipping can hide controls without causing document overflow. |
-| `appearance-settings.spec.ts` | Settings › Appearance is engine-wide. Body font swaps the prose face while code stays monospace. Soft text contrast resolves `--fg` to `#d2d2de` / `#2e2f46` in dark and light, text contrast and theme survive a reload with the local caches cleared (only the engine can restore them), and under Pixel 5 touch emulation every control in the card is at least 44×44px with no sideways scroll at 390px. |
+| `appearance-settings.spec.ts` | Settings › Appearance is engine-wide. Body font swaps the prose face while code stays monospace. Soft text contrast resolves `--fg` to `#d2d2de` / `#2e2f46` in dark and light, text contrast and theme survive a reload with the local caches cleared (only the engine can restore them), a refused custom pair keeps Apply disabled and says why while a passing one applies live and Reset clears it, and under Pixel 5 touch emulation every control in the card and in the Custom colours dialog is at least 44×44px with no sideways scroll at 390px. |
 | `touch-targets.spec.ts` | Home, chat, tasks, automations, every Memory section, the project, schedule and task detail pages and every Settings tab under iPhone touch emulation: every control at least 44×44px. It also clicks each menu, popover and dialog trigger and measures what opens (model pickers, the workspace form, chat details), and checks `.field-info` panels stay inside the viewport and beside their glyph. Measures buttons, links, ARIA widgets, inputs (checkboxes and radios through their label), `summary` and opened `<details>`; inline prose links and visually hidden keyboard controls are exempt. jsdom applies no CSS, so only a real engine under `(pointer: coarse)` can measure it. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. And that a project's archived list opens the transcript in the file viewer, with its "Continue this chat", instead of the chat's pinned side tile: the split view exists only in a real layout, so jsdom cannot see the tile the project route must not have. |

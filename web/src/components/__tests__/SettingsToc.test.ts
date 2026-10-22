@@ -105,6 +105,7 @@ it('lists Overview cards on the rail', async () => {
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
     expect(labels).toEqual([
       'Workspace',
+      'Chats and models',
       'Google account',
       'Memory handover',
       'Update task history',

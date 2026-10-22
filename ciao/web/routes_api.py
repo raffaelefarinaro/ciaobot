@@ -435,6 +435,53 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         return JSONResponse(payload, status_code=201 if created else 200)
 
 
+async def reorder_workspaces(request: Request) -> JSONResponse:
+    """Persist a reordered workspace registry. Body: {"order": [name, ...]}."""
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    order = body.get("order") if isinstance(body, dict) else None
+    if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
+        return JSONResponse({"error": "order[] is required"}, status_code=400)
+    # Under the registry lock, like create/update/archive/restore.
+    async with _workspace_archive_lock(request):
+        current = list(config.workspaces)
+        if len(order) != len(set(order)) or set(order) != set(current):
+            return JSONResponse(
+                {"error": "order must list every registered workspace exactly once"},
+                status_code=400,
+            )
+        if order != current:
+            before = config.primary_workspace()
+            previous = dict(config.workspaces)
+            rebuilt = {name: previous[name] for name in order}
+            config.workspaces.clear()
+            config.workspaces.update(rebuilt)
+            if config.primary_workspace() != before:
+                # Without a workspace named "personal" the first entry is the
+                # main workspace; a reorder must not hand that role away.
+                config.workspaces.clear()
+                config.workspaces.update(previous)
+                return JSONResponse(
+                    {"error": f"'{before}' is the main workspace and stays first"},
+                    status_code=409,
+                )
+            try:
+                _persist_workspaces(config)
+            except OSError as exc:
+                config.workspaces.clear()
+                config.workspaces.update(previous)
+                return JSONResponse(
+                    {"error": f"Failed to save the workspace order: {exc}"},
+                    status_code=500,
+                )
+            _refresh_project_manager_workspaces(request)
+            _publish_workspaces_changed(request)
+    return JSONResponse(_workspaces_payload(config))
+
+
 async def _bootstrap_new_agent_root(config, name: str) -> bool:
     """Seed a freshly created workspace's own agent root.
 
@@ -546,7 +593,7 @@ def _publish_workspaces_changed(
 
 
 def _workspace_archive_lock(request: Request) -> asyncio.Lock:
-    """One registry change at a time per app: archive, restore, create, update.
+    """One registry change at a time per app: archive, restore, create, update, reorder.
 
     Without it a double-submitted archive ran twice: the second pass found the
     folder already gone and recorded an empty "archived" copy, or its failed
@@ -5026,13 +5073,16 @@ def _open_path_with_default_app(path: Path) -> None:
 
 
 async def workspace_open(request: Request) -> Response:
-    """Open a file with the OS default application on the machine running Ciao.
+    """Open a path with the OS default application on the machine running Ciao.
 
     Body: ``{"path": str}``. Uses the same path resolver as the workspace
     viewers (relative paths anchor to workspace_root; fuzzy basename lookup
-    is allowed). The open happens on the engine's machine, so a remote caller
-    (a phone, another Mac over Tailscale) would pop the file up on a screen
-    nobody is looking at: refused, and the PWA hides the action there.
+    is allowed for files). Directories are opened too — that is the file
+    manager — because an agent that points at a folder is pointing at a
+    thing the user wants to see. The open happens on the engine's machine,
+    so a remote caller (a phone, another Mac over Tailscale) would pop the
+    file up on a screen nobody is looking at: refused, and the PWA hides
+    the action there.
     """
     if not is_loopback_client(request):
         return JSONResponse(
@@ -5049,7 +5099,7 @@ async def workspace_open(request: Request) -> Response:
 
     config = request.app.state.config
     roots = _allowed_roots(config)
-    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True, allow_dir=True)
     if isinstance(result, Response):
         return result
     resolved = result
@@ -5839,7 +5889,9 @@ async def settings_keyboard(request: Request) -> JSONResponse:
     return JSONResponse(payload())
 
 
-_APPEARANCE_KEYS = frozenset({"text_contrast", "body_font", "theme", "font_scale"})
+_APPEARANCE_KEYS = frozenset(
+    {"text_contrast", "body_font", "theme", "font_scale", "custom_colors"}
+)
 
 
 async def settings_appearance(request: Request) -> JSONResponse:

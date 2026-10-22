@@ -2092,9 +2092,10 @@ export const useProjectStore = defineStore('projects', () => {
   //
   // A command the assistant suggested in a chat. The engine owns it; this
   // map is the browser's transient copy: it lives in memory only (never
-  // persisted, never derived from the chat rows), so a reload starts empty
-  // and the `/ws/events` snapshot is the only way back. The command itself
-  // is untrusted text the user reviews and runs; nothing here executes it.
+  // persisted). Chat list/detail payloads hydrate it under read-start
+  // watermarks, and the `/ws/events` snapshot replaces the full map. The
+  // command is untrusted text the user reviews and runs; nothing here
+  // executes it.
   const terminalOffers = ref<Record<string, TerminalOffer>>({})
 
   // A monotonic counter that orders the offer state against the HTTP reads
@@ -2473,6 +2474,27 @@ export const useProjectStore = defineStore('projects', () => {
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
     return res
+  }
+
+  // Persist a new workspace order. The list moves at once and snaps back when
+  // the save fails. The active workspace stays active; only positions change.
+  // Returns the server payload (its `primary` can change with the order), or
+  // null when `names` is not the current set of workspaces and nothing was sent.
+  async function reorderWorkspaces(names: string[]): Promise<WorkspacesResponse | null> {
+    const previous = workspaces.value
+    const reordered = names
+      .map(name => previous.find(w => w.name === name))
+      .filter((w): w is WorkspaceInfo => w !== undefined)
+    if (reordered.length !== previous.length) return null
+    workspaces.value = reordered
+    try {
+      const res = await api.post<WorkspacesResponse>('/api/workspaces/reorder', { order: names })
+      workspaces.value = res.workspaces || []
+      return res
+    } catch (err) {
+      workspaces.value = previous
+      throw err
+    }
   }
 
   async function updateWorkspace(name: WorkspaceName, payload: Partial<WorkspaceInfo>) {
@@ -4984,7 +5006,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'workspaces_changed': {
-        // A workspace was archived, restored or renamed in another tab or
+        // A workspace was archived, restored, renamed or reordered in another tab or
         // device. Refetch the registry so the sidebar and pickers stop
         // offering it (or show it again) without a reload. A rename also
         // moves the selection, so the renamed workspace stays selected here.
@@ -6847,7 +6869,7 @@ export const useProjectStore = defineStore('projects', () => {
     archivingChats, isArchiving,
     // Actions
     setQueuedDelivery,
-    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace,
+    fetchAll, fetchWorkspaces, createWorkspace, reorderWorkspaces, updateWorkspace,
     archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
     workspaceRegistryRevision, refreshWorkspaceRegistry,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,

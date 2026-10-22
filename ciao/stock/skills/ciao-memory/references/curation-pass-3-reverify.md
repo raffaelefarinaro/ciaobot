@@ -12,6 +12,8 @@ On a full pass, do this first:
 
 Every decision on a candidate (keep, trash, restore, complete, restore-completed, delete) is refused unattended with `unattended_forbidden`, so run none of them. There is no archive operation either, and moving or editing a note to imitate one skips the receipt. Orphan status is only a linking signal, never proof that a note is disposable. The queue's signals are `unverified` (facts unchecked past the type's horizon, the same notes `stale_notes` lists, so re-verify rather than retire), `unlinked`, `possible_duplicate`, `superseded_language` (evidence names the line) and `weak_provenance`.
 
+In an attended follow-up, decide to keep any candidate you also intend to edit before making the edit. Its ID includes the note's content hash, so editing first makes the later decision fail; an edit does not stamp `updated:`. This pass itself leaves all candidates undecided.
+
 ## `aging_state_entries`
 
 Region entries whose `[as-of:]` or learned-at stamp has aged past its horizon. Re-verify each against recent chats and project docs, then:

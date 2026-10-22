@@ -1,108 +1,75 @@
 // @vitest-environment jsdom
-
-// The Google link helpers of useWorkspaceAdmin and the one rule that keeps a
-// stale draft from overwriting a link: saving a workspace never sends gws_profile.
-
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { createMemoryHistory, createRouter } from 'vue-router'
-import { flushPromises, mount } from '@vue/test-utils'
-import { computed, defineComponent, h } from 'vue'
-import type { WorkspacesResponse } from '../../lib/types'
+import { computed, effectScope } from 'vue'
+import { useWorkspaceAdmin } from '../useWorkspaceAdmin'
 import { useProjectStore } from '../../stores/projects'
-import { useWorkspaceAdmin, type WorkspaceAdmin } from '../useWorkspaceAdmin'
+import type { WorkspaceInfo } from '../../lib/types'
 
-const state = vi.hoisted(() => ({ workspaces: null as unknown }))
+vi.mock('../../lib/api', () => ({ api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn() } }))
 
-vi.mock('../../lib/api', () => ({
-  api: {
-    get: vi.fn((path: string) => Promise.resolve(path === '/api/workspaces' ? state.workspaces : {})),
-    post: vi.fn(() => Promise.resolve({})),
-    patch: vi.fn(() => Promise.resolve(state.workspaces)),
-    del: vi.fn(() => Promise.resolve({})),
-  },
-}))
-
-function registry(): WorkspacesResponse {
+function ws(overrides?: WorkspaceInfo['provider_overrides']): WorkspaceInfo {
   return {
-    workspaces: ['work', 'home'].map((name) => ({
-      name,
-      vault_root: `${name}/memory-vault`,
-      default_provider: 'claude',
-      gws_profile: '',
-      color: 'pink',
-    })),
-    active: 'work',
-    primary: 'work',
-    default_agent_fs_scope: 'workspace',
-    provider_options: [{ value: 'claude', label: 'Claude' }],
-  } as WorkspacesResponse
+    name: 'work',
+    vault_root: 'work',
+    default_provider: 'claude',
+    gws_profile: '',
+    ...(overrides ? { provider_overrides: overrides } : {}),
+  }
 }
 
-async function mountAdmin(): Promise<WorkspaceAdmin> {
-  let admin!: WorkspaceAdmin
-  const Harness = defineComponent({
-    setup() {
-      admin = useWorkspaceAdmin({
-        notifySaved: vi.fn(),
-        notifyFailed: vi.fn(),
-        gwsProfileOptions: computed(() => []),
-        fetchGwsIntegration: () => Promise.resolve(),
-      })
-      return () => h('div')
-    },
-  })
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: Harness }] })
-  await router.push('/')
-  await router.isReady()
-  mount(Harness, { global: { plugins: [router] } })
-  await admin.fetchWorkspacesList()
-  await flushPromises()
-  return admin
+function setup(initial: WorkspaceInfo) {
+  setActivePinia(createPinia())
+  const store = useProjectStore()
+  store.activeWorkspace = 'work'
+  store.workspaces = [initial]
+  store.workspaceProviderOptions = [{ value: 'claude', label: 'Claude' }]
+  const update = vi.fn().mockResolvedValue({})
+  store.updateWorkspace = update as never
+  store.fetchWorkspaces = vi.fn().mockImplementation(async () => ({ workspaces: store.workspaces })) as never
+  const scope = effectScope()
+  const admin = scope.run(() => useWorkspaceAdmin({
+    notifySaved: vi.fn(),
+    notifyFailed: vi.fn(),
+    gwsProfileOptions: computed(() => []),
+    fetchGwsIntegration: vi.fn().mockResolvedValue(undefined),
+  }))!
+  return { admin, update }
 }
 
-describe('useWorkspaceAdmin Google link', () => {
-  beforeEach(async () => {
-    setActivePinia(createPinia())
-    state.workspaces = registry()
-    useProjectStore().activeWorkspace = 'work'
-    const { api } = await import('../../lib/api')
-    vi.mocked(api.patch).mockClear()
-  })
+describe('useWorkspaceAdmin saveWorkspace provider_overrides', () => {
+  beforeEach(() => vi.clearAllMocks())
 
-  it('setWorkspaceGwsLink keeps a dirty draft dirty and a clean form clean', async () => {
-    const { api } = await import('../../lib/api')
-    const admin = await mountAdmin()
-    const work = admin.workspaceForms.value.find((f) => f.name === 'work')!
-    const home = admin.workspaceForms.value.find((f) => f.name === 'home')!
-
-    work.color = 'cyan'
-    expect(admin.workspaceDirty(work)).toBe(true)
-    await admin.setWorkspaceGwsLink('work', 'x')
-    expect(vi.mocked(api.patch)).toHaveBeenCalledWith('/api/workspaces/work', { gws_profile: 'x' })
-    expect(work.gws_profile).toBe('x')
-    expect(work.color).toBe('cyan')
-    expect(admin.workspaceDirty(work)).toBe(true)
-    // Discarding the colour keeps the link: the baseline carries it too.
-    admin.discardWorkspace('work')
-    const discarded = admin.workspaceForms.value.find((f) => f.name === 'work')!
-    expect(discarded.gws_profile).toBe('x')
-    expect(admin.workspaceDirty(discarded)).toBe(false)
-
-    expect(admin.workspaceDirty(home)).toBe(false)
-    await admin.setWorkspaceGwsLink('home', 'y')
-    expect(home.gws_profile).toBe('y')
-    expect(admin.workspaceDirty(home)).toBe(false)
-  })
-
-  it('save no longer sends gws_profile', async () => {
-    const { api } = await import('../../lib/api')
-    const admin = await mountAdmin()
-    const work = admin.workspaceForms.value.find((f) => f.name === 'work')!
-    work.color = 'cyan'
+  it('omits provider_overrides when unchanged', async () => {
+    const { admin, update } = setup(ws({ claude: { model: 'sonnet' } }))
+    await admin.fetchWorkspacesList()
     await admin.saveWorkspace('work')
-    const [path, body] = vi.mocked(api.patch).mock.calls[0]
-    expect(path).toBe('/api/workspaces/work')
-    expect(body).not.toHaveProperty('gws_profile')
+    expect(update.mock.calls[0][1]).not.toHaveProperty('provider_overrides')
+  })
+
+  it('sends the whole map when changed', async () => {
+    const { admin, update } = setup(ws({ claude: { model: 'sonnet' } }))
+    await admin.fetchWorkspacesList()
+    admin.workspaceForms.value[0].provider_overrides = { claude: { model: 'sonnet', thinking: 'high' }, opencode: { model: 'a/b' } }
+    await admin.saveWorkspace('work')
+    expect(update.mock.calls[0][1].provider_overrides).toEqual({
+      claude: { model: 'sonnet', thinking: 'high' },
+      opencode: { model: 'a/b' },
+    })
+  })
+
+  it('sends {} when the map was emptied', async () => {
+    const { admin, update } = setup(ws({ claude: { model: 'sonnet' } }))
+    await admin.fetchWorkspacesList()
+    admin.workspaceForms.value[0].provider_overrides = {}
+    await admin.saveWorkspace('work')
+    expect(update.mock.calls[0][1].provider_overrides).toEqual({})
+  })
+
+  it('a workspace with no stored overrides starts empty and is not dirty', async () => {
+    const { admin } = setup(ws())
+    await admin.fetchWorkspacesList()
+    expect(admin.workspaceForms.value[0].provider_overrides).toEqual({})
+    expect(admin.workspaceDirty(admin.workspaceForms.value[0])).toBe(false)
   })
 })

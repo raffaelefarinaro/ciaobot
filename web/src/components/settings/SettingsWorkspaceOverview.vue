@@ -9,7 +9,7 @@
           <p class="section-title">Workspace</p>
         </div>
         <p class="hint">
-          Name, colour, default provider and file access for this workspace.
+          Name, colour and file access for this workspace.
         </p>
       </div>
       <div class="overview-body">
@@ -26,35 +26,13 @@
         <p :id="`workspace-name-hint-${form.name}`" class="hint hint--compact set-subrow-hint">Letters, numbers, dashes, underscores.</p>
         <div class="set-subrow">
           <span class="ws-label set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
-          <div
-            class="workspace-color-swatches set-subrow-control"
-            role="radiogroup"
-            :aria-labelledby="`workspace-color-${form.name}`"
-          >
-            <button
-              v-for="preset in WORKSPACE_COLOR_PRESETS"
-              :key="`${form.name}-color-${preset.id}`"
-              type="button"
-              class="workspace-color-swatch"
-              role="radio"
-              :aria-checked="form.color === preset.id"
-              :aria-label="preset.label"
-              :title="preset.label"
-              :disabled="workspacesSaving === form.name"
-              :class="{ active: form.color === preset.id }"
-              :style="{ '--swatch': preset.swatch }"
-              @click="form.color = preset.id"
-            />
-          </div>
+          <WorkspaceColorPicker
+            v-model="form.color"
+            class="set-subrow-control"
+            :labelledby="`workspace-color-${form.name}`"
+            :disabled="workspacesSaving === form.name"
+          />
         </div>
-        <label class="settings-field set-subrow">
-          <span class="ws-label set-subrow-label">{{ workspaceProviderFieldLabel }}</span>
-          <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
-            <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-              {{ provider.label }}
-            </option>
-          </select>
-        </label>
         <label
           class="settings-field set-subrow"
           :class="{ 'workspace-card--target': workspaceLinkTarget === form.name }"
@@ -90,22 +68,10 @@
           </button>
         </div>
         <p class="hint hint--compact set-subrow-hint">Load your Claude account's connectors (Slack, Jira, …) in this workspace's Claude chats.</p>
-        <div v-if="workspaceDirty(form)" class="workspace-edit-actions">
-          <button
-            type="button"
-            class="btn-primary btn-small workspace-save"
-            :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
-            @click="saveWorkspace(form.name)"
-          >{{ workspacesSaving === form.name ? 'Saving...' : 'Save changes' }}</button>
-          <button
-            type="button"
-            class="btn-small workspace-discard"
-            :disabled="workspacesSaving === form.name"
-            @click="discardWorkspace(form.name)"
-          >Discard</button>
-        </div>
       </div>
     </div>
+
+    <SettingsWorkspaceModels />
 
     <div class="card">
       <div class="settings-card-header">
@@ -149,10 +115,11 @@
 import { inject } from 'vue'
 import SkeletonLoader from '../SkeletonLoader.vue'
 import WorkspaceTile from '../WorkspaceTile.vue'
+import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
 import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
 import WorkspaceGoogleAccount from './WorkspaceGoogleAccount.vue'
-import { WORKSPACE_COLOR_PRESETS } from '../../lib/workspaceColors'
+import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
 import {
   WORKSPACE_ADMIN_KEY,
   WORKSPACE_FS_SANDBOX_NOTE,
@@ -174,13 +141,8 @@ const {
   workspaceNameDraft,
   workspaceLinkTarget,
   fsScopeDefaultOptionLabel,
-  workspaceProviderFieldLabel,
-  workspaceProviderOptions,
   activeWorkspaceForm: form,
   clearWorkspaceLinkHighlight,
-  workspaceDirty,
-  discardWorkspace,
-  saveWorkspace,
   workspaceArchivable,
   archiveWorkspace,
 } = admin

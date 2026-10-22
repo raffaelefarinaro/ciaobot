@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import appVue from '../App.vue?raw'
 import {
   APPEARANCE_CACHE_KEY,
+  CUSTOM_TOKEN_NAMES,
+  DEFAULT_PAIRS,
   DEFAULT_APPEARANCE,
   applyAppearanceToRoot,
   applyTheme,
@@ -125,5 +128,66 @@ describe('appearance paint cache', () => {
     expect(() => restoreAppearanceFromCache(root)).not.toThrow()
     expect(() => applyTheme('dark')).not.toThrow()
     expect(readLocalTheme()).toBe('system')
+  })
+})
+
+describe('applyAppearanceToRoot custom colours', () => {
+  const dark = { bg: '#101018', fg: '#e8e8f0' }
+  const light = { bg: '#fdf6e3', fg: '#2b2b2b' }
+
+  it('applies the active mode pair as inline tokens and marks the root', () => {
+    const root = document.createElement('html')
+    applyAppearanceToRoot({ custom_colors: { dark } }, root)
+    expect(root.style.getPropertyValue('--bg')).toBe('#101018')
+    expect(root.style.getPropertyValue('--fg')).toBe('#e8e8f0')
+    expect(root.dataset.customColors).toBe('dark')
+  })
+
+  it('removes the tokens when the other mode has no pair, and applies it when it has', () => {
+    const root = document.createElement('html')
+    applyAppearanceToRoot({ custom_colors: { dark } }, root)
+    root.classList.add('theme-light')
+    applyAppearanceToRoot({ custom_colors: { dark } }, root)
+    for (const name of CUSTOM_TOKEN_NAMES) expect(root.style.getPropertyValue(name)).toBe('')
+    expect(root.dataset.customColors).toBeUndefined()
+    applyAppearanceToRoot({ custom_colors: { dark, light } }, root)
+    expect(root.style.getPropertyValue('--bg')).toBe('#fdf6e3')
+    expect(root.dataset.customColors).toBe('light')
+  })
+
+  it('ignores a stored pair that fails the readability check', () => {
+    const root = document.createElement('html')
+    applyAppearanceToRoot({ custom_colors: { dark: { bg: '#1a1a2e', fg: '#5a5a70' } } }, root)
+    expect(root.style.getPropertyValue('--bg')).toBe('')
+    expect(root.dataset.customColors).toBeUndefined()
+  })
+
+  it('clears the tokens when custom colours are reset, and restores them from the cache', () => {
+    const root = document.createElement('html')
+    applyAppearanceToRoot({ custom_colors: { dark } }, root)
+    applyAppearanceToRoot({ custom_colors: {} }, root)
+    expect(root.style.getPropertyValue('--bg')).toBe('')
+    writeAppearanceCache({ ...DEFAULT_APPEARANCE, custom_colors: { dark }, revision: 'r' })
+    restoreAppearanceFromCache(root)
+    expect(root.style.getPropertyValue('--bg')).toBe('#101018')
+  })
+})
+
+describe('DEFAULT_PAIRS', () => {
+  it('equals the --bg and --fg of the dark and light blocks in App.vue', () => {
+    const block = (selector: RegExp): string => {
+      const match = selector.exec(appVue)
+      expect(match).not.toBeNull()
+      return match![1]
+    }
+    const read = (css: string, name: string): string => {
+      const match = new RegExp(`${name}:\\s*(#[0-9a-fA-F]{6})`).exec(css)
+      expect(match).not.toBeNull()
+      return match![1].toLowerCase()
+    }
+    const dark = block(/^:root \{([^}]*)\}/m)
+    const light = block(/^:root\.theme-light \{([^}]*)\}/m)
+    expect({ bg: read(dark, '--bg'), fg: read(dark, '--fg') }).toEqual(DEFAULT_PAIRS.dark)
+    expect({ bg: read(light, '--bg'), fg: read(light, '--fg') }).toEqual(DEFAULT_PAIRS.light)
   })
 })
