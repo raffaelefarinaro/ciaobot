@@ -49,8 +49,14 @@ async function mountCard() {
   return view
 }
 
+const RADIO_LABEL: Record<string, string> = { off: 'Off', dismiss: 'Dismiss', all: 'Dismiss and accept' }
+
 function radio(view: VueWrapper, value: string) {
-  return view.find(`input[type="radio"][value="${value}"]`)
+  return view.findAll('button[role="radio"]').find((b) => b.text() === RADIO_LABEL[value])!
+}
+
+function isChecked(view: VueWrapper, value: string): boolean {
+  return radio(view, value).attributes('aria-checked') === 'true'
 }
 
 let projectStore: ReturnType<typeof useProjectStore>
@@ -100,7 +106,7 @@ describe('SettingsMemoryHandover', () => {
     expect(view.text()).not.toContain('matched your decision')
     expect(projectStore.updateWorkspace).not.toHaveBeenCalled()
     expect(apiPatch).not.toHaveBeenCalled()
-    expect(radio(view, 'off').element).toHaveProperty('checked', true)
+    expect(isChecked(view, 'off')).toBe(true)
 
     apiGet.mockResolvedValue(response())
     const quiet = await mountCard()
@@ -111,34 +117,41 @@ describe('SettingsMemoryHandover', () => {
     const view = await mountCard()
     apiGet.mockClear()
     apiGet.mockResolvedValue(response({ handover: 'dismiss' }))
-    await radio(view, 'dismiss').setValue(true)
+    await radio(view, 'dismiss').trigger('click')
     await flushPromises()
     expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_handover: 'dismiss' })
     expect(askConfirm).not.toHaveBeenCalled()
     expect(apiGet).toHaveBeenCalledTimes(1)
-    expect(radio(view, 'dismiss').element).toHaveProperty('checked', true)
+    expect(isChecked(view, 'dismiss')).toBe(true)
   })
 
   it('selecting Dismiss and accept asks first and does nothing when declined', async () => {
     const view = await mountCard()
     askConfirm.mockResolvedValue(false)
-    await radio(view, 'all').setValue(true)
+    await radio(view, 'all').trigger('click')
     await flushPromises()
     expect(askConfirm).toHaveBeenCalledTimes(1)
     expect(projectStore.updateWorkspace).not.toHaveBeenCalled()
-    expect(radio(view, 'off').element).toHaveProperty('checked', true)
+    expect(isChecked(view, 'off')).toBe(true)
 
     askConfirm.mockResolvedValue(true)
-    await radio(view, 'all').setValue(true)
+    await radio(view, 'all').trigger('click')
     await flushPromises()
     expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_handover: 'all' })
   })
 
   it('states the consequence of all: always-loaded memory, Undo, five per run', async () => {
     const view = await mountCard()
-    expect(view.text()).toContain('always-loaded memory')
-    expect(view.text()).toContain('Undo')
-    expect(view.text()).toContain('5')
+    apiGet.mockResolvedValue(response({ handover: 'all' }))
+    await radio(view, 'all').trigger('click')
+    await flushPromises()
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(askConfirm.mock.calls[0][0]).toContain('History')
+    expect(askConfirm.mock.calls[0][0]).toContain('undone')
+    const hint = view.find('.handover-hint').text()
+    expect(hint).toContain('always-loaded memory')
+    expect(hint).toContain('Undo')
+    expect(hint).toContain('5 changes per run')
   })
 
   it('says plainly when handover cannot act on this install', async () => {
@@ -150,7 +163,7 @@ describe('SettingsMemoryHandover', () => {
     expect(radio(view, 'off').attributes('disabled')).toBeUndefined()
     expect(radio(view, 'dismiss').attributes('disabled')).toBeDefined()
     expect(radio(view, 'all').attributes('disabled')).toBeDefined()
-    await radio(view, 'off').setValue(true)
+    await radio(view, 'off').trigger('click')
     await flushPromises()
     expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_handover: 'off' })
     expect(view.text()).toContain('No decisions with a prediction yet')
@@ -164,11 +177,11 @@ describe('SettingsMemoryHandover', () => {
   it('a failed save shows its own error and restores the saved choice', async () => {
     projectStore.updateWorkspace = vi.fn().mockRejectedValue(new Error('disk full')) as never
     const view = await mountCard()
-    await radio(view, 'dismiss').setValue(true)
+    await radio(view, 'dismiss').trigger('click')
     await flushPromises()
     const alert = view.find('[role="alert"]')
     expect(alert.text()).toContain('disk full')
-    expect(radio(view, 'off').element).toHaveProperty('checked', true)
+    expect(isChecked(view, 'off')).toBe(true)
     expect(view.text()).not.toContain('Could not read')
   })
 
@@ -177,7 +190,7 @@ describe('SettingsMemoryHandover', () => {
     const view = await mountCard()
     expect(view.text()).toContain('boom')
     expect(view.text()).not.toContain('No decisions with a prediction yet')
-    expect(view.find('input[type="radio"]').exists()).toBe(false)
+    expect(view.find('button[role="radio"]').exists()).toBe(false)
     apiGet.mockResolvedValue(response())
     await view.findAll('button').find((b) => b.text() === 'Try again')!.trigger('click')
     await flushPromises()
@@ -207,19 +220,91 @@ describe('SettingsMemoryHandover', () => {
     expect(apiGet).toHaveBeenLastCalledWith('/api/proposals/handover?workspace=work')
     resolveOld(response({ workspace: 'personal', handover: 'all' }, { decided: 9, matched: 1, rate: 0.1 }))
     await flushPromises()
-    expect(radio(view, 'dismiss').element).toHaveProperty('checked', true)
+    expect(isChecked(view, 'dismiss')).toBe(true)
     expect(view.text()).toContain('agreed 100%')
   })
 
-  it('uses native, labelled radio options at least touch-sized', async () => {
+  it('renders a three-way segmented radiogroup like Theme', async () => {
     const view = await mountCard()
     const group = view.find('[role="radiogroup"]')
     expect(group.attributes('aria-label')).toBe('Memory handover')
-    const inputs = view.findAll('input[type="radio"]')
-    expect(inputs).toHaveLength(3)
-    for (const input of inputs) {
-      expect(input.element.closest('label')).not.toBeNull()
-    }
+    expect(group.classes()).toContain('instance-toggle')
+    const buttons = view.findAll('button.toggle-btn[role="radio"]')
+    expect(buttons).toHaveLength(3)
     expect(view.text()).toContain('Dismiss and accept')
+    expect(buttons.filter((b) => b.attributes('tabindex') === '0')).toHaveLength(1)
+    expect(radio(view, 'off').attributes('tabindex')).toBe('0')
+  })
+
+  it('arrow keys move the selection and save', async () => {
+    const view = await mountCard()
+    apiGet.mockResolvedValue(response({ handover: 'dismiss' }))
+    await radio(view, 'off').trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_handover: 'dismiss' })
+    expect(askConfirm).not.toHaveBeenCalled()
+    expect(isChecked(view, 'dismiss')).toBe(true)
+
+    askConfirm.mockResolvedValue(false)
+    await radio(view, 'dismiss').trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(isChecked(view, 'dismiss')).toBe(true)
+    expect(isChecked(view, 'all')).toBe(false)
+  })
+
+  it('Home and End go to the first and last enabled option', async () => {
+    apiGet.mockResolvedValue(response({ handover: 'dismiss' }))
+    const view = await mountCard()
+    await radio(view, 'dismiss').trigger('keydown', { key: 'Home' })
+    await flushPromises()
+    expect(projectStore.updateWorkspace).toHaveBeenLastCalledWith('personal', { memory_handover: 'off' })
+
+    apiGet.mockResolvedValue(response({ handover: 'off', acting_available: false }))
+    const locked = await mountCard()
+    await radio(locked, 'off').trigger('keydown', { key: 'End' })
+    await flushPromises()
+    // Dismiss and accept are disabled, so End lands on the last enabled one: Off itself.
+    expect(projectStore.updateWorkspace).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the buttons focusable while saving so a second arrow still works', async () => {
+    let release: () => void = () => {}
+    projectStore.updateWorkspace = vi.fn(() => new Promise<void>((r) => { release = r })) as never
+    const view = mount(SettingsMemoryHandover, { attachTo: document.body })
+    mounted.push(view)
+    await flushPromises()
+    const off = radio(view, 'off')
+    ;(off.element as HTMLButtonElement).focus()
+    await off.trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    // Saving: nothing is natively disabled, so focus is not dropped to BODY.
+    const dismiss = radio(view, 'dismiss')
+    expect(dismiss.attributes('disabled')).toBeUndefined()
+    expect(dismiss.attributes('aria-disabled')).toBe('true')
+    expect(document.activeElement).toBe(dismiss.element)
+    // A second choice while the first saves is ignored.
+    await dismiss.trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(projectStore.updateWorkspace).toHaveBeenCalledTimes(1)
+    expect(askConfirm).not.toHaveBeenCalled()
+    release()
+    await flushPromises()
+  })
+
+  it('the first enabled option is the tab stop when the saved choice is disabled', async () => {
+    apiGet.mockResolvedValue(response({ handover: 'all', acting_available: false }))
+    const view = await mountCard()
+    expect(radio(view, 'all').attributes('tabindex')).toBe('-1')
+    expect(radio(view, 'off').attributes('tabindex')).toBe('0')
+    expect(view.findAll('button[role="radio"]').filter((b) => b.attributes('tabindex') === '0')).toHaveLength(1)
+  })
+
+  it('all but Off are disabled when acting is unavailable', async () => {
+    apiGet.mockResolvedValue(response({ acting_available: false }))
+    const view = await mountCard()
+    expect(radio(view, 'off').attributes('disabled')).toBeUndefined()
+    expect(radio(view, 'dismiss').attributes('disabled')).toBeDefined()
+    expect(radio(view, 'all').attributes('disabled')).toBeDefined()
   })
 })
