@@ -107,7 +107,7 @@ async function mountModelsTab(): Promise<VueWrapper> {
       { path: '/settings/:tab', component: Stub },
     ],
   })
-  await router.push('/settings/models')
+  await router.push('/settings/providers')
   await router.isReady()
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {

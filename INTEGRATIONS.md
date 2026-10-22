@@ -123,7 +123,7 @@ is fail-open if the provider is unavailable.
 ### Auto mode approvals
 
 OpenCode chats follow the chat's permission mode (the per-provider default
-from Settings → Models & providers, Auto unless changed). In Auto the V2
+from Settings → Providers, Auto unless changed). In Auto the V2
 session permission ruleset allows routine tools while routing every `shell`
 action to `ask`; Manual routes every tool to `ask` and Bypass suppresses
 routine cards. V2 `glob` and `grep` resources are search patterns/regexes
@@ -316,7 +316,7 @@ The agent control plane runs inside `ciao/mcp_server.py` (the shared operation t
 
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for a managed provider. They are not environment variables and should not be configured.
 
-**Provider-owned credentials:** Claude Code and opencode credentials are owned by their CLIs (`ciao auth <provider>` or Settings → Models & providers). Ciaobot reads no provider API key and exposes no API-key editor.
+**Provider-owned credentials:** Claude Code and opencode credentials are owned by their CLIs (`ciao auth <provider>` or Settings → Providers). Ciaobot reads no provider API key and exposes no API-key editor.
 
 Workspace-specific integrations can still be set in `.env`, but the public `.env.example` does not ship private/work examples. Use user-owned credentials for each integration:
 
@@ -332,8 +332,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **MCP credentials:** MCP credentials belong to the provider that owns each connection. Configure them through the provider's supported environment or credential-store mechanism; Ciaobot Settings does not read or write MCP secret values. Claude workspace reachability is scoped by where a server is declared (each workspace's agent root) and narrowed by `mcp__<name>` entries in `disallowed_tools`.
 
-**Provider connections.** The chat providers card in Settings → Models &
-providers launches, verifies, and logs out Claude Code and opencode through
+**Provider connections.** The chat providers card in Settings → Providers launches, verifies, and logs out Claude Code and opencode through
 their own CLIs; Ciaobot stores none of their credentials, and there are no
 API-key fields to fill in.
 
@@ -415,7 +414,7 @@ Linux production Settings uses `/api/admin/restart` for a draining restart,
 without a git checkout, package reinstall, or desktop build.
 See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recovery.
 
-- `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** The permission mode is now set per provider in Settings → Models & providers (Manual asks before every action, Auto lets safe reads and edits run silently and asks before destructive operations, Bypass allows everything); a provider with no pin uses Auto.
+- `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** The permission mode is now set per provider in Settings → Providers (Manual asks before every action, Auto lets safe reads and edits run silently and asks before destructive operations, Bypass allows everything); a provider with no pin uses Auto.
 - `PWA_AUTH_REQUIRED`: **removed and no longer read.** Password protection is always on; `ciao setup --no-auth` is gone with it. An install that still sets it to `false` gets a `legacy-env-ignored` operator tile; the `true` that setup used to write is ignored silently. A workspace `.env` with no `PWA_AUTH_TOKEN` signs sessions with a generated `.runtime/session-secret` and is still protected: put a password in `PWA_AUTH_TOKEN` and restart, or sign in once with `ciao setup-url`.
 - `PWA_HOST`, `CIAO_LOG_LEVEL`, `CIAO_DEV_MODE`, `CIAO_APP_REPO`: **moved to Settings and no longer read.** They are Settings → General → Network access (the bind address, default `0.0.0.0`; read at startup) and Settings → General → Developer (developer mode — the Debug card, `/api/debug/issues` and a source-checkout deploy from Settings → Restart; the source checkout path for that deploy; and the log level, read at startup, where `debug` also attaches a rotating `.runtime/server_debug.log` of 10 MB × 2 backups that the dev-mode `/api/debug/issues` report and the `{{ISSUE_REPORT}}` placeholder surface alongside the error tail). All four are stored in `.runtime/app_settings.json` and exposed on `/api/settings/routines`. On the first server start after upgrading, any of them still set in `.env` is imported into Settings once (an unusable host or log level is skipped with a warning); the `legacy_env_imported` flag in that file makes the import one-shot, so a value later changed in Settings stays changed. After that the variables are inert: the `legacy-env-ignored` operator tile asks you to remove them from `.env`.
 - `CIAO_VAULT_MODE`: **no longer written or read.** Setup records the vault mode (`scratch` initializes the current vault layout; `existing` preserves the selected notes folder and starts an initial inventory/curation chat, where clear material may be reorganized and ambiguous material is left in place) on the second line of `.runtime/setup-completed-at`, which only the first-run onboarding chat reads. A value left in `.env` is ignored silently: setup wrote it, so it is not a setting the operator chose.
@@ -429,7 +428,7 @@ See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recover
 - `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND`: optional override for `gws`; the server defaults it to `file` at startup for headless auth.
 - `CIAO_INSIGHTS_DISABLED`: **retired and no longer read after one-time migration.** On the first upgraded server start, its value is copied into the persisted **Session insights** switch in Settings → General; an existing Settings value wins. Remove it from `.env` after that migration. The retired startup-backfill opt-in remains inert.
 
-Session insights models are chosen per provider in Settings → Models & providers.
+Session insights models are chosen per provider in Settings → Providers.
 Automatic uses the source chat's model for archive memory, chat titles and
 schedule attention. Choose a specific model there to override it. History
 imports without a recorded source model use the workspace/provider default.

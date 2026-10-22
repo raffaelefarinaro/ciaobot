@@ -35,7 +35,7 @@ const PAGES = [
   '/settings',
   '/settings/home',
   '/settings/workspaces',
-  '/settings/models',
+  '/settings/providers',
   '/settings/skills',
   '/settings/subagents',
   '/settings/commands',
@@ -76,7 +76,7 @@ describe('isAppRouteHref', () => {
       // The app's own "How to install" link (`HomeSetupCard.vue`) uses this
       // shorter spelling of the same destination.
       '/settings#install-app',
-      '/settings/models#chat-providers',
+      '/settings/providers#chat-providers',
       '/settings/workspaces#new-workspace',
     ]) {
       expect(isAppRouteHref(href), href).toBe(true)
@@ -106,9 +106,10 @@ describe('isAppRouteHref', () => {
       '/settings/',
       '/memory/',
       '/settings/unknown',
-      '/settings/providers',
+      '/settings/models',
+      '/settings/models#chat-providers',
       '/settings?tab=models',
-      '/settings/models?effort=high',
+      '/settings/providers?effort=high',
       '/settings/workspaces#install-app',
       '/settings/home#new-workspace',
       '/memory/review#top',
@@ -159,7 +160,7 @@ describe('a workspace File access link', () => {
       '/settings/workspaces?workspace=personal',
       '/settings/workspaces#file-access',
       '/settings/workspaces/?workspace=personal#file-access',
-      '/settings/models?workspace=personal#file-access',
+      '/settings/providers?workspace=personal#file-access',
       `https://example.com/settings/workspaces?workspace=personal#file-access`,
       `//example.com/settings/workspaces?workspace=personal#file-access`,
       '/settings/workspaces?workspace=../api/x#file-access',
