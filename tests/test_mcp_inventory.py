@@ -162,7 +162,7 @@ async def test_claude_project_local_config_overrides_project_scope(
 async def test_payload_carries_shell_prefix_and_no_example_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nt: bool
 ) -> None:
-    root = tmp_path / ("it's work" if nt else "my work")
+    root = tmp_path / ("it's \u2019work\u2018" if nt else "my work")
     root.mkdir()
     payload = await provider_inventory(
         workspace="personal", agent_root=root, explicitly_denied=set(), manager=None,
@@ -174,7 +174,9 @@ async def test_payload_carries_shell_prefix_and_no_example_commands(
         payload["shell"] = _shell_prefix(root)
 
     if nt:
-        quoted = str(root).replace("'", "''")
+        quoted = "".join(
+            ch * 2 if ch in "'\u2018\u2019\u201a\u201b" else ch for ch in str(root)
+        )
         assert payload["shell"] == {
             "kind": "powershell", "cd_prefix": f"Set-Location -LiteralPath '{quoted}'; ",
         }

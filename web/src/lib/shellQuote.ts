@@ -6,7 +6,7 @@ const SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/
 
 export function quoteArg(arg: string, shell: ShellKind): string {
   if (SAFE_ARG.test(arg)) return arg
-  const escaped = shell === 'powershell' ? arg.replace(/'/g, "''") : arg.replace(/'/g, "'\\''")
+  const escaped = shell === 'powershell' ? arg.replace(/['\u2018-\u201B]/g, ch => ch + ch) : arg.replace(/'/g, "'\\''")
   return `'${escaped}'`
 }
 
@@ -25,6 +25,20 @@ export function validServerUrl(url: string): boolean {
   }
 }
 
+const HREF_ALLOWLIST = /^[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/
+const CMD_EXE_META = /[&|<>^%"!]/
+
+/** Why a URL cannot be put in a command for this shell, or null when it can. */
+export function serverUrlError(raw: string, shell: ShellKind): string | null {
+  if (!validServerUrl(raw)) return 'Enter an http:// or https:// URL without spaces.'
+  const href = new URL(raw).href
+  if (shell === 'powershell' && (CMD_EXE_META.test(raw) || CMD_EXE_META.test(href))) {
+    return "This URL has characters the Windows terminal can't pass safely. Use Copy and adjust the command by hand."
+  }
+  if (!HREF_ALLOWLIST.test(href)) return 'Enter an http:// or https:// URL using plain ASCII characters.'
+  return null
+}
+
 export function mcpCommand(a: {
   provider: McpProvider
   action: McpAction
@@ -41,8 +55,8 @@ export function mcpCommand(a: {
   }
   let url = ''
   if (a.action === 'add') {
-    if (!a.url || !validServerUrl(a.url)) return null
-    url = quoteArg(a.url, a.shell)
+    if (!a.url || serverUrlError(a.url, a.shell)) return null
+    url = quoteArg(new URL(a.url).href, a.shell)
   }
   let cmd: string | null
   if (a.provider === 'claude') {

@@ -10,8 +10,10 @@
     <p v-if="error" class="action-result --error" role="alert">{{ error }}</p>
     <p v-if="loading" class="hint" role="status">Reading CLI configuration and open chat connections…</p>
     <template v-if="status">
-      <p class="hint">Commands run in this workspace folder:</p>
-      <code class="mcp-workspace-path">{{ status.agent_root }}</code>
+      <template v-if="status.agent_root">
+        <p class="hint">Commands run in this workspace folder:</p>
+        <code class="mcp-workspace-path">{{ status.agent_root }}</code>
+      </template>
       <section class="mcp-ask" aria-labelledby="mcp-ask-title">
         <h3 id="mcp-ask-title">Easiest: ask Ciao in a chat</h3>
         <p class="hint">Ciao asks which server and URL, runs the right command for your CLI, helps you sign in, then reloads the chat.</p>
@@ -44,36 +46,35 @@
             <p v-if="connection.error" class="hint">{{ connection.error }}</p>
           </div>
           <p v-if="!server.connections.length" class="hint">Connection not checked. Start a {{ providerLabel(current.provider) }} chat in this workspace to check it.</p>
-          <div class="mcp-actions">
-            <button
-              type="button"
-              class="mcp-signin"
-              :class="needsAuth(server) ? 'btn-primary' : 'btn-small'"
-              :disabled="!serverCommand(current.provider, 'login', server.name)"
-              @click="runCommand(serverCommand(current.provider, 'login', server.name))"
-            >Sign in in terminal</button>
-            <div class="mcp-more" @keydown.esc.stop="closeMenu(true)">
+          <p v-if="!manageable(server)" class="hint">This server can’t be managed with a command here; use {{ providerLabel(current.provider) }} directly.</p>
+          <template v-else>
+            <div class="mcp-actions">
               <button
-                :ref="el => setMoreRef(menuKey(selected, server.name), el)"
+                v-if="showSignIn(server)"
                 type="button"
-                class="btn-small mcp-more-button"
-                :aria-label="`More actions for ${server.name}`"
-                aria-haspopup="menu"
-                :aria-expanded="openMenu === menuKey(current.provider, server.name)"
-                @click="toggleMenu(menuKey(current.provider, server.name))"
-              >···</button>
-              <div v-if="openMenu === menuKey(current.provider, server.name)" class="mcp-menu" role="menu" :aria-label="`Actions for ${server.name}`">
+                class="mcp-signin"
+                :class="needsAuth(server) ? 'btn-primary' : 'btn-small'"
+                @click="runCommand(serverCommand(current.provider, 'login', server.name))"
+              >Sign in in terminal</button>
+              <div class="mcp-more" @keydown.esc.stop="closeMenu(true)" @focusout="onFocusOut">
                 <button
+                  :ref="el => setMoreRef(moreKey(server), el)"
                   type="button"
-                  role="menuitem"
-                  class="mcp-menuitem"
-                  @click="copyServerCommand(current.provider, server.name)"
-                >{{ current.provider === 'claude' ? 'Copy remove command' : 'Copy sign-out command' }}</button>
+                  class="btn-small mcp-more-button"
+                  :aria-label="`More actions for ${server.name}`"
+                  aria-haspopup="menu"
+                  :aria-expanded="openMenu === moreKey(server)"
+                  @click="toggleMenu(moreKey(server))"
+                >···</button>
+                <div v-if="openMenu === moreKey(server)" class="mcp-menu" role="menu" :aria-label="`Actions for ${server.name}`">
+                  <button type="button" role="menuitem" class="mcp-menuitem" @click="signInFromMenu(current.provider, server.name)">Sign in in terminal</button>
+                  <button type="button" role="menuitem" class="mcp-menuitem" @click="copyServerCommand(current.provider, server.name)">{{ current.provider === 'claude' ? 'Copy remove command' : 'Copy sign-out command' }}</button>
+                </div>
               </div>
+              <span v-if="menuCopied === moreKey(server)" class="hint" role="status">Copied</span>
             </div>
-            <span v-if="menuCopied === menuKey(current.provider, server.name)" class="hint" role="status">Copied</span>
-          </div>
-          <p class="hint">{{ needsAuth(server) ? 'Sign-in required' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
+            <p v-if="showSignIn(server)" class="hint">{{ needsAuth(server) ? 'Sign-in required' : 'Sign-in can only be detected from an open chat; use this for servers that use OAuth.' }}</p>
+          </template>
         </div>
         <p v-if="current.provider === 'opencode' && current.servers.length" class="hint">OpenCode has no remove command: delete the server from the <code>mcp</code> block of the config file named in its Source.</p>
 
@@ -86,8 +87,8 @@
           </div>
           <div class="mcp-field">
             <label for="mcp-server-url">Server URL</label>
-            <input id="mcp-server-url" v-model="url" type="text" placeholder="https://example.com/mcp" autocomplete="off" autocapitalize="off" spellcheck="false" :aria-invalid="urlInvalid" />
-            <p v-if="urlInvalid" class="mcp-error" role="alert">Enter an http:// or https:// URL without spaces.</p>
+            <input id="mcp-server-url" v-model="url" type="text" placeholder="https://example.com/mcp" autocomplete="off" autocapitalize="off" spellcheck="false" :aria-invalid="!!urlError" />
+            <p v-if="urlError" class="mcp-error" role="alert">{{ urlError }}</p>
           </div>
         </div>
         <ul class="mcp-commands">
@@ -115,7 +116,7 @@ import TabBar from '../TabBar.vue'
 import type { McpServersController } from '../../composables/useMcpServers'
 import { useRunInTerminal } from '../../composables/useRunInTerminal'
 import { writeClipboard } from '../../lib/codeCopy'
-import { mcpCommand, validServerName, validServerUrl, type McpAction } from '../../lib/shellQuote'
+import { mcpCommand, serverUrlError, validServerName, type McpAction } from '../../lib/shellQuote'
 import type { McpConnection, McpNativeServer, McpProviderInventory } from '../../lib/types'
 
 type Provider = McpProviderInventory['provider']
@@ -143,7 +144,7 @@ const current = computed(() => providers.value.find(p => p.provider === selected
 const name = ref('')
 const url = ref('')
 const nameInvalid = computed(() => name.value !== '' && !validServerName(name.value))
-const urlInvalid = computed(() => url.value !== '' && !validServerUrl(url.value))
+const urlError = computed(() => (url.value !== '' && status.value ? serverUrlError(url.value, status.value.shell.kind) : null))
 
 function command(provider: Provider, action: McpAction, n?: string, u?: string): string | null {
   if (!status.value) return null
@@ -182,10 +183,11 @@ function flashNote(text: string): void {
 }
 
 async function runCommand(cmd: string | null, opts?: { enter?: boolean }): Promise<void> {
-  if (!cmd) return
+  if (!cmd || terminal.busy.value) return
   const result = await terminal.run(cmd, opts)
   if (result === 'typed') flashNote('Typed in the terminal below')
   else if (result === 'copied') flashNote('Copied. Paste it into the terminal.')
+  else flashNote(`Could not reach the terminal or the clipboard. Run this yourself: ${cmd}`)
 }
 
 async function copyCommand(cmd: string | null): Promise<void> {
@@ -197,6 +199,17 @@ const menuCopied = ref<string | null>(null)
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
 const moreRefs = new Map<string, HTMLElement>()
 function menuKey(provider: Provider, serverName: string): string { return `${provider}:${serverName}` }
+function moreKey(server: McpNativeServer): string { return menuKey(current.value?.provider ?? selected.value, server.name) }
+function onFocusOut(event: FocusEvent): void {
+  const next = event.relatedTarget
+  // A null target (Safari does not focus a clicked button) must not close the
+  // menu before the click lands; outside clicks are handled separately.
+  if (openMenu.value && next instanceof Element && !(event.currentTarget as Element).contains(next)) closeMenu(false)
+}
+async function signInFromMenu(provider: Provider, serverName: string): Promise<void> {
+  closeMenu(true)
+  await runCommand(serverCommand(provider, 'login', serverName))
+}
 function setMoreRef(key: string, el: unknown): void {
   if (el instanceof HTMLElement) moreRefs.set(key, el)
   else moreRefs.delete(key)
@@ -231,6 +244,14 @@ onBeforeUnmount(() => {
   clearTimeout(noteTimer)
   clearTimeout(copiedTimer)
 })
+
+function manageable(server: McpNativeServer): boolean {
+  return validServerName(server.name)
+}
+
+function showSignIn(server: McpNativeServer): boolean {
+  return !server.connections.length || server.connections.some(c => c.state === 'needs_auth' || c.state === 'failed')
+}
 
 function needsAuth(server: McpNativeServer): boolean {
   return server.connections.some(c => c.state === 'needs_auth')
