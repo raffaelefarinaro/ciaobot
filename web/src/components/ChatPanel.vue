@@ -7728,7 +7728,7 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
 }
 
-/* Segmented control, the same shape as Settings → Models' thinking picker. */
+/* Segmented control, the same shape as Settings → Providers' thinking picker. */
 .thinking-levels__chips {
   display: inline-flex;
   flex-wrap: wrap;
