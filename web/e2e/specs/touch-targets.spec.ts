@@ -10,7 +10,7 @@ const TOUCH_MIN = 44
 const TABS = [
   '/settings',
   '/settings/workspaces',
-  '/settings/models',
+  '/settings/providers',
   '/settings/skills',
   '/settings/subagents',
   '/settings/commands',
@@ -40,7 +40,7 @@ const POPUP_SURFACES: Array<[string, string]> = [
   ...MAIN_SURFACES,
   ['/chat/alpha-chat-1', COMPOSER],
   ['/settings/workspaces', '.settings-main'],
-  ['/settings/models', '.settings-main'],
+  ['/settings/providers', '.settings-main'],
 ]
 
 /**

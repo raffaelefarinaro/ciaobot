@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Settings → Models offers the same model pickers as the chat composer, so
+// Settings → Providers offers the same model pickers as the chat composer, so
 // a model reads the same everywhere: a readable name, the raw id in the
 // option's data and tooltip, and a badge from the namespace the id itself
 // states.
@@ -107,7 +107,7 @@ async function mountModelsTab(): Promise<VueWrapper> {
       { path: '/settings/:tab', component: Stub },
     ],
   })
-  await router.push('/settings/models')
+  await router.push('/settings/providers')
   await router.isReady()
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
@@ -151,7 +151,7 @@ function optionFor(items: ReturnType<VueWrapper['findAll']>, model: string) {
   return option!
 }
 
-describe('Settings → Models model names', () => {
+describe('Settings → Providers model names', () => {
   it('names a namespaced model the way the chat picker does', async () => {
     const wrapper = await mountModelsTab()
     try {

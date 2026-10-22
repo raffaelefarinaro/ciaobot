@@ -423,7 +423,7 @@ class ScheduleDispatcher:
                         "Schedule attention classifier model %s was refused by "
                         "the provider for a one-shot call, so this auto-archived "
                         "run keeps its chat visible; picking a Session insights "
-                        "model that serves one-shots in Settings → Models avoids "
+                        "model that serves one-shots in Settings → Providers avoids "
                         "the warning on later runs",
                         model,
                     )

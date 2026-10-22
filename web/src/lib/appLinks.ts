@@ -43,7 +43,7 @@ const SETTINGS_HREFS = [
   '/settings/home',
   '/settings/home#install-app',
   '/settings#install-app',
-  '/settings/models#chat-providers',
+  '/settings/providers#chat-providers',
   '/settings/workspaces#new-workspace',
 ]
 

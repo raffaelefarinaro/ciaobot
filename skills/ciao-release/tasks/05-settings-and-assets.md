@@ -12,14 +12,15 @@ is where a partial change shows up.
 Settings is **not a single page that scrolls**. Each section has its own route,
 listed in the sidebar, and each renders only its own cards:
 
-`/settings` (General, the default), `/settings/workspaces`, `/settings/models`,
+`/settings` (General, the default), `/settings/providers`, `/settings/workspaces`,
 `/settings/skills`, `/settings/subagents`, `/settings/commands`,
 `/settings/mcp`.
 
 Visit each route in turn. On each one, **wait for that route's own heading or
 load state to resolve** — do not sleep a fixed interval and call it loaded.
-`/settings/providers` is a redirect to `/settings/models#chat-providers`; it is
-not a section of its own.
+`/settings/models` redirects to `/settings/providers`; it is not a section of
+its own. The sidebar rail has two groups: Ciaobot (General, Providers,
+Workspaces) and the active workspace (Skills, Subagents, Commands, MCP servers).
 
 `/settings` (General) carries What can Ciaobot do?, Appearance, This host,
 memory backup, insights, Updates, the main workspace, workspace health, the PWA
@@ -36,7 +37,7 @@ current tab rendered (`tocItems` in `web/src/components/SettingsView.vue`), so
 it lists the sections of *that* route, not the seven Settings sections on one
 scroll. A rail that names another route's cards is a finding.
 
-On `/settings/models`, compare each provider row's version (OpenCode and Claude)
+On `/settings/providers`, compare each provider row's version (OpenCode and Claude)
 with `ciao/stock/provider-versions.json` on the release branch. A mismatch is a
 release blocker: report it, do not fix it here.
 
@@ -117,7 +118,7 @@ Do not create, edit or delete anything in Settings.
 - `05-settings-01-general.png` — `/settings` (General). Look for: its own
   sections present, rail listing this route's cards, backup card collapsed
   details, no clipped headings, no overlap.
-- `05-settings-02-route.png` — one additional route (e.g. `/settings/models` or
+- `05-settings-02-route.png` — one additional route (e.g. `/settings/providers` or
   `/settings/skills`). Look for: only that route's cards, its own rail where the
   route has more than one section (`/settings/mcp` legitimately shows none),
   load state resolved, no other route's sections bleeding in.
