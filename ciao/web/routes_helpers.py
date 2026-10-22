@@ -192,7 +192,12 @@ def _find_fuzzy_match(roots: list[Path], candidate: Path) -> Path | None:
     return matches[0][3]
 
 
-def _resolve_workspace_path(roots: list[Path], raw: str, allow_fuzzy: bool = False) -> Path | Response:
+def _resolve_workspace_path(
+    roots: list[Path],
+    raw: str,
+    allow_fuzzy: bool = False,
+    allow_dir: bool = False,
+) -> Path | Response:
     """Shared path resolver for the workspace-file/binary/image endpoints.
 
     Returns the canonicalised ``Path`` on success, or a ``Response`` carrying
@@ -203,6 +208,13 @@ def _resolve_workspace_path(roots: list[Path], raw: str, allow_fuzzy: bool = Fal
     Absolute paths are served from anywhere on disk — there is no workspace
     sandbox. This keeps the common case (clicking a workspace-relative path
     in a chat bubble) unchanged while letting the PWA open any file.
+
+    A resolver that demands a file by default stays honest for every caller
+    that hands the result to a file *reader*: opening a directory through
+    them would produce a confusing downstream error. The one caller that can
+    act on a directory passes ``allow_dir`` (``POST /api/workspace-open``
+    hands the path to the OS default app, and on a directory that is the
+    file manager).
     """
     if not raw:
         return JSONResponse({"error": "missing path"}, status_code=400)
@@ -227,6 +239,9 @@ def _resolve_workspace_path(roots: list[Path], raw: str, allow_fuzzy: bool = Fal
         return JSONResponse({"error": "bad path"}, status_code=400)
 
     if resolved.is_file():
+        return resolved
+
+    if allow_dir and resolved.is_dir():
         return resolved
 
     if allow_fuzzy:
