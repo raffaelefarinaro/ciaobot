@@ -129,7 +129,7 @@
               >{{ name }}</li>
             </ul>
             <p class="hint hint--muted">
-              You can rename or add more in Settings → Workspaces after setup.
+              You can rename or add more in Settings → Manage workspaces after setup.
             </p>
           </div>
           <template v-else>
@@ -143,7 +143,7 @@
               :disabled="loading"
             />
             <span class="hint">Choose the logical name for this folder — for example personal, work,
-              journal, or a client. You can add more later in Settings → Workspaces.</span>
+              journal, or a client. You can add more later in Settings → Manage workspaces.</span>
           </template>
         </div>
 

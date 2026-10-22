@@ -164,7 +164,7 @@ describe('Settings > Workspaces file access', () => {
       expect(newPanel.text()).not.toContain('this computer')
 
       await newPanel.get('input[placeholder="letters, numbers, dashes, underscores"]').setValue('client-a')
-      const create = wrapper.findAll('button').find(b => b.text() === 'Create workspace')
+      const create = wrapper.findAll('button').find(b => b.text() === 'Create and open')
       await create!.trigger('click')
       await flushPromises()
 
@@ -187,7 +187,7 @@ describe('Settings > Workspaces file access', () => {
       const newPanel = wrapper.get('#new-workspace')
       await fileAccessSelect(newPanel).setValue('workspace')
       await newPanel.get('input[placeholder="letters, numbers, dashes, underscores"]').setValue('client-b')
-      const create = wrapper.findAll('button').find(b => b.text() === 'Create workspace')
+      const create = wrapper.findAll('button').find(b => b.text() === 'Create and open')
       await create!.trigger('click')
       await flushPromises()
 

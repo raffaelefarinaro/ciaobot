@@ -6910,7 +6910,7 @@ describe('update-available notification', () => {
 })
 
 describe('gws health toast', () => {
-  test('surfaces an error toast whose Fix action routes to Settings → Workspaces', () => {
+  test('surfaces an error toast whose Fix action routes to Settings → Manage workspaces', () => {
     const store = useProjectStore()
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
@@ -6921,7 +6921,7 @@ describe('gws health toast', () => {
         token_valid: false,
         token_error: 'expired',
         title: 'Google Workspace login needs attention',
-        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Workspaces.',
+        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Manage workspaces.',
       }),
     })
 

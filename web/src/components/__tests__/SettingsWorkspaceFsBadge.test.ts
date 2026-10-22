@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
-// Settings > Workspaces: each row shows its effective File access at a glance.
-// An explicit choice shows as chosen; a workspace with no choice shows the
-// engine's default_agent_fs_scope.
+// Settings > Manage workspaces: each row's summary line shows its effective
+// File access. An explicit choice shows as chosen; a workspace with no choice
+// shows the engine's default_agent_fs_scope.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -70,6 +70,10 @@ async function mountWorkspacesTab() {
   return wrapper
 }
 
+function summaryFor(wrapper: Awaited<ReturnType<typeof mountWorkspacesTab>>, name: string): string {
+  return cardFor(wrapper, name).find('.set-row-sub').text()
+}
+
 function cardFor(wrapper: Awaited<ReturnType<typeof mountWorkspacesTab>>, name: string) {
   const card = wrapper.findAll('.workspace-list .workspace-card')
     .find(c => c.find('.workspace-title').text() === name)
@@ -77,7 +81,7 @@ function cardFor(wrapper: Awaited<ReturnType<typeof mountWorkspacesTab>>, name: 
   return card!
 }
 
-describe('Settings > Workspaces File access badge on the row', () => {
+describe('Settings > Manage workspaces summary shows file access', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
@@ -86,9 +90,8 @@ describe('Settings > Workspaces File access badge on the row', () => {
     state.workspaces = response('workspace')
     const wrapper = await mountWorkspacesTab()
     try {
-      const badge = cardFor(wrapper, 'explicit').find('.workspace-fs-tag')
-      expect(badge.exists()).toBe(true)
-      expect(badge.text()).toBe('Whole machine')
+      expect(cardFor(wrapper, 'explicit').find('.workspace-fs-tag').exists()).toBe(false)
+      expect(summaryFor(wrapper, 'explicit')).toBe('Claude · Whole machine · no Google')
     } finally {
       wrapper.unmount()
     }
@@ -98,7 +101,7 @@ describe('Settings > Workspaces File access badge on the row', () => {
     state.workspaces = response('workspace')
     const wrapper = await mountWorkspacesTab()
     try {
-      expect(cardFor(wrapper, 'defaulted').find('.workspace-fs-tag').text()).toBe('Workspace only')
+      expect(summaryFor(wrapper, 'defaulted')).toBe('Claude · Workspace only · no Google')
     } finally {
       wrapper.unmount()
     }
@@ -108,9 +111,9 @@ describe('Settings > Workspaces File access badge on the row', () => {
     state.workspaces = response('machine')
     const wrapper = await mountWorkspacesTab()
     try {
-      expect(cardFor(wrapper, 'defaulted').find('.workspace-fs-tag').text()).toBe('Whole machine')
+      expect(summaryFor(wrapper, 'defaulted')).toBe('Claude · Whole machine · no Google')
       // An explicit choice is shown as chosen, whatever the default is.
-      expect(cardFor(wrapper, 'explicit').find('.workspace-fs-tag').text()).toBe('Whole machine')
+      expect(summaryFor(wrapper, 'explicit')).toBe('Claude · Whole machine · no Google')
     } finally {
       wrapper.unmount()
     }

@@ -163,8 +163,11 @@ describe('Settings > Workspaces archive', () => {
       expect(labels).toContain('Archive')
       expect(labels).not.toContain('Delete')
       const personal = cardFor(wrapper, 'personal')
-      expect(personal.find('.set-menu-btn').exists()).toBe(false)
-      expect((await openActions(personal)).map(b => b.text())).not.toContain('Archive')
+      // The trigger exists for every row: the primary one offers Rename only.
+      expect(personal.find('.set-menu-btn').exists()).toBe(true)
+      const personalLabels = (await openActions(personal)).map(b => b.text())
+      expect(personalLabels).toContain('Rename')
+      expect(personalLabels).not.toContain('Archive')
     } finally {
       wrapper.unmount()
     }
@@ -208,7 +211,7 @@ describe('Settings > Workspaces archive', () => {
       expect(request!.message).toBe(archiveConfirmMessage('work'))
       expect(request!.message).toContain('stops using its notes and memory')
       expect(request!.message).toContain('.archived-workspaces/')
-      expect(request!.message).toContain('restore it from Settings → Workspaces')
+      expect(request!.message).toContain('restore it under Manage workspaces (workspace switcher)')
       expect(request!.message).not.toMatch(/delete/i)
 
       state.workspaces = workspaces(['personal'])

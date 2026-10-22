@@ -9,7 +9,7 @@ metadata:
 
 ## Installation
 
-Install `gws` from Settings → Workspaces (or see the Ciaobot README). The binary must be on `$PATH`.
+Install `gws` from Settings → Manage workspaces (or see the Ciaobot README). The binary must be on `$PATH`.
 
 ## Authentication (Ciaobot)
 
@@ -19,9 +19,9 @@ Run every Google API call through the `ciao` CLI — never bare `gws`. Bare `gws
 ciao gws "$GWS_PROFILE" <service> <subcommand> [flags]
 ```
 
-`GWS_PROFILE` names the Google account linked to this chat's workspace. It is the only account available in a chat; accounts are linked in Settings → Workspaces. `ciao gws` routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
+`GWS_PROFILE` names the Google account linked to this chat's workspace. It is the only account available in a chat; accounts are linked in Settings → Manage workspaces. `ciao gws` routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
 
-OAuth setup: Settings → Workspaces (Google Workspace card). Credentials live in `secrets/gws-<account>/` (the pre-existing `personal` and `work` accounts use `secrets/gws-personal/` and `secrets/gws/`).
+OAuth setup: Settings → Manage workspaces (Google Workspace card). Credentials live in `secrets/gws-<account>/` (the pre-existing `personal` and `work` accounts use `secrets/gws-personal/` and `secrets/gws/`).
 
 ## Connection status
 
@@ -30,7 +30,7 @@ Google account is connected and its token is valid with `ciao gws status`.
 It reports the linked profile, whether credentials are present, the last
 health-monitor token reading, and whether a re-login is needed. It is read-only
 and never runs `gws auth status` itself. If `needs_relogin` is true, tell the
-user to re-authenticate in Settings → Workspaces (Google Workspace card) — the
+user to re-authenticate in Settings → Manage workspaces (Google Workspace card) — the
 one-click "Sign in with Google" flow there restores Gmail, Calendar, Drive, and
 scheduled Google tasks.
 

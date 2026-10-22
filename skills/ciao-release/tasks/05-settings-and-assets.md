@@ -14,8 +14,8 @@ listed in the sidebar, and each renders only its own cards:
 
 `/settings` (General, the default), `/settings/appearance`,
 `/settings/access`, `/settings/providers`, `/settings/advanced`,
-`/settings/workspaces`, `/settings/workspace`, `/settings/skills`, `/settings/subagents`,
-`/settings/commands`, `/settings/mcp`.
+`/settings/workspace` (Overview), `/settings/skills`, `/settings/subagents`,
+`/settings/commands`, `/settings/mcp`, and `/settings/workspaces` (Manage workspaces, not in the rail: open it from the workspace switcher).
 
 Visit each route in turn. On each one, **wait for that route's own heading or
 load state to resolve** — do not sleep a fixed interval and call it loaded.
@@ -52,8 +52,9 @@ finding; do not wait on it more than once.
 
 ## Step 1b — File access per workspace
 
-Open `/settings/workspaces`. Each workspace row must show a **File access** tag
-with the effective value (*Workspace only* or *Whole machine*). Follow
+Open `/settings/workspaces`. Each workspace row's summary line
+(`provider · file access · Google email or no Google`) must show the effective
+File access (*Workspace only* or *Whole machine*). Follow
 **Settings →** on one workspace: it makes that workspace active and opens
 `/settings/workspace`, where the **File access** select must offer *Default*,
 *Workspace only* and *Whole machine*. Do not change the value.

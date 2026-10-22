@@ -176,12 +176,21 @@ const FOLD_TRANSCRIPT = [
 
 const sessions = new Map()
 
+/** The workspace registry as this session sees it: a saved Memory handover shows on its workspace. */
+function workspacesPayload(state) {
+  return {
+    workspaces: WORKSPACES.map(w => (state.handover[w.name] ? { ...w, memory_handover: state.handover[w.name] } : w)),
+    active: WORKSPACES[0].name,
+    provider_options: [{ value: 'claude', label: 'Claude' }],
+  }
+}
+
 function sessionOf(req) {
   const cookie = req.headers.cookie || ''
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), appearance: { text_contrast: 'normal', theme: null, font_scale: null, revision: 'a0' } }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), appearance: { text_contrast: 'normal', theme: null, font_scale: null, revision: 'a0' }, handover: {} }
     sessions.set(id, state)
   }
   return state
@@ -408,11 +417,7 @@ const GET_ROUTES = {
     auth_required: false,
     update_available: false,
   }),
-  '/api/workspaces': () => ({
-    workspaces: WORKSPACES,
-    active: WORKSPACES[0].name,
-    provider_options: [{ value: 'claude', label: 'Claude' }],
-  }),
+  '/api/workspaces': (req) => workspacesPayload(sessionOf(req)),
   // /api/projects, /api/chats and /api/schedules are bare arrays, not envelopes.
   '/api/projects': () => PROJECTS,
   // The chat list carries this session's suggested commands: a chat holds the
@@ -437,9 +442,9 @@ const GET_ROUTES = {
   // assert the empty and the plain states, which must stay the default.
   '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
   // Settings > Workspace > Overview's Memory handover card.
-  '/api/proposals/handover': () => ({
-    workspace: WORKSPACES[0].name,
-    handover: 'off',
+  '/api/proposals/handover': (req, url) => ({
+    workspace: url.searchParams.get('workspace') || WORKSPACES[0].name,
+    handover: sessionOf(req).handover[url.searchParams.get('workspace') || WORKSPACES[0].name] || 'off',
     acting_available: true,
     agreement: { decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9, predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0, suggest_handover: false },
   }),
@@ -812,6 +817,17 @@ const server = http.createServer(async (req, res) => {
       }
       state.appearance.revision = `a${Number(state.appearance.revision.slice(1)) + 1}`
       return sendJson(res, state.appearance)
+    }
+    // A workspace PATCH keeps the Memory handover it saves, per session, and
+    // answers with the registry (the store replaces its list from the reply).
+    const workspacePatch = req.method === 'PATCH' ? /^\/api\/workspaces\/([^/]+)$/.exec(pathname) : null
+    if (workspacePatch) {
+      const state = sessionOf(req)
+      const name = decodeURIComponent(workspacePatch[1])
+      if (body && WORKSPACES.some(w => w.name === name) && typeof body.memory_handover === 'string') {
+        state.handover[name] = body.memory_handover
+      }
+      return sendJson(res, workspacesPayload(state))
     }
     if (req.method === 'PATCH') {
       const chatId = chatIdFromPath(pathname)

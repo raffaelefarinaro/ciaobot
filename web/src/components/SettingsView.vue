@@ -463,7 +463,7 @@
             <p class="section-title">Ciaobot folder</p>
             <p class="hint">
               The folder Ciaobot runs from: routines, skills, scripts, runtime state and the <code>.env</code> file.
-              Chat workspaces (the sidebar switcher) are managed separately under Settings &rarr; Workspaces.
+              Chat workspaces (the sidebar switcher) are managed from the workspace switcher: Manage workspaces.
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
@@ -866,203 +866,8 @@
 
       <!-- WORKSPACES TAB (the list of all of them; /settings/workspaces) -->
       <template v-if="currentTab === 'workspaces'">
-        <div v-if="!workspacesLoaded" class="card"><SkeletonLoader label="Loading workspaces" :count="3" /></div>
-        <template v-else-if="workspacesError">
-          <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
-        </template>
-        <template v-else>
-          <div class="card">
-            <div class="settings-card-header settings-card-header--split">
-              <div>
-                <p class="section-title">Workspaces</p>
-                <p class="hint">
-                  Each workspace keeps its own projects, chats, memory, model defaults and Google account.
-                </p>
-              </div>
-              <button class="btn-small" :aria-expanded="showNewWorkspace" @click="showNewWorkspace = !showNewWorkspace">
-                {{ showNewWorkspace ? 'Cancel' : 'New workspace' }}
-              </button>
-            </div>
-
-            <div v-if="showNewWorkspace" id="new-workspace" class="workspace-card workspace-card--new settings-form-panel">
-              <div class="workspace-card-header">
-                <div>
-                  <p class="workspace-title">New workspace</p>
-                  <p class="hint hint--compact">Saved to <code>.runtime/workspaces.json</code> and applied immediately.</p>
-                </div>
-              </div>
-              <div class="settings-field-grid">
-                <label class="settings-field"><span class="ws-label">Name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
-                </label>
-                <label class="settings-field"><span class="ws-label">Vault name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
-                </label>
-                <div class="settings-field settings-field--wide">
-                  <span class="ws-label" id="new-workspace-color-label">Accent color</span>
-                  <div
-                    class="workspace-color-swatches"
-                    role="radiogroup"
-                    aria-labelledby="new-workspace-color-label"
-                  >
-                    <button
-                      v-for="preset in WORKSPACE_COLOR_PRESETS"
-                      :key="`new-color-${preset.id}`"
-                      type="button"
-                      class="workspace-color-swatch"
-                      role="radio"
-                      :aria-checked="newWorkspaceForm.color === preset.id"
-                      :aria-label="preset.label"
-                      :title="preset.label"
-                      :disabled="workspacesSaving === 'new'"
-                      :class="{ active: newWorkspaceForm.color === preset.id }"
-                      :style="{ '--swatch': preset.swatch }"
-                      @click="newWorkspaceForm.color = preset.id"
-                    />
-                  </div>
-                </div>
-                <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
-                    <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-                      {{ provider.label }}
-                    </option>
-                  </select>
-                </label>
-                <label class="settings-field"><span class="ws-label">File access</span>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.agent_fs_scope" :disabled="workspacesSaving === 'new'">
-                    <option value="">{{ fsScopeDefaultOptionLabel }}</option>
-                    <option value="workspace">Workspace only</option>
-                    <option value="machine">Whole machine</option>
-                  </select>
-                  <span class="hint hint--compact">{{ WORKSPACE_FS_SCOPE_COPY[newWorkspaceForm.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</span>
-                </label>
-                <label class="settings-field">
-                  <div class="settings-label-row">
-                    <span class="ws-label">Google profile</span>
-                    <details class="field-info">
-                      <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                      <div class="field-info-panel">
-                        <p>
-                          Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
-                        </p>
-                      </div>
-                    </details>
-                  </div>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
-                    <option value="">No Google account</option>
-                    <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
-                      {{ profile.label }} ({{ profile.email || profile.name }})
-                    </option>
-                    <option v-if="workspaceCustomGwsProfile(newWorkspaceForm.gws_profile)" :value="newWorkspaceForm.gws_profile">
-                      Custom: {{ newWorkspaceForm.gws_profile }}
-                    </option>
-                  </select>
-                </label>
-              </div>
-              <div class="action-row settings-actions">
-                <button class="set-link set-link--quiet" type="button" :disabled="workspacesSaving === 'new'" @click="showNewWorkspace = false">Cancel</button>
-                <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
-                  {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
-                </button>
-              </div>
-            </div>
-
-            <p v-if="workspaceLinkStatus" class="hint hint--warn workspace-link-status" role="status">
-              {{ workspaceLinkStatus }}
-            </p>
-
-            <div class="workspace-list set-list">
-              <div
-                v-for="form in workspaceForms"
-                :key="form.name"
-                :id="`workspace-row-${form.name}`"
-                class="workspace-card set-row"
-              >
-                <div class="workspace-card-header set-row-head">
-                  <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
-                  <div class="set-row-main">
-                    <p class="workspace-title set-row-title">{{ form.name }}</p>
-                    <span v-if="workspaceFsScopeBadge(form.agent_fs_scope)" class="set-tag workspace-fs-tag">{{ workspaceFsScopeBadge(form.agent_fs_scope) }}</span>
-                    <p class="set-row-sub">{{ workspaceSummary(form) }}</p>
-                  </div>
-                  <div class="workspace-actions set-row-actions">
-                    <button
-                      type="button"
-                      class="set-link"
-                      :aria-label="`Settings for workspace ${form.name}`"
-                      @click="openWorkspaceSettings(form.name)"
-                    >Settings &rarr;</button>
-                    <DropdownMenuRoot
-                      v-if="workspaceArchivable(form.name)"
-                      :open="settingsMenu === `ws:${form.name}`"
-                      :modal="false"
-                      @update:open="setSettingsMenu(`ws:${form.name}`, $event)"
-                    >
-                      <DropdownMenuTrigger as-child>
-                        <button
-                          type="button"
-                          class="set-menu-btn"
-                          :aria-label="`Actions for workspace ${form.name}`"
-                          :disabled="archivingWorkspace === form.name"
-                        >&middot;&middot;&middot;</button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
-                        <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
-                          <DropdownMenuItem as-child @select="archiveWorkspace(form.name)">
-                            <button
-                              type="button"
-                              class="settings-menu-item settings-menu-item--caution"
-                              :aria-label="`Archive workspace ${form.name}`"
-                            >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive' }}</button>
-                          </DropdownMenuItem>
-                        </div>
-                      </DropdownMenuContent>
-                    </DropdownMenuRoot>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
-
-            <section class="archived-workspaces" aria-labelledby="archived-workspaces-title">
-              <p id="archived-workspaces-title" class="subsection-title">Archived workspaces</p>
-              <p class="hint hint--compact">
-                Archived workspaces keep every file in <code>.archived-workspaces/</code> in the Ciaobot folder. Ciaobot does not read their notes or memory until you restore them.
-              </p>
-              <p v-if="archivedLoading && !archivedWorkspaces.length" class="hint">Loading&hellip;</p>
-              <div v-else-if="archivedLoadError" class="action-result action-result--error" role="alert">
-                {{ archivedLoadError }}
-                <button class="btn-small" type="button" @click="fetchArchivedWorkspaces">Retry</button>
-              </div>
-              <p v-else-if="!archivedWorkspaces.length" class="hint archived-empty">No archived workspaces.</p>
-              <ul v-if="archivedWorkspaces.length" class="archived-list">
-                <li
-                  v-for="item in archivedWorkspaces"
-                  :key="item.id"
-                  class="archived-item"
-                >
-                  <div class="archived-item-text">
-                    <p class="workspace-title">{{ item.name }}</p>
-                    <p class="hint hint--compact">
-                      Archived {{ formatArchivedAt(item.archived_at) }} &middot; <code>{{ item.path }}</code>
-                    </p>
-                    <p v-if="!item.restorable && item.blocked_reason" class="hint hint--warn hint--compact">
-                      {{ item.blocked_reason }}
-                    </p>
-                  </div>
-                  <button
-                    class="btn-small"
-                    type="button"
-                    :aria-label="`Restore workspace ${item.name}`"
-                    :disabled="!item.restorable || restoringArchiveId === item.id"
-                    @click="restoreWorkspace(item)"
-                  >{{ restoringArchiveId === item.id ? 'Restoring...' : 'Restore' }}</button>
-                </li>
-              </ul>
-            </section>
-          </div>
-
+        <SettingsManageWorkspaces />
+        <template v-if="workspacesLoaded && !workspacesError">
           <!-- Google Workspace integration -->
           <div class="card">
             <div class="settings-card-header settings-card-header--split">
@@ -1105,7 +910,7 @@
                 </div>
                 <p class="hint">
                   Add one account per Google login you use, then link each workspace to the
-                  account it should use (the <strong>Google profile</strong> field above).
+                  account it should use (the <strong>Google profile</strong> field in its Overview).
                   Accounts are local <code>gws</code> profiles: Gmail, Calendar, Drive, Docs,
                   Sheets, Slides, and Tasks.
                 </p>
@@ -1887,6 +1692,7 @@
 
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
+import SettingsManageWorkspaces from './settings/SettingsManageWorkspaces.vue'
 import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -1939,8 +1745,6 @@ import {
 import { askConfirm } from '../lib/confirm'
 import {
   WORKSPACE_ADMIN_KEY,
-  WORKSPACE_FS_SANDBOX_NOTE,
-  WORKSPACE_FS_SCOPE_COPY,
   useWorkspaceAdmin,
 } from '../composables/useWorkspaceAdmin'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -1979,9 +1783,6 @@ import { parseWorkspaceFileAccessHref } from '../lib/appLinks'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
-import {
-  WORKSPACE_COLOR_PRESETS,
-} from '../lib/workspaceColors'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -3552,7 +3353,7 @@ async function createAssetViaChat(kind: keyof typeof ASSET_CHAT_PROMPTS) {
 }
 
 
-// ── Workspaces settings (Workspaces tab) ───────────────────────────────────
+// ── Workspaces settings (Overview and Manage workspaces) ───────────────────────────────────
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
 // leaving persistent inline text under the form.
@@ -3576,42 +3377,24 @@ const workspaceAdmin = useWorkspaceAdmin({
   fetchGwsIntegration,
 })
 const {
-  workspaceProviderFieldLabel,
   workspacesLoaded,
   workspacesError,
-  workspacesSaving,
-  workspacesResult,
-  archivingWorkspace,
-  archivedWorkspaces,
-  archivedLoading,
-  archivedLoadError,
-  restoringArchiveId,
   showNewWorkspace,
   workspaceForms,
-  newWorkspaceForm,
   workspaceLinkStatus,
   workspaceLinkTarget,
-  fsScopeDefaultOptionLabel,
-  workspaceSwatch,
-  workspaceFsScopeBadge,
-  workspaceSummary,
-  workspaceProviderOptions,
   fetchWorkspacesList,
-  createNewWorkspace,
-  workspaceArchivable,
-  archiveWorkspace,
   fetchArchivedWorkspaces,
-  formatArchivedAt,
-  restoreWorkspace,
 } = workspaceAdmin
-provide(WORKSPACE_ADMIN_KEY, workspaceAdmin)
 // The sidebar's "New workspace" links to /settings/workspaces#new-workspace:
 // open the form and bring it into view instead of landing on the list.
 watch(
-  () => route.hash,
-  hash => {
+  () => [route.hash, currentTab.value, workspacesLoaded.value] as const,
+  ([hash, tab, loaded]) => {
     if (hash !== '#new-workspace') return
     showNewWorkspace.value = true
+    // The form renders once the list has loaded, so wait for that to focus it.
+    if (tab !== 'workspaces' || !loaded) return
     void nextTick(() => {
       document.querySelector('.workspace-card--new')?.scrollIntoView?.({ block: 'start' })
       document.querySelector<HTMLInputElement>('.workspace-card--new input')?.focus()
@@ -3637,6 +3420,7 @@ function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
   event.preventDefault()
   settingsMenu.value = null
 }
+provide(WORKSPACE_ADMIN_KEY, { ...workspaceAdmin, settingsMenu, setSettingsMenu, closeSettingsMenuOnEscape })
 
 // Bumped on every route resolution so a delayed list load from a superseded
 // link cannot open, scroll to or focus the wrong row.
@@ -3709,13 +3493,6 @@ watch(
   },
   { immediate: true },
 )
-
-// Opens the Overview page for a workspace from the Workspaces list.
-async function openWorkspaceSettings(name: string, hash = ''): Promise<void> {
-  await projectStore.switchWorkspace(name, { transition: false })
-  if (projectStore.activeWorkspace !== name) return
-  await router.push({ path: '/settings/workspace', hash })
-}
 
 // Platform MCP list only — exclude Ciaobot project servers from .mcp.json
 // (n8n_mcp, notion, ciaobot), which have their own MCP status section.
@@ -5557,98 +5334,6 @@ a.btn-secondary {
   margin-top: var(--space-5);
 }
 
-.workspace-list {
-  display: flex;
-  flex-direction: column;
-  margin-top: var(--space-2);
-}
-/* One workspace = one collapsed hairline row (.set-row); Edit opens its
-   fields in place underneath. */
-.workspace-card {
-  display: flex;
-  flex-direction: column;
-  border-radius: 0;
-  background: transparent;
-}
-.workspace-link-status {
-  margin: var(--space-2) 0;
-}
-/* The unsaved new workspace keeps a light frame: it is a draft form, and it
-   has to read as not-yet-real next to the saved rows. */
-.workspace-card--new {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-.workspace-card-header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-.workspace-title {
-  margin: 0;
-  color: var(--fg);
-  font-size: var(--text-base);
-  font-weight: 600;
-}
-.workspace-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: 0 0 auto;
-}
-.workspace-actions .btn-small {
-  flex: 0 0 auto;
-}
-.archived-workspaces {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin-top: var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
-.archived-workspaces .subsection-title {
-  margin: 0;
-}
-.archived-list {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border-top: 1px solid var(--border);
-}
-.archived-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  min-height: 52px;
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--border);
-}
-.archived-item-text {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  min-width: 0;
-}
-.archived-item-text p {
-  margin: 0;
-}
-.archived-item-text code {
-  overflow-wrap: anywhere;
-}
-.archived-item .btn-small {
-  flex: 0 0 auto;
-}
-/* The reason is printed beside it; the dimming only confirms it. */
-.archived-item .btn-small:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-}
 .provider-defaults {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5792,12 +5477,6 @@ a.btn-secondary {
 }
 .settings-advanced[open] summary {
   margin-bottom: var(--space-2);
-}
-@container (max-width: 720px) {
-  .archived-item {
-    flex-direction: column;
-    align-items: stretch;
-  }
 }
 .skill-source {
   color: var(--fg2);
