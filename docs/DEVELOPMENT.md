@@ -12,6 +12,10 @@ Chat file-link regressions cover separate agent roots, exact identities across
 text/image/binary/HTML previews, failed pins preserving the modal, and stale pin
 completions not dismissing a newer file (#1167).
 
+`ChatPanelUserMessage.test.ts` covers chat-reference link eligibility against
+the same openable-chat list used by the mention picker, and preserves the
+link-map identity when a chat-list poll changes only activity time (#1807).
+
 Page-load behavior is covered by `tests/test_static_asset_compression.py` and
 `web/src/lib/chatComponents.test.ts`, plus `AppEngineOffline.test.ts` for the
 bounded startup request and display delay. Static gzip is limited to hashed

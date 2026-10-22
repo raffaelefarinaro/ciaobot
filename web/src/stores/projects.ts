@@ -2092,9 +2092,10 @@ export const useProjectStore = defineStore('projects', () => {
   //
   // A command the assistant suggested in a chat. The engine owns it; this
   // map is the browser's transient copy: it lives in memory only (never
-  // persisted, never derived from the chat rows), so a reload starts empty
-  // and the `/ws/events` snapshot is the only way back. The command itself
-  // is untrusted text the user reviews and runs; nothing here executes it.
+  // persisted). Chat list/detail payloads hydrate it under read-start
+  // watermarks, and the `/ws/events` snapshot replaces the full map. The
+  // command is untrusted text the user reviews and runs; nothing here
+  // executes it.
   const terminalOffers = ref<Record<string, TerminalOffer>>({})
 
   // A monotonic counter that orders the offer state against the HTTP reads
