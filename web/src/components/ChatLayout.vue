@@ -404,6 +404,7 @@ import { pendingConfirm } from '../lib/confirm'
 import { pendingPrompt } from '../lib/prompt'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 import { useKeyboardSettings } from '../composables/useKeyboardSettings'
+import { useAppearanceSettings } from '../composables/useAppearanceSettings'
 import { effectiveBinding, keyboardMatches, type ShortcutId } from '../lib/keyboardShortcuts'
 
 const store = useProjectStore()
@@ -446,6 +447,7 @@ const schedulePanelRef = ref<any>(null)
 const fontScale = useFontScale()
 const keyboard = useKeyboardSettings()
 void keyboard.load().catch(() => {})
+void useAppearanceSettings().load().catch(() => {})
 
 function matchesShortcut(event: KeyboardEvent, id: ShortcutId): boolean {
   return keyboardMatches(event, effectiveBinding(keyboard.settings.value, id))

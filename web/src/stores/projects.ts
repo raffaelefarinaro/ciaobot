@@ -14,6 +14,7 @@ import {
 import { errorMessage } from '../lib/errorMessage'
 import { nextBackgroundableCalls, type BackgroundableCalls } from '../lib/moveToBackground'
 import { applyKeyboardSettings, useKeyboardSettings } from '../composables/useKeyboardSettings'
+import { applyAppearanceSettings } from '../composables/useAppearanceSettings'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft, type OrphanDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
@@ -4548,6 +4549,7 @@ export const useProjectStore = defineStore('projects', () => {
             revision: msg.keyboard_revision,
           })
         }
+        if (msg.appearance) applyAppearanceSettings(msg.appearance)
         // Reset broker-streaming state to match server truth.
         projectStreaming.value = {}
         for (const entry of msg.active_streams) {
@@ -4592,6 +4594,9 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'keyboard_settings_changed':
         applyKeyboardSettings(msg)
+        break
+      case 'appearance_settings_changed':
+        applyAppearanceSettings(msg)
         break
       case 'server_restarting':
         beginServerRestart(msg.message)

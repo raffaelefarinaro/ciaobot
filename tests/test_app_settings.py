@@ -422,3 +422,79 @@ def test_non_string_composer_preferences_on_disk_load_as_default(tmp_path, key):
     path = tmp_path / "app_settings.json"
     path.write_text(json.dumps({key: ["steer"]}))
     assert getattr(AppSettingsStore(path).settings, key) == ""
+
+
+def test_text_contrast_roundtrip(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.appearance_payload()["text_contrast"] == "normal"
+
+    store.update({"text_contrast": "soft"})
+    assert AppSettingsStore(path).settings.text_contrast == "soft"
+    assert AppSettingsStore(path).appearance_payload()["text_contrast"] == "soft"
+
+    store.update({"text_contrast": "normal"})
+    assert AppSettingsStore(path).settings.text_contrast == ""
+
+
+def test_text_contrast_rejects_unknown(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    with pytest.raises(ValueError, match="text_contrast must be normal or soft"):
+        store.update({"text_contrast": "loud"})
+
+    path.write_text(json.dumps({"text_contrast": 5}))
+    assert AppSettingsStore(path).settings.text_contrast == ""
+    path.write_text(json.dumps({"text_contrast": "loud"}))
+    assert AppSettingsStore(path).settings.text_contrast == ""
+
+
+def test_theme_and_font_scale_start_unset_and_roundtrip(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    payload = store.appearance_payload()
+    assert payload["theme"] is None
+    assert payload["font_scale"] is None
+
+    store.update({"theme": "light", "font_scale": 1.35})
+    reloaded = AppSettingsStore(path).appearance_payload()
+    assert reloaded["theme"] == "light"
+    assert reloaded["font_scale"] == 1.35
+    assert reloaded["revision"] != payload["revision"]
+
+    # "system" is a stored choice, distinct from never having stored one.
+    store.update({"theme": "system"})
+    assert AppSettingsStore(path).appearance_payload()["theme"] == "system"
+
+
+@pytest.mark.parametrize("value", ["blue", "", 5, None, ["dark"]])
+def test_theme_rejects_unknown(tmp_path, value):
+    with pytest.raises(ValueError, match="theme must be dark, light or system"):
+        AppSettingsStore(tmp_path / "app_settings.json").update({"theme": value})
+
+
+@pytest.mark.parametrize("value", [0.5, 1.6, 1.07, "1.2", True, None, float("nan")])
+def test_font_scale_rejects_out_of_range_or_off_step(tmp_path, value):
+    with pytest.raises(ValueError, match="font_scale must be"):
+        AppSettingsStore(tmp_path / "app_settings.json").update({"font_scale": value})
+
+
+def test_theme_and_font_scale_garbage_on_disk_load_as_unset(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"theme": "blue", "font_scale": 9}))
+    payload = AppSettingsStore(path).appearance_payload()
+    assert payload["theme"] is None
+    assert payload["font_scale"] is None
+    path.write_text(json.dumps({"theme": ["x"], "font_scale": "1.2"}))
+    payload = AppSettingsStore(path).appearance_payload()
+    assert payload["theme"] is None
+    assert payload["font_scale"] is None
+
+
+def test_huge_integer_font_scale_is_invalid_not_a_crash(tmp_path):
+    path = tmp_path / "app_settings.json"
+    huge = 10 ** 400
+    with pytest.raises(ValueError, match="font_scale must be"):
+        AppSettingsStore(path).update({"font_scale": huge})
+    path.write_text('{"font_scale": 1' + "0" * 400 + "}")
+    assert AppSettingsStore(path).appearance_payload()["font_scale"] is None

@@ -1,3 +1,5 @@
+import type { AppearancePayload } from './appearance'
+
 export type WorkspaceName = string
 
 /**
@@ -637,8 +639,9 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
   | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
+  | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   // A chat's suggested command changed: the offer, or `null` when the engine
   // dropped it. Global (it travels on `/ws/events`, not the per-chat socket),

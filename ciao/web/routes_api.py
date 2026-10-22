@@ -5889,6 +5889,48 @@ async def settings_keyboard(request: Request) -> JSONResponse:
     return JSONResponse(payload())
 
 
+_APPEARANCE_KEYS = frozenset({"text_contrast", "theme", "font_scale"})
+
+
+async def settings_appearance(request: Request) -> JSONResponse:
+    """Read or update appearance preferences shared by every device of this engine."""
+    app_settings = request.app.state.app_settings
+    if app_settings is None:
+        return JSONResponse({"error": "settings store unavailable"}, status_code=503)
+    if request.method == "PATCH":
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "expected an object"}, status_code=400)
+        expected_revision = body.pop("revision", None)
+        unknown = sorted(set(body) - _APPEARANCE_KEYS)
+        if unknown:
+            return JSONResponse(
+                {"error": f"Unknown appearance settings: {', '.join(unknown)}"},
+                status_code=400,
+            )
+        if not isinstance(expected_revision, str):
+            return JSONResponse({"error": "revision is required"}, status_code=400)
+        if expected_revision != app_settings.appearance_payload()["revision"]:
+            return JSONResponse(
+                {"error": "Appearance settings changed on another device. Reload and try again."},
+                status_code=409,
+            )
+        try:
+            app_settings.update(body)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+        if pcm is not None:
+            pcm.events.publish({
+                "type": "appearance_settings_changed",
+                **app_settings.appearance_payload(),
+            })
+    return JSONResponse(app_settings.appearance_payload())
+
+
 # ── Status ───────────────────────────────────────────────────────────────
 
 async def status_endpoint(request: Request) -> JSONResponse:
