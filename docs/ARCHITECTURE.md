@@ -775,6 +775,8 @@ prediction, excluding agent, auto and swept rows; `suggest_handover` is true onl
 is `off`, with at least 20 decisions and a rate of at least 0.9. It is advice: nothing enables
 handover automatically.
 
+A workspace may carry `provider_overrides` (`WorkspaceConfig`, validated by `coerce_provider_overrides`, stored sparse in `.runtime/workspaces.json`): per provider, an override of `model`, `thinking`, `permission_mode` and `insights_model` that sits between an explicit value and the Settings → Providers default. `CiaoConfig.workspace_override` and the `default_*_for_*` methods resolve it keyed by the chat's effective provider; it is operator-only (the session-cookie workspace upsert), is not restored from an archive, and never applies to an MCP-spawned chat's permission mode, which stays clamped to its caller's (`ControlPlane._child_mode`).
+
 The per-workspace `memory_handover` setting (`off`, `dismiss`, `all`; default `off`) lives in
 `.runtime/workspaces.json` and changes only through the session-cookie
 `PATCH /api/workspaces/{name}`. No agent verb, operator CLI, environment variable or control-plane op

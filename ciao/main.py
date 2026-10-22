@@ -876,10 +876,10 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # The mode default is the operator's pin for the provider this run
         # actually resolves to (Settings -> Models & providers -> permission mode), so a
         # routine obeys the same setting a hand-opened chat on that provider
-        # does. It used to fall back to the Telegram context's mode, which is a
+        # does, with this workspace's override of that pin winning. It used to fall back to the Telegram context's mode, which is a
         # different surface's state and belongs to no workspace.
-        provider, model, _workspace = pcm.schedule_effective_routing(entry)
-        mode = entry.mode or config.default_mode_for_provider(provider)
+        provider, model, workspace = pcm.schedule_effective_routing(entry)
+        mode = entry.mode or config.default_mode_for_provider(provider, workspace)
         return ("claude", model, mode, provider)
 
     # Classified before anything else touches the runtime root, because the

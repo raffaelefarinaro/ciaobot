@@ -65,6 +65,8 @@ for new chats, all set on the chat providers card in Settings → Providers. A C
 own defaults from the signed-in account's catalog. The permission mode chooses
 how much a chat may do without asking: manual (ask for every action), auto
 (allow safe work, ask on risky actions), or bypass (allow everything).
+A workspace can override these per provider (its `provider_overrides`); an empty
+override uses the Providers value.
 
 ## API Keys and Secrets
 

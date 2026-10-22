@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ciao import provider_registry
+from ciao.config import PERMISSION_MODES
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,6 @@ def _clean_provider_map(raw: object) -> dict[str, str]:
     }
 
 
-# Execution (permission) modes a provider default may pin. ``manual`` is the
-# PWA-facing name for the BridgeMode ``normal`` (ask for every action);
-# ``plan`` stays chat-only and is not a settings default.
-_MODES = ("manual", "auto", "bypass")
 _KEYBOARD_SHORTCUT_IDS = {
     "newChat", "archiveChat", "toggleSidebar", "modelPicker",
     "fontIncrease", "fontDecrease", "closeChat",
@@ -73,7 +70,7 @@ def _clean_default_modes(raw: object) -> dict[str, str]:
         for provider_id, mode in raw.items()
         if str(provider_id) in known
         and isinstance(mode, str)
-        and mode.strip() in _MODES
+        and mode.strip() in PERMISSION_MODES
     }
 
 
@@ -409,11 +406,11 @@ class AppSettingsStore:
                         str(mode)
                         for mode in value.values()
                         if not isinstance(mode, str)
-                        or (mode.strip() and mode.strip() not in _MODES)
+                        or (mode.strip() and mode.strip() not in PERMISSION_MODES)
                     )
                     if unknown:
                         raise ValueError(
-                            f"{key} entries must be one of {', '.join(_MODES)}"
+                            f"{key} entries must be one of {', '.join(PERMISSION_MODES)}"
                         )
                 setattr(updated, key, _NESTED_CLEANERS[key](value))
                 continue

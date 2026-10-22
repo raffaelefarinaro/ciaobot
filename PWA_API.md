@@ -919,9 +919,14 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # untrusted [memory]/[profile] text into the always-loaded AGENTS.md regions,
 # within the event-shape and duplicate guards and a cap of five accepts per
 # curation run, and each accept can be undone from History.
+# Each workspace also reports provider_overrides
+# ({provider: {model, thinking, permission_mode, insights_model}}, sparse,
+# {} when none): this workspace's overrides of the Settings -> Providers
+# defaults for new chats and schedule runs on that provider. Empty or missing
+# means the engine default.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
-# Upsert — body keys: name, default_provider,
+# Upsert — body keys: name, default_provider, provider_overrides,
 # gws_profile, color (pink|cyan|amber|emerald|violet; default
 # pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
 # null = defaults), claude_ai_connectors (boolean, default true). When false,
@@ -940,6 +945,22 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/worksp
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
   -H 'content-type: application/json' \
   -d '{"disallowed_tools":"mcp__n8n_mcp"}'
+
+# Override provider defaults for one workspace. provider_overrides maps a
+# provider id to {model, thinking, permission_mode (manual|auto|bypass),
+# insights_model}. An unknown provider, key or value is a 400 and nothing is
+# saved; model and insights_model must be a tier alias or Claude model id
+# (opencode takes any id), and thinking one of the provider's levels. The map
+# replaces the stored one, a save that omits the key keeps it, and {} clears it;
+# an empty value means "engine default". The override applies to new chats,
+# schedule runs, webhook and task chats and memory passes in that workspace on
+# that provider; an explicit model or mode still wins, and a chat an agent
+# creates over MCP never exceeds its caller's permission mode. Operator-only:
+# no agent verb, CLI, MCP tool or env var writes it, and an archive restore
+# does not bring it back.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
+  -H 'content-type: application/json' \
+  -d '{"provider_overrides":{"claude":{"model":"sonnet","permission_mode":"manual"}}}'
 
 # Archive. Nothing is deleted or merged into another workspace: the folder
 # moves intact to <install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/
