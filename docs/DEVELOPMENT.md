@@ -368,49 +368,100 @@ while the server is running, because the live schedule store may be writing it.
   What a `0x03` byte does inside a pseudoconsole is decided by the console
   host and by the operating system, not by the adapter, and the chain is
   worth writing down before anyone tries to fix the interrupt from this
-  side. The host reads the input pipe, matches the ETX while it decodes
-  that stream, synthesises a Ctrl+C key event and raises a
-  `CTRL_C_EVENT` **only when the console's input mode has
-  `ENABLE_PROCESSED_INPUT` set**; with the flag off the byte stays in the
-  console's input queue as an ordinary character. The event is then
-  delivered by the operating system to the processes of the console host's
-  *process group*: Microsoft's own summary of the mechanism says "In order
-  for Ctrl-C to work, thus, the pseudoconsole process must be in the same
-  process group as the processes you are trying to control", and a child
-  created with `CREATE_NEW_PROCESS_GROUP` is guaranteed never to receive
-  it. The input mode belongs to the *client*: the console host never
-  writes it, the only writer is the client's own `SetConsoleMode`, and the
-  `CreatePseudoConsole` flags (`PSEUDOCONSOLE_INHERIT_CURSOR`,
-  `PSEUDOCONSOLE_AMBIGUOUS_IS_WIDE`, `PSEUDOCONSOLE_GLYPH_WIDTH_*`) do
-  not touch it. There is no adapter-side way to write it either: the
-  pseudoconsole's input handle on the client side is the *pipe* the
-  client writes to, `SetConsoleMode` refuses a pipe, and the public
-  ConPTY API (`conpty-static.h`) exposes no way to reach the console's
-  input mode — Windows Terminal's own ConPTY client
-  (`src/cascadia/TerminalConnection/ConptyConnection.cpp`) makes no
-  console-mode call at all. The `?9001h` sequence the host emits at
-  start-up is a request *from* the host *to* the terminal, and the key
-  records it asks for are decoded by the same state machine and dispatched
-  through the same gate, so the handshake cannot change the interrupt
-  either. The adapter therefore cannot make a `0x03` interrupt a running
-  program on its own: the gate belongs to the shell that owns the
-  console, and the delivery belongs to the console host's process group.
-  `tests/test_os_terminal_windows.py::test_the_console_state_behind_the_interrupt_is_measured`
-  measures the gate from inside the pseudoconsole: the input mode is on
-  and the shell's input is the console's own, at the prompt and while a
-  program runs, so the gate is open and the chain breaks further down.
-  (Its "running program" is a nested shell, which handles Ctrl+C itself
-  and cancels it, so it cannot tell "the event was never delivered" from
-  "the program swallowed it".) The next link is measured by
-  `tests/test_os_terminal_windows.py::test_the_interrupt_is_measured_against_the_console_host`:
-  a reader inside the pseudoconsole registers a
-  `Console.CancelKeyPress` handler and then reads one key, so the log
-  says whether the byte arrived as an ordinary character (the host raised
-  nothing), whether the read was aborted and the handler did not run (the
-  host raised the event and the operating system did not deliver it), or
-  whether the handler ran (the event was raised and delivered) — and it
-  measures the raw ETX next to the win32-input-mode key record the host
-  asks for, so the encoding is ruled in or out in the same run.
+  side. It has four links.
+
+  1. **The host decodes the byte.** The host reads the input pipe, matches
+     the ETX while it decodes that stream and synthesises a Ctrl+C key
+     event; with the console's input mode off `ENABLE_PROCESSED_INPUT` the
+     byte stays in the console's input queue as an ordinary character.
+  2. **The host raises the event.** The `CTRL_C_EVENT` is raised **only
+     when the console's input mode has `ENABLE_PROCESSED_INPUT` set**. The
+     input mode belongs to the *client*: the console host never writes it,
+     the only writer is the client's own `SetConsoleMode`, and the
+     `CreatePseudoConsole` flags (`PSEUDOCONSOLE_INHERIT_CURSOR`,
+     `PSEUDOCONSOLE_AMBIGUOUS_IS_WIDE`, `PSEUDOCONSOLE_GLYPH_WIDTH_*`) do
+     not touch it. There is no adapter-side way to write it either: the
+     pseudoconsole's input handle on the client side is the *pipe* the
+     client writes to, `SetConsoleMode` refuses a pipe, and the public
+     ConPTY API (`conpty-static.h`) exposes no way to reach the console's
+     input mode — Windows Terminal's own ConPTY client
+     (`src/cascadia/TerminalConnection/ConptyConnection.cpp`) makes no
+     console-mode call at all.
+  3. **The operating system delivers the event, to the console host's
+     process group.** Microsoft's own summary of the mechanism says "In
+     order for Ctrl-C to work, thus, the pseudoconsole process must be in
+     the same process group as the processes you are trying to control",
+     and a child created with `CREATE_NEW_PROCESS_GROUP` is guaranteed
+     never to receive it.
+  4. **The operating system skips a process that ignores Ctrl+C.** The
+     "ignore Ctrl+C" attribute is set with
+     `SetConsoleCtrlHandler(NULL, TRUE)`, cleared with
+     `SetConsoleCtrlHandler(NULL, FALSE)`, and — Microsoft's own words —
+     "this attribute of ignoring or processing CTRL+C is **inherited by
+     child processes**". A process that has it set is not delivered to at
+     all: no handler runs, no read is aborted, and the process is not even
+     terminated by the default handler. Nothing inside the shell can undo
+     it, because the attribute belongs to the process and is read by the
+     operating system.
+
+  The `?9001h` sequence the host emits at start-up is a request *from* the
+  host *to* the terminal, and the key records it asks for are decoded by
+  the same state machine and dispatched through the same gate, so the
+  handshake cannot change the interrupt either.
+
+  What the measurements decided. The first one
+  (`tests/test_os_terminal_windows.py::test_the_console_state_behind_the_interrupt_is_measured`)
+  measured link 2 from inside the pseudoconsole: the input mode is on and
+  the shell's input is the console's own, at the prompt and while a program
+  runs, so the gate is open. (Its "running program" is a nested shell,
+  which handles Ctrl+C itself and cancels it, so it cannot tell "the event
+  was never delivered" from "the program swallowed it".) The second
+  (`tests/test_os_terminal_windows.py::test_the_interrupt_is_measured_against_the_console_host`)
+  measured links 3 and 4 together: a reader inside the pseudoconsole
+  registers a `Console.CancelKeyPress` handler and then reads one key, so
+  the log says whether the byte arrived as an ordinary character (the host
+  raised nothing), whether the read was aborted and the handler did not
+  run (the host raised the event and the operating system did not deliver
+  it), or whether the handler ran (the event was raised and delivered) —
+  and it measures the raw ETX next to the win32-input-mode key record the
+  host asks for, so the encoding is ruled in or out in the same run. The
+  numbers were: the raw ETX never arrived as a character and never ran the
+  handler, while the win32 key record arrived as text — so the host
+  consumed the ETX and turned it into the control event, and the *delivery*
+  was where the chain stopped. The third measurement
+  (`tests/test_os_terminal_windows.py::test_the_ignore_ctrl_c_attribute_decides_whether_the_event_is_delivered`)
+  isolated link 4: the same reader, with the "ignore Ctrl+C" attribute
+  put in a known state. With the attribute set the event does not arrive;
+  with it cleared it does. The attribute was the blocker, and the engine
+  had inherited it from whatever started it (a POSIX-flavoured shell sets
+  it, so that its own Ctrl+C arrives as a signal rather than as a console
+  control event).
+
+  The fix follows from that: the shell is started by a **helper**
+  (`ciao/os_support/terminal_child_windows.py`), a fresh `-I -S` process
+  that is attached to the pseudoconsole, clears the attribute in itself
+  (`SetConsoleCtrlHandler(NULL, FALSE)`) and then creates the shell, so the
+  shell inherits the cleared state. The engine's own attribute is never
+  touched — clearing it in the engine would change how the engine itself
+  answers a Ctrl+C — and the helper swallows the control event it shares
+  with the shell, so it outlives the interrupt it hands on. The byte the
+  user typed is still `0x03` and `write()` is unchanged; what changed is the
+  attribute the shell inherits.
+
+  How the helper reaches the pseudoconsole is worth writing down, because
+  the obvious way round does not work. The pseudoconsole's handle is not an
+  ordinary kernel handle: `SetHandleInformation` on it fails with "the
+  handle is invalid", so it cannot be made inheritable and cannot be
+  handed to a child as an inherited handle. A child is attached to a
+  pseudoconsole the other way round — `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+  in the process attribute list — and that is what the adapter does for
+  the helper. The shell then reaches the pseudoconsole the ordinary way: a
+  process attached to a console passes that console on to its children, so
+  the shell, created by the helper without `CREATE_NEW_CONSOLE` and without
+  `DETACHED_PROCESS`, inherits the helper's console, which is the
+  pseudoconsole. No handle is inherited by anybody, and the helper's own
+  standard handles are the console's — so it prints nothing, ever: a
+  failure is a status, and only a status.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
