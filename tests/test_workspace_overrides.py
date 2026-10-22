@@ -426,3 +426,114 @@ def test_rename_carries_overrides(tmp_path: Path) -> None:
     renamed = preview_renamed_config(config.workspace("work"), old="work", new="job")
     assert renamed.name == "job"
     assert renamed.provider_overrides == {"claude": {"model": "opus"}}
+
+
+# -- agent surfaces keep their caller's ceiling (review round 1) --------------
+
+
+def _agent_world(tmp_path: Path, parent_mode: str):
+    from ciao.schedules import ScheduleManager, ScheduleStore
+
+    config = _config(
+        tmp_path,
+        {"claude": {"permission_mode": "bypass"}},
+        vault_root=tmp_path / "memory-vault",
+    )
+    manager = _manager(tmp_path, config)
+    project = manager.create_project("W", workspace="work")
+    parent = manager.create_chat(project.project_id, mode=parent_mode)
+    schedules = ScheduleManager(
+        store=ScheduleStore(tmp_path), dispatch_to_web=lambda *a, **k: None
+    )
+    plane = CiaoControlPlane(
+        config, project_chat_manager=manager, schedule_manager=schedules
+    )
+    principal = McpPrincipal(
+        token_id="t",
+        chat_id=parent.chat_id,
+        project_id=project.project_id,
+        workspace="work",
+        provider="claude",
+    )
+    return plane, manager, principal, project
+
+
+def test_agent_created_schedule_stores_the_capped_mode(tmp_path: Path) -> None:
+    plane, _manager_, principal, _project = _agent_world(tmp_path, "normal")
+
+    created = plane.schedule_create(
+        principal, prompt="Check.", daily_time="09:00", timezone="UTC", frequency="weekly"
+    )["data"]
+    stored = next(
+        e for e in plane.schedules.list_entries() if e.schedule_id == created["schedule_id"]
+    )
+    assert stored.mode == "normal"
+
+    # An explicit stronger mode is clamped too; a weaker one is honoured.
+    clamped = plane.schedule_create(
+        principal, prompt="Check.", daily_time="09:00", timezone="UTC",
+        frequency="weekly", mode="bypass",
+    )["data"]
+    assert next(
+        e for e in plane.schedules.list_entries() if e.schedule_id == clamped["schedule_id"]
+    ).mode == "normal"
+
+    updated = plane.schedule_update(principal, created["schedule_id"], mode="bypass")["data"]
+    assert next(
+        e for e in plane.schedules.list_entries() if e.schedule_id == updated["schedule_id"]
+    ).mode == "normal"
+
+
+def test_legacy_workspaces_env_import_drops_provider_overrides(tmp_path: Path) -> None:
+    """The one-time CIAO_WORKSPACES import must not carry a bypass override in."""
+    config = _config(tmp_path)
+    config.workspaces = {}
+    config.legacy_workspaces_env = json.dumps(
+        [{"name": "work", "vault_root": "work",
+          "provider_overrides": {"claude": {"permission_mode": "bypass"}}}]
+    )
+    assert config.import_legacy_workspaces_env() == ["work"]
+    assert config.workspace("work").provider_overrides == {}
+    rows = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert "provider_overrides" not in rows[0]
+
+
+@pytest.mark.parametrize(
+    "provider, field, value",
+    [
+        ("opencode", "model", "x" * 201),
+        ("opencode", "model", "vendor/model; rm -rf"),
+        ("opencode", "insights_model", "has space"),
+        ("opencode", "model", "new\nline"),
+        ("claude", "model", "opus$(x)"),
+    ],
+)
+def test_override_model_ids_are_bounded_and_charset_checked(
+    provider: str, field: str, value: str
+) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        coerce_provider_overrides({provider: {field: value}})
+    assert value not in str(excinfo.value)
+    assert f"provider_overrides.{provider}.{field}" in str(excinfo.value)
+
+
+def test_override_model_ids_accept_real_ids() -> None:
+    ok = {"opencode": {"model": "anthropic/claude-sonnet-4.5:beta@2", "insights_model": "a_b-c[1]"}}
+    assert coerce_provider_overrides(ok) == ok
+
+
+def test_invalid_stored_override_warning_does_not_log_the_value(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "work", "vault_root": "work",
+                     "provider_overrides": {"opencode": {"model": "SECRET value!"}}}]),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING):
+        config = _load(tmp_path)
+    assert config.workspace("work").provider_overrides == {}
+    assert any("provider_overrides" in r.getMessage() for r in caplog.records)
+    assert "SECRET" not in caplog.text

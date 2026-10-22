@@ -1650,6 +1650,45 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path):
     assert stored_run.workspace == "beta"
 
 
+def test_patch_rename_without_the_key_keeps_provider_overrides(tmp_path):
+    """A rename PATCH that omits provider_overrides carries the stored map to the new name."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    overrides = {"claude": {"model": "opus", "permission_mode": "manual"}}
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "alpha": WorkspaceConfig(
+                name="alpha", vault_root="memory-vault/alpha", provider_overrides=overrides
+            ),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+    config.persist_workspace_registry()
+    app = Starlette(
+        routes=[Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"])]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = _RenamePCM()
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    resp = client.patch("/api/workspaces/alpha", json={"name": "beta"})
+
+    assert resp.status_code == 200, resp.json()
+    beta = next(w for w in resp.json()["workspaces"] if w["name"] == "beta")
+    assert beta["provider_overrides"] == overrides
+    assert config.workspace("beta").provider_overrides == overrides
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert next(r for r in stored if r["name"] == "beta")["provider_overrides"] == overrides
+
+
 @pytest.mark.parametrize(
     "extra",
     [

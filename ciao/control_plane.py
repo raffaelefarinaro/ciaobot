@@ -4095,6 +4095,7 @@ class CiaoControlPlane:
         project_id: str | None = None,
         actor: Actor = "user",
         instructions: str = "",
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """Hand one task to the agent as an ordinary chat, exactly once.
 
@@ -4125,6 +4126,11 @@ class CiaoControlPlane:
         what the turn did — a chat exists and nothing will report its outcome. That
         is the state a crash in this window leaves too, and it is never replayed
         without a person asking.
+
+        ``mode`` is the permission mode of the delegated chat. The user path
+        passes none and gets the workspace default; an agent caller passes its
+        own ceiling (:meth:`_child_mode`), so a workspace override can never
+        hand an agent a stronger chat than its own.
 
         ``actor`` is recorded for the caller, not used to weaken anything: the
         store refuses an agent completion either way, and this method never
@@ -4213,6 +4219,7 @@ class CiaoControlPlane:
             chat = self.pcm.create_chat(
                 project,
                 title=record.title,
+                mode=mode,
                 helper=task_delegation_helper(
                     task_id=record.id, task_revision=revision, attempt_id=attempt_id
                 ),
@@ -5030,6 +5037,7 @@ class CiaoControlPlane:
         task_id: str = "",
         actor: Actor = "user",
         reason: str | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """One lifecycle gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
 
@@ -5091,7 +5099,7 @@ class CiaoControlPlane:
         if verb == "resume":
             return self._attempt_resume(workspace, attempt, actor=actor)
         if verb == "retry":
-            return self._attempt_retry(workspace, attempt, actor=actor)
+            return self._attempt_retry(workspace, attempt, actor=actor, mode=mode)
         if verb == "detach":
             return await self._attempt_detach(workspace, attempt, actor=actor, reason=note)
         raise ControlPlaneError(
@@ -5226,7 +5234,7 @@ class CiaoControlPlane:
         }
 
     def _attempt_retry(
-        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor, mode: str | None = None
     ) -> dict[str, Any]:
         """Start a new attempt for the same task, in a fresh chat.
 
@@ -5253,6 +5261,7 @@ class CiaoControlPlane:
             expected_revision=document.revision,
             project_id=None,
             actor=actor,
+            mode=mode,
         )
         return {**outcome, "retried": True}
 
@@ -5393,6 +5402,7 @@ class CiaoControlPlane:
                 expected_revision=expected_revision,
                 project_id=project_id,
                 actor="agent",
+                mode=self._child_mode(principal, None),
             )
         )
 
@@ -5412,7 +5422,12 @@ class CiaoControlPlane:
         """
         return _ok(
             await self.workspace_task_attempt_action(
-                self._workspace(principal), attempt_id, action, actor="agent", reason=reason
+                self._workspace(principal),
+                attempt_id,
+                action,
+                actor="agent",
+                reason=reason,
+                mode=self._child_mode(principal, None),
             )
         )
 
@@ -6096,12 +6111,11 @@ class CiaoControlPlane:
             created_at=now,
             model=str(values.get("model") or ""),
             provider=str(values.get("provider") or ""),
-            # "" means inherit, exactly as an empty model/provider does: the
-            # permission mode is resolved from the operator's per-provider pin
-            # at dispatch. The MCP schedule tool exposes no `mode` at all, so
-            # the old "auto" default was an unconditional override that made the
-            # dispatcher's inheritance dead for every model-created routine.
-            mode=str(values.get("mode") or ""),
+            # An agent-created routine runs unattended later, so its mode is
+            # fixed now at the caller's own ceiling (a requested weaker mode is
+            # honoured, a stronger one is clamped), never left to inherit the
+            # workspace/engine default at dispatch time.
+            mode=self._child_mode(principal, str(values.get("mode") or "") or None),
             timezone_name=str(values.get("timezone") or values.get("timezone_name") or "UTC"),
             days_of_week=list(values.get("days_of_week") or []),
             frequency=frequency,
@@ -6220,6 +6234,10 @@ class CiaoControlPlane:
             # (unlike `changes`, filtered above).
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
+        if normalized.get("mode"):
+            # Same ceiling `schedule_create` applies: an agent can weaken a
+            # routine's mode but never set a stronger one than its own.
+            normalized["mode"] = self._child_mode(principal, str(normalized["mode"]))
         if project is not None:
             # The recorded name is what survives per-instance project-id
             # regeneration (dispatch re-homes by it), so leaving the previous

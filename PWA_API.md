@@ -954,8 +954,9 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/works
 # replaces the stored one, a save that omits the key keeps it, and {} clears it;
 # an empty value means "engine default". The override applies to new chats,
 # schedule runs, webhook and task chats and memory passes in that workspace on
-# that provider; an explicit model or mode still wins, and a chat an agent
-# creates over MCP never exceeds its caller's permission mode. Operator-only:
+# that provider; an explicit model or mode still wins. A chat, a delegated
+# task (or its retry) and a schedule that an agent creates over MCP never
+# exceed that agent's own permission mode, whatever the override says. Operator-only:
 # no agent verb, CLI, MCP tool or env var writes it, and an archive restore
 # does not bring it back.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import os
+import re
 import secrets
 import sys
 from collections.abc import Mapping
@@ -386,6 +387,11 @@ PROVIDER_OVERRIDE_FIELDS: tuple[str, ...] = (
 )
 
 
+_FREE_TEXT_OVERRIDE_FIELDS = ("model", "insights_model")
+_OVERRIDE_ID_MAX_CHARS = 200
+_OVERRIDE_ID_RE = re.compile(r"[A-Za-z0-9._:/@\[\]-]+")
+
+
 def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
     """Normalize a workspace's provider overrides. None -> {}; unknown provider/key/value raises ValueError."""
     from ciao import provider_registry
@@ -419,6 +425,16 @@ def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
             value = value.strip()
             if not value:
                 continue
+            if key in _FREE_TEXT_OVERRIDE_FIELDS and (
+                len(value) > _OVERRIDE_ID_MAX_CHARS
+                or not _OVERRIDE_ID_RE.fullmatch(value)
+            ):
+                # The value is never echoed: it may be hand-edited junk that
+                # ends up in a log line or an error toast.
+                raise ValueError(
+                    f"{label} must be at most {_OVERRIDE_ID_MAX_CHARS} characters "
+                    "of letters, digits and . _ : / @ [ ] -"
+                )
             if key == "permission_mode" and value not in PERMISSION_MODES:
                 raise ValueError(
                     f"{label} must be one of: {', '.join(PERMISSION_MODES)}"
@@ -1258,6 +1274,10 @@ class CiaoConfig:
             )
             return []
         legacy = _parse_workspaces_json(raw)
+        # Overrides can carry a permission mode and are operator-set in
+        # Settings only; an environment import never brings them in.
+        for imported_workspace in legacy.values():
+            imported_workspace.provider_overrides = {}
         # A workspace archived in Settings left the registry on purpose; the
         # variable must not bring it back while its folder sits in the archive.
         archived = self._archived_workspace_names()
@@ -1509,8 +1529,8 @@ class CiaoConfig:
     ) -> BridgeMode:
         """The default execution (permission) mode for new chats on ``provider``.
 
-        A ``workspace`` override wins; then an operator pin (Settings → Providers → permission mode) wins;
-        otherwise every provider falls back to ``claude_mode`` (auto).
+        A ``workspace`` override wins; then an operator pin (Settings →
+        Providers → permission mode); otherwise every provider falls back to ``claude_mode`` (auto).
         ``manual`` maps to the BridgeMode ``normal`` — ask for every
         action; ``bypass`` allows everything; ``auto`` runs the permissive
         classifier-gated default.
