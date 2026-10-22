@@ -2032,7 +2032,7 @@ import {
 } from '../composables/useFontScale'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useAppearanceSettings } from '../composables/useAppearanceSettings'
-import { applyTheme, readLocalTheme, type AppearancePayload, type Theme } from '../lib/appearance'
+import { readLocalTheme, type Theme } from '../lib/appearance'
 import type {
   AgentAssetsResponse,
   ArchivedWorkspace,
@@ -2288,21 +2288,18 @@ const THEME_OPTIONS: { value: Theme; label: string }[] = [
 ]
 const appearanceError = ref('')
 // Another device (or the first load) can move the engine theme while Settings is open.
-watch(() => appearance.settings.value.theme, (theme) => {
-  if (theme) activeTheme.value = theme
+// While a choice is being saved the control shows that choice, not the engine's
+// answer to an earlier one.
+watch([() => appearance.settings.value.theme, appearance.themeSaves], ([theme, saves]) => {
+  if (theme && saves === 0) activeTheme.value = theme
 })
-
-function saveAppearance(patch: Partial<AppearancePayload>) {
-  appearanceError.value = ''
-  void appearance.save(patch).catch((cause: unknown) => {
-    appearanceError.value = cause instanceof Error ? cause.message : 'Could not save appearance settings.'
-  })
-}
 
 function setTheme(theme: Theme) {
   activeTheme.value = theme
-  applyTheme(theme)
-  saveAppearance({ theme })
+  appearanceError.value = ''
+  void appearance.saveTheme(theme).catch((cause: unknown) => {
+    appearanceError.value = cause instanceof Error ? cause.message : 'Could not save appearance settings.'
+  })
 }
 
 function isSkillExpanded(name: string) {

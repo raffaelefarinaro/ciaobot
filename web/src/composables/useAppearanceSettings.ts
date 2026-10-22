@@ -9,6 +9,7 @@ import {
   readLocalTheme,
   writeAppearanceCache,
   type AppearancePayload,
+  type Theme,
 } from '../lib/appearance'
 import { FONT_SCALE_STEP, MAX_FONT_SCALE, MIN_FONT_SCALE, useFontScale } from './useFontScale'
 
@@ -16,6 +17,8 @@ const settings = ref<AppearancePayload>({ ...DEFAULT_APPEARANCE })
 const loaded = ref(false)
 let loading: Promise<void> | null = null
 let seeded = false
+/** Theme saves queued or in flight. */
+const themeSaves = ref(0)
 // Writes go one at a time: each carries the revision the previous one returned.
 let writes: Promise<unknown> = Promise.resolve()
 
@@ -42,7 +45,9 @@ export function applyAppearanceSettings(value: Partial<AppearancePayload>): void
   if (value.theme === null) settings.value.theme = null
   else if (isTheme(value.theme)) {
     settings.value.theme = value.theme
-    applyTheme(value.theme)
+    // A choice still being saved is newer than the engine's answer to an
+    // earlier one; saveTheme applies the engine value once the last settles.
+    if (themeSaves.value === 0) applyTheme(value.theme)
   }
   if (value.font_scale === null) settings.value.font_scale = null
   else if (validFontScale(value.font_scale)) {
@@ -139,11 +144,27 @@ watch(fontScale, (next) => {
   }, 300)
 })
 
+/** Applies a theme choice at once, then stores it on the engine. */
+async function saveTheme(theme: Theme): Promise<void> {
+  applyTheme(theme)
+  themeSaves.value++
+  try {
+    await save({ theme })
+  } finally {
+    themeSaves.value--
+    // After the last save the engine value is the truth (the user's last
+    // choice on success, the previous one on failure).
+    if (themeSaves.value === 0 && settings.value.theme) applyTheme(settings.value.theme)
+  }
+}
+
 export function useAppearanceSettings(): {
   settings: typeof settings
   loaded: typeof loaded
   load: () => Promise<void>
   save: (patch: Partial<AppearancePayload>) => Promise<void>
+  saveTheme: (theme: Theme) => Promise<void>
+  themeSaves: typeof themeSaves
 } {
-  return { settings, loaded, load, save }
+  return { settings, loaded, load, save, saveTheme, themeSaves }
 }

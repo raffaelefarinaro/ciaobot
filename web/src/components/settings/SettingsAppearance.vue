@@ -8,7 +8,7 @@
       <SettingsRadioGroup
         label="Text contrast"
         :options="TEXT_CONTRAST_OPTIONS"
-        :model-value="settings.text_contrast"
+        :model-value="desired ?? settings.text_contrast"
         @update:model-value="choose"
       />
     </div>
@@ -30,20 +30,27 @@ const TEXT_CONTRAST_OPTIONS: { value: TextContrast; label: string }[] = [
 const { settings, load, save } = useAppearanceSettings()
 const pending = ref(false)
 const error = ref('')
+// The latest choice, shown at once; it is saved when no save is in flight, so
+// the user's last choice wins over one made while an earlier save was pending.
+const desired = ref<TextContrast | null>(null)
 
 onMounted(() => {
   void load().catch(() => { error.value = 'Could not load appearance settings.' })
 })
 
 async function choose(value: TextContrast) {
-  if (pending.value || settings.value.text_contrast === value) return
+  desired.value = value
+  if (pending.value) return
   pending.value = true
   error.value = ''
   try {
-    await save({ text_contrast: value })
+    while (desired.value !== null && desired.value !== settings.value.text_contrast) {
+      await save({ text_contrast: desired.value })
+    }
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not save appearance settings.'
   } finally {
+    desired.value = null
     pending.value = false
   }
 }

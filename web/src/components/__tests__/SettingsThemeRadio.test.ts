@@ -51,3 +51,41 @@ it('Theme follows the radio keyboard pattern and saves the choice to the engine'
     wrapper.unmount()
   }
 })
+
+it('two quick theme choices do not flicker back to the first while its save is queued', async () => {
+  vi.stubGlobal('matchMedia', () => ({ matches: true }))
+  setActivePinia(createPinia())
+  const stub = defineComponent({ render: () => h('div') })
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab?', component: stub }] })
+  await router.push('/settings/appearance')
+  await router.isReady()
+  vi.spyOn(api, 'get').mockRejectedValue(new Error('unavailable'))
+  let resolveFirst!: (value: unknown) => void
+  let resolveSecond!: (value: unknown) => void
+  const base = { text_contrast: 'normal', font_scale: 1.2 }
+  vi.spyOn(api, 'patch')
+    .mockReturnValueOnce(new Promise((r) => { resolveFirst = r }))
+    .mockReturnValueOnce(new Promise((r) => { resolveSecond = r }))
+  localStorage.setItem('ciao-theme', 'system')
+  const wrapper = mount(SettingsView, {
+    attachTo: document.body,
+    global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } },
+  })
+  try {
+    await flushPromises()
+    const radios = () => wrapper.get('[role="radiogroup"][aria-label="Theme"]').findAll('[role="radio"]')
+    await radios()[1].trigger('click') // Light
+    await radios()[0].trigger('click') // Dark, while Light is still saving
+    resolveFirst({ ...base, theme: 'light', revision: 'r1' })
+    await flushPromises()
+    // The second save is still in flight: the first one's answer must not show.
+    expect(radios().map((r) => r.attributes('aria-checked'))).toEqual(['true', 'false', 'false'])
+    expect(document.documentElement.classList.contains('theme-light')).toBe(false)
+    resolveSecond({ ...base, theme: 'dark', revision: 'r2' })
+    await flushPromises()
+    expect(radios().map((r) => r.attributes('aria-checked'))).toEqual(['true', 'false', 'false'])
+    expect(document.documentElement.classList.contains('theme-light')).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})

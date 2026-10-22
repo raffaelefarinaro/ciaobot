@@ -41,16 +41,23 @@ describe('SettingsAppearance', () => {
     expect(radios(wrapper).map((b) => b.attributes('aria-checked'))).toEqual(['false', 'true'])
   })
 
-  it('ignores another choice while a save is pending', async () => {
-    let resolve!: (value: typeof engine) => void
-    const patch = vi.spyOn(api, 'patch').mockReturnValue(new Promise((r) => { resolve = r }))
-    const wrapper = mount(SettingsAppearance)
+  it('saves the last choice made while a save is pending and keeps focus on it', async () => {
+    let resolveFirst!: (value: unknown) => void
+    const patch = vi.spyOn(api, 'patch')
+      .mockReturnValueOnce(new Promise((r) => { resolveFirst = r }))
+      .mockResolvedValue({ ...engine, text_contrast: 'normal', revision: 'r2' })
+    const wrapper = mount(SettingsAppearance, { attachTo: document.body })
     await flushPromises()
     await radios(wrapper)[1].trigger('click')
-    await radios(wrapper)[0].trigger('click')
+    await radios(wrapper)[0].trigger('keydown', { key: 'ArrowLeft' })
     expect(patch).toHaveBeenCalledTimes(1)
-    resolve({ ...engine, text_contrast: 'soft' as never, revision: 'r1' })
+    resolveFirst({ ...engine, text_contrast: 'soft', revision: 'r1' })
     await flushPromises()
+    expect(patch).toHaveBeenCalledTimes(2)
+    expect(patch).toHaveBeenLastCalledWith('/api/settings/appearance', { text_contrast: 'normal', revision: 'r1' })
+    expect(radios(wrapper)[0].attributes('aria-checked')).toBe('true')
+    expect(document.activeElement).toBe(radios(wrapper)[0].element)
+    wrapper.unmount()
   })
 
   it('follows the radio keyboard pattern: one tab stop, arrows select, Home/End jump', async () => {
