@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
 import { useMcpServers } from './useMcpServers'
 import type { McpStatus } from '../lib/types'
-const inventory = (workspace = 'personal'): McpStatus => ({ workspace, agent_root: '/workspace', providers: [] })
+const inventory = (workspace = 'personal'): McpStatus => ({ workspace, agent_root: '/workspace', providers: [], shell: { kind: 'posix', cd_prefix: 'cd -- /workspace && ' } })
 describe('native MCP inventory', () => {
   it('scopes reads to the selected workspace', async () => {
     const get = vi.fn().mockResolvedValue(inventory('client a'))

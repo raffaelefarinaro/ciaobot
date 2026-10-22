@@ -413,12 +413,18 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   its name and tinted initial tile. Providers is one card, so its page rail
   shows Status only, with no "On this page" list.
   The "On this page" navigation is built from the rendered sections in DOM order,
-  so it follows that order. The MCP tab is a read-only provider inventory:
-  `composables/useMcpServers.ts` owns status and usage reads, while
-  `components/settings/SettingsMcpServers.vue` renders provider configuration,
-  per-chat connection states, and provider-native setup/auth instructions.
+  so it follows that order. The MCP tab shows the provider inventory plus an
+  "Ask Ciao" entry (a chat titled "Add an MCP server"), per-CLI tabs built on
+  `TabBar` (the workspace's default provider first), a command builder (name
+  and URL inputs, shell-quoted, with the engine's `cd` prefix from
+  `/api/mcp/status` `shell`) and "Run in terminal", which types the command into
+  the in-app terminal via `composables/useRunInTerminal.ts` and falls back to
+  copying it when the terminal is locked or unavailable. `composables/useMcpServers.ts`
+  owns status and usage reads, while `components/settings/SettingsMcpServers.vue`
+  renders provider configuration and per-chat connection states.
   Settings never edits native MCP configuration, handles secret values, probes
-  servers, or starts a provider/MCP process. The selected workspace scopes
+  servers, or starts a provider/MCP process; commands run only in the terminal
+  the user is watching. The selected workspace scopes
   `/api/mcp/status`; only already running chats in that workspace contribute
   connection states. An empty connections list means unchecked, and unreadable
   configuration/provider state is unknown. Claude's workspace server allowlist

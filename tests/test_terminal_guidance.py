@@ -23,7 +23,6 @@ from pathlib import Path
 import ciao
 import pytest
 from ciao import agent_cli
-from ciao.web import mcp_inventory
 
 STOCK = Path(ciao.__file__).parent / "stock"
 CAPABILITIES = STOCK / "skills" / "ciao-capabilities"
@@ -120,13 +119,13 @@ def _inventory_command_names() -> set[str]:
     starts handing out has to be documented, and one it stops handing out
     does not have to be un-documented.
     """
-    names: set[str] = set()
-    for provider in ("claude", "opencode"):
-        instructions = mcp_inventory._setup_instructions(provider, Path("/agent/root"))
-        for line in instructions.values():
-            match = re.search(r"\b((?:claude|opencode) mcp [a-z][a-z-]*)", line)
-            assert match, f"the {provider} inventory names no MCP command: {line!r}"
-            names.add(match.group(1))
+    # The Settings page builds its commands in the PWA (web/src/lib/shellQuote.ts,
+    # `mcpCommand`); the inventory only supplies the `cd` prefix.
+    builder = (REPO / "web" / "src" / "lib" / "shellQuote.ts").read_text(encoding="utf-8")
+    names = set(re.findall(r"\b((?:claude|opencode) mcp [a-z][a-z-]*)", builder))
+    assert {"claude mcp add", "opencode mcp add"} <= names, (
+        "shellQuote.ts no longer parses into MCP commands"
+    )
     return names
 
 
