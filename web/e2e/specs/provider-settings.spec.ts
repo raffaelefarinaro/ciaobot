@@ -19,7 +19,6 @@ for (const mobile of [false, true]) {
       thinking_levels: { claude: ['low', 'medium', 'high', 'xhigh', 'max'] },
     } }))
     let settings = {
-      insights_enabled: true,
       provider_default_models: { claude: 'sonnet' },
       provider_default_thinking: {},
       provider_insights_models: {},

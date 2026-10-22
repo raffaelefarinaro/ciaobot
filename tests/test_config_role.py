@@ -39,23 +39,14 @@ def _config(**overrides: str) -> CiaoConfig:
     return CiaoConfig.from_env(env)
 
 
-def test_legacy_insights_opt_out_is_captured_for_settings_migration(
-    tmp_path: Path,
-) -> None:
+def test_insights_disabled_env_is_not_read(tmp_path: Path) -> None:
     config = _config(
         CIAO_WORKSPACE=str(tmp_path),
         CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
         CIAO_INSIGHTS_DISABLED="true",
     )
-    assert config.insights_enabled is True
-    assert config.legacy_insights_disabled is True
-
-    enabled = _config(
-        CIAO_WORKSPACE=str(tmp_path),
-        CIAO_RUNTIME_ROOT=str(tmp_path / ".runtime"),
-        CIAO_INSIGHTS_DISABLED="false",
-    )
-    assert enabled.legacy_insights_disabled is False
+    assert not hasattr(config, "insights_enabled")
+    assert not hasattr(config, "legacy_insights_disabled")
 
 
 def test_vault_root_defaults_under_workspace_root(tmp_path: Path) -> None:

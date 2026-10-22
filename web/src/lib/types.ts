@@ -924,8 +924,6 @@ export interface MoveToBackgroundResponse { moved: boolean }
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
 // model overrides (Settings → Providers tab).
 export interface RoutineSettings {
-  insights_enabled?: boolean
-
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
   provider_default_models?: Record<string, string>

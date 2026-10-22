@@ -22,8 +22,8 @@ A personal assistant's memory must be, with **zero user configuration**:
    pollutes the store with its own paperwork.
 6. **Legible** — plain markdown the user can read, edit, and diff. User
    correction is the only reliable fix for extraction errors.
-7. **Private by choice** — the automatic memory pass is on by default, but the
-   Session insights switch in Settings → General stops it.
+7. **Local** — the automatic memory pass runs on every archived chat and
+   writes only to plain markdown notes on this machine.
 
 ## Architecture: two layers, verbatim long tail
 

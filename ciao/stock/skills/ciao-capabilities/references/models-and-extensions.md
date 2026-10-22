@@ -17,7 +17,6 @@
 - Per-provider default model and thinking level for new chats (**Settings → Providers**, the chat providers card, which also shows each CLI's connection and lets you reconnect, verify, or log out) — no cross-provider tier mapping; each provider resolves `opus`/`sonnet`/`haiku`/`fable`-style aliases against its own catalog. Per-chat override in the picker, with Automatic resolving to the chat's own model.
 - Per-provider default **permission mode** for new chats (**Settings → Providers**): *manual* asks before every action, *auto* (the default) runs safe reads and edits silently and asks before destructive ones, *bypass* allows everything. That default is the only permission control in the app — there is no in-chat mode switch. A single chat's mode can only be changed outside the UI, with `ciao chat update --mode` (which can lower a mode but never raise it above the calling chat's own) where the CLI allows it; otherwise it is the user's choice.
 - Beyond per-chat routing, one chat can **reach another model without leaving the conversation**: a handover moves the whole chat to another provider.
-- **Session insights** can be disabled entirely in Settings → General.
 
 ## Google Workspace (`gws`)
 

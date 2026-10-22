@@ -76,7 +76,8 @@ it('lists Main workspace on the rail, in page order, once its routines load', as
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
     const at = labels.indexOf('Main workspace')
     expect(at).toBeGreaterThan(-1)
-    expect(labels[at - 1]).toBe('Session insights')
+    expect(labels).not.toContain('Session insights')
+    expect(labels[at - 1]).toBe('Memory handover')
     expect(labels[at + 1]).toBe('Workspace health')
     expect(wrapper.find('#settings-main-workspace').exists()).toBe(true)
   } finally {

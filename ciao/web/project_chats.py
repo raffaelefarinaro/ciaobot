@@ -1688,9 +1688,7 @@ class ProjectChatManager:
             "confident about is filed into your notes; what it is not arrives as "
             "a proposal you can accept or dismiss in **Memory · To decide**. What "
             "it files shows up in **Memory · History**, where you can see the "
-            "change and undo it while the note is still as the pass left it. "
-            "Turning insights off only stops new passes — it never deletes what "
-            "is already saved."
+            "change and undo it while the note is still as the pass left it."
         )
         # One block, both shapes, for the same reason as `memory_intro` (#987):
         # the known state, the interview and the starting-knowledge pass are the
@@ -2940,7 +2938,7 @@ class ProjectChatManager:
 
         Returns a dict with ``ok``, ``vault_moved`` (bool), ``vault_folder``
         (str | None), ``outcome``, and ``memory_pass`` (the pass chat id, or
-        None when Session insights is off or there is no vault folder).
+        None when there is no vault folder).
         """
         if project_id == _CC_CLI_PROJECT_ID:
             raise ValueError("The Claude Code CLI project cannot be completed.")

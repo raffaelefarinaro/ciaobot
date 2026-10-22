@@ -114,7 +114,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/tasks/{task_id}/updates` | Append one progress note: `{"workspace", "expected_revision", "text", "send"}`. Allowed while the task is `in_progress` or `in_review`. `send: true` also delivers the note to the live attempt's chat and is refused when nothing is live. A note is not a description edit and does not complete the task. A stale revision is a 409 and writes nothing |
 | PATCH | `/api/tasks/{task_id}/updates/{update_id}` | Reword one progress note at `expected_revision`: `{"workspace", "expected_revision", "text"}`. The author and recorded time stay. A stale revision is a 409 |
 | POST | `/api/tasks/{task_id}/chats` | Record that a chat worked on the task outside delegation, or unlink it with `"remove": true`: `{"workspace", "expected_revision", "chat_id", "remove"}`. Not a delegation: it never moves, assigns or completes the task, in any status. A stale revision is a 409 and writes nothing. |
-| POST | `/api/tasks/{task_id}/resolution-review` | Ask for a learning pass over the task's **saved** resolution: `{"workspace", "expected_revision"}`. Editing a resolution never queues a pass by itself; this is the explicit ask. The same text on the same completion is not extracted twice. Answers `{workspace, queued, completion_id, memory_chat_id}`, or `{queued: false, reason: "session insights off"}` when Session insights is off. A task with no saved resolution is a 400, a resolution holding the closing fence token is a 400, and a stale revision is a 409 |
+| POST | `/api/tasks/{task_id}/resolution-review` | Ask for a learning pass over the task's **saved** resolution: `{"workspace", "expected_revision"}`. Editing a resolution never queues a pass by itself; this is the explicit ask. The same text on the same completion is not extracted twice. Answers `{workspace, queued, completion_id, memory_chat_id}`. A task with no saved resolution is a 400, a resolution holding the closing fence token is a 400, and a stale revision is a 409 |
 | POST | `/api/tasks/{task_id}/delegate` | Hand one task to the agent as **one ordinary chat**, at `expected_revision` (required): `{"workspace", "expected_revision", "project_id"}` and nothing else — there is no body key for prompt text, because the prompt is built server-side from the record's own fields. `project_id` takes an id or a name in this workspace and overrides where the chat is hosted; omit it to use the task's own project, or the workspace's General. The turn runs with the **default** attendance — never `unattended`, so an approval card it raises is an ordinary Needs-you card. Answers 200 with `{workspace, created, attempt, chat_id, project_id, project_origin, task}`; `created: false` means a live attempt already existed and nothing was created or sent |
 | GET | `/api/tasks/{task_id}/attempts?workspace=` | One task's whole attempt history, the live attempt first. A row is `{attempt_id, task_id, task_revision, chat_id, state, created_at, updated_at, ended_at, detail, live}`, plus `chat_archived` when `chat_id` is set (the `task` carries the same flag); `state` is one of `running`, `needs_you`, `failed`, `interrupted`, `ready_for_review`, `stopped` |
 | POST | `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` | One lifecycle gesture on one attempt; `{"workspace"}` plus an optional `reason` (`detach` only) are the body keys, because the gesture acts on an attempt rather than editing a record (there is no field to present a revision at). `action` is `stop` (ends the turn irreversibly; the task keeps its linkage and stays uncompletable), `resume` (continues the **same** chat under the **same** attempt; only an attempt that did not finish is resumable), `retry` (starts a **new** attempt in a new chat, leaving the previous one as history) or `detach` (stops the turn if running and clears the linkage, which is what makes the task completable again). An unknown verb is a 400 `invalid_action`; an unknown attempt id is a 404. Optional `reason` (string, at most 1000 characters after trimming; a non-string or an over-long one is a 400 `invalid_task`, never truncated) is recorded with the decision in the workspace's append-only `Workspace/Task-Decisions.jsonl` as a `reject` row when `detach` releases a `ready_for_review` attempt; a `reason` on any other verb, or on a detach of an attempt that is not `ready_for_review`, is a 400 `invalid_action`. |
@@ -1031,10 +1031,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → General / Providers)**
 
 ```bash
-# Read internal-routine settings: the automatic-session-insights switch and the
-# per-provider default model / mode /
-# thinking / Session insights maps. insights_enabled=false stops the memory
-# pass. provider_insights_models is keyed by the chat's provider; a missing
+# Read internal-routine settings: the per-provider default model / mode /
+# thinking / Session insights maps. provider_insights_models is keyed by the chat's provider; a missing
 # entry means that provider's default chat model reads the session.
 # Also the server settings that used to be .env variables, as stored ("" =
 # default): pwa_host (bind address), log_level, dev_mode, app_repo (source
@@ -1053,7 +1051,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # anything else is a 400.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"provider_insights_models":{"claude":"haiku"},"provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Keyboard settings (Settings → Home → Keyboard shortcuts)**

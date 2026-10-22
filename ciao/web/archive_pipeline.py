@@ -165,7 +165,6 @@ class ArchivePipeline:
             if (
                 memory_pass.MEMORY_PASS_CHATS
                 and not memory_pass.is_memory_pass_chat(chat, project_meta)
-                and getattr(config, "insights_enabled", True)
                 and outcome.path is not None
                 and outcome.turn_count > 0
                 and vault_root is not None
