@@ -93,6 +93,9 @@ it('links to the feature guide and suggests asking in a chat', async () => {
     expect(link.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/features.html')
     expect(link.attributes('target')).toBe('_blank')
     expect(link.attributes('rel')).toContain('noopener')
+    const companions = section.findAll('a')[1]
+    expect(companions.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/companions.html')
+    expect(companions.attributes('target')).toBe('_blank')
   } finally {
     wrapper.unmount()
   }

@@ -204,6 +204,8 @@ h3 { font-size: 20px; margin: 24px 0 8px; }
   margin: 16px 0;
   color: var(--muted);
 }
+/* Install prompts on the companions page carry long URLs. */
+.note.ask code { overflow-wrap: anywhere; }
 
 /* Steps */
 .steps { counter-reset: step; list-style: none; padding: 0; margin: 16px 0; }
