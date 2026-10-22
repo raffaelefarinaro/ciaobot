@@ -112,3 +112,21 @@ def test_mcp_floor_covers_cve_2026_59951() -> None:
         "runtime pin exists because a wheel install resolves the declared "
         "dependency, not uv.lock"
     )
+
+
+def test_certifi_floor_excludes_compromised_em_sign_root() -> None:
+    version = metadata.version("certifi")
+    assert _as_version(version) >= _as_version("2026.10.19"), (
+        f"certifi {version} includes the compromised emSign ECC Root CA - G3; "
+        "the runtime pin exists because a wheel install resolves the declared "
+        "dependency, not uv.lock"
+    )
+
+
+def test_opentelemetry_api_floor_covers_unbounded_tracestate_parsing() -> None:
+    version = metadata.version("opentelemetry-api")
+    assert _as_version(version) >= _as_version("1.45.1"), (
+        f"opentelemetry-api {version} predates the 1.45.1 fix for "
+        "GHSA-xcq7-p3pf-p88h / CVE-2026-114603; the runtime pin exists because "
+        "a wheel install resolves the declared dependency, not uv.lock"
+    )
