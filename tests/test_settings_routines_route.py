@@ -43,7 +43,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
-    assert data["insights_enabled"] is True
+    assert "insights_enabled" not in data
     # Session insights is chosen per provider now; the global knob is gone.
     assert data["provider_insights_models"] == {}
     assert "insights_model" not in data
@@ -97,27 +97,17 @@ def test_a_stored_on_device_model_is_dropped_on_load(tmp_path):
     assert config.provider_insights_models == {"opencode": "x/y"}
 
 
-def test_patch_toggles_insights_enabled(tmp_path):
-    client, config = _make_client(tmp_path)
+def test_patch_insights_enabled_is_ignored(tmp_path):
+    client, _config = _make_client(tmp_path)
     resp = client.patch(
         "/api/settings/routines",
         json={"insights_enabled": False},
     )
 
     assert resp.status_code == 200
-    assert resp.json()["insights_enabled"] is False
-    assert config.insights_enabled is False
-    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.insights_enabled is False
-
-
-def test_patch_rejects_non_boolean_insights_enabled(tmp_path):
-    client, _config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines",
-        json={"insights_enabled": "false"},
-    )
-    assert resp.status_code == 400
+    assert "insights_enabled" not in resp.json()
+    saved = json.loads((tmp_path / ".runtime" / "app_settings.json").read_text())
+    assert "insights_enabled" not in saved
 
 
 def test_patch_applies_provider_default_models(tmp_path):

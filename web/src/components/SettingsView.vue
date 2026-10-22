@@ -369,12 +369,6 @@
              its data: nothing here is part of the workspace edit form. -->
         <SettingsMemoryHandover />
 
-        <SettingsInsights
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
-
         <!-- Main workspace -->
         <div v-if="routines && routines.workspace_context" class="card">
           <div class="settings-card-header">
@@ -2089,7 +2083,6 @@ import { useCommandCopy } from '../composables/useCommandCopy'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
-import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'

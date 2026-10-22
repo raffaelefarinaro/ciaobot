@@ -665,7 +665,6 @@ class CiaoConfig:
     # it into ``.runtime/workspaces.json`` once and then ignores it.
     legacy_workspaces_env: str = field(default="", repr=False)
     legacy_gws_profile: str = field(default="", repr=False)
-    legacy_insights_disabled: bool | None = field(default=None, repr=False)
     # Raw values of the retired `.env` server variables
     # (`app_settings.LEGACY_ENV_SETTINGS`) this install still sets. Never read
     # as settings; server startup imports them into Settings once.
@@ -700,7 +699,6 @@ class CiaoConfig:
     # Claude model for the review-queue folds that run without a chat behind
     # them. Chat-driven calls use :func:`ciao.insights.resolve_insights_model`.
     insights_model: str = "sonnet"
-    insights_enabled: bool = True
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -1673,15 +1671,6 @@ class CiaoConfig:
             if str(source.get(name, "") or "").strip()
         }
 
-        legacy_insights_raw = str(
-            source.get("CIAO_INSIGHTS_DISABLED", "") or ""
-        ).strip().lower()
-        legacy_insights_disabled = (
-            None
-            if not legacy_insights_raw
-            else legacy_insights_raw not in {"0", "false", "no", "off"}
-        )
-
         return cls(
             pwa_auth_token=pwa_auth_token,
             workspace_root=workspace_root,
@@ -1699,7 +1688,6 @@ class CiaoConfig:
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
             legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),
-            legacy_insights_disabled=legacy_insights_disabled,
         )
 
 
