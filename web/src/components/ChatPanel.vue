@@ -7057,7 +7057,8 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
 }
 /* A real keycap: readable glyphs at body size, bordered, so the chord is
-   legible next to the send button rather than a faint mono smudge. */
+   legible next to the send button rather than a faint mono smudge. It follows
+   the body font (--font), so Serif or Mono in Settings > Appearance changes it. */
 .composer-kbd kbd {
   display: inline-grid;
   place-items: center;

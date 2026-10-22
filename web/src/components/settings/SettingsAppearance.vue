@@ -41,11 +41,10 @@ const TEXT_CONTRAST_OPTIONS: { value: TextContrast; label: string }[] = [
   { value: 'soft', label: 'Soft' },
 ]
 // Each option is drawn in its own face so the choice is visible before it is made.
-const face = (name: 'sans' | 'serif' | 'mono') => `var(--font-${name})`
 const BODY_FONT_OPTIONS: { value: BodyFont; label: string; fontFamily: string }[] = [
-  { value: 'system', label: 'System', fontFamily: face('sans') },
-  { value: 'serif', label: 'Serif', fontFamily: face('serif') },
-  { value: 'mono', label: 'Mono', fontFamily: face('mono') },
+  { value: 'system', label: 'System', fontFamily: 'var(--font-sans)' },
+  { value: 'serif', label: 'Serif', fontFamily: 'var(--font-serif)' },
+  { value: 'mono', label: 'Mono', fontFamily: 'var(--font-mono)' },
 ]
 
 const { settings, load, save } = useAppearanceSettings()

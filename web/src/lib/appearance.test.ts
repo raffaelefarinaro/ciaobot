@@ -63,11 +63,16 @@ describe('applyAppearanceToRoot body font', () => {
 describe('font tokens', () => {
   const sources = import.meta.glob('../**/*.{vue,css}', { query: '?raw', eager: true, import: 'default' }) as Record<string, string>
 
-  it('no component uses var(--font-sans) outside App.vue', () => {
+  it('no component uses var(--font-sans) outside App.vue and the Body font picker', () => {
+    // SettingsAppearance.vue is the one exception: its System button must draw
+    // itself in the system face even while Serif or Mono is active.
     const offenders = Object.entries(sources)
-      .filter(([path, text]) => !path.endsWith('/App.vue') && text.includes('var(--font-sans)'))
+      .filter(([path, text]) => !path.endsWith('/App.vue') && !path.endsWith('/SettingsAppearance.vue')
+        && text.includes('var(--font-sans)'))
       .map(([path]) => path)
     expect(offenders).toEqual([])
+    const picker = Object.entries(sources).find(([path]) => path.endsWith('/SettingsAppearance.vue'))
+    expect(picker?.[1].split('var(--font-sans)').length).toBe(2)
     expect(Object.keys(sources).some((path) => path.endsWith('/App.vue'))).toBe(true)
     expect(Object.keys(sources).some((path) => path.endsWith('settingsPanels.css'))).toBe(true)
   })

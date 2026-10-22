@@ -45,16 +45,42 @@ test.describe('Settings › Appearance', () => {
     const token = (name: string) =>
       page.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name)
     const group = page.getByRole('radiogroup', { name: 'Body font' })
+    // Code-like surfaces keep --font-mono whatever the body font is. A probe
+    // with the token gives the browser-normalised mono stack to compare with;
+    // no .badge renders on this page, so one is attached to measure its rule.
+    const monoSurfaces = () => page.evaluate(() => {
+      const make = (cls: string, style = '') => {
+        const el = document.createElement('span')
+        el.className = cls
+        el.style.cssText = style
+        document.body.appendChild(el)
+        const family = getComputedStyle(el).fontFamily
+        el.remove()
+        return family
+      }
+      return {
+        probe: make('', 'font-family: var(--font-mono)'),
+        badge: make('badge'),
+        wordmark: getComputedStyle(document.querySelector('.wordmark') as Element).fontFamily,
+      }
+    })
+    const expectMonoSurfaces = async () => {
+      const found = await monoSurfaces()
+      expect(found.badge).toBe(found.probe)
+      expect(found.wordmark).toBe(found.probe)
+    }
 
     await group.getByRole('radio', { name: 'Serif' }).click()
     await expect(page.locator('html')).toHaveAttribute('data-body-font', 'serif')
     await expect.poll(() => family('body')).toMatch(/Charter|Georgia/)
     expect(await family('.settings-main .routine-name')).toBe(await family('body'))
     expect(await family('.settings-main .routine-detail')).toBe(await family('body'))
+    await expectMonoSurfaces()
 
     await group.getByRole('radio', { name: 'Mono' }).click()
     await expect(page.locator('html')).toHaveAttribute('data-body-font', 'mono')
     await expect.poll(() => family('body')).toBe(await token('--font-mono'))
+    await expectMonoSurfaces()
 
     await group.getByRole('radio', { name: 'System' }).click()
     await expect(page.locator('html')).not.toHaveAttribute('data-body-font', /.+/)
@@ -119,6 +145,10 @@ test('on a touch device every control is at least 44px and the page does not scr
       return bad
     }, TOUCH_MIN)
     expect(small).toEqual([])
+    expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
+
+    await page.getByRole('radiogroup', { name: 'Body font' }).getByRole('radio', { name: 'Mono' }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-body-font', 'mono')
     expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
   } finally {
     await context.close()
