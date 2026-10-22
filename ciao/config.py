@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import os
+import re
 import secrets
 import sys
 from collections.abc import Mapping
@@ -19,7 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ciao.entity_types import stock_entity_type_registry
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
 from ciao.fs_sandbox import AGENT_FS_SCOPES
-from ciao.models import BridgeMode
+from ciao.models import THINKING_LEVELS, BridgeMode
 from ciao.os_support.paths import resolve_path
 from ciao.providers.opencode import OpencodeSettings
 
@@ -357,6 +358,11 @@ def coerce_agent_fs_scope(raw: object) -> str | None:
     )
 
 
+# Execution (permission) modes a provider default may pin. ``manual`` is the
+# PWA-facing name for the BridgeMode ``normal`` (ask for every action);
+# ``plan`` stays chat-only and is not a settings default.
+PERMISSION_MODES: tuple[str, ...] = ("manual", "auto", "bypass")
+
 MEMORY_HANDOVERS: tuple[str, ...] = ("off", "dismiss", "all")
 DEFAULT_MEMORY_HANDOVER = "off"
 
@@ -371,6 +377,82 @@ def coerce_memory_handover(raw: object) -> str:
     if cleaned in MEMORY_HANDOVERS:
         return cleaned
     raise ValueError(f"memory_handover must be one of: {', '.join(MEMORY_HANDOVERS)}")
+
+
+PROVIDER_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "model",
+    "thinking",
+    "permission_mode",
+    "insights_model",
+)
+
+
+_FREE_TEXT_OVERRIDE_FIELDS = ("model", "insights_model")
+_OVERRIDE_ID_MAX_CHARS = 200
+_OVERRIDE_ID_RE = re.compile(r"[A-Za-z0-9._:/@\[\]-]+")
+
+
+def _clip(value: object) -> str:
+    """A repr of an untrusted key, cut short so it cannot flood an error or a log line."""
+    text = repr(value)
+    return text if len(text) <= 64 else text[:61] + "..."
+
+
+def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
+    """Normalize a workspace's provider overrides. None -> {}; unknown provider/key/value raises ValueError."""
+    from ciao import provider_registry
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("provider_overrides must be an object")
+    known = provider_registry.provider_ids()
+    for provider in raw:
+        if provider not in known:
+            raise ValueError(f"provider_overrides: unknown provider {_clip(provider)}")
+    cleaned: dict[str, dict[str, str]] = {}
+    for provider in known:
+        if provider not in raw:
+            continue
+        entry = raw[provider]
+        if not isinstance(entry, dict):
+            raise ValueError(f"provider_overrides.{provider} must be an object")
+        for key in entry:
+            if key not in PROVIDER_OVERRIDE_FIELDS:
+                raise ValueError(f"provider_overrides.{provider}: unknown key {_clip(key)}")
+        fields: dict[str, str] = {}
+        for key in PROVIDER_OVERRIDE_FIELDS:
+            if key not in entry:
+                continue
+            value = entry[key]
+            label = f"provider_overrides.{provider}.{key}"
+            if not isinstance(value, str):
+                raise ValueError(f"{label} must be a string")
+            value = value.strip()
+            if not value:
+                continue
+            if key in _FREE_TEXT_OVERRIDE_FIELDS and (
+                len(value) > _OVERRIDE_ID_MAX_CHARS
+                or not _OVERRIDE_ID_RE.fullmatch(value)
+            ):
+                # The value is never echoed: it may be hand-edited junk that
+                # ends up in a log line or an error toast.
+                raise ValueError(
+                    f"{label} must be at most {_OVERRIDE_ID_MAX_CHARS} characters "
+                    "of letters, digits and . _ : / @ [ ] -"
+                )
+            if key == "permission_mode" and value not in PERMISSION_MODES:
+                raise ValueError(
+                    f"{label} must be one of: {', '.join(PERMISSION_MODES)}"
+                )
+            if key == "thinking":
+                levels = THINKING_LEVELS.get(provider, ())
+                if value not in levels:
+                    raise ValueError(f"{label} must be one of: {', '.join(levels)}")
+            fields[key] = value
+        if fields:
+            cleaned[provider] = fields
+    return cleaned
 
 
 @dataclass(slots=True)
@@ -400,6 +482,10 @@ class WorkspaceConfig:
     # Whether Workspace care may act on its own [memory]/[profile] verdicts
     # (off, dismiss, all). Operator-only: never set from an agent surface.
     memory_handover: str = DEFAULT_MEMORY_HANDOVER
+    # Operator-only per-provider overrides of the Providers defaults for new
+    # chats and schedules in this workspace. Empty/missing = engine default.
+    # Never set from an agent surface.
+    provider_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def effective_agent_fs_scope(self) -> str:
         """The scope the agent runs under: the explicit choice, else the platform default."""
@@ -441,6 +527,13 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         memory_handover = coerce_memory_handover(data.get("memory_handover"))
     except ValueError:
         memory_handover = DEFAULT_MEMORY_HANDOVER
+    try:
+        provider_overrides = coerce_provider_overrides(data.get("provider_overrides"))
+    except ValueError as exc:
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid provider_overrides for workspace %r: %s", name, exc
+        )
+        provider_overrides = {}
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
@@ -453,6 +546,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         color=color,
         agent_fs_scope=agent_fs_scope,
         memory_handover=memory_handover,
+        provider_overrides=provider_overrides,
     )
 
 
@@ -1122,6 +1216,8 @@ class CiaoConfig:
                 row["agent_fs_scope"] = workspace.agent_fs_scope
             if workspace.memory_handover != DEFAULT_MEMORY_HANDOVER:
                 row["memory_handover"] = workspace.memory_handover
+            if workspace.provider_overrides:
+                row["provider_overrides"] = workspace.provider_overrides
             payload.append(row)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
@@ -1184,6 +1280,10 @@ class CiaoConfig:
             )
             return []
         legacy = _parse_workspaces_json(raw)
+        # Overrides can carry a permission mode and are operator-set in
+        # Settings only; an environment import never brings them in.
+        for imported_workspace in legacy.values():
+            imported_workspace.provider_overrides = {}
         # A workspace archived in Settings left the registry on purpose; the
         # variable must not bring it back while its folder sits in the archive.
         archived = self._archived_workspace_names()
@@ -1310,10 +1410,12 @@ class CiaoConfig:
     ) -> str:
         """Pick the new-chat / new-schedule default for a workspace.
 
-        The workspace no longer pins a model: the answer is the effective
+        Order: this workspace's override for the effective provider, then the
         provider's operator default (``provider_default_models``, surfaced in
-        the PWA Settings → Providers tab), falling back to the provider's own
-        catalog default.
+        the PWA Settings → Providers tab), then the provider's own catalog
+        default. The override is keyed by the effective provider, never by the
+        workspace's default provider, so a chat opened on another provider
+        never inherits a model that belongs to this workspace's own provider.
 
         ``provider``, when given, is the provider the chat/schedule will
         actually run on. It can differ from the workspace's own
@@ -1331,6 +1433,11 @@ class CiaoConfig:
         if effective_provider:
             descriptor = provider_registry.get(effective_provider)
             if descriptor is not None:
+                override = self.workspace_override(
+                    workspace, effective_provider, "model"
+                )
+                if override:
+                    return override
                 # The operator's explicit pick comes first, whatever the
                 # provider. Checking `default_model_config_key` before this
                 # meant Claude — the one provider that has such a key — always
@@ -1364,13 +1471,47 @@ class CiaoConfig:
         settings = getattr(self, descriptor.default_model_settings_attr, None)
         return getattr(settings, "default_model", "") if settings else ""
 
-    def default_model_for_provider(self, provider: str) -> str:
-        """The operator's default model for a provider, or ``""`` when unset.
+    def workspace_override(
+        self, workspace: str | None, provider: str, field_name: str
+    ) -> str:
+        """This workspace's override of one provider default, or "" when it has none."""
+        workspace_config = self.workspace(workspace)
+        if workspace_config is None:
+            return ""
+        return (workspace_config.provider_overrides.get(provider) or {}).get(
+            field_name, ""
+        )
+
+    def default_thinking_for_provider(
+        self, provider: str, workspace: str | None = None
+    ) -> str:
+        """Default thinking level for new chats on ``provider``: workspace override, then engine."""
+        return self.workspace_override(workspace, provider, "thinking") or (
+            self.provider_default_thinking or {}
+        ).get(provider, "")
+
+    def insights_model_override(
+        self, provider: str, workspace: str | None = None
+    ) -> str:
+        """Session-insights model override for ``provider``: workspace, then engine, else ""."""
+        return self.workspace_override(workspace, provider, "insights_model") or (
+            self.provider_insights_models or {}
+        ).get(provider, "")
+
+    def default_model_for_provider(
+        self, provider: str, workspace: str | None = None
+    ) -> str:
+        """The default model for a provider, or ``""`` when unset.
 
         Used when a chat is created on a provider that is not the workspace's
-        default provider, so the per-provider default still applies.
+        default provider, so the per-provider default still applies. A
+        ``workspace`` override for that provider wins over the operator default.
         """
         from ciao import provider_registry
+
+        override = self.workspace_override(workspace, provider, "model")
+        if override:
+            return override
 
         descriptor = provider_registry.get(provider)
         if descriptor is None:
@@ -1389,15 +1530,20 @@ class CiaoConfig:
             return workspace_config.default_provider
         return "claude"
 
-    def default_mode_for_provider(self, provider: str) -> BridgeMode:
+    def default_mode_for_provider(
+        self, provider: str, workspace: str | None = None
+    ) -> BridgeMode:
         """The default execution (permission) mode for new chats on ``provider``.
 
-        An operator pin (Settings → Providers → permission mode) wins;
-        otherwise every provider falls back to ``claude_mode`` (auto).
+        A ``workspace`` override wins; then an operator pin (Settings →
+        Providers → permission mode); otherwise every provider falls back to ``claude_mode`` (auto).
         ``manual`` maps to the BridgeMode ``normal`` — ask for every
         action; ``bypass`` allows everything; ``auto`` runs the permissive
         classifier-gated default.
         """
+        override = self.workspace_override(workspace, provider, "permission_mode")
+        if override:
+            return cast(BridgeMode, "normal" if override == "manual" else override)
         mode = (self.provider_default_modes or {}).get(provider, "")
         if mode in {"normal", "plan", "auto", "bypass"}:
             return cast(BridgeMode, mode)

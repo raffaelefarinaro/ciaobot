@@ -565,6 +565,22 @@ def test_workspace_archive_restore_resets_memory_handover_to_off(tmp_path):
     assert config.workspaces["work"].memory_handover == "off"
 
 
+def test_workspace_archive_restore_does_not_restore_provider_overrides(tmp_path):
+    """Overrides can carry bypass, so a restore comes back on engine defaults."""
+    from ciao.workspace_archive import restored_settings
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    config.workspaces["work"].provider_overrides = {"claude": {"permission_mode": "bypass"}}
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    metadata = {"workspace": {"default_provider": "claude", "provider_overrides": {"claude": {"permission_mode": "bypass"}}}}
+    assert "provider_overrides" not in restored_settings(config, metadata)
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert config.workspaces["work"].provider_overrides == {}
+
+
 def test_restore_refuses_a_taken_name(tmp_path):
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
     archived = client.post("/api/workspaces/work/archive").json()["archived"]

@@ -58,10 +58,17 @@ def test_the_two_classifications_are_not_mutually_exclusive() -> None:
     assert insights.is_context_overflow(both)
 
 
+def _override_reader(models: dict[str, str]):
+    """Stand-in for CiaoConfig.insights_model_override (no workspace overrides)."""
+    return lambda provider, workspace=None: models.get(provider, "")
+
+
 def test_a_providers_insights_model_wins_over_its_default() -> None:
     defaults = {"claude": "sonnet", "opencode": "vendor/default"}
+    models = {"opencode": "vendor/insights"}
     config = SimpleNamespace(
-        provider_insights_models={"opencode": "vendor/insights"},
+        provider_insights_models=models,
+        insights_model_override=_override_reader(models),
         default_model_for_workspace=lambda workspace, provider: defaults[provider],
     )
     assert insights.resolve_insights_model(config, "work", "opencode") == "vendor/insights"
@@ -70,8 +77,10 @@ def test_a_providers_insights_model_wins_over_its_default() -> None:
 
 
 def test_automatic_insights_inherits_the_source_model() -> None:
+    models: dict[str, str] = {}
     config = SimpleNamespace(
-        provider_insights_models={},
+        provider_insights_models=models,
+        insights_model_override=_override_reader(models),
         default_model_for_workspace=lambda workspace, provider: "default-model",
     )
     for provider, model in (("claude", "opus"), ("opencode", "vendor/chat-model")):
@@ -86,8 +95,10 @@ def test_automatic_insights_inherits_the_source_model() -> None:
 
 def _helper_config(overrides: dict[str, str] | None = None) -> SimpleNamespace:
     defaults = {"claude": "opus", "opencode": "vendor/default"}
+    models = dict(overrides or {})
     return SimpleNamespace(
-        provider_insights_models=dict(overrides or {}),
+        provider_insights_models=models,
+        insights_model_override=_override_reader(models),
         default_model_for_workspace=lambda workspace, provider: defaults[provider],
     )
 
