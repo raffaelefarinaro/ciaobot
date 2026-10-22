@@ -112,7 +112,8 @@ export function collectTraceOutputs(
 
 /** One list of files for a whole chat, from each turn's outputs: the same
  *  file across turns (or spelled absolute vs relative) is one row, keeping
- *  the first spelling and the most telling action. */
+ *  the spelling met first (callers that walk the turns newest-first get the
+ *  latest) and the most telling action. */
 export function mergeTraceOutputs(lists: Iterable<TraceOutput[] | undefined>): TraceOutput[] {
   const keys: string[] = []
   const merged: TraceOutput[] = []
