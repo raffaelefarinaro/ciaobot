@@ -297,7 +297,7 @@ onBeforeUnmount(() => {
         <h2 class="tp-title">Terminal</h2>
         <p class="tp-status">
           <span class="tp-status-item">{{ hostLabel }}</span>
-          <span class="tp-status-item tp-status-folder">{{ folderLabel }}</span>
+          <span class="tp-status-item tp-status-folder" :title="folderLabel">{{ folderLabel }}</span>
           <span class="tp-status-item">{{ platformLabel }}</span>
         </p>
       </div>
@@ -441,9 +441,20 @@ onBeforeUnmount(() => {
   gap: 2px var(--space-2);
   font-size: var(--text-xs);
   color: var(--fg3);
+  min-width: 0;
 }
 .tp-status-item { overflow-wrap: anywhere; }
-.tp-status-folder { font-family: var(--font-mono); }
+/* The folder is a path: it is shown, and it is never wrapped into a
+   column. A phone's drawer has room for a line of it, and the whole path
+   is in the tooltip. */
+.tp-status-folder {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  min-width: 0;
+}
 .tp-actions {
   display: flex;
   flex-wrap: wrap;
@@ -624,6 +635,16 @@ onBeforeUnmount(() => {
 .terminal-pane--drawer .tp-sessions {
   flex: 0 0 auto;
   max-height: 34%;
+}
+/* On a phone the header stacks: the buttons take their own row, so the
+   status line gets the full width and the path is a line of it rather
+   than a column. */
+.terminal-pane--drawer .tp-head {
+  flex-direction: column;
+  align-items: stretch;
+}
+.terminal-pane--drawer .tp-actions {
+  justify-content: flex-start;
 }
 @media (pointer: coarse) {
   .tp-actions :deep(button),
