@@ -111,6 +111,23 @@ describe('ProjectView closure sheet', () => {
     wrapper.unmount()
   })
 
+  it('closes the project with an empty note when the note is only whitespace', async () => {
+    const wrapper = await openClosureSheet()
+
+    // A draft of spaces is no note at all: it closes the project the same way
+    // a blank field does, rather than travelling to the engine as padding.
+    await wrapper.get('#project-closure-note').setValue('   ')
+    await wrapper.get('.modal-sheet form').trigger('submit')
+    await flush()
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/project-1/complete', {
+      outcome: 'completed',
+      note: '',
+    })
+    wrapper.unmount()
+  })
+
   it('sends the typed note trimmed', async () => {
     const wrapper = await openClosureSheet()
 
