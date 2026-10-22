@@ -84,6 +84,7 @@ from ciao.task_updates import (
     strip_updates,
     unseen_updates,
 )
+from ciao.terminal_offer import TerminalOfferError, normalize_terminal_offer
 from ciao.web.chat_service import MEMORY_PASS_RESOLUTION_MAX
 from ciao.web.transcript_service import _assemble_chat_messages
 from ciao.web.routes_webhooks import webhook_store
@@ -2659,6 +2660,79 @@ class CiaoControlPlane:
             return _ok({"chat_id": chat_id, "status": "queued"})
         self.pcm.start_stream(chat_id, text)
         return _ok({"chat_id": chat_id, "status": "started"})
+
+    def chat_terminal_offer(self, principal: AgentPrincipal, command: str) -> dict[str, Any]:
+        """Offer a suggested terminal command to the *calling* chat.
+
+        The command is guidance, not an action: the user reads it, copies it and
+        runs it themselves. Nothing here executes it, opens a terminal, unlocks
+        a session or reads output back — the state that holds it is transient
+        and in memory only (#1840).
+
+        There is no chat argument, and that is the whole point of the shape.
+        An offer is a command on somebody's screen, so the screen is the chat
+        that asked for it; a target argument would let a caller put one
+        anywhere it could name. The chat is therefore the principal's own, and
+        it is resolved by its *exact* id: ``_chat_scope`` falls back to an
+        unambiguous title, which is right for ``chat get`` and wrong here,
+        because a title is a name the caller chose.
+
+        The command is untrusted, model-authored text and can carry a
+        credential, so a refusal is static: it names a reason and never the
+        rejected text, which would end up in a log line and a telemetry
+        field. A value of the wrong *type* never reaches this method — the
+        transport's schema refuses it first — and a *constraint* on the text
+        is deliberately not part of that schema, because a constraint would
+        put a rejected command inside the validation error.
+
+        Plan mode may still offer: the command is text the user reviews, the
+        same classification ``file_surface`` has. An unattended turn may not:
+        a schedule has nobody in front of the screen to review the text.
+        """
+        chat_id = str(principal.chat_id or "").strip()
+        if not chat_id:
+            raise ControlPlaneError(
+                "chat_required", "No active chat to offer a terminal command to."
+            )
+        if self.pcm.get_chat(chat_id) is None:
+            # The exact id or nothing: a title must not resolve here.
+            raise ControlPlaneError("chat_not_found", "The calling chat was not found.")
+        # Authorization: the chat must live in the principal's own workspace.
+        chat, _project = self._chat_scope(principal, chat_id)
+        if chat.archived:
+            raise ControlPlaneError(
+                "chat_archived", "Cannot offer a terminal command in an archived chat."
+            )
+        if self._unattended_turn(principal):
+            raise ControlPlaneError(
+                "unattended_forbidden",
+                "A suggested terminal command requires an attended turn.",
+            )
+        try:
+            normalized = normalize_terminal_offer(command)
+        except TerminalOfferError as exc:
+            # `exc.reason` is a closed word ("empty", "too_long", ...); the
+            # command it came from never appears.
+            raise ControlPlaneError(
+                "invalid_terminal_command",
+                f"The suggested command was refused ({exc.reason}).",
+            ) from exc
+        try:
+            payload = self.pcm.set_terminal_offer(chat.chat_id, normalized)
+        except TerminalOfferError as exc:
+            raise ControlPlaneError(
+                "invalid_terminal_command",
+                f"The suggested command was refused ({exc.reason}).",
+            ) from exc
+        except ValueError:
+            # The manager's own refusals are static, and so is this one: the
+            # command never appears in an error string.
+            raise ControlPlaneError(
+                "invalid_terminal_command", "The suggested command was refused."
+            ) from None
+        if payload is None:
+            raise ControlPlaneError("chat_not_found", "The calling chat was not found.")
+        return _ok({"chat_id": chat.chat_id, "terminal_offer": payload})
 
     def chat_continue(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)

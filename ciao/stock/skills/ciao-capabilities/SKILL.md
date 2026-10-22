@@ -39,7 +39,7 @@ Each area has a reference file next to this one. Open only the file the question
 | Area | What it covers | Read |
 |---|---|---|
 | Workspaces, projects, chats | hierarchy, file access, archiving a workspace, `ciao project`, linked repos, code mode, forks, subagents, background runs, plan mode, turn resilience | `references/workspaces-and-chats.md` |
-| Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, Memory Map, Vault Review, retirement candidates, conversation import, memory backup | `references/memory.md` |
+| Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, the optional reason on every decision, Memory Map, Vault Review, retirement candidates, conversation import, memory backup | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
 | Files | viewer and pinned panel, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
 | Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, queue and steer, `gws` | `references/models-and-extensions.md` |
@@ -53,7 +53,7 @@ Ciaobot deliberately does not build in dictation, keeping the host awake, an age
 
 ## Privacy and trust posture
 
-Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept). An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. The agent's file access is set per workspace (File access, in `references/workspaces-and-chats.md`): under Workspace only it cannot read outside that workspace's folder, but the network is not restricted.
+Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, every individual accept or dismiss in the queue asks for an optional reason before it writes (picking a re-home destination is the exception; the destination is the answer), and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept). An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. The agent's file access is set per workspace (File access, in `references/workspaces-and-chats.md`): under Workspace only it cannot read outside that workspace's folder, but the network is not restricted.
 
 ## Guided tour (new users)
 

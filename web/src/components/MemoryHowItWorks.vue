@@ -81,10 +81,10 @@
           </div>
           <p class="mhw-note">Settings → General → Memory handover can let Workspace care act on its guess for memory and profile: off, dismiss, or dismiss and accept. Accept is capped at 5 per run, and each one has Undo in History. Not available on every install.</p>
 
-          <h3 class="mhw-sub">Why? reasons</h3>
+          <h3 class="mhw-sub">Why you decided</h3>
           <ul class="mhw-list">
-            <li>Say why when you accept or dismiss. It is optional.</li>
-            <li>Each week Ciaobot distills your reasons into two notes you can edit: Memory-Review-Rules and Task-Rules. Memory passes and task hand-offs read them as hints.</li>
+            <li>Accepting or dismissing a suggestion asks why first. It is optional — you can continue without one. The one thing it does not ask is which workspace a re-home should move a note to: there the destination is the answer.</li>
+            <li>Each week Ciaobot distills your reasons into two notes you can edit: Memory-Review-Rules and Task-Rules. It waits until there are enough new decisions, so it is a weekly tidy rather than a second daily job. Memory passes and task hand-offs read them as hints.</li>
           </ul>
 
           <h3 class="mhw-sub">Add a category</h3>
