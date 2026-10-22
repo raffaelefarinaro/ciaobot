@@ -33,6 +33,7 @@ import type {
   BackgroundRunLog,
   BackgroundRunSummary,
   SubagentTranscript,
+  TerminalOffer,
   WsEvent,
   QueueDelivery,
   SteerFallbackReason,
@@ -1916,11 +1917,14 @@ export const useProjectStore = defineStore('projects', () => {
     const initialHistory = initialChatId
       ? loadMessages(initialChatId, { waitForSettledReply: true })
       : undefined
+    // The offer watermark is captured before the request, not when it lands:
+    // a payload that raced a newer offer change must not roll it back.
+    const initialDetailReadStart = initialChatId ? terminalOfferReadStart() : 0
     const initialDetail = initialChatId
       ? api.get<ChatInfo>(`/api/chats/${encodeURIComponent(initialChatId)}`)
         .then(chat => {
           if (routeChatId() === initialChatId) {
-            replaceChat(chat)
+            replaceChat(chat, initialDetailReadStart)
             activeChatId.value = initialChatId
           }
           return chat
@@ -1932,6 +1936,7 @@ export const useProjectStore = defineStore('projects', () => {
         restoreState()
         restoreUnread()
       }
+      const listReadStart = terminalOfferReadStart()
       const [workspaceResponse, p, c] = await Promise.all([
         api.get<WorkspacesResponse>('/api/workspaces'),
         api.get<ProjectInfo[]>('/api/projects'),
@@ -1944,7 +1949,7 @@ export const useProjectStore = defineStore('projects', () => {
       projects.value = p
       // Keep an archived deep link's prefetched history through reconciliation.
       if (initialDetail) await initialDetail
-      reconcileActiveChats(c)
+      reconcileActiveChats(c, listReadStart)
       // Offer back any draft whose chat no longer exists — most likely swept
       // as an abandoned empty chat before its unsent text could be sent (#277).
       // Load-time only (not on every in-session refresh; `bootstrapped` is
@@ -1962,7 +1967,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (initialDetail) {
         const detail = await initialDetail
         // The catalog may have been captured before this particular chat.
-        if (detail && routeChatId() === initialChatId) replaceChat(detail)
+        if (detail && routeChatId() === initialChatId) replaceChat(detail, initialDetailReadStart)
       }
       // Resolve the current route after bootstrap: navigation during the
       // requests must not be undone by the route that started them.
@@ -2082,7 +2087,130 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  function reconcileChatList(nextChats: ChatInfo[]) {
+  // ── Transient terminal offers ────────────────────────────────────────
+  //
+  // A command the assistant suggested in a chat. The engine owns it; this
+  // map is the browser's transient copy: it lives in memory only (never
+  // persisted, never derived from the chat rows), so a reload starts empty
+  // and the `/ws/events` snapshot is the only way back. The command itself
+  // is untrusted text the user reviews and runs; nothing here executes it.
+  const terminalOffers = ref<Record<string, TerminalOffer>>({})
+
+  // A monotonic counter that orders the offer state against the HTTP reads
+  // that can overwrite it. Every read start and every accepted change takes
+  // the next value, so "did this read start before that change?" is a
+  // comparison of two integers. A wall clock would not do: two events in
+  // the same millisecond would compare equal, and the read that raced them
+  // would be taken as fresh.
+  let terminalOfferClock = 0
+  // The clock value of the last global snapshot, and of the last change for
+  // each chat. A read may only write when neither of them is newer than it.
+  let terminalOfferSnapshotClock = 0
+  const terminalOfferChatClock: Record<string, number> = {}
+
+  function nextTerminalOfferClock(): number {
+    terminalOfferClock += 1
+    return terminalOfferClock
+  }
+
+  /**
+   * The clock value a read has to reach to be allowed to write. A read that
+   * started before the newest change for that chat is stale: its payload
+   * predates the change and must not roll it back.
+   */
+  function terminalOfferWatermark(chatId: string): number {
+    return Math.max(terminalOfferSnapshotClock, terminalOfferChatClock[chatId] ?? 0)
+  }
+
+  /**
+   * Capture the point in the offer timeline a read starts at. Call this
+   * BEFORE the request: an answer is only as fresh as the question that
+   * asked for it, so a watermark taken when the response lands would take
+   * every stale reply for a fresh one.
+   */
+  function terminalOfferReadStart(): number {
+    return nextTerminalOfferClock()
+  }
+
+  /**
+   * A well-formed offer is a non-empty id and a non-empty command. The
+   * command is never rewritten here — the engine owns its text, and this
+   * client only ever displays it.
+   */
+  function isTerminalOffer(value: unknown): value is TerminalOffer {
+    if (!value || typeof value !== 'object') return false
+    const candidate = value as { id?: unknown; command?: unknown }
+    return typeof candidate.id === 'string' && candidate.id.length > 0
+      && typeof candidate.command === 'string' && candidate.command.trim().length > 0
+  }
+
+  /**
+   * Apply the offer a payload carried. A payload that raced a newer event or
+   * a newer snapshot is stale and changes nothing; a fresh one writes the
+   * offer, or clears it when the payload names none.
+   */
+  function applyTerminalOfferRead(
+    chatId: string,
+    offer: TerminalOffer | null,
+    readStartedAt: number,
+  ): boolean {
+    if (readStartedAt < terminalOfferWatermark(chatId)) return false
+    if (offer) terminalOffers.value[chatId] = { id: offer.id, command: offer.command }
+    else delete terminalOffers.value[chatId]
+    return true
+  }
+
+  /**
+   * Hydrate one chat's offer from a payload row. An archived row never
+   * hydrates: the command died with the chat, and a preserved archived row
+   * must not bring it back.
+   */
+  function applyTerminalOfferFromChatInfo(chat: ChatInfo, readStartedAt: number): void {
+    if (chat.archived) return
+    applyTerminalOfferRead(chat.chat_id, chat.terminal_offer ?? null, readStartedAt)
+  }
+
+  /**
+   * The complete offer map from the `/ws/events` snapshot. It replaces the
+   * map: the snapshot names every chat that holds an offer, so a chat it
+   * does not name holds none. A chat this client has not listed yet keeps
+   * its row — the snapshot can arrive before the chat list.
+   */
+  function applyTerminalOfferSnapshot(offers: Record<string, TerminalOffer>): void {
+    const next: Record<string, TerminalOffer> = {}
+    for (const [chatId, offer] of Object.entries(offers)) {
+      // The engine only ever sends `{id, command}`; an entry that is not
+      // one is left out rather than carried into the map as half an offer.
+      if (!isTerminalOffer(offer)) continue
+      next[chatId] = { id: offer.id, command: offer.command }
+    }
+    terminalOffers.value = next
+    terminalOfferSnapshotClock = nextTerminalOfferClock()
+  }
+
+  /**
+   * Apply a change the engine announced: an offer, or its removal. The chat
+   * is stamped, so a read that was already in flight cannot roll the change
+   * back.
+   */
+  function setTerminalOffer(chatId: string, offer: TerminalOffer | null): void {
+    terminalOfferChatClock[chatId] = nextTerminalOfferClock()
+    if (offer) terminalOffers.value[chatId] = { id: offer.id, command: offer.command }
+    else delete terminalOffers.value[chatId]
+  }
+
+  /**
+   * The offers of the chats a set of projects took with them. A chat that is
+   * gone holds no command, and its id is stamped so a read still in flight
+   * cannot bring the command back.
+   */
+  function clearTerminalOffersForProjects(projectIds: Set<string>): void {
+    for (const chat of chats.value) {
+      if (projectIds.has(chat.project_id)) setTerminalOffer(chat.chat_id, null)
+    }
+  }
+
+  function reconcileChatList(nextChats: ChatInfo[], readStartedAt: number = terminalOfferClock) {
     const applied = applyPendingArchived(nextChats)
     chats.value = applied
     hydrateParkedQueues(applied)
@@ -2091,6 +2219,12 @@ export const useProjectStore = defineStore('projects', () => {
     // chat id a pre-#1119 build left in the browser-local pin/dismissal keys.
     for (const chat of nextChats) applyChatPinFromChatInfo(chat)
     pruneChatPins(nextChats.map(ch => ch.chat_id))
+
+    // Hydrate the transient offers from the same payload, under the same
+    // watermark: a list that raced a newer offer change must not roll it
+    // back, and a list read after it may clear an offer the engine no
+    // longer holds.
+    for (const chat of applied) applyTerminalOfferFromChatInfo(chat, readStartedAt)
 
     // Rebase any receipt-time snippet stamps now that the server's real
     // activity times are available (see lastResultSnippetNeedsRebase).
@@ -2139,7 +2273,7 @@ export const useProjectStore = defineStore('projects', () => {
    * preserved from what we already hold locally instead of being dropped by a
    * wholesale array replace. Active rows replace their peers in place.
    */
-  function reconcileActiveChats(activeChats: ChatInfo[]) {
+  function reconcileActiveChats(activeChats: ChatInfo[], readStartedAt: number = terminalOfferClock) {
     const merged: ChatInfo[] = []
     const activeById = new Map(activeChats.map(c => [c.chat_id, c]))
     for (const existing of chats.value) {
@@ -2158,7 +2292,7 @@ export const useProjectStore = defineStore('projects', () => {
     for (const c of activeById.values()) merged.push(c)
     chats.value = merged
     // Reuse reconcileChatList's side effects (message pruning, unread, overlay).
-    reconcileChatList(merged)
+    reconcileChatList(merged, readStartedAt)
   }
 
   function hasSettledHistory(chatId: string): boolean {
@@ -2208,8 +2342,9 @@ export const useProjectStore = defineStore('projects', () => {
       // chats, which this poll never needs — archived rows are held locally.
       // This keeps the every-15s refresh light instead of re-shipping the
       // whole registry to the client on each tick.
+      const listReadStart = terminalOfferReadStart()
       const latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
-      reconcileActiveChats(latestChats)
+      reconcileActiveChats(latestChats, listReadStart)
 
       const chatId = activeChatId.value
       const chatStillOpen = chatId
@@ -2391,6 +2526,8 @@ export const useProjectStore = defineStore('projects', () => {
     projects.value.forEach(p => { if (p.workspace === name) projectIds.add(p.project_id) })
     projects.value = projects.value.filter(p => !projectIds.has(p.project_id))
     projectIds.forEach(clearDraftsForProject)
+    // The archived workspace's chats go with it, and so do their commands.
+    clearTerminalOffersForProjects(projectIds)
     chats.value = chats.value.filter(c => !projectIds.has(c.project_id))
     if (selectedInWorkspace && selectedChatId) {
       disconnectWs(selectedChatId)
@@ -2474,6 +2611,8 @@ export const useProjectStore = defineStore('projects', () => {
     const report = await api.del<ProjectDeleteReport>(`/api/projects/${projectId}?delete_vault=1`)
     projects.value = projects.value.filter(p => p.project_id !== projectId)
     clearDraftsForProject(projectId)
+    // The project's chats go with it, and so do the commands they offered.
+    clearTerminalOffersForProjects(new Set([projectId]))
     chats.value = chats.value.filter(c => c.project_id !== projectId)
     if (activeChatProject === projectId) {
       if (activeChatId.value) disconnectWs(activeChatId.value)
@@ -2493,6 +2632,8 @@ export const useProjectStore = defineStore('projects', () => {
     })
     projects.value = projects.value.filter(p => p.project_id !== projectId)
     clearDraftsForProject(projectId)
+    // The completed project's chats go with it, and so do their commands.
+    clearTerminalOffersForProjects(new Set([projectId]))
     chats.value = chats.value.filter(c => c.project_id !== projectId)
     if (activeChatProject === projectId) {
       if (activeChatId.value) disconnectWs(activeChatId.value)
@@ -2542,6 +2683,7 @@ export const useProjectStore = defineStore('projects', () => {
       try {
         // A runtime override (home's model picker) rides the create call; the
         // server otherwise starts the chat on the workspace default.
+        const readStart = terminalOfferReadStart()
         const c = await api.post<ChatInfo>(
           `/api/projects/${projectId}/chats`,
           runtime ? { title, model: runtime.model, provider: runtime.provider } : { title },
@@ -2549,7 +2691,7 @@ export const useProjectStore = defineStore('projects', () => {
         // The server also broadcasts chat_created for this same chat. The
         // broadcast can arrive before the POST response, so reconcile through
         // the ID-aware helper instead of pushing a possible duplicate.
-        replaceChat(c)
+        replaceChat(c, readStart)
         messages.value[c.chat_id] = []
         // Write before switching: ChatPanel reads the draft once at mount, so
         // this must already be in storage before the new panel mounts below.
@@ -2571,10 +2713,12 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function renameChat(chatId: string, title: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, { title })
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+    applyTerminalOfferFromChatInfo(c, readStart)
   }
 
   async function updateChat(
@@ -2587,10 +2731,12 @@ export const useProjectStore = defineStore('projects', () => {
       code_mode?: boolean
     },
   ) {
+    const readStart = terminalOfferReadStart()
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+    applyTerminalOfferFromChatInfo(c, readStart)
   }
 
   /** PATCH a chat's code mode. Throws the ApiError so the chip can show the engine's message. */
@@ -2603,11 +2749,12 @@ export const useProjectStore = defineStore('projects', () => {
     updates: { model: string; provider: RuntimeProvider },
   ) {
     const visibleMessages = normalizeMessages(messages.value[chatId] || [])
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {
       ...updates,
       messages: visibleMessages,
     })
-    replaceChat(c)
+    replaceChat(c, readStart)
     await loadMessages(chatId)
     if (activeChatId.value === chatId) {
       disconnectWs(chatId)
@@ -2622,11 +2769,12 @@ export const useProjectStore = defineStore('projects', () => {
     turnIndex: number,
   ) {
     const snapshot = normalizeMessages(copiedMessages)
+    const readStart = terminalOfferReadStart()
     const fork = await api.post<ChatInfo>(`/api/chats/${chatId}/fork`, {
       messages: snapshot,
       turn_index: turnIndex,
     })
-    replaceChat(fork)
+    replaceChat(fork, readStart)
     messages.value[fork.chat_id] = snapshot
     persistMessages()
     await switchChat(fork.chat_id)
@@ -2636,10 +2784,12 @@ export const useProjectStore = defineStore('projects', () => {
   async function moveChat(chatId: string, targetProjectId: string) {
     // Server validates same-workspace + non-archived + project exists.
     // The chat_moved broadcast on /ws/events also reconciles other tabs.
+    const readStart = terminalOfferReadStart()
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, { project_id: targetProjectId })
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+    applyTerminalOfferFromChatInfo(c, readStart)
     return c
   }
 
@@ -2653,6 +2803,8 @@ export const useProjectStore = defineStore('projects', () => {
     const query = options?.onlyIfEmpty ? '?only_if_empty=1' : ''
     const result = await api.del<{ deleted?: boolean }>(`/api/chats/${chatId}${query}`)
     if (options?.onlyIfEmpty && result?.deleted === false) return false
+    // The chat is gone for good, and the command it offered went with it.
+    setTerminalOffer(chatId, null)
     // Deliberate delete: the chat is really gone, so any draft riding along
     // with it is by construction never a sweep casualty — clear it now.
     clearChatDraft(chatId)
@@ -2836,6 +2988,9 @@ export const useProjectStore = defineStore('projects', () => {
       // emitted after the archive request has already cleared this pane.
       if (c) c.postprocess = res.postprocess
     }
+    // The archive committed, so the command the chat offered died with it.
+    // Not before: a refused archive leaves the chat, and its offer, alone.
+    setTerminalOffer(chatId, null)
     delete archivingChats.value[chatId]
     // Active already cleared optimistically; keep the guard for races where
     // the user switched chats between the optimistic clear and the response.
@@ -2846,32 +3001,39 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function continueArchivedChat(chatId: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/continue`)
     chats.value.push(c)
+    // A continued chat starts with no offer: the command belonged to the
+    // archived conversation, and it is not copied into the new one.
+    applyTerminalOfferFromChatInfo(c, readStart)
     messages.value[c.chat_id] = []
     switchChat(c.chat_id)
     return c
   }
 
   async function setChatRetry(chatId: string, prompt: string, images?: string[]) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, {
       action: 'set',
       prompt,
       images: images || [],
     })
-    replaceChat(c)
+    replaceChat(c, readStart)
     return c
   }
 
   async function stopChatRetry(chatId: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, { action: 'stop' })
-    replaceChat(c)
+    replaceChat(c, readStart)
     return c
   }
 
   async function tryChatRetryNow(chatId: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, { action: 'try_now' })
-    replaceChat(c)
+    replaceChat(c, readStart)
     reattachActiveChatSocket(chatId)
     return c
   }
@@ -2885,11 +3047,12 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  function replaceChat(chat: ChatInfo) {
+  function replaceChat(chat: ChatInfo, readStartedAt: number = terminalOfferClock) {
     const idx = chats.value.findIndex(x => x.chat_id === chat.chat_id)
     if (idx >= 0) chats.value[idx] = chat
     else chats.value.push(chat)
     applyChatPinFromChatInfo(chat)
+    applyTerminalOfferFromChatInfo(chat, readStartedAt)
     hydrateParkedQueues([chat])
   }
 
@@ -2921,11 +3084,14 @@ export const useProjectStore = defineStore('projects', () => {
     path: string,
     expectedRevision: number,
   ): Promise<ChatPinState> {
+    // The response is a whole ChatInfo, so it hydrates the transient offer
+    // too: capture the watermark before the request, not when it lands.
+    const readStart = terminalOfferReadStart()
     try {
       const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, {
         pin: { path, expected_revision: expectedRevision },
       })
-      replaceChat(c)
+      replaceChat(c, readStart)
       return chatPinStateFromChat(c)
     } catch (e) {
       const err = e as { status?: number; payload?: PinConflictPayload }
@@ -2936,7 +3102,61 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  /**
+   * Dismiss the command a chat offered.
+   *
+   * The body is exactly the contract's `{terminal_offer:{expected_id}}`: a
+   * dismissal never carries a pin, a title or anything else, so it can
+   * never race another write on the same chat. A 409 means another offer
+   * took the chat's place: the engine's offer is adopted and the conflict
+   * is reported, so the caller can show what is there now. A malformed
+   * conflict body is never repaired into "no offer" — the caller retries,
+   * and the state on screen stays as it is until the engine says otherwise.
+   */
+  async function dismissTerminalOffer(
+    chatId: string,
+    expectedId: string,
+  ): Promise<'dismissed' | 'conflict'> {
+    // Captured before the request: the answer is only as fresh as the
+    // question that asked for it.
+    const readStartedAt = terminalOfferReadStart()
+    try {
+      await api.patch<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`, {
+        terminal_offer: { expected_id: expectedId },
+      })
+    } catch (e) {
+      const err = e as { status?: number; payload?: { error?: string; terminal_offer?: unknown } }
+      if (err?.status !== 409) throw e
+      const payload = err.payload
+      if (payload?.error !== 'terminal_offer_conflict') throw e
+      const current = payload.terminal_offer
+      if (current === null) {
+        // The engine holds no offer any more: adopt that, and report the
+        // conflict so the caller knows the id it presented was stale.
+        if (applyTerminalOfferRead(chatId, null, readStartedAt)) {
+          terminalOfferChatClock[chatId] = nextTerminalOfferClock()
+        }
+        return 'conflict'
+      }
+      if (!isTerminalOffer(current)) {
+        // A malformed conflict body is not turned into "no offer": half an
+        // offer is not a state, and repairing it would silently drop a
+        // command the user never dismissed.
+        throw e
+      }
+      if (applyTerminalOfferRead(chatId, current, readStartedAt)) {
+        terminalOfferChatClock[chatId] = nextTerminalOfferClock()
+      }
+      return 'conflict'
+    }
+    if (applyTerminalOfferRead(chatId, null, readStartedAt)) {
+      terminalOfferChatClock[chatId] = nextTerminalOfferClock()
+    }
+    return 'dismissed'
+  }
+
   async function newSession(chatId: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/new`)
     // A reset clears `archived` server-side on the same chat_id, so any stale
     // local archive intent for it must go with it.
@@ -2944,6 +3164,9 @@ export const useProjectStore = defineStore('projects', () => {
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+    // A new provider session starts with no offer: the command belonged to
+    // the session that is gone.
+    applyTerminalOfferFromChatInfo(c, readStart)
     messages.value[chatId] = []
     persistMessages()
     // Reconnect WebSocket for fresh session
@@ -3700,8 +3923,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function ensureChatInfo(chatId: string): Promise<void> {
     if (canOpenChat(chatId)) return
+    const readStart = terminalOfferReadStart()
     try {
-      replaceChat(await api.get<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`))
+      replaceChat(await api.get<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`), readStart)
     } catch {
       // A deleted or inaccessible deep link must not select an unknown chat.
     }
@@ -4300,6 +4524,9 @@ export const useProjectStore = defineStore('projects', () => {
       const gone = new Set(dropped)
       dropped.forEach(clearDraftsForProject)
       const selected = activeChat.value
+      // The dropped projects' chats go with them, and so do the commands
+      // they offered.
+      clearTerminalOffersForProjects(gone)
       chats.value = chats.value.filter(c => !gone.has(c.project_id))
       if (selected && gone.has(selected.project_id) && activeChatId.value === selected.chat_id) {
         disconnectWs(selected.chat_id)
@@ -4341,6 +4568,10 @@ export const useProjectStore = defineStore('projects', () => {
         // closed/archived), so a client that missed a pin/unpin while its socket
         // was down heals to server truth instead of writing stale browser state.
         applyChatPinsSnapshot(msg.chat_pins)
+        // The transient offer map is complete too: the snapshot replaces it,
+        // so an offer the engine no longer holds is cleared, and one it
+        // holds for a chat this client has not listed yet is kept.
+        applyTerminalOfferSnapshot(msg.chat_terminal_offers)
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -4468,8 +4699,9 @@ export const useProjectStore = defineStore('projects', () => {
           }
         }
         // Refresh the chats list so last_activity_at + recent ordering update.
+        const listReadStart = terminalOfferReadStart()
         api.get<ChatInfo[]>('/api/chats?active_only=1')
-          .then(c => reconcileActiveChats(c))
+          .then(c => reconcileActiveChats(c, listReadStart))
           .catch(() => { /* ignore */ })
         // Ensure the active chat's transcript refreshes even when the tab is
         // hidden — otherwise the answer stays invisible until the user opens
@@ -4531,8 +4763,9 @@ export const useProjectStore = defineStore('projects', () => {
           void loadSubagents(msg.chat_id)
         }
         // Keep sidebar ordering and last-activity timestamps in sync.
+        const listReadStart = terminalOfferReadStart()
         api.get<ChatInfo[]>('/api/chats?active_only=1')
-          .then(c => reconcileActiveChats(c))
+          .then(c => reconcileActiveChats(c, listReadStart))
           .catch(() => { /* ignore */ })
         break
       }
@@ -4603,6 +4836,8 @@ export const useProjectStore = defineStore('projects', () => {
           if (msg.archive_path) chat.archive_path = msg.archive_path
         }
         if (archivingChats.value[msg.chat_id]) delete archivingChats.value[msg.chat_id]
+        // The command died with the chat.
+        setTerminalOffer(msg.chat_id, null)
         // Hold the local flag until a chat-list payload agrees: a GET that left
         // before the archive committed can still resolve after this event.
         pendingArchived.value.add(msg.chat_id)
@@ -4633,8 +4868,9 @@ export const useProjectStore = defineStore('projects', () => {
         // second fetch of the same chat. Harmless; keep it, the agent's switches need it.
         // The event has no after_turn_index; the server's ChatInfo does. Refetch
         // rather than guess the anchor (an optimistic user row has no turn_index yet).
+        const readStart = terminalOfferReadStart()
         void api.get<ChatInfo>(`/api/chats/${encodeURIComponent(msg.chat_id)}`)
-          .then((fresh) => { replaceChat(fresh) })
+          .then((fresh) => { replaceChat(fresh, readStart) })
           .catch(() => { /* next chats load heals it */ })
         break
       }
@@ -4650,6 +4886,16 @@ export const useProjectStore = defineStore('projects', () => {
         }, { source: 'event' })
         break
       }
+      case 'chat_terminal_offer_changed': {
+        // The engine offered (or dropped) a command. Nothing else happens
+        // here: an archived chat holds no offer, so a late event cannot give
+        // it one, and the command is never run — only displayed.
+        const chat = chats.value.find(c => c.chat_id === msg.chat_id)
+        if (chat?.archived) break
+        if (msg.terminal_offer !== null && !isTerminalOffer(msg.terminal_offer)) break
+        setTerminalOffer(msg.chat_id, msg.terminal_offer)
+        break
+      }
       case 'chat_deleted': {
         // Fires when the server prunes an empty chat (user created a "New
         // Chat" and never sent a message, then moved on) or when another
@@ -4659,6 +4905,8 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
         }
+        // The chat is gone, and so is the command it offered.
+        setTerminalOffer(msg.chat_id, null)
         dropChatPinState(msg.chat_id)
         if (messages.value[msg.chat_id]) delete messages.value[msg.chat_id]
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
@@ -4691,6 +4939,9 @@ export const useProjectStore = defineStore('projects', () => {
         const selectedChatId = activeChat.value?.project_id === msg.project_id
           ? activeChatId.value
           : null
+        // The project's chats go with it, and so do the commands they
+        // offered.
+        clearTerminalOffersForProjects(new Set([msg.project_id]))
         projects.value = projects.value.filter(p => p.project_id !== msg.project_id)
         chats.value = chats.value.filter(c => c.project_id !== msg.project_id)
         if (selectedChatId) {
@@ -6564,6 +6815,7 @@ export const useProjectStore = defineStore('projects', () => {
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    terminalOffers,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
@@ -6592,6 +6844,7 @@ export const useProjectStore = defineStore('projects', () => {
     addFileCommentImage, removeFileCommentImage,
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
+    terminalOfferReadStart, dismissTerminalOffer,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
