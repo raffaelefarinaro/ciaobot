@@ -7908,8 +7908,9 @@ details[open] > .activity-summary::before {
   opacity: 0.7;
 }
 
-/* Pinned-file split: when the chat column is narrow, reclaim horizontal
-   space from gutter padding so bubbles stay readable without extra scroll. */
+/* The split — a pinned file beside the chat, or the terminal's tile: when
+   the chat column is narrow, reclaim horizontal space from gutter padding so
+   bubbles stay readable without extra scroll. */
 @container chat-split (max-width: 560px) {
   .messages {
     padding: 8px 6px 16px 6px;
