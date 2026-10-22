@@ -313,10 +313,6 @@ class _FakeWin32:
             return 0xFFFFFFFF
         return 1
 
-    def SetHandleInformation(self, handle: Any, mask: int, flags: int) -> int:
-        self._record("SetHandleInformation", handle, mask, flags)
-        return 1
-
     def TerminateProcess(self, handle: Any, code: int) -> int:
         self._record("TerminateProcess", handle, code)
         self.wait_release.set()
@@ -397,7 +393,6 @@ def _install_fake(monkeypatch: pytest.MonkeyPatch, fake: _FakeWin32) -> None:
         "DeleteProcThreadAttributeList",
         "CreateProcessW",
         "ResumeThread",
-        "SetHandleInformation",
         "TerminateProcess",
         "GetExitCodeProcess",
         "WaitForSingleObject",
@@ -438,23 +433,60 @@ def _names(fake: _FakeWin32) -> list[str]:
 def test_spawn_assigns_the_job_before_resuming_and_never_uses_a_process_group(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The shell must be owned by the job before it runs a single instruction."""
+    """The shell must be owned by the job before it runs a single instruction.
+
+    The child the adapter creates is the helper, not the shell: a fresh
+    process has to clear the ignore-Ctrl+C attribute before the shell is
+    created, or the shell inherits the engine's. The helper is what the
+    adapter spawns, and the shell's executable and its whole argv travel to
+    the helper, which creates the shell with them.
+    """
     fake = _FakeWin32()
     _install_fake(monkeypatch, fake)
     argv = _shell(monkeypatch)
 
+    def make_tree(pid: int, *, dies_with_engine: bool = False) -> _FakeProcessTree:
+        # The job's creation is recorded among the native calls, so the
+        # order of the whole transaction can be asserted.
+        fake._record("ProcessTree")
+        tree = _FakeProcessTree(pid, dies_with_engine=dies_with_engine)
+        tree.on_kill = fake.wait_release.set
+        return tree
+
+    monkeypatch.setattr(tw, "ProcessTree", make_tree)
+
     terminal = tw.spawn_terminal(cwd=tmp_path, cols=100, rows=40)
     try:
         names = _names(fake)
-        assert names.index("CreateProcessW") < names.index(
-            "ResumeThread"
-        ), "the child must be created suspended, then resumed"
+        created = names.index("CreateProcessW")
+        assigned = names.index("ProcessTree")
+        resumed = names.index("ResumeThread")
+        assert created < assigned < resumed, (
+            "the child must be created suspended, assigned to the job, and "
+            "only then resumed"
+        )
         flags = fake.spawned[0]["flags"]
         assert flags & tw._CREATE_SUSPENDED, "the child must start suspended"
         assert flags & tw._EXTENDED_STARTUPINFO_PRESENT
         assert flags & tw._CREATE_UNICODE_ENVIRONMENT
         assert not flags & 0x00000200, "no CREATE_NEW_PROCESS_GROUP for a terminal"
-        assert fake.spawned[0]["application"] == argv[0]
+        spawned = fake.spawned[0]
+        command = spawned["command"]
+        # The helper is what is spawned, and the shell's own executable and
+        # its whole argv travel to it.
+        assert spawned["application"] == sys.executable, (
+            "the interpreter that runs the helper is what is spawned"
+        )
+        assert str(tw.CHILD_HELPER) in command, "the helper must be named"
+        assert "-NoLogo" in command, "the shell's argv must travel to the helper"
+        assert "-NoProfile" in command, "the shell's argv must travel to the helper"
+        # The shell is never created with a path guessed from a PATH: the
+        # executable the adapter resolved is what travels to the helper,
+        # and it travels whole.
+        assert argv[0] in command, "the resolved shell path must travel to the helper"
+        assert command.count(Path(argv[0]).name) == 1, (
+            "the shell must be named by its path, and by nothing else"
+        )
     finally:
         terminal.close()
 
@@ -476,6 +508,10 @@ def test_the_child_standard_handles_point_at_the_pseudoconsole(
     (``siEx.StartupInfo.dwFlags = STARTF_USESTDHANDLES;``) with the three
     standard-handle slots left null, because the pseudoconsole replaces the
     child's console rather than its file descriptors.
+
+    The child is the helper, and the helper leaves the three slots null for
+    the shell as well: the shell's input and output are the console's own,
+    and not the engine's.
     """
     fake = _FakeWin32()
     _install_fake(monkeypatch, fake)
@@ -553,8 +589,8 @@ def test_spawn_names_the_shell_explicitly_and_quotes_the_whole_argv(
         assert str(tw.CHILD_HELPER) in command, "the helper must be named"
         assert spawned["cwd"] == str(tmp_path)
         assert (
-            spawned["inherit"] == 1
-        ), "the helper must inherit the pseudoconsole's handle"
+            spawned["inherit"] == 0
+        ), "nothing is inherited: the shell inherits the helper's console"
     finally:
         terminal.close()
 
@@ -2729,7 +2765,7 @@ def test_the_ignore_ctrl_c_attribute_decides_whether_the_event_is_delivered(
     )
     report = (
         f"#1721 ignore-attribute experiment: with the ignore-Ctrl+C attribute "
-        f"set, the 0x03 ran the reader's CancelKeyPress handler: {ignored}; "
+        f"set, the 0x03 ran the probe's control handler: {ignored}; "
         f"with the attribute cleared, it ran: {cleared}"
     )
     print(report)
@@ -2784,6 +2820,31 @@ def test_the_helper_imports_nothing_from_the_engine() -> None:
     assert "from ciao" not in source
 
 
+def test_the_helper_is_inert_on_import_and_prints_nothing() -> None:
+    """Importing the helper does nothing, and it writes no byte.
+
+    The engine's import-all gate loads this module on every platform, so
+    importing it must not touch a console. And the helper's own standard
+    handles are the console's once it runs as the terminal's child, so
+    anything it wrote would land in the user's terminal: importing it
+    writes nothing either.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            f"import runpy; runpy.run_path({str(CHILD_HELPER)!r})",
+        ],
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b""
+    assert result.stderr == b""
+
+
 @_windows_only
 def test_the_helper_reports_a_status_and_never_a_traceback(tmp_path: Path) -> None:
     """A helper that cannot start the shell says so with a status.
@@ -2794,7 +2855,7 @@ def test_the_helper_reports_a_status_and_never_a_traceback(tmp_path: Path) -> No
     """
     missing = str(tmp_path / "no-such-shell.exe")
     result = subprocess.run(
-        [sys.executable, "-I", "-S", str(CHILD_HELPER), "0", missing, missing],
+        [sys.executable, "-I", "-S", str(CHILD_HELPER), missing, missing],
         capture_output=True,
         timeout=30,
     )
@@ -2809,14 +2870,17 @@ def test_the_helper_reports_a_status_and_never_a_traceback(tmp_path: Path) -> No
 @_windows_only
 def test_the_helper_refuses_an_argument_it_cannot_use() -> None:
     """A helper that cannot read its arguments says so with a status."""
-    result = subprocess.run(
-        [sys.executable, "-I", "-S", str(CHILD_HELPER), "not-a-handle"],
-        capture_output=True,
-        timeout=30,
-    )
-    assert result.returncode == 2, "the helper must refuse a bad argument"
-    assert result.stdout == b""
-    assert result.stderr == b""
+    for arguments in ([], ["only-one"], ["one", "two", "three"]):
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", str(CHILD_HELPER), *arguments],
+            capture_output=True,
+            timeout=30,
+        )
+        assert result.returncode == 2, (
+            f"the helper must refuse {arguments!r} with a status"
+        )
+        assert result.stdout == b""
+        assert result.stderr == b""
 
 
 def _process_alive(pid: int) -> bool:
@@ -2849,17 +2913,18 @@ def _process_alive(pid: int) -> bool:
 
 
 @_windows_only
-def test_the_pseudoconsole_handle_is_inheritable_for_the_helper_and_not_after(
+def test_the_helper_is_attached_to_the_pseudoconsole_and_inherits_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The pseudoconsole's handle reaches the helper, and nobody else.
+    """The helper is on the pseudoconsole, and no handle travels to it.
 
-    The helper attaches the shell to the pseudoconsole, so it needs the
-    pseudoconsole's handle — and a handle reaches a child only when it is
-    inheritable. The flag is set before the child is created and taken back
-    right after it, so the engine's other children never inherit the
-    pseudoconsole and the handle is not left inheritable for the rest of
-    the engine's life.
+    The shell inherits the helper's console, so the pseudoconsole's handle
+    never has to reach the helper: a handle reaches a child only when it is
+    inheritable, and the pseudoconsole's handle is not an ordinary kernel
+    handle — ``SetHandleInformation`` refuses it with "the handle is
+    invalid". The handle goes into the process attribute list instead, which
+    is how a child is attached to a pseudoconsole, and the console is then
+    passed on to the shell the ordinary way.
     """
     fake = _FakeWin32()
     _install_fake(monkeypatch, fake)
@@ -2868,21 +2933,19 @@ def test_the_pseudoconsole_handle_is_inheritable_for_the_helper_and_not_after(
     terminal = tw.spawn_terminal(cwd=tmp_path)
     try:
         names = _names(fake)
-        flags = [
-            (index, args)
-            for index, (name, args) in enumerate(fake.calls)
-            if name == "SetHandleInformation"
+        attributes = [
+            args for name, args in fake.calls if name == "UpdateProcThreadAttribute"
         ]
-        assert len(flags) == 2, "the flag is set for the spawn and taken back"
-        (set_at, set_args), (cleared_at, cleared_args) = flags
-        assert set_args[1] == tw._HANDLE_FLAG_INHERIT, "the handle must be inheritable"
-        assert set_args[2] == tw._HANDLE_FLAG_INHERIT
-        assert cleared_args[1] == tw._HANDLE_FLAG_INHERIT
-        assert cleared_args[2] == 0, "the flag must be taken back"
-        created = names.index("CreateProcessW")
-        assert set_at < created < cleared_at, (
-            "the handle must be inheritable for the one spawn and not after it"
+        assert len(attributes) == 1, (
+            "the helper is attached to the pseudoconsole, and only to it"
         )
+        attribute, value, size = attributes[0]
+        assert attribute == tw._PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+        assert value, "the pseudoconsole's handle goes into the attribute list"
+        assert size == ctypes.sizeof(ctypes.c_void_p)
+        # Nothing is inherited: the console is attached, not handed over.
+        assert fake.spawned[0]["inherit"] == 0
+        assert not any(name == "SetHandleInformation" for name in names)
     finally:
         terminal.close()
 

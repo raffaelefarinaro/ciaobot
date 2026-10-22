@@ -14,6 +14,8 @@ reads keystrokes from the other. This module drives it directly through
   reads to decide whether a console control event reaches a process at all,
   and the one every child inherits — and then creates the shell, so the
   shell inherits the cleared attribute and the engine's own is untouched;
+  the helper is attached to the pseudoconsole and the shell inherits that
+  console from it, so no handle is inherited by anybody;
 * the child's ``STARTUPINFO`` carries ``STARTF_USESTDHANDLES`` with the
   three standard-handle slots null, so the pseudoconsole replaces the
   child's console instead of the child inheriting the parent's handles;
@@ -99,11 +101,12 @@ if sys.platform == "win32":
     # cleared state: that is what ciao/os_support/terminal_child_windows.py
     # is for.
 
-    # Handle flags (winnt.h). A handle reaches a child only when it is
-    # inheritable, and only for that one spawn.
-    _HANDLE_FLAG_INHERIT = 0x00000001
-
-    # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE (processthreadsapi.h).
+    # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE (processthreadsapi.h). The
+    # attribute is how the helper is attached to the pseudoconsole; the
+    # shell then inherits that console from the helper, because a process
+    # attached to a console passes it on to its children. No handle is
+    # inherited by anybody: the pseudoconsole's handle is not an ordinary
+    # kernel handle, and SetHandleInformation refuses it.
     _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
 
     # STARTF_USESTDHANDLES (winbase.h). The child of a pseudoconsole must
@@ -278,9 +281,6 @@ if sys.platform == "win32":
         ctypes.POINTER(_ProcessInformation),
     )
     _ResumeThread = _declare("ResumeThread", wintypes.DWORD, wintypes.HANDLE)
-    _SetHandleInformation = _declare(
-        "SetHandleInformation", wintypes.BOOL, wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD
-    )
     _TerminateProcess = _declare(
         "TerminateProcess", wintypes.BOOL, wintypes.HANDLE, wintypes.UINT
     )
@@ -983,6 +983,11 @@ if sys.platform == "win32":
         engine inherits it from whatever started it — so a shell the engine
         created itself would never receive the interrupt, and the terminal's
         Ctrl+C would do nothing.
+
+        The helper is attached to the pseudoconsole, and the shell inherits
+        that console from the helper: a process attached to a console passes
+        it on to its children. The pseudoconsole's handle therefore never
+        has to travel to the helper, and nothing is inherited by anybody.
         """
         folder = _validated_folder(cwd)
         _validated_dimension(cols, "cols", 20, 500)
@@ -1059,28 +1064,19 @@ if sys.platform == "win32":
             # to use them rather than the parent's handles.
             startup.StartupInfo.dwFlags = _STARTF_USESTDHANDLES
 
-            # The helper attaches the shell to this pseudoconsole, so it
-            # needs the pseudoconsole's handle — and a handle reaches a
-            # child only when it is inheritable. The flag is set for that
-            # one spawn and taken back right after it, so the engine's
-            # other children never inherit the pseudoconsole.
-            if not _SetHandleInformation(
-                int(hpcon.value or 0), _HANDLE_FLAG_INHERIT, _HANDLE_FLAG_INHERIT
-            ):
-                raise ctypes.WinError(ctypes.get_last_error())
-
             block = _environment_block(env)
             environment = ctypes.create_string_buffer(block, len(block))
-            # The helper is given the pseudoconsole's handle, the shell's
-            # executable and the shell's whole command line, and it creates
-            # the shell with them: the shell's name stays explicit and its
-            # argv stays fully quoted, and the helper needs no more.
+            # The helper is attached to the pseudoconsole, and the shell
+            # inherits that console from it, so no handle has to travel to
+            # the helper and none is inherited. The helper is given the
+            # shell's executable and the shell's whole command line, and it
+            # creates the shell with them: the shell's name stays explicit
+            # and its argv stays fully quoted, and the helper needs no more.
             helper_argv = [
                 sys.executable,
                 "-I",
                 "-S",
                 str(CHILD_HELPER),
-                str(int(hpcon.value or 0)),
                 argv[0],
                 subprocess.list2cmdline(argv),
             ]
@@ -1093,7 +1089,7 @@ if sys.platform == "win32":
                 command,
                 None,
                 None,
-                True,
+                False,
                 _CREATE_SUSPENDED
                 | _EXTENDED_STARTUPINFO_PRESENT
                 | _CREATE_UNICODE_ENVIRONMENT,
@@ -1106,12 +1102,6 @@ if sys.platform == "win32":
             process_handle = int(process_info.hProcess or 0)
             thread_handle = int(process_info.hThread or 0)
             opened.extend([process_handle, thread_handle])
-
-            # The helper has the handle now; the engine's other children
-            # must not.
-            _SetHandleInformation(
-                int(hpcon.value or 0), _HANDLE_FLAG_INHERIT, 0
-            )
 
             # The pseudoconsole keeps its own copies of these; ours would
             # keep the pipes alive and hide a broken channel.

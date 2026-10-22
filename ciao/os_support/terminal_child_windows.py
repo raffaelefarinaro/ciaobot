@@ -28,13 +28,17 @@ The rules it follows, and why:
 - It is attached to the pseudoconsole, so it has a console to set the
   attribute on, and it is the shell's parent, so the shell inherits the
   attribute in the state the helper left it.
+- The shell inherits the helper's **console**. A process attached to a
+  console passes it on to its children, and the shell is created neither
+  with ``CREATE_NEW_CONSOLE`` nor with ``DETACHED_PROCESS``, so the shell
+  lands on the very pseudoconsole the helper is attached to. The
+  pseudoconsole's handle therefore never has to reach the helper, and
+  nothing is inherited by anybody: the handle is not an ordinary kernel
+  handle and cannot be made inheritable in the first place.
 - It installs a handler of its own that swallows the control event. The
   helper is attached to the same console and shares the shell's process
   group, so the interrupt reaches the helper too, and the helper has to
   outlive the event it hands on.
-- The pseudoconsole's handle reaches the helper as an inherited handle, and
-  the helper passes it on in the shell's process attribute list, so the
-  shell is attached to the very pseudoconsole the engine drives.
 - It imports nothing from ``ciao`` and runs under ``-I -S``, so no user or
   site initialisation runs and no credential is read on the way in.
 - It writes nothing to stdout or stderr, and it never prints a traceback:
@@ -62,13 +66,10 @@ if sys.platform == "win32":
     #: The shell could not be waited for.
     WAIT_FAILED = 127
 
-    # Process creation flags (winbase.h).
-    _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
-    # STARTF_USESTDHANDLES (winbase.h): the pseudoconsole replaces the
-    # child's console, so the three standard-handle slots stay null.
+    # STARTF_USESTDHANDLES (winbase.h): the shell's three standard-handle
+    # slots stay null, so the console's own handles are used and not the
+    # engine's.
     _STARTF_USESTDHANDLES = 0x00000100
-    # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE (processthreadsapi.h).
-    _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
     # Process and thread state (winbase.h, synchapi.h).
     _INFINITE = 0xFFFFFFFF
 
@@ -105,14 +106,6 @@ if sys.platform == "win32":
             ("hStdError", wintypes.HANDLE),
         ]
 
-    class _StartupInfoEx(ctypes.Structure):
-        """``STARTUPINFOEXW``: a STARTUPINFOW plus its attribute list."""
-
-        _fields_ = [
-            ("StartupInfo", _StartupInfo),
-            ("lpAttributeList", ctypes.c_void_p),
-        ]
-
     class _ProcessInformation(ctypes.Structure):
         """``PROCESS_INFORMATION``: the new process and its first thread."""
 
@@ -125,28 +118,6 @@ if sys.platform == "win32":
 
     _SetConsoleCtrlHandler = _declare(
         "SetConsoleCtrlHandler", wintypes.BOOL, ctypes.c_void_p, wintypes.BOOL
-    )
-    _InitializeProcThreadAttributeList = _declare(
-        "InitializeProcThreadAttributeList",
-        wintypes.BOOL,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.POINTER(ctypes.c_size_t),
-    )
-    _UpdateProcThreadAttribute = _declare(
-        "UpdateProcThreadAttribute",
-        wintypes.BOOL,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        ctypes.c_size_t,
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-    )
-    _DeleteProcThreadAttributeList = _declare(
-        "DeleteProcThreadAttributeList", None, ctypes.c_void_p
     )
     _CreateProcessW = _declare(
         "CreateProcessW",
@@ -202,61 +173,39 @@ if sys.platform == "win32":
             return False
         return True
 
-    def _create_the_shell(
-        hpcon: int, application: str, command_line: str
-    ) -> tuple[int, int]:
-        """Create the shell on the pseudoconsole; return its process and thread.
+    def _create_the_shell(application: str, command_line: str) -> tuple[int, int]:
+        """Create the shell; return its process and thread handles.
 
-        The shell is created the way the pseudoconsole's own clients are
-        created: the pseudoconsole handle goes into the process attribute
-        list, the three standard-handle slots stay null, and the
-        pseudoconsole replaces the child's console.
+        The shell inherits the helper's console, which is the pseudoconsole
+        the engine attached the helper to: a process attached to a console
+        passes that console on to its children, and the shell is created
+        neither with ``CREATE_NEW_CONSOLE`` nor with ``DETACHED_PROCESS``.
+        The pseudoconsole's handle is therefore not needed here, and no
+        handle is inherited by anybody.
+
+        The three standard-handle slots stay null, exactly as the adapter
+        leaves them for the helper: the shell's input and output are the
+        console's own, and not the engine's.
         """
-        size = ctypes.c_size_t()
-        _InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
-        if not size.value:
-            return 0, 0
-        attribute_buffer = ctypes.create_string_buffer(size.value)
-        attribute_list = int(
-            ctypes.cast(attribute_buffer, ctypes.c_void_p).value or 0
-        )
-        if not _InitializeProcThreadAttributeList(
-            ctypes.cast(attribute_buffer, ctypes.c_void_p), 1, 0, ctypes.byref(size)
+        startup = _StartupInfo()
+        startup.cb = ctypes.sizeof(_StartupInfo)
+        startup.dwFlags = _STARTF_USESTDHANDLES
+        process_info = _ProcessInformation()
+        command = ctypes.create_unicode_buffer(command_line)
+        if not _CreateProcessW(
+            application,
+            command,
+            None,
+            None,
+            False,
+            0,
+            None,
+            None,
+            ctypes.cast(ctypes.byref(startup), ctypes.c_void_p),
+            ctypes.byref(process_info),
         ):
             return 0, 0
-        process_info = _ProcessInformation()
-        try:
-            if not _UpdateProcThreadAttribute(
-                ctypes.cast(attribute_buffer, ctypes.c_void_p),
-                0,
-                _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-                hpcon,
-                ctypes.sizeof(ctypes.c_void_p),
-                None,
-                None,
-            ):
-                return 0, 0
-            startup = _StartupInfoEx()
-            startup.StartupInfo.cb = ctypes.sizeof(_StartupInfoEx)
-            startup.lpAttributeList = ctypes.cast(attribute_buffer, ctypes.c_void_p)
-            startup.StartupInfo.dwFlags = _STARTF_USESTDHANDLES
-            command = ctypes.create_unicode_buffer(command_line)
-            if not _CreateProcessW(
-                application,
-                command,
-                None,
-                None,
-                False,
-                _EXTENDED_STARTUPINFO_PRESENT,
-                None,
-                None,
-                ctypes.cast(ctypes.byref(startup), ctypes.c_void_p),
-                ctypes.byref(process_info),
-            ):
-                return 0, 0
-            return int(process_info.hProcess or 0), int(process_info.hThread or 0)
-        finally:
-            _DeleteProcThreadAttributeList(attribute_list)
+        return int(process_info.hProcess or 0), int(process_info.hThread or 0)
 
     def _wait_for_the_shell(process: int) -> int:
         """Wait for the shell to end; return its exit code."""
@@ -269,23 +218,18 @@ if sys.platform == "win32":
     def main(argv: list[str]) -> int:
         """Clear the attribute, start the shell, and report its exit code.
 
-        ``argv`` is the pseudoconsole's handle value, the shell's
-        executable and the shell's whole command line. The status is the
-        shell's own exit code, or one of the failure statuses above: the
-        helper never prints anything, because its standard handles are the
-        user's terminal.
+        ``argv`` is the shell's executable and the shell's whole command
+        line. The status is the shell's own exit code, or one of the
+        failure statuses above: the helper never prints anything, because
+        its standard handles are the user's terminal.
         """
-        if len(argv) != 3:
+        if len(argv) != 2:
             return 2
-        hpcon_text, application, command_line = argv
-        try:
-            hpcon = int(hpcon_text)
-        except ValueError:
-            return 2
+        application, command_line = argv
         try:
             if not _clear_the_interrupt_attribute():
                 return CONTROL_FAILED
-            process, thread = _create_the_shell(hpcon, application, command_line)
+            process, thread = _create_the_shell(application, command_line)
             if not process:
                 return CREATE_FAILED
             try:

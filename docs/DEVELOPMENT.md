@@ -444,12 +444,24 @@ while the server is running, because the live schedule store may be writing it.
   shell inherits the cleared state. The engine's own attribute is never
   touched — clearing it in the engine would change how the engine itself
   answers a Ctrl+C — and the helper swallows the control event it shares
-  with the shell, so it outlives the interrupt it hands on. The
-  pseudoconsole's handle reaches the helper as an inherited handle,
-  inheritable for that one spawn only, and the helper passes it on in the
-  shell's process attribute list. The byte the user typed is still `0x03`
-  and `write()` is unchanged; what changed is the attribute the shell
-  inherits.
+  with the shell, so it outlives the interrupt it hands on. The byte the
+  user typed is still `0x03` and `write()` is unchanged; what changed is the
+  attribute the shell inherits.
+
+  How the helper reaches the pseudoconsole is worth writing down, because
+  the obvious way round does not work. The pseudoconsole's handle is not an
+  ordinary kernel handle: `SetHandleInformation` on it fails with "the
+  handle is invalid", so it cannot be made inheritable and cannot be
+  handed to a child as an inherited handle. A child is attached to a
+  pseudoconsole the other way round — `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+  in the process attribute list — and that is what the adapter does for
+  the helper. The shell then reaches the pseudoconsole the ordinary way: a
+  process attached to a console passes that console on to its children, so
+  the shell, created by the helper without `CREATE_NEW_CONSOLE` and without
+  `DETACHED_PROCESS`, inherits the helper's console, which is the
+  pseudoconsole. No handle is inherited by anybody, and the helper's own
+  standard handles are the console's — so it prints nothing, ever: a
+  failure is a status, and only a status.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
