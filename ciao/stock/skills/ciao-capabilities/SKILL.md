@@ -32,6 +32,12 @@ in the Ciaobot picker. Point users to the live
 [`INTEGRATIONS.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/INTEGRATIONS.md)
 for current commands; do not invent version-sensitive install or login syntax.
 
+When a user has to sign in, install a CLI, or set up an MCP server, read
+`references/install-and-settings.md`: it carries the current verified commands
+and the exact places in the app. The agent hands over a command to review and
+run — `ciao chat terminal-offer` puts one in the chat as a copyable card — and
+never runs a sign-in, an install or an MCP setup on the user's behalf.
+
 ## Capability areas
 
 Each area has a reference file next to this one. Open only the file the question needs.
@@ -44,7 +50,7 @@ Each area has a reference file next to this one. Open only the file the question
 | Files | viewer and pinned panel, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
 | Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, queue and steer, `gws` | `references/models-and-extensions.md` |
 | Task board | the Tasks page, Delegate to agent, Approve Done, "After this update" tasks | `references/tasks.md` |
-| Terminal | the browser terminal panel: where it runs, the unlock, sessions, the socket protocol, and what an agent can and cannot do | `references/terminal.md` |
+| Terminal | the browser terminal panel: where it runs, the unlock, sessions, the socket protocol, how to offer a suggested command, and what an agent can and cannot do | `references/terminal.md` |
 | App and system | Settings page, MCP, installing and updating, other devices, forgotten password, Linux, Windows, local API | `references/install-and-settings.md` |
 
 ## Left to companion tools
