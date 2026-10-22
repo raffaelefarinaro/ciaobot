@@ -905,7 +905,7 @@ def read_health_cache(runtime_root: Path) -> dict[str, dict[str, Any]]:
 
 
 class GwsHealthMonitor:
-    """Debounced token-validity check for configured GWS profiles.
+    """Debounced token-validity check: checks configured GWS profiles; notifies only for linked ones.
 
     On the transition to an invalid token it emits a PWA notification (via the
     push manager) and an in-app ``gws_health`` status event (via the events
@@ -960,20 +960,9 @@ class GwsHealthMonitor:
         )
 
     def _configured_profiles(self) -> list[str]:
-        """Accounts with credentials that at least one active workspace links.
-
-        An account no workspace links has no Settings screen to fix it, so its
-        expiry must not raise a toast or push. Archived workspaces are outside
-        ``config.workspaces`` and so do not count as links.
-        """
-        linked = {
-            str(workspace.gws_profile or "").strip()
-            for workspace in self._config.workspaces.values()
-        }
+        """Profiles with credentials."""
         out: list[str] = []
         for profile in known_profiles(self._config):
-            if profile not in linked:
-                continue
             config_dir = profile_config_dir(self._config, profile)
             if config_dir is None:
                 continue
@@ -983,6 +972,10 @@ class GwsHealthMonitor:
             ):
                 out.append(profile)
         return out
+
+    def _linked_profiles(self) -> set[str]:
+        """Profile ids some active workspace links; archived workspaces are outside config.workspaces."""
+        return {str(w.gws_profile or "").strip() for w in self._config.workspaces.values()}
 
     def check_once(self) -> dict[str, Any]:
         """Check every configured profile once. Returns a summary for logging.
@@ -1000,6 +993,7 @@ class GwsHealthMonitor:
         with self._lock:
             state = self._load()
             summary: dict[str, Any] = {"checked": [], "invalid": [], "notified": []}
+            linked = self._linked_profiles()
             for profile in self._configured_profiles():
                 status = self._status_fn(self._config, profile)
                 summary["checked"].append(profile)
@@ -1047,6 +1041,7 @@ class GwsHealthMonitor:
                     if (
                         consecutive_invalid >= self._notify_threshold
                         and not prior.get("notified_invalid")
+                        and profile in linked
                     ):
                         self._notify(profile, token_error)
                         entry["notified_invalid"] = True

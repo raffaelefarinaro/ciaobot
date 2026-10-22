@@ -549,7 +549,7 @@ def test_health_monitor_debounces_and_rearms(tmp_path: Path) -> None:
     assert len(push.sent) == 2
 
 
-def test_health_monitor_skips_profiles_no_workspace_links(tmp_path: Path) -> None:
+def test_health_monitor_warns_only_for_linked_profiles(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     # "orphan" has credentials but no workspace links it; "archived-only" is
     # linked only by a workspace that left config.workspaces (archived).
@@ -587,11 +587,41 @@ def test_health_monitor_skips_profiles_no_workspace_links(tmp_path: Path) -> Non
 
     summary = monitor.check_once()
 
-    assert summary["checked"] == ["personal"]
+    assert set(summary["checked"]) == {"personal", "orphan", "archived-only"}
     assert summary["notified"] == ["personal"]
-    assert set(probed) == {"personal"}
+    assert set(probed) == {"personal", "orphan", "archived-only"}
     assert [p["profile"] for p in push.sent] == ["personal"]
     assert [e["profile"] for e in events.published] == ["personal"]
+
+
+def test_health_monitor_refreshes_stale_cache_for_unlinked_profile(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    cfg.workspaces = {}
+    config_dir = gws_auth.profile_config_dir(cfg, "acme")
+    config_dir.mkdir(parents=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    runtime = tmp_path / ".runtime"
+    (runtime / "gws_health.json").write_text(
+        json.dumps({"profiles": {"acme": {
+            "token_valid": False, "notified_invalid": True, "consecutive_invalid": 3,
+        }}}),
+        encoding="utf-8",
+    )
+    push, events = _FakePush(), _FakeEvents()
+    monitor = gws_auth.GwsHealthMonitor(
+        cfg,
+        push_manager=push,
+        events_hub=events,
+        runtime_root=runtime,
+        status_fn=lambda config, profile: {"available": True, "token_valid": True},
+        retry_delay=0,
+    )
+
+    monitor.check_once()
+
+    assert gws_auth.read_health_cache(runtime)["acme"]["token_valid"] is True
+    assert push.sent == []
+    assert events.published == []
 
 
 def test_health_monitor_in_process_retry_suppresses_transient_invalid(tmp_path: Path) -> None:

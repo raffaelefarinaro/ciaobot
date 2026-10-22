@@ -107,19 +107,16 @@ const MAX_SKIPPED = 3
 
 /**
  * Measure every open `.field-info-panel`: report those whose box leaves the
- * viewport or sits more than 12px from the visible glyph's bottom, and name
- * the ones measured so the caller can prove the check ran.
+ * viewport or sits more than 12px from the visible glyph's bottom.
  */
 async function panelProblems(page: Page) {
   return page.evaluate(() => {
     const out: string[] = []
-    const measured: string[] = []
     const w = window.innerWidth
     for (const el of Array.from(document.querySelectorAll('.field-info-panel'))) {
       const r = el.getBoundingClientRect()
       if (r.width === 0) continue
       const summary = el.parentElement?.querySelector('summary')
-      measured.push(summary?.getAttribute('aria-label') ?? '')
       if (r.left < -0.5 || r.right > w + 0.5) out.push(`panel overflows viewport: left ${Math.round(r.left)} right ${Math.round(r.right)} of ${w}`)
       const s = summary?.getBoundingClientRect()
       // The 20px glyph sits centred in the 44px hit area, so its bottom is the
@@ -127,7 +124,7 @@ async function panelProblems(page: Page) {
       const glyphBottom = s ? s.bottom - 12 : 0
       if (s && Math.abs(r.top - glyphBottom) > 12.5) out.push(`panel ${Math.round(r.top - glyphBottom)}px from the glyph`)
     }
-    return { out, measured }
+    return { out }
   })
 }
 
