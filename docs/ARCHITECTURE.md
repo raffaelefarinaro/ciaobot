@@ -382,7 +382,7 @@ web/                           Vue 3 PWA frontend.
                                The pane around that screen is `TerminalPane.vue`, mounted the
                                first time a terminal is asked for (`terminalPanel.ts` carries
                                the one-bit signal) and kept after that, so the screen survives
-                               a hide. It has two shapes, and the layout picks between them:
+                               a close. It has two shapes, and the layout picks between them:
                                in the right-hand slot it is the pinned file's own tile
                                (`.chat-split-side` — the same inset, radius, tone and animation,
                                behind the same draggable `chat-split-resizer` and the same
@@ -397,8 +397,9 @@ web/                           Vue 3 PWA frontend.
                                the app's shortcuts in the bubble phase on its own root — the
                                shell keeps Escape, Tab, the arrows, Ctrl+C and Ctrl+D, and
                                Shift+Tab is the one key intercepted in the capture phase, to
-                               hand the keyboard back to the panel's controls. Hide detaches;
-                               End asks the engine to stop the shell.
+                               hand the keyboard back to the panel's controls. Sessions are
+                               compact switchable tabs; closing the pane detaches without
+                               ending shells, while a tab's close control ends only that shell.
   package.json                 npm deps and scripts (build, typecheck, test).
   Vite + TypeScript. Build outputs to ciao/web/static/.
 

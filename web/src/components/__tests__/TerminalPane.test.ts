@@ -6,7 +6,8 @@
  * The pane is the part a person touches, so this file is about the parts a
  * person can get wrong: the pane never asks for a password, it obtains the
  * grant itself and lists the shells, opening one gives the session a screen
- * and a connection, Hide detaches without stopping the shell, End stops it,
+ * and a connection, closing the pane detaches without stopping the shell,
+ * closing a session tab stops only that session,
  * and a takeover refusal is offered as something to do rather than a dead
  * end.
  *
@@ -328,10 +329,12 @@ describe('TerminalPane', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock')
     expect(store.unlocked).toBe(true)
     expect(store.phase).not.toBe('locked')
-    const rows = wrapper.findAll('.tp-session')
-    expect(rows).toHaveLength(2)
-    expect(rows[0].text()).toContain('/tmp/work')
-    expect(rows[1].text()).toContain('ended')
+    const tabs = wrapper.findAll('[role="tab"]')
+    expect(tabs).toHaveLength(2)
+    expect(tabs[0].text()).toContain('work')
+    expect(tabs[1].text()).toContain('ended')
+    expect(wrapper.get('[role="tablist"]').attributes('aria-label')).toBe('Terminal sessions')
+    expect(wrapper.find('button[aria-label="New terminal session"]').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -371,14 +374,14 @@ describe('TerminalPane', () => {
     wrapper.unmount()
   })
 
-  it('hides without ending the session', async () => {
+  it('closes the pane without ending its sessions', async () => {
     serve([sessionInfo('s1')])
     const store = useTerminalStore()
     const wrapper = await mountPane()
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
-    await wrapper.get('.tp-hide').trigger('click')
+    await wrapper.get('.tp-close').trigger('click')
     await flushPromises()
 
     expect(store.visible).toBe(false)
@@ -391,7 +394,7 @@ describe('TerminalPane', () => {
     wrapper.unmount()
   })
 
-  it('gives the keyboard back to the control that opened the pane', async () => {
+  it('returns focus to the opener after closing the pane', async () => {
     serve([sessionInfo('s1')])
     const store = useTerminalStore()
     const opener = document.createElement('button')
@@ -401,26 +404,60 @@ describe('TerminalPane', () => {
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
-    await wrapper.get('.tp-hide').trigger('click')
+    await wrapper.get('.tp-close').trigger('click')
     await flushPromises()
 
     expect(document.activeElement).toBe(opener)
     wrapper.unmount()
   })
 
-  it('ends the session when End is pressed', async () => {
+  it('ends a session from its tab close control', async () => {
     serve([sessionInfo('s1')])
     const store = useTerminalStore()
     const wrapper = await mountPane()
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
-    await wrapper.get('.tp-end').trigger('click')
+    await wrapper.get('.tp-session-end').trigger('click')
     await flushPromises()
 
     expect(apiDel).toHaveBeenCalledWith('/api/terminal/sessions/s1')
     expect(store.sessions).toHaveLength(0)
     expect(store.activeSession).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('switches tabs and ends only the session whose tab was closed', async () => {
+    serve([sessionInfo('s1'), sessionInfo('s2', { folder: '/tmp/other' })])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const tabs = wrapper.findAll('[role="tab"]')
+    await tabs[1].trigger('click')
+    expect(store.activeSession?.session_id).toBe('s2')
+    await wrapper.get('button[aria-label="End terminal session /tmp/work"]').trigger('click')
+    await flushPromises()
+
+    expect(apiDel).toHaveBeenCalledWith('/api/terminal/sessions/s1')
+    expect(store.sessions.map((session) => session.session_id)).toEqual(['s2'])
+    expect(store.activeSession?.session_id).toBe('s2')
+    wrapper.unmount()
+  })
+
+  it('moves between session tabs with the arrow keys', async () => {
+    serve([sessionInfo('s1'), sessionInfo('s2', { folder: '/tmp/other' })])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const tabs = wrapper.findAll('[role="tab"]')
+    await tabs[0].trigger('keydown', { key: 'ArrowRight' })
+
+    expect(store.activeSession?.session_id).toBe('s2')
+    expect(document.activeElement).toBe(tabs[1].element)
     wrapper.unmount()
   })
 
@@ -495,7 +532,7 @@ describe('TerminalPane', () => {
     field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }))
     await flushPromises()
 
-    expect(document.activeElement).toBe(wrapper.get('.tp-hide').element)
+    expect(document.activeElement).toBe(wrapper.get('.tp-close').element)
     // The shell never saw it, so nothing was sent.
     expect(sockets[0].ofType('input')).toHaveLength(0)
     wrapper.unmount()
@@ -548,7 +585,7 @@ describe('TerminalPane', () => {
     const source = readFileSync(join(__dirname, '..', 'TerminalPane.vue'), 'utf8')
     expect(source).toMatch(/@media \(pointer: coarse\)/)
     expect(source).toMatch(/min-height:\s*var\(--touch\)/)
-    expect(source).toMatch(/\.tp-session \{[^}]*min-height:\s*var\(--touch\)/)
+    expect(source).toMatch(/\.tp-tab-wrap \{[^}]*min-height:\s*var\(--touch\)/)
   })
 
   it('draws no frame of its own in the tile: the tile is the window', () => {
