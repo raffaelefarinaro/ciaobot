@@ -104,6 +104,7 @@ from ciao.schedules import (
     stamp_fallback_project,
     wall_clock_time_error,
     wall_clock_time_value_error,
+    normalize_system_schedule_update,
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
@@ -5599,7 +5600,23 @@ async def schedule_detail(request: Request) -> JSONResponse:
     entry = store.get(schedule_id)
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    timing_fields: set[str] = set()
+    if entry.scope == "system":
+        try:
+            normalized, fields = normalize_system_schedule_update(body, entry)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        timing_fields = set(fields)
+        body = {
+            ("time" if key == "daily_time_utc" else "timezone" if key == "timezone_name" else key): value
+            for key, value in normalized.items()
+        }
     if "title" in body:
         entry.title = str(body["title"]).strip()
     if "description" in body:
@@ -5689,7 +5706,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
     # project. Also clears it when the entry becomes project-bound.
     stamp_fallback_project(entry, request.app.state.project_chat_manager)
     try:
-        store.replace(entry)
+        if entry.scope == "system":
+            request.app.state.schedule_manager.replace(entry, timing_fields=frozenset(timing_fields))
+        else:
+            request.app.state.schedule_manager.replace(entry)
     except ValueError as exc:
         # A fanned-out system routine's workspace is part of its id, so the
         # store refuses to "move" it. That is a bad request, not a server
@@ -5698,7 +5718,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     pcm = request.app.state.project_chat_manager
     publish_automations_changed(pcm)
-    return JSONResponse(_enrich_schedule(entry, pcm))
+    reread = store.get(schedule_id)
+    if reread is None:
+        return JSONResponse({"error": "schedule disappeared after update"}, status_code=500)
+    return JSONResponse(_enrich_schedule(reread, pcm))
 
 
 # ── Models ───────────────────────────────────────────────────────────────
