@@ -270,6 +270,8 @@ def gh_token_for_sandbox(
         return None
     token = result.stdout.strip()
     if result.returncode != 0 or not token:
+        # gh answered that it has no token (a logout): stop handing out the old one.
+        _gh_token_cache.pop(key, None)
         return None
     _gh_token_cache[key] = (token, time.monotonic())
     return token

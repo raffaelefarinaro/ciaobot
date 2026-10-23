@@ -927,6 +927,16 @@ def test_gh_token_failure_not_cached(monkeypatch):
     assert len(calls) == 2
 
 
+def test_gh_token_logout_evicts_the_cached_token(monkeypatch):
+    clear_gh_token_cache()
+    _gh_run(monkeypatch, [(0, "tok\n", ""), (1, "", "not logged in")])
+
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    monkeypatch.setattr("ciao.fs_sandbox._GH_TOKEN_TTL", 0.0)
+    assert gh_token_for_sandbox("/bin/gh", {}) is None
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) is None
+
+
 def test_gh_token_runs_expected_argv(monkeypatch):
     clear_gh_token_cache()
     calls = _gh_run(monkeypatch, [(0, "tok\n", "")])
