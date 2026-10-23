@@ -1360,7 +1360,28 @@ def test_darwin_seatbelt_blocks_moving_secrets_ancestors_and_the_account_dir(tmp
     assert (linked / "token.json").read_text(encoding="utf-8").strip() == "x"
 
 
-@pytest.mark.parametrize("name", ["se*crets", "se?crets", "se[crets", "se]crets"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        # `*` and `?` are not legal Windows filename characters, so the folder
+        # the refusal is about cannot exist there; `[`/`]` do exist and still
+        # exercise the glob guard.
+        pytest.param(
+            "se*crets",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32", reason="* is not a legal Windows filename character"
+            ),
+        ),
+        pytest.param(
+            "se?crets",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32", reason="? is not a legal Windows filename character"
+            ),
+        ),
+        "se[crets",
+        "se]crets",
+    ],
+)
 def test_claude_macos_settings_refuse_glob_characters_in_the_denied_folder(
     tmp_path, monkeypatch, name
 ):
