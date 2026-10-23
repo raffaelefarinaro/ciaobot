@@ -941,7 +941,8 @@ Workspace-only chats also get the `gws` CLI (executable, links, npm package,
 node) read-only and the linked Google account's credential directory writable
 for gws's token cache, with `client_secret.json` and `credentials.json` in it
 kept write-denied (#1959). They also get the `gh` config directory
-read-only (#1961); a token kept in the macOS keychain is still unreachable. A project's
+read-only, and the engine also passes gh's token as `GH_TOKEN`, so a login
+kept in the macOS keychain works (#1961). A project's
 linked repository is added to a chat's roots (workspace scope) only when the chat is in code mode. It is passed to
 Claude as an add-dir and to opencode as `skills.paths` in `OPENCODE_CONFIG_CONTENT`
 in every scope, fixed when the provider process starts; a change applies from the

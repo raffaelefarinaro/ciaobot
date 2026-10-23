@@ -223,6 +223,31 @@ def gh_config_read_root(env: Mapping[str, str]) -> Path | None:
     return path.resolve() if path.is_dir() else None
 
 
+def gh_token_for_sandbox(gh: str | None, env: Mapping[str, str]) -> str | None:
+    """The ``gh`` login token, to pass into a workspace-scoped chat (#1961).
+
+    The macOS keychain is outside a workspace sandbox, so the engine reads gh's
+    token unsandboxed and passes it in the chat's environment. The agent can
+    read it, as it could read ``hosts.yml``. None when gh is missing, the
+    environment already carries ``GH_TOKEN`` / ``GITHUB_TOKEN`` (the chat
+    inherits it), or gh has no token. The token is never logged.
+    """
+    if gh is None or env.get("GH_TOKEN") or env.get("GITHUB_TOKEN"):
+        return None
+    try:
+        result = subprocess.run(
+            [gh, "auth", "token", "--hostname", "github.com"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=dict(env),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    token = result.stdout.strip()
+    return token if result.returncode == 0 and token else None
+
+
 def _inside_roots(roots: Sequence[Path], paths: Sequence[Path]) -> list[Path]:
     """The paths inside a writable root: readable there, but never writable.
 

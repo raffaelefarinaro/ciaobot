@@ -324,6 +324,7 @@ def test_workspace_scope_request_grants_runtime_files_read_only(
 ) -> None:
     monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
     monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: None)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda gh, env: None)
     manager = _make_manager(tmp_path)
     config = manager._config
     workspace = config.workspace("personal")
@@ -352,6 +353,7 @@ def _workspace_manager(
     # Never depend on whether gws is installed on the host running the tests.
     monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
     monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: None)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda gh, env: None)
     manager = _make_manager(tmp_path)
     config = manager._config
     workspace = config.workspace("personal")
@@ -403,6 +405,22 @@ def test_workspace_scope_grants_gh_config_read_only(
         config.workspaces["personal"], agent_fs_scope="machine"
     )
     assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+def test_workspace_scope_injects_gh_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda gh, env: "tok")
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: "/bin/gh")
+
+    assert manager.build_agent_request(chat, prompt="hi").extra_env["GH_TOKEN"] == "tok"
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    assert "GH_TOKEN" not in manager.build_agent_request(chat, prompt="hi").extra_env
 
 
 def _credentials_request(

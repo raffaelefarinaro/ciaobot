@@ -12,6 +12,7 @@ import pytest
 
 from ciao.fs_sandbox import (
     gh_config_read_root,
+    gh_token_for_sandbox,
     gws_tool_read_roots,
     SANDBOX_EXEC_PATH,
     FsSandboxUnavailable,
@@ -836,6 +837,45 @@ def test_gh_config_root_uses_xdg_then_home(tmp_path, monkeypatch):
 
 def test_gh_config_root_missing_returns_none(tmp_path):
     assert gh_config_read_root({"GH_CONFIG_DIR": str(tmp_path / "absent")}) is None
+
+
+def test_gh_token_for_sandbox_returns_token(monkeypatch):
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, "tok\n", "")
+
+    monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", fake_run)
+
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+
+
+def test_gh_token_for_sandbox_none_cases(monkeypatch):
+    calls = []
+
+    def run_returning(result):
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        return fake_run
+
+    monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", run_returning(None))
+    assert gh_token_for_sandbox(None, {}) is None
+    assert gh_token_for_sandbox("/bin/gh", {"GH_TOKEN": "x"}) is None
+    assert gh_token_for_sandbox("/bin/gh", {"GITHUB_TOKEN": "x"}) is None
+    assert calls == []
+
+    failed = subprocess.CompletedProcess(["gh"], 1, "tok\n", "")
+    empty = subprocess.CompletedProcess(["gh"], 0, "\n", "")
+    for outcome in (
+        failed,
+        empty,
+        subprocess.TimeoutExpired("gh", 5),
+        OSError("boom"),
+    ):
+        monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", run_returning(outcome))
+        assert gh_token_for_sandbox("/bin/gh", {}) is None
 
 
 def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypatch):

@@ -5912,6 +5912,22 @@ class ProjectChatManager:
             is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
         ):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+        # The macOS keychain is outside a workspace sandbox, so gh cannot read
+        # its own login there: the engine passes the token in (#1961). A memory
+        # pass must not reach an external surface.
+        if self._agent_fs_scope_for_chat(chat)[0] == "workspace" and not is_memory_pass_chat(
+            chat, project
+        ):
+            from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
+            from ciao.tool_path import resolve_tool  # noqa: PLC0415
+
+            try:
+                gh_path = resolve_tool("gh")
+            except OSError:
+                gh_path = None
+            gh_token = gh_token_for_sandbox(gh_path, os.environ)
+            if gh_token:
+                env["GH_TOKEN"] = gh_token
         return env
 
     def _claude_ai_connectors_on(self, workspace: str) -> bool:

@@ -202,7 +202,7 @@ A workspace-only chat's sandbox makes the linked Google account's credential dir
 
 ### Residual: readable gh token (#1961)
 
-A workspace-only chat's sandbox grants the `gh` config directory (`GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`) read-only. `hosts.yml` there may hold the operator's GitHub OAuth token, so the agent can read it, as it can with whole-machine access. The maintainer accepted this. A token kept in the macOS keychain is not exposed.
+A workspace-only chat's sandbox grants the `gh` config directory (`GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`) read-only. `hosts.yml` there may hold the operator's GitHub OAuth token, so the agent can read it, as it can with whole-machine access. The maintainer accepted this. Because the keychain is outside the sandbox, the engine also reads gh's token and passes it as `GH_TOKEN` in the chat's environment, where the agent can read it.
 
 ## Verification
 
