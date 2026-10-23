@@ -1022,10 +1022,15 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedu
   -H 'content-type: application/json' \
   -d '{"time":"01:00","timezone":"Europe/Zurich","frequency":"daily","prompt":"Memory curation","web_project_id":"proj-...","workspace":"personal","archive_policy":"auto"}'
 
-# Update archive behavior.
+# Update a routine's local clock and IANA timezone. For packaged system
+# routines, PATCH may also change enabled/workspace/model/provider/archive_policy
+# and time/timezone; prompt/title/command/frequency/target are package-owned and
+# rejected. System timing is persisted on the existing routine ID, not as a
+# duplicate user schedule. `time` is local HH:MM in `timezone`, including DST.
+# Untouched packaged fan-out rows retain their staggered defaults.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/schedules/$SID" \
   -H 'content-type: application/json' \
-  -d '{"archive_policy":"auto"}'
+  -d '{"time":"21:30","timezone":"Europe/Zurich"}'
 
 # Run a schedule on demand. Auto-archived routines can return archived_to.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedule-run/$SID"
