@@ -6,6 +6,7 @@ import os
 import plistlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,22 @@ def _runner(calls: list[list[str]], *, returncode: int = 0):
         return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
 
     return run
+
+
+def _engine_starts(monkeypatch, startup_id: str = "run-1") -> None:
+    """The engine the CLI started answers as itself: a verified start (#1938).
+
+    The CLI tests here drive `ciao service start` with launchctl stubbed, so
+    no engine ever boots; without this the wait would run to its deadline and
+    report an unconfirmed start.
+    """
+    monkeypatch.setattr(
+        macos_service,
+        "wait_for_engine",
+        lambda _runtime, **_kw: macos_service.StartOutcome(
+            "started", "Ciaobot engine started.", startup_id=startup_id, pid=4242
+        ),
+    )
 
 
 def _write_bundle(path: Path, executable: str) -> None:
@@ -372,6 +389,7 @@ def test_service_start_registers_missing_launch_agent(
     (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     calls: list[list[str]] = []
     monkeypatch.setattr(sys, "platform", "darwin")
+    _engine_starts(monkeypatch)
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
@@ -544,6 +562,7 @@ def test_service_start_registers_a_protected_workspace_under_the_host(
     host = _verified_host()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(sys, "platform", "darwin")
+    _engine_starts(monkeypatch)
     monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: host)
     monkeypatch.setattr(sys, "executable", _ENGINE_PYTHON)
     monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
@@ -589,6 +608,7 @@ def test_service_start_register_pins_the_runtime_root_and_honors_engine_path(
     calls: list[list[str]] = []
     monkeypatch.setenv("CIAO_ENGINE_PATH", str(engine))
     monkeypatch.setattr(sys, "platform", "darwin")
+    _engine_starts(monkeypatch)
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
@@ -629,6 +649,7 @@ def test_service_start_refuses_workspace_mismatch(
         (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     calls: list[list[str]] = []
     monkeypatch.setattr(sys, "platform", "darwin")
+    _engine_starts(monkeypatch)
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
@@ -1460,3 +1481,370 @@ def test_start_service_succeeds_when_the_engine_did_not_fail_on_the_port(
     assert result.message == "Ciaobot engine started."
     assert "PWA_PORT" not in result.message
 
+
+
+# ── the CLI waits for the engine it started, and for no other (#1938) ─────
+
+
+class _Clock:
+    """A clock the test advances: `sleep` moves it, nothing waits for real."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _lock_owner(desktop: macos_service.DesktopRuntime, startup_id: str, **over: object) -> dict:
+    """Lock metadata as the engine writes it; ``over`` overrides any field,
+    the ``runtime`` directory included."""
+    return {
+        "pid": 4242,
+        "port": desktop.port,
+        "workspace": desktop.workspace,
+        "runtime": desktop.runtime_root,
+        "started_at": "2026-10-23T15:14:55Z",
+        "status": "running",
+        "startup_id": startup_id,
+        **over,
+    }
+
+
+def _write_lock(runtime: macos_service.DesktopRuntime, owner: dict) -> None:
+    (Path(runtime.runtime_root) / macos_service.SERVER_LOCK_NAME).write_text(
+        json.dumps(owner), encoding="utf-8"
+    )
+
+
+def _quiet_records(monkeypatch, tmp_path: Path) -> None:
+    """No bind failure and no denial recorded anywhere this test can see."""
+    monkeypatch.setattr(macos_service, "read_port_in_use", lambda: "")
+    monkeypatch.setattr(macos_service, "denial_path", lambda: tmp_path / "no-denial.txt")
+
+
+def test_read_lock_owner_answers_none_for_missing_malformed_and_non_object(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    assert macos_service.read_lock_owner(runtime) is None
+    lock = Path(runtime.runtime_root) / macos_service.SERVER_LOCK_NAME
+    lock.write_text("{not json", encoding="utf-8")
+    assert macos_service.read_lock_owner(runtime) is None
+    lock.write_text("[1, 2]", encoding="utf-8")
+    assert macos_service.read_lock_owner(runtime) is None
+    _write_lock(runtime, _lock_owner(runtime, "run-1"))
+    assert macos_service.read_lock_owner(runtime)["startup_id"] == "run-1"
+
+
+def test_start_waits_past_two_seconds_for_its_own_engine(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    _quiet_records(monkeypatch, tmp_path)
+    clock = _Clock()
+    start = clock.now
+    _write_lock(runtime, _lock_owner(runtime, "run-old", status="stopped"))
+
+    # The engine takes 4.5 s to take its lock and answer — longer than the
+    # 2 s the old wait allowed (measured: 4.1 s to first answer, #1938).
+    def identity(port: int, *, timeout: float):
+        assert port == runtime.port
+        assert 0.1 <= timeout <= macos_service.START_PROBE_TIMEOUT_S
+        if clock.now - start < 4.5:
+            return None
+        _write_lock(runtime, _lock_owner(runtime, "run-new"))
+        return {"startup_id": "run-new", "pid": 4242, "overall_ready": False}
+
+    original_fresh = macos_service._fresh_lock_owner
+
+    def fresh(rt, previous_id):
+        # The lock lands with the first answer in this scenario.
+        if clock.now - start >= 4.5:
+            _write_lock(runtime, _lock_owner(runtime, "run-new"))
+        return original_fresh(rt, previous_id)
+
+    monkeypatch.setattr(macos_service, "engine_identity", identity)
+    monkeypatch.setattr(macos_service, "_fresh_lock_owner", fresh)
+
+    outcome = macos_service.wait_for_engine(
+        runtime,
+        previous={"startup_id": "run-old", "status": "stopped"},
+        started_at=0.0,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert outcome.ok is True
+    assert outcome.state == "started"
+    assert outcome.startup_id == "run-new"
+    assert outcome.pid == 4242
+    assert clock.now - start >= 4.5
+    assert clock.now - start < macos_service.START_SETTLE_TIMEOUT_S
+
+
+def test_start_rejects_an_unrelated_startup_status_listener(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    _quiet_records(monkeypatch, tmp_path)
+    clock = _Clock()
+    _write_lock(runtime, _lock_owner(runtime, "run-new"))
+    # Something answers the port with a 2xx and no identity: a bare JSON
+    # object, which is what satisfied the old wait.
+    monkeypatch.setattr(macos_service, "engine_identity", lambda _port, **_kw: None)
+
+    outcome = macos_service.wait_for_engine(
+        runtime, previous=None, started_at=0.0, clock=clock, sleep=clock.sleep,
+    )
+
+    assert outcome.ok is False
+    assert outcome.state == "timeout"
+
+
+def test_engine_identity_ignores_a_2xx_without_a_startup_id(monkeypatch) -> None:
+    import io
+
+    class _Response(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    answers = iter([b"ok", b'{"overall_ready": true}', b'{"startup_id": "", "pid": 1}', b'{"startup_id": "run-1", "pid": 7}'])
+    monkeypatch.setattr(
+        macos_service.urllib.request, "urlopen", lambda *_a, **_kw: _Response(next(answers))
+    )
+
+    assert macos_service.engine_identity(9443) is None
+    assert macos_service.engine_identity(9443) is None
+    assert macos_service.engine_identity(9443) is None
+    assert macos_service.engine_identity(9443) == {"startup_id": "run-1", "pid": 7}
+
+
+def test_start_rejects_the_previous_engine_identity(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    _quiet_records(monkeypatch, tmp_path)
+    clock = _Clock()
+    # The run from before the kickstart is still the lock owner and still
+    # answers the port as itself: that is the old engine, not a new start.
+    previous = _lock_owner(runtime, "run-old")
+    _write_lock(runtime, previous)
+    monkeypatch.setattr(
+        macos_service, "engine_identity", lambda _port, **_kw: {"startup_id": "run-old", "pid": 1}
+    )
+
+    outcome = macos_service.wait_for_engine(
+        runtime, previous=previous, started_at=0.0, clock=clock, sleep=clock.sleep,
+    )
+
+    assert outcome.state == "timeout"
+
+
+def test_start_rejects_another_runtime_and_a_mismatched_port(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    _quiet_records(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        macos_service, "engine_identity", lambda _port, **_kw: {"startup_id": "run-x", "pid": 1}
+    )
+    other = tmp_path / "other-runtime"
+    other.mkdir()
+
+    _write_lock(runtime, _lock_owner(runtime, "run-x", runtime=str(other)))
+    assert macos_service._fresh_lock_owner(runtime, None) is None
+    _write_lock(runtime, _lock_owner(runtime, "run-x", port=runtime.port + 1))
+    assert macos_service._fresh_lock_owner(runtime, None) is None
+    _write_lock(runtime, _lock_owner(runtime, "run-x", status="stopped"))
+    assert macos_service._fresh_lock_owner(runtime, None) is None
+    _write_lock(runtime, _lock_owner(runtime, "run-x"))
+    assert macos_service._fresh_lock_owner(runtime, None)["startup_id"] == "run-x"
+
+
+def test_start_reports_a_delayed_bind_failure(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(macos_service, "denial_path", lambda: tmp_path / "no-denial.txt")
+    clock = _Clock()
+    start = clock.now
+    # The record lands 3 s in — after the old 2 s deadline had already
+    # reported "started".
+    monkeypatch.setattr(
+        macos_service,
+        "read_port_in_use",
+        lambda: "port 9443 is in use by another process" if clock.now - start >= 3 else "",
+    )
+    monkeypatch.setattr(macos_service, "engine_identity", lambda _port, **_kw: None)
+
+    outcome = macos_service.wait_for_engine(
+        runtime, previous=None, started_at=0.0, clock=clock, sleep=clock.sleep,
+    )
+
+    assert outcome.state == "port_in_use"
+    assert outcome.ok is False
+    assert "in use" in outcome.message
+    assert clock.now - start < macos_service.START_SETTLE_TIMEOUT_S
+
+
+def test_start_timeout_is_not_success(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    _quiet_records(monkeypatch, tmp_path)
+    clock = _Clock()
+    start = clock.now
+    monkeypatch.setattr(macos_service, "engine_identity", lambda _port, **_kw: None)
+
+    outcome = macos_service.wait_for_engine(
+        runtime, previous=None, started_at=0.0, clock=clock, sleep=clock.sleep,
+    )
+
+    assert outcome.ok is False
+    assert outcome.state == "timeout"
+    assert outcome.startup_id is None
+    assert "did not confirm" in outcome.message
+    assert "ciao service status" in outcome.message
+    assert clock.now - start >= macos_service.START_SETTLE_TIMEOUT_S
+    # Bounded: the wait polled, it did not spin.
+    assert all(step == macos_service.START_POLL_INTERVAL_S for step in clock.slept)
+
+
+def test_start_reports_workspace_access_denial(tmp_path: Path, monkeypatch) -> None:
+    import os as _os
+
+    runtime = _runtime(tmp_path)
+    monkeypatch.setattr(macos_service, "read_port_in_use", lambda: "")
+    monkeypatch.setattr(macos_service, "engine_identity", lambda _port, **_kw: None)
+    record = tmp_path / "workspace-access-denied.txt"
+    monkeypatch.setattr(macos_service, "denial_path", lambda: record)
+    line = "macOS denied Ciaobot Server access to /w: allow it in System Settings."
+    clock = _Clock()
+
+    # A denial left over from an earlier run is not this start's verdict.
+    record.write_text(line + "\n", encoding="utf-8")
+    stale = time.time() - 600
+    _os.utime(record, (stale, stale))
+    outcome = macos_service.wait_for_engine(
+        runtime, previous=None, started_at=time.time(), clock=clock, sleep=clock.sleep,
+    )
+    assert outcome.state == "timeout"
+
+    # One recorded after the kickstart is.
+    started_at = time.time() - 5
+    record.write_text(line + "\n", encoding="utf-8")
+    outcome = macos_service.wait_for_engine(
+        runtime, previous=None, started_at=started_at, clock=_Clock(), sleep=lambda _s: None,
+    )
+    assert outcome.state == "denied"
+    assert outcome.message == line
+
+
+def test_cli_wait_does_not_make_worker_start_submission_blocking(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    calls: list[list[str]] = []
+
+    def never(*_a, **_kw):
+        raise AssertionError("start_service must not wait for the engine")
+
+    monkeypatch.setattr(macos_service, "wait_for_engine", never)
+    monkeypatch.setattr(macos_service, "engine_identity", never)
+
+    result = macos_service.start_service(runtime=runtime, uid=501, runner=_runner(calls))
+
+    assert result.ok is True
+    assert [c[1] for c in calls[:3]] == ["enable", "bootstrap", "kickstart"]
+
+
+def test_cli_start_reports_an_unconfirmed_start_as_a_failure(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ciao import cli
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+    seen: dict[str, object] = {}
+
+    def wait(rt, **kw):
+        seen.update(kw)
+        return macos_service.StartOutcome("timeout", "The engine did not confirm its start within 30s.")
+
+    monkeypatch.setattr(macos_service, "wait_for_engine", wait)
+
+    rc = cli.main(["service", "start", "--workspace", str(workspace), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["ok"] is False
+    assert payload["details"]["verified"] is False
+    assert payload["details"]["start_outcome"] == "timeout"
+    assert payload["details"]["port_in_use"] is False
+    # The previous identity was read before the kickstart (none here) and
+    # the kickstart time is what a denial is measured against.
+    assert seen["previous"] is None
+    assert isinstance(seen["started_at"], float)
+
+
+def test_cli_start_reads_the_launchd_exit_code_after_a_timeout(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ciao import cli
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+    monkeypatch.setattr(
+        macos_service,
+        "wait_for_engine",
+        lambda _rt, **_kw: macos_service.StartOutcome("timeout", "The engine did not confirm its start within 30s."),
+    )
+    # The engine ran unsupervised and exited on the port-in-use code; launchd
+    # remembers that even though the engine left no record of its own. The
+    # submission's own read, right after the kickstart, is still too early to
+    # see it; the read after the deadline is not.
+    reasons = iter([None, "port 9555 is in use by pid 77"])
+    monkeypatch.setattr(macos_service, "port_in_use_reason", lambda _rt, **_kw: next(reasons))
+
+    rc = cli.main(["service", "start", "--workspace", str(workspace), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["details"]["start_outcome"] == "port_in_use"
+    assert payload["details"]["port_in_use"] is True
+    assert "in use" in payload["message"]
+
+
+def test_cli_start_reports_the_verified_identity(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ciao import cli
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+    _engine_starts(monkeypatch, startup_id="run-7")
+
+    rc = cli.main(["service", "start", "--workspace", str(workspace), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["ok"] is True
+    assert payload["details"]["verified"] is True
+    assert payload["details"]["startup_id"] == "run-7"
+    assert payload["details"]["pid"] == 4242
