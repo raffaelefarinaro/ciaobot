@@ -1088,7 +1088,11 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 # bound and logs at; pwa_host and log_level change only at the next start).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
-# Update any subset. Persisted in .runtime/app_settings.json, applied to the
+# PATCH accepts only provider_default_models, provider_default_modes,
+# provider_default_thinking, provider_insights_models, pwa_host, log_level,
+# dev_mode and app_repo. The retired insights_enabled key is still accepted but
+# ignored; any other key (including response-only fields) returns 400. Updates
+# are persisted in .runtime/app_settings.json and applied to the
 # live config immediately (no restart). Empty string clears an override back
 # to the env default. A stored "apple"/"apfel" Session insights model (from the
 # retired on-device option) reads as Automatic rather than reaching a provider
@@ -1115,6 +1119,8 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
 # snapshot and in `keyboard_settings_changed`, and is part of `revision`.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard"
 
+# PATCH accepts revision plus any subset of keyboard_shortcuts,
+# keyboard_send_mode and mid_turn_delivery; unrelated keys return 400.
 # Include the revision returned by GET. A stale revision receives 409 instead
 # of overwriting another device's change. Updates persist to
 # .runtime/app_settings.json and broadcast through /ws/events.

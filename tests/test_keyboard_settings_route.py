@@ -71,6 +71,35 @@ def test_keyboard_settings_endpoint_rejects_stale_revision(tmp_path):
     assert client.get("/api/settings/keyboard").json()["keyboard_send_mode"] == "enter"
 
 
+def test_keyboard_patch_rejects_unrelated_fields_without_writes_or_events(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    published = []
+
+    class Events:
+        def publish(self, payload):
+            published.append(payload)
+
+    class Manager:
+        events = Events()
+
+    app = Starlette(routes=[Route("/api/settings/keyboard", settings_keyboard, methods=["GET", "PATCH"])])
+    app.state.app_settings = store
+    app.state.project_chat_manager = Manager()
+    client = TestClient(app)
+    initial = client.get("/api/settings/keyboard").json()
+
+    response = client.patch("/api/settings/keyboard", json={
+        "revision": initial["revision"],
+        "keyboard_send_mode": "enter",
+        "dev_mode": True,
+    })
+
+    assert response.status_code == 400
+    assert client.get("/api/settings/keyboard").json() == initial
+    assert store.settings.dev_mode is False
+    assert published == []
+
+
 def test_mid_turn_delivery_in_payload_and_revision(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
 
