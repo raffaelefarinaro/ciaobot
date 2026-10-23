@@ -982,6 +982,7 @@ class ChatStreaming:
                     # turn goes out with an empty prompt and those images
                     # rather than dropping them without a word (#1112).
                     skipped_blank = True
+                    stream.finish_drain_one(next_pending)
                     next_pending = stream.drain_one()
                 if skipped_blank:
                     # Keep the entry we are about to run (or park) in the list:
@@ -1052,6 +1053,12 @@ class ChatStreaming:
                         stream.move_in_flight = 0
                         stream.move_succeeded = False
                         continue
+                # Stop can arrive while provider reload is awaiting. The
+                # earlier snapshot was consumed before that await, so recheck
+                # before deciding whether the drained entry runs or parks.
+                if stream.user_stopped:
+                    park_rest = True
+                    stream.user_stopped = False
                 if next_pending is None or had_error or park_rest:
                     stream.accepting_queue = False
                     late = stream.drain_pending()
@@ -1064,8 +1071,12 @@ class ChatStreaming:
                         cm_park = self._host._chats.get(chat_id)
                         if cm_park is not None:
                             cm_park.pending_queue = [*cm_park.pending_queue, *parked]
+                            if next_pending is not None:
+                                stream.finish_drain_one(next_pending)
                             self._host._save()
                             stream.publish_queue_state(cm_park.pending_queue)
+                    elif next_pending is not None:
+                        stream.finish_drain_one(next_pending)
                     break
 
                 combined_text = next_pending.get("text", "").strip()
@@ -1081,6 +1092,10 @@ class ChatStreaming:
                 turn_index2: int | None = None
                 sent_at_iso2 = ""
                 queued_send_id = str(next_pending.get("send_id") or "")
+                queued_send_ids = [queued_send_id] if queued_send_id else []
+                queued_send_ids.extend(
+                    str(send_id) for send_id in (next_pending.get("send_ids") or [])
+                )
                 chat_meta2 = self._host._chats.get(chat_id)
                 if (
                     chat_meta2 is not None
@@ -1094,6 +1109,7 @@ class ChatStreaming:
                     # erase the form's pending state.
                     parked = [next_pending, *stream.drain_pending()]
                     chat_meta2.pending_queue = [*chat_meta2.pending_queue, *parked]
+                    stream.finish_drain_one(next_pending)
                     self._host._save()
                     stream.publish_queue_state(chat_meta2.pending_queue)
                     break
@@ -1113,10 +1129,11 @@ class ChatStreaming:
                     }
                     if turn_origin:
                         chat_meta2.user_turn_origin[str(turn_index2)] = turn_origin
-                    if queued_send_id:
-                        chat_meta2.record_send_id(turn_index2, queued_send_id)
+                    if queued_send_ids:
+                        chat_meta2.record_send_ids(turn_index2, queued_send_ids)
                     self.start_turn_perf(chat_id, turn_index2)
                     self._host._save()
+                stream.finish_drain_one(next_pending)
 
                 followup_echo: dict = {
                     "type": "user_echo",
@@ -1212,6 +1229,16 @@ class ChatStreaming:
                     refresh_cancelled = True
                 except Exception:  # noqa: BLE001 — location is advisory; never block turn end
                     logger.exception("repo location refresh failed for %s", chat_id)
+            # A reload failure, cancellation, or other exception can interrupt
+            # the await after drain_one removed an entry. Park it on teardown so
+            # its send id remains owned and the user's message is not lost.
+            draining = [*stream.take_draining(), *stream.drain_pending()]
+            if draining:
+                drain_chat = self._host._chats.get(chat_id)
+                if drain_chat is not None:
+                    drain_chat.pending_queue = [*drain_chat.pending_queue, *draining]
+                    self._host._save()
+                    stream.publish_queue_state(drain_chat.pending_queue)
             stream.finish()
             self._host._broker.clear(chat_id, stream)
             done: dict[str, Any] = {
