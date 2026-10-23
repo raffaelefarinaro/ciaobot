@@ -5754,6 +5754,18 @@ async def list_models(request: Request) -> JSONResponse:
 
 # ── Routine settings (Settings → Providers tab) ────────────────────────────
 
+_ROUTINES_SETTINGS_KEYS = frozenset({
+    "provider_default_models",
+    "provider_default_modes",
+    "provider_default_thinking",
+    "provider_insights_models",
+    "pwa_host",
+    "log_level",
+    "dev_mode",
+    "app_repo",
+})
+
+
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
     s = app_settings.settings
@@ -5836,6 +5848,12 @@ async def settings_routines(request: Request) -> JSONResponse:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "expected an object"}, status_code=400)
+        unknown = sorted(set(body) - _ROUTINES_SETTINGS_KEYS - {"insights_enabled"})
+        if unknown:
+            return JSONResponse(
+                {"error": f"Unknown routines settings: {', '.join(unknown)}"},
+                status_code=400,
+            )
         try:
             app_settings.update(body)
         except ValueError as exc:
@@ -5871,6 +5889,14 @@ async def settings_keyboard(request: Request) -> JSONResponse:
         if not isinstance(body, dict):
             return JSONResponse({"error": "expected an object"}, status_code=400)
         expected_revision = body.pop("revision", None)
+        unknown = sorted(set(body) - {
+            "keyboard_shortcuts", "keyboard_send_mode", "mid_turn_delivery",
+        })
+        if unknown:
+            return JSONResponse(
+                {"error": f"Unknown keyboard settings: {', '.join(unknown)}"},
+                status_code=400,
+            )
         current = payload()
         if not isinstance(expected_revision, str):
             return JSONResponse({"error": "revision is required"}, status_code=400)
