@@ -8,6 +8,8 @@ from pathlib import Path
 # in PWA_API.md → Agent recipes. Each entry needs a one-line reason so future
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
+    "/api/onboarding": "browser-only resumable lifecycle progress; signed session, no settings/readiness writes",
+    "/api/onboarding/complete": "browser-only onboarding completion; signed session, no host actions",
     "/api/terminal/unlock": (
         "browser-only grant issue; signed session and exact origin/transport "
         "policy, no body and no secret, grant travels only in an HttpOnly cookie, "

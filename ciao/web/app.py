@@ -216,6 +216,7 @@ from ciao.web.routes_welcome import (
     welcome_password,
     welcome_status,
 )
+from ciao.web.routes_onboarding import complete_onboarding, get_onboarding, patch_onboarding
 from ciao.web.routes_import import (
     import_batch_cancel,
     import_batch_delete,
@@ -630,6 +631,9 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
         Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
+        Route("/api/onboarding", get_onboarding, methods=["GET"]),
+        Route("/api/onboarding", patch_onboarding, methods=["PATCH"]),
+        Route("/api/onboarding/complete", complete_onboarding, methods=["POST"]),
         Route("/api/addresses", addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),

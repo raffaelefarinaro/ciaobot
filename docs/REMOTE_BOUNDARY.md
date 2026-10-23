@@ -214,6 +214,8 @@ A workspace-only chat's sandbox grants the `gh` config directory (`GH_CONFIG_DIR
 
 ## Remaining work (not claimed resolved)
 
+Onboarding lifecycle progress (`/api/onboarding`) is browser-session authority only: every request requires the signed session, and mutations use the normal same-origin policy. It records only installation/registered-workspace journey step and completion; it cannot verify readiness or perform host actions. An agent bearer token does not authorize this browser surface.
+
 1. Replace the dashboard password with named, revocable per-device credentials
    bound to a stable engine identity, and require verified TLS by default.
 2. Constrain workspace file/image/write/open APIs to authorized roots with
