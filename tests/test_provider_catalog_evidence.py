@@ -1,6 +1,8 @@
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 import asyncio
 
 from ciao.providers.catalog_evidence import (
@@ -121,7 +123,10 @@ def test_models_route_reports_evidence_without_constructing_a_claude_client(tmp_
     def _explode(*_args, **_kwargs):
         raise AssertionError("the models route must not construct a Claude client")
 
+    import claude_agent_sdk
+
     monkeypatch.setattr(claude_module, "ClaudeSDKClient", _explode, raising=False)
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _explode, raising=False)
     monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
     config = _route_config(tmp_path)
     invalidate_claude_catalog()
@@ -299,3 +304,61 @@ def test_claude_logout_and_verify_drop_earlier_observations(tmp_path: Path, monk
 
     # The bundled CLI path varies by install; the subcommand is the contract.
     assert [command[-2:] for command in commands] == [["auth", "logout"]]
+
+
+@pytest.mark.asyncio
+async def test_authorized_turn_captures_from_the_same_connection(tmp_path: Path, monkeypatch) -> None:
+    """The capture must hang off the turn's own client, once, before query.
+
+    Calling the helper directly does not prove the hook is wired: removing the
+    call in `consume_sdk` would leave every other test green.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ciao.models import AgentRequest
+    from ciao.providers import claude as claude_module
+    from ciao.providers.claude import ClaudeProvider
+
+    class FakeClient:
+        connects = 0
+        queries = 0
+
+        async def connect(self, _payload=None):
+            FakeClient.connects += 1
+
+        async def query(self, _payload):
+            FakeClient.queries += 1
+
+        async def receive_response(self):
+            if False:  # pragma: no cover - an empty turn
+                yield None
+
+    fake = FakeClient()
+    provider = ClaudeProvider(tmp_path, config=SimpleNamespace(
+        memory_char_limit=2200, user_char_limit=1375, vault_root=tmp_path / "memory-vault",
+    ))
+    provider._connected = False
+
+    async def fake_ensure(_request):
+        return fake
+
+    monkeypatch.setattr(provider, "_ensure_connected", fake_ensure)
+    connect_with_deadline = AsyncMock()
+    monkeypatch.setattr(claude_module, "_connect_with_deadline", connect_with_deadline)
+    capture = AsyncMock()
+    monkeypatch.setattr(provider, "_capture_catalog_evidence", capture)
+
+    _events = [
+        event async for event in provider._run_streaming_once(
+            AgentRequest(prompt="hello", model="sonnet", mode="normal"),
+            lambda _handle: None,
+        )
+    ]
+
+    capture.assert_awaited_once()
+    assert capture.await_args.args[0] is fake, "capture must use the turn's client"
+    assert capture.await_args.kwargs["generation"] is not None
+    # One connect for the turn, then query; capture reuses that client.
+    connect_with_deadline.assert_awaited_once_with(fake)
+    assert FakeClient.queries == 1
