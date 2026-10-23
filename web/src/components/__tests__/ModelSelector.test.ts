@@ -81,6 +81,30 @@ describe('ModelSelector', () => {
     ).toBe('haiku, glm-5.2:cloud')
   })
 
+  it('names the trigger after its row label and the current model', () => {
+    const label = document.createElement('span')
+    label.id = 'row-label'
+    label.textContent = 'Default model'
+    document.body.appendChild(label)
+    const wrapper = mountSelector({ modelValue: 'sonnet', labelledBy: 'row-label' })
+
+    const trigger = wrapper.get('.model-selector__trigger')
+    const ids = (trigger.attributes('aria-labelledby') || '').split(' ')
+    expect(ids).toHaveLength(2)
+    expect(ids[0]).toBe('row-label')
+    // The second id is the trigger's own value, so the name reads
+    // "Default model, sonnet" rather than the label alone.
+    expect(document.getElementById(ids[1])?.textContent).toBe('sonnet')
+    label.remove()
+    wrapper.unmount()
+  })
+
+  it('keeps the trigger named by its text when no row label is given', () => {
+    const wrapper = mountSelector({ modelValue: 'sonnet' })
+    expect(wrapper.get('.model-selector__trigger').attributes('aria-labelledby')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('opens on trigger click and renders sections', async () => {
     const wrapper = mountSelector()
     await wrapper.find('.model-selector__trigger').trigger('click')

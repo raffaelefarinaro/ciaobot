@@ -113,6 +113,18 @@ describe('SettingsWorkspaceModels', () => {
     expect(label(insights)).toMatch(/^Engine default \(.*[Hh]aiku.*\)$/)
   })
 
+  it('names each model picker trigger after its row label and the current value', async () => {
+    const view = await mountCard()
+    const triggers = view.findAll('.model-selector__trigger')
+    expect(triggers).toHaveLength(2)
+    const parts = (i: number) => (triggers[i].attributes('aria-labelledby') || '')
+      .split(' ')
+      .map((id) => view.find(`#${CSS.escape(id)}`).text())
+    const value = (i: number) => triggers[i].get('.model-selector__label').text()
+    expect(parts(0)).toEqual(['Default model', value(0)])
+    expect(parts(1)).toEqual(['Session insights', value(1)])
+  })
+
   it('names Auto and Auto-mode when the engine sets nothing', async () => {
     state.routines = routines({ provider_default_modes: {}, provider_default_thinking: {}, provider_insights_models: {} })
     const view = await mountCard()
