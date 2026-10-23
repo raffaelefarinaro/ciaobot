@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -235,6 +236,68 @@ def _same_origin_source(request: Request) -> bool:
     """
     source = request.headers.get("origin") or request.headers.get("referer")
     return not source or _same_origin(request, source)
+
+
+def _host_name(value: str) -> str:
+    host = value.strip()
+    if host.startswith("["):
+        end = host.find("]")
+        host = host[1:end] if end != -1 else host
+    elif host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    return host.rstrip(".").lower()
+
+
+def _localhost_request(request: Request) -> bool:
+    """True when the setup caller is a loopback peer naming a local Host."""
+    if not is_loopback_client(request):
+        return False
+    name = _host_name(request.headers.get("host", ""))
+    if not name:
+        name = (request.url.hostname or "").rstrip(".").lower()
+    return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _same_host_header(request: Request, value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    if not parsed.hostname:
+        return False
+    request_host = _host_name(request.headers.get("host", ""))
+    if not request_host:
+        request_host = (request.url.hostname or "").rstrip(".").lower()
+    return parsed.hostname.rstrip(".").lower() == request_host
+
+
+def _setup_finish_origin_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if origin:
+        return _same_host_header(request, origin)
+    referer = request.headers.get("referer")
+    if referer:
+        return _same_host_header(request, referer)
+    return True
+
+
+def _setup_finish_refusal(request: Request) -> JSONResponse | None:
+    """Canonical bootstrap and local-origin guard for setup finish."""
+    config = request.app.state.config
+    if not getattr(config, "bootstrap_mode", False):
+        return JSONResponse(
+            {"error": "setup finish is only available in bootstrap mode"},
+            status_code=409,
+        )
+    if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
+        return JSONResponse(
+            {
+                "error": "setup finish is localhost-only — open the wizard at "
+                f"http://localhost:{config.pwa_port}"
+            },
+            status_code=403,
+        )
+    return None
 
 
 async def authorize_websocket(websocket: WebSocket) -> bool:
