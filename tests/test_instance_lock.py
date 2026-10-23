@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,10 @@ def test_workspace_instance_lock_blocks_second_backend_and_releases(tmp_path: Pa
         metadata = json.loads(first.path.read_text(encoding="utf-8"))
         assert metadata["status"] == "running"
         assert metadata["port"] == 8443
+        startup_id = metadata["startup_id"]
+        assert startup_id == first.startup_id
+        first.acquire()
+        assert first.startup_id == startup_id
         with pytest.raises(WorkspaceAlreadyRunningError, match="port 8443"):
             second.acquire()
     finally:
@@ -27,6 +32,13 @@ def test_workspace_instance_lock_blocks_second_backend_and_releases(tmp_path: Pa
     second.release()
     metadata = json.loads(second.path.read_text(encoding="utf-8"))
     assert metadata["status"] == "stopped"
+    assert metadata["startup_id"] == second.startup_id
+    assert second.startup_id != startup_id
+    second.release()
+    previous_id = second.startup_id
+    second.acquire()
+    assert second.startup_id != previous_id
+    second.release()
 
 
 @pytest.mark.asyncio
@@ -41,7 +53,7 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     class RecordingLock:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.startup_id = "test-startup-id"
 
         def __enter__(self):
             events.append("lock")
@@ -77,7 +89,9 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     config.import_legacy_gws_profile_env = import_legacy_gws
 
-    async def run_server_locked(_config, *, supervised: bool = False) -> int:
+    async def run_server_locked(_config, *, supervised: bool = False, startup_id=None, engine_pid=None) -> int:
+        assert startup_id == "test-startup-id"
+        assert engine_pid == os.getpid()
         events.append("run")
         return 0
 
