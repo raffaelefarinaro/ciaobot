@@ -5182,7 +5182,8 @@ class ProjectChatManager:
         """Runtime files a workspace-scoped chat reads but never writes (#1945).
 
         Also the ``gws`` CLI with its links, npm package and node, so
-        ``ciao gws`` runs when it is installed under the home folder (#1959).
+        ``ciao gws`` runs when it is installed under the home folder (#1959),
+        and the ``gh`` config directory so ``gh`` finds its login (#1961).
         gws gets its credential directory writable for its token cache (see
         ``_agent_fs_scope_for_chat``), with the account's ``client_secret.json``
         and ``credentials.json`` pinned here so they stay write-denied: an
@@ -5190,7 +5191,7 @@ class ProjectChatManager:
         """
         if fs_scope != "workspace":
             return ()
-        from ciao.fs_sandbox import gws_tool_read_roots  # noqa: PLC0415
+        from ciao.fs_sandbox import gh_config_read_root, gws_tool_read_roots  # noqa: PLC0415
         from ciao.tool_path import login_shell_path  # noqa: PLC0415
         from ciao.workspace_reroot import receipt_path, registry_file  # noqa: PLC0415
 
@@ -5203,6 +5204,9 @@ class ProjectChatManager:
                 pinned = gws_dir / name
                 if pinned.exists():
                     granted.append(str(pinned))
+        gh_dir = gh_config_read_root(os.environ)
+        if gh_dir is not None:
+            granted.append(str(gh_dir))
         return tuple(granted)
 
     def _granted_gws_dir(self, chat: ChatInfo) -> Path | None:

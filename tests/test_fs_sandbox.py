@@ -11,6 +11,7 @@ import asyncio
 import pytest
 
 from ciao.fs_sandbox import (
+    gh_config_read_root,
     gws_tool_read_roots,
     SANDBOX_EXEC_PATH,
     FsSandboxUnavailable,
@@ -809,6 +810,32 @@ def test_gws_tool_roots_skip_package_json_outside_node_modules(tmp_path, monkeyp
     assert roots == [gws]
     assert bin_dir not in roots
     assert node not in roots
+
+
+def test_gh_config_root_prefers_gh_config_dir(tmp_path):
+    config = tmp_path / "custom-gh"
+    config.mkdir()
+    xdg = tmp_path / "xdg"
+    (xdg / "gh").mkdir(parents=True)
+
+    root = gh_config_read_root({"GH_CONFIG_DIR": str(config), "XDG_CONFIG_HOME": str(xdg)})
+
+    assert root == config.resolve()
+
+
+def test_gh_config_root_uses_xdg_then_home(tmp_path, monkeypatch):
+    xdg = tmp_path / "xdg"
+    (xdg / "gh").mkdir(parents=True)
+    assert gh_config_read_root({"XDG_CONFIG_HOME": str(xdg)}) == (xdg / "gh").resolve()
+
+    home = tmp_path / "home"
+    (home / ".config" / "gh").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert gh_config_read_root({}) == (home / ".config" / "gh").resolve()
+
+
+def test_gh_config_root_missing_returns_none(tmp_path):
+    assert gh_config_read_root({"GH_CONFIG_DIR": str(tmp_path / "absent")}) is None
 
 
 def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypatch):

@@ -323,6 +323,7 @@ def test_workspace_scope_request_grants_runtime_files_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
+    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: None)
     manager = _make_manager(tmp_path)
     config = manager._config
     workspace = config.workspace("personal")
@@ -350,6 +351,7 @@ def _workspace_manager(
 ) -> tuple[ProjectChatManager, ChatInfo]:
     # Never depend on whether gws is installed on the host running the tests.
     monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
+    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: None)
     manager = _make_manager(tmp_path)
     config = manager._config
     workspace = config.workspace("personal")
@@ -375,6 +377,26 @@ def test_workspace_scope_request_grants_gws_tool_read_only(
         str(gws_bin),
     )
     assert str(gws_bin) not in request.agent_roots
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+def test_workspace_scope_grants_gh_config_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gh_dir = tmp_path / "gh-config"
+    gh_dir.mkdir()
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: gh_dir)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(gh_dir) in request.agent_read_only
+    assert str(gh_dir) not in request.agent_roots
 
     config = manager._config
     config.workspaces["personal"] = dataclasses.replace(

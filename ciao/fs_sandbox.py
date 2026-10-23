@@ -14,7 +14,7 @@ import site
 import subprocess
 import sys
 import sysconfig
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -205,6 +205,22 @@ def gws_tool_read_roots(path: str) -> list[Path]:
         roots.append(package)
         roots.extend(_tool_read_roots("node", path))
     return list(dict.fromkeys(roots))
+
+
+def gh_config_read_root(env: Mapping[str, str]) -> Path | None:
+    """The ``gh`` CLI's config directory, read-only for a workspace-scoped chat (#1961).
+
+    Resolved the way gh does: ``GH_CONFIG_DIR``, else ``$XDG_CONFIG_HOME/gh``,
+    else ``~/.config/gh``. ``hosts.yml`` can hold an OAuth token; the agent can
+    read it, as it can with whole-machine access.
+    """
+    if env.get("GH_CONFIG_DIR"):
+        path = Path(env["GH_CONFIG_DIR"])
+    elif env.get("XDG_CONFIG_HOME"):
+        path = Path(env["XDG_CONFIG_HOME"]) / "gh"
+    else:
+        path = Path.home() / ".config" / "gh"
+    return path.resolve() if path.is_dir() else None
 
 
 def _inside_roots(roots: Sequence[Path], paths: Sequence[Path]) -> list[Path]:
