@@ -263,3 +263,34 @@ def test_completion_accepts_deferred_provider_without_readiness_claim(onboarding
     response = client.post("/api/onboarding/complete", json={"expected_revision": 1, "target": {"kind": "installation"}})
     assert response.status_code == 200
     assert response.json()["installation"]["status"] == "completed"
+
+
+def test_stale_patch_returns_conflict_not_a_malformed_request(onboarding_client) -> None:
+    """A stale revision is a 409, not a 400: the code checks the specific errors
+    before ValueError, which both receipt errors subclass."""
+    client, config, _serializer = onboarding_client
+    _seed(client, config)
+    path = Path(config.state_path.parent) / "onboarding.json"
+    before = path.read_bytes()
+    response = client.patch(
+        "/api/onboarding",
+        json={"expected_revision": 0, "target": {"kind": "installation"}, "step": "care"},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "onboarding_revision_conflict"
+    assert path.read_bytes() == before
+
+
+def test_corrupt_receipt_on_mutation_returns_state_unavailable(onboarding_client) -> None:
+    client, config, _serializer = onboarding_client
+    path = Path(config.state_path.parent) / "onboarding.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = b"corrupt-bytes"
+    path.write_bytes(raw)
+    response = client.patch(
+        "/api/onboarding",
+        json={"expected_revision": 1, "target": {"kind": "installation"}, "step": "care"},
+    )
+    assert response.status_code == 500
+    assert response.json()["code"] == "onboarding_state_unavailable"
+    assert path.read_bytes() == raw

@@ -42,20 +42,23 @@ async def _run(request: Request, *, complete: bool = False) -> JSONResponse:
         async with _workspace_archive_lock(request):
             receipt = complete_progress(config, target=target, expected_revision=expected) if complete else change_step(config, target=target, expected_revision=expected, step=data["step"])
         return JSONResponse(_body(receipt), headers={"Cache-Control": "no-store"})
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return JSONResponse({"error": "Invalid onboarding request.", "code": "invalid_onboarding_request"}, status_code=400)
+    # Order matters: OnboardingConflictError subclasses OnboardingStateError,
+    # which subclasses ValueError. Catching ValueError first would report a
+    # stale revision or corrupt state as a malformed request.
     except FileNotFoundError:
         return JSONResponse({"error": "Onboarding is not initialized.", "code": "onboarding_not_initialized"}, status_code=503)
-    except OnboardingTargetNotFound:
-        return JSONResponse({"error": "Onboarding target not found.", "code": "onboarding_target_not_found"}, status_code=404)
     except OnboardingConflictError:
         return JSONResponse({"error": "Onboarding revision conflict.", "code": "onboarding_revision_conflict"}, status_code=409)
+    except OnboardingTargetNotFound:
+        return JSONResponse({"error": "Onboarding target not found.", "code": "onboarding_target_not_found"}, status_code=404)
     except OnboardingTargetClosed:
         return JSONResponse({"error": "Onboarding target is closed.", "code": "onboarding_target_closed"}, status_code=409)
     except OnboardingFinishRequired:
         return JSONResponse({"error": "Finish the onboarding steps first.", "code": "onboarding_finish_required"}, status_code=409)
     except OnboardingStateError:
         return JSONResponse({"error": "Onboarding state is unavailable.", "code": "onboarding_state_unavailable"}, status_code=500)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return JSONResponse({"error": "Invalid onboarding request.", "code": "invalid_onboarding_request"}, status_code=400)
 
 
 async def get_onboarding(request: Request) -> JSONResponse:
