@@ -265,10 +265,15 @@ def test_discovered_private_legacy_dotenv_is_exempt_before_import(
     )
     monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
     monkeypatch.delenv("CIAO_WORKSPACES", raising=False)
+    # An inherited runtime root would make the receipt land outside the fixture,
+    # so the assertion below could pass without exercising this workspace's
+    # classification at all.
+    monkeypatch.delenv("CIAO_RUNTIME_ROOT", raising=False)
     monkeypatch.setattr("ciao.install_discovery.discover_workspace", lambda base: workspace)
     config = CiaoConfig.from_env(export=False)
     assert not config.bootstrap_mode
     assert config.workspace_root == workspace.resolve()
+    assert config.state_path.parent == workspace.resolve() / ".runtime"
     receipt = ensure_startup_receipt(
         config.state_path.parent,
         workspace_root=config.workspace_root,
