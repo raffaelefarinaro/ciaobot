@@ -2488,6 +2488,26 @@ async function confirmDeleteChat(chatId: string) {
     padding-block: 2px;
   }
 
+  /* Idle project names may use the slots reserved for hover actions. Keep the
+     buttons in the tab order at zero width; focusing or hovering restores the
+     full target before it is activated. */
+  .project-header .project-actions-btn,
+  .project-header .add-chat-btn {
+    width: 0;
+    min-width: 0;
+  }
+
+  .project-header:hover .project-actions-btn,
+  .project-header:focus-within .project-actions-btn,
+  .project-actions-btn:focus,
+  .project-actions-btn[data-state='open'],
+  .project-header:hover .add-chat-btn,
+  .project-header:focus-within .add-chat-btn,
+  .add-chat-btn:focus {
+    width: var(--touch);
+    min-width: var(--touch);
+  }
+
   .project-list .chat-item {
     min-height: 36px;
   }
