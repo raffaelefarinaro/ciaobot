@@ -63,7 +63,7 @@ MIN_INTERVAL_MINUTES = 1
 DEFAULT_INTERVAL_MINUTES = 10
 
 # Exactly what ``compute_next_run`` can parse out of ``daily_time_utc``.
-_VALID_DAILY_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_VALID_DAILY_TIME = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 
 
 def wall_clock_time_error(entry: "ScheduleEntry") -> str:
@@ -1229,6 +1229,9 @@ class ScheduleStore:
         description: str = "",
         command: str = "",
     ) -> ScheduleEntry:
+        time_error = wall_clock_time_value_error(frequency, daily_time_utc)
+        if time_error:
+            raise ValueError(time_error)
         entry = ScheduleEntry(
             schedule_id=f"sched-{uuid.uuid4().hex[:8]}",
             daily_time_utc=daily_time_utc,
@@ -1270,6 +1273,10 @@ class ScheduleStore:
         # policy the dispatcher will refuse to honour.
         normalize_auto_archive(entry)
         entry.command = normalize_schedule_command(entry.command)
+        if entry.scope != "system":
+            time_error = wall_clock_time_error(entry)
+            if time_error:
+                raise ValueError(time_error)
         with self._lock:
             if entry.scope == "system":
                 self._replace_system_state(entry, timing_fields=timing_fields)
@@ -1711,7 +1718,13 @@ class ScheduleStore:
         # not accepted as an operator update either.
         validate_system_timing(entry.daily_time_utc, entry.timezone_name)
         state = self._load_system_state()
+        was_direct = entry.schedule_id in state
         current = state.setdefault(entry.schedule_id, {})
+        if not was_direct:
+            inherited = state.get(system_base_id(entry.schedule_id), {})
+            for field in SYSTEM_TIMING_FIELDS:
+                if field in inherited:
+                    current[field] = inherited[field]
         for field in SYSTEM_STATE_FIELDS:
             if field in SYSTEM_TIMING_FIELDS:
                 if field in timing_fields or getattr(entry, field) != getattr(previous, field):

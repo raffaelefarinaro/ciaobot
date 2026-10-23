@@ -9,9 +9,10 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
-from ciao.schedules import ScheduleManager, ScheduleStore, compute_last_expected_run, compute_next_run, system_base_id, system_schedule_id
 from datetime import UTC, datetime
-from ciao.web.routes_api import schedule_detail
+from ciao.schedules import ScheduleManager, ScheduleStore, compute_last_expected_run, compute_next_run, system_base_id, system_schedule_id
+from ciao.web import routes_api
+from ciao.web.routes_api import list_schedules, schedule_detail
 
 
 def _store(tmp_path: Path, *workspaces: str) -> ScheduleStore:
@@ -31,10 +32,13 @@ class _Pcm:
     events = None
 
 
-def _client(tmp_path: Path) -> tuple[TestClient, ScheduleManager]:
+def _client(tmp_path: Path, *, include_get: bool = False, manager: ScheduleManager | None = None) -> tuple[TestClient, ScheduleManager]:
     store = _store(tmp_path / ".runtime", "personal")
-    manager = ScheduleManager(store)
-    app = Starlette(routes=[Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH"])])
+    manager = manager or ScheduleManager(store)
+    route_list = [Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH"])]
+    if include_get:
+        route_list.append(Route("/api/schedules", list_schedules, methods=["GET"]))
+    app = Starlette(routes=route_list)
     app.state.schedule_manager = manager
     app.state.project_chat_manager = _Pcm()
     return TestClient(app), manager
@@ -121,7 +125,8 @@ def test_legacy_disabled_overlay_survives_timing_edit(tmp_path: Path) -> None:
     assert restored.daily_time_utc == "09:25"
 
 
-def test_unsuffixed_legacy_overlay_timing_is_inherited_and_direct_editable(tmp_path: Path) -> None:
+@pytest.mark.parametrize("edit", ["bookkeeping", "time", "zone"])
+def test_first_direct_overlay_write_preserves_legacy_timing(tmp_path: Path, edit: str) -> None:
     store = _store(tmp_path, "personal")
     entry = next(e for e in store.list_entries() if e.schedule_id.endswith("@personal"))
     legacy_id = system_base_id(entry.schedule_id)
@@ -131,9 +136,15 @@ def test_unsuffixed_legacy_overlay_timing_is_inherited_and_direct_editable(tmp_p
     }}))
     inherited = store.get(entry.schedule_id)
     assert (inherited.daily_time_utc, inherited.timezone_name, inherited.enabled) == ("06:40", "Asia/Tokyo", False)
-    inherited.daily_time_utc = "07:50"
+    if edit == "time":
+        inherited.daily_time_utc = "07:50"
+    elif edit == "zone":
+        inherited.timezone_name = "Europe/London"
     store.replace(inherited)
-    assert store.get(entry.schedule_id).daily_time_utc == "07:50"
+    reopened = _store(tmp_path, "personal").get(entry.schedule_id)
+    expected = ("07:50", "Asia/Tokyo") if edit == "time" else ("06:40", "Europe/London") if edit == "zone" else ("06:40", "Asia/Tokyo")
+    assert (reopened.daily_time_utc, reopened.timezone_name) == expected
+    assert reopened.enabled is False
 
 
 def test_mixed_invalid_http_update_leaves_state_bytes_unchanged(tmp_path: Path) -> None:
@@ -161,6 +172,51 @@ def test_mcp_system_timing_uses_existing_aliases_and_persists(tmp_path: Path) ->
     assert result["data"]["daily_time_utc"] == "08:45"
     assert result["data"]["timezone_name"] == "Europe/London"
     assert store.get(entry.schedule_id).daily_time_utc == "08:45"
+
+
+def _change_packaged_timing(store: ScheduleStore, schedule_id: str, time: str, zone: str) -> None:
+    definitions = [dict(item) for item in store._load_system_definitions()]
+    base_id = system_base_id(schedule_id)
+    target = next(item for item in definitions if item.get("schedule_id") == base_id)
+    target["daily_time_utc"] = time
+    target["timezone_name"] = zone
+    store._system_definitions = definitions
+
+
+def test_http_same_default_selection_survives_packaged_definition_change(tmp_path: Path) -> None:
+    client, manager = _client(tmp_path)
+    entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
+    selected_time, selected_zone = entry.daily_time_utc, entry.timezone_name
+    response = client.patch(f"/api/schedules/{entry.schedule_id}", json={"time": selected_time})
+    assert response.status_code == 200
+    reopened = _store(tmp_path / ".runtime", "personal")
+    _change_packaged_timing(reopened, entry.schedule_id, "17:05", "Pacific/Honolulu")
+    restored = reopened.get(entry.schedule_id)
+    assert (restored.daily_time_utc, restored.timezone_name) == (selected_time, "Pacific/Honolulu")
+    # No explicit setting for sibling workspace: new packaged defaults still fan out.
+    siblings = _store(tmp_path / ".runtime", "personal", "work")
+    _change_packaged_timing(siblings, entry.schedule_id, "17:05", "Pacific/Honolulu")
+    sibling = next(e for e in siblings.list_entries() if e.schedule_id.endswith("@work"))
+    assert sibling.timezone_name == "Pacific/Honolulu"
+
+
+def test_mcp_same_default_selection_survives_packaged_definition_change(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    store = _store(runtime, "personal")
+    manager = ScheduleManager(store)
+    plane = CiaoControlPlane(
+        type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
+                            "workspace_root": str(tmp_path)})(),
+        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+    )
+    entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
+    selected_time, selected_zone = entry.daily_time_utc, entry.timezone_name
+    plane.schedule_update(McpPrincipal("token", "chat", "project", "personal", "claude"), entry.schedule_id,
+                          timezone=selected_zone)
+    reopened = _store(runtime, "personal")
+    _change_packaged_timing(reopened, entry.schedule_id, "17:05", "Pacific/Honolulu")
+    restored = reopened.get(entry.schedule_id)
+    assert (restored.daily_time_utc, restored.timezone_name) == ("17:05", selected_zone)
 
 
 def test_mcp_timezone_only_edit_and_conflicting_aliases(tmp_path: Path) -> None:
@@ -192,6 +248,39 @@ def test_mcp_system_timing_keeps_workspace_authorization(tmp_path: Path) -> None
     with pytest.raises(ControlPlaneError, match="another workspace"):
         plane.schedule_update(principal, entry.schedule_id, daily_time="08:45", timezone="UTC")
     assert store.get(entry.schedule_id).daily_time_utc != "08:45"
+
+
+def test_mcp_system_rejects_non_ascii_clock_digit_without_write(tmp_path: Path) -> None:
+    store = _store(tmp_path / ".runtime", "personal")
+    manager = ScheduleManager(store)
+    plane = CiaoControlPlane(
+        type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
+                            "workspace_root": str(tmp_path)})(),
+        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+    )
+    entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
+    state_path = tmp_path / ".runtime" / "system_schedules_state.json"
+    manager.replace(entry)
+    before = state_path.read_bytes()
+    with pytest.raises(ControlPlaneError):
+        plane.schedule_update(McpPrincipal("token", "chat", "project", "personal", "claude"), entry.schedule_id, daily_time="08:1٢")
+    assert state_path.read_bytes() == before
+
+
+def test_mcp_user_schedule_rejects_non_ascii_clock_digit(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path / ".runtime")
+    entry = store.create(daily_time_utc="08:00", prompt="run", model="", mode="auto", chat_id=0, frequency="daily", workspace="personal")
+    manager = ScheduleManager(store)
+    plane = CiaoControlPlane(
+        type("Config", (), {"workspace": lambda _self, name: object() if name == "personal" else None,
+                            "workspace_root": str(tmp_path)})(),
+        project_chat_manager=_Pcm(), schedule_manager=manager, background_runner=None,
+    )
+    store_path = tmp_path / ".runtime" / "schedules.json"
+    before = store_path.read_bytes()
+    with pytest.raises(ControlPlaneError):
+        plane.schedule_update(McpPrincipal("token", "chat", "project", "personal", "claude"), entry.schedule_id, daily_time_utc="08:1٢")
+    assert store_path.read_bytes() == before
 
 
 def test_timing_edit_creates_no_user_schedule(tmp_path: Path) -> None:
@@ -241,9 +330,10 @@ def test_explicit_same_package_time_survives_changed_definition(tmp_path: Path) 
     entry = next(e for e in store.list_entries() if e.schedule_id.endswith("@personal"))
     original_time = entry.daily_time_utc
     store.replace(entry, timing_fields=frozenset({"daily_time_utc"}))
-    definition = store._load_system_definitions()[0].copy()
-    definition["daily_time_utc"] = "11:00" if original_time != "11:00" else "12:00"
-    store._system_definitions = [definition]
+    definitions = [dict(item) for item in store._load_system_definitions()]
+    target = next(item for item in definitions if item.get("schedule_id") == system_base_id(entry.schedule_id))
+    target["daily_time_utc"] = "11:00" if original_time != "11:00" else "12:00"
+    store._system_definitions = definitions
     assert store.get(entry.schedule_id).daily_time_utc == original_time
 
 
@@ -260,14 +350,26 @@ def test_packaged_prompt_still_updates_after_timing_override(tmp_path: Path) -> 
     assert changed.prompt.endswith(" revised")
 
 
-def test_http_system_timing_response_matches_subsequent_get(tmp_path: Path) -> None:
-    client, manager = _client(tmp_path)
+def test_http_system_timing_response_matches_get_for_persisted_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Manager(ScheduleManager):
+        def replace(self, entry, *, timing_fields=frozenset()):
+            super().replace(entry, timing_fields=timing_fields)
+            if entry.scope == "system" and timing_fields:
+                entry.daily_time_utc = "07:55"  # diverge transient object from the persisted value
+
+    runtime = tmp_path / ".runtime"
+    manager = _Manager(_store(runtime, "personal"))
+    client, manager = _client(tmp_path, include_get=True, manager=manager)
+    monkeypatch.setattr(routes_api, "compute_next_run", lambda _entry: datetime(2026, 10, 23, 8, 0, tzinfo=UTC))
+    monkeypatch.setattr(routes_api, "compute_last_expected_run", lambda _entry, now=None: None)
     entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
     response = client.patch(f"/api/schedules/{entry.schedule_id}", json={"time": "08:10", "timezone": "Europe/London"})
     assert response.status_code == 200
-    reread = manager._store.get(entry.schedule_id)
-    assert response.json()["daily_time_utc"] == reread.daily_time_utc == "08:10"
-    assert response.json()["timezone_name"] == reread.timezone_name == "Europe/London"
+    get_rows = client.get("/api/schedules").json()
+    from_get = next(item for item in get_rows if item["schedule_id"] == entry.schedule_id)
+    assert response.json() == from_get
+    assert response.json()["daily_time_utc"] == "08:10"
+    assert response.json()["timezone_name"] == "Europe/London"
 
 
 @pytest.mark.parametrize("body", [{"prompt": "changed"}, {"title": "changed"}, {"frequency": "weekly"}, {"target": "x"}])
@@ -328,4 +430,40 @@ def test_system_timing_rejects_invalid_values_without_writing(tmp_path: Path, ti
     before = state_path.read_bytes()
     with pytest.raises(ValueError):
         store.replace(entry)
+    assert state_path.read_bytes() == before
+
+
+def test_system_store_rejects_non_ascii_clock_digit(tmp_path: Path) -> None:
+    store = _store(tmp_path, "personal")
+    entry = next(e for e in store.list_entries() if e.schedule_id.endswith("@personal"))
+    entry.daily_time_utc = "08:1٢"
+    with pytest.raises(ValueError):
+        store.replace(entry, timing_fields=frozenset({"daily_time_utc"}))
+
+
+def test_user_store_rejects_non_ascii_clock_digit(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    with pytest.raises(ValueError):
+        store.create(daily_time_utc="08:1٢", prompt="run", model="", mode="auto", chat_id=0, frequency="daily")
+    assert not (tmp_path / "schedules.json").exists()
+
+
+def test_http_system_rejects_non_ascii_clock_digit_without_write(tmp_path: Path) -> None:
+    client, manager = _client(tmp_path)
+    entry = next(e for e in manager.list_entries() if e.schedule_id.endswith("@personal"))
+    state_path = tmp_path / ".runtime" / "system_schedules_state.json"
+    manager.replace(entry)
+    before = state_path.read_bytes()
+    response = client.patch(f"/api/schedules/{entry.schedule_id}", json={"time": "08:1٢"})
+    assert response.status_code == 400
+    assert state_path.read_bytes() == before
+
+
+def test_http_user_schedule_rejects_non_ascii_clock_digit(tmp_path: Path) -> None:
+    client, manager = _client(tmp_path)
+    entry = manager.create(daily_time_utc="08:00", prompt="run", model="", mode="auto", chat_id=0, frequency="daily")
+    state_path = tmp_path / ".runtime" / "schedules.json"
+    before = state_path.read_bytes()
+    response = client.patch(f"/api/schedules/{entry.schedule_id}", json={"time": "08:1٢"})
+    assert response.status_code == 400
     assert state_path.read_bytes() == before
