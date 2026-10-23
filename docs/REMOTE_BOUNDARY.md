@@ -196,6 +196,10 @@ this one. There is nothing to unpair and no session to bridge.
 
 An agent with vault write access can forge the `via=pwa` memory rows and `actor=user` task rows the weekly rules pass reads as operator decisions. This is bounded: the resulting `Memory-Review-Rules.md` and `Task-Rules.md` only shape what memory review proposes and how tasks are filed, are linted on write and again on read, and are fenced as evidence. They never accept, promote or change permissions.
 
+### Residual: writable Google credential directory (#1959)
+
+A workspace-only chat's sandbox makes the linked Google account's credential directory (`<workspace>/secrets/gws-<profile>`) writable, because `gws` must write its token cache there. `client_secret.json` and `credentials.json` are write-denied by name, but `gws` ranks `credentials.enc`, per-account `credentials.*.enc`, `accounts.json` and `.encryption_key` above them, and those stay writable. A prompt-injected agent can therefore plant credentials for an account it controls. A later unsandboxed `gws` (the operator's terminal, a schedule, a whole-machine chat) would then act as that account, for example writing the operator's files to it. The agent can also read the linked account's refresh token, as it can with whole-machine access. The maintainer accepted this risk. The alternative was a per-chat copy of the directory under `.runtime`, refreshed at each chat start.
+
 ## Verification
 
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`
