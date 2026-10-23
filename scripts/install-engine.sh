@@ -29,6 +29,7 @@ SLEEP=sleep
 version=
 workspace=
 no_start=0
+no_modify_path=0
 migrate=0
 as_host=0
 as_client=
@@ -101,7 +102,7 @@ settled_mismatch=
 
 usage() {
     cat >&2 <<'USAGE'
-Usage: install-engine.sh [--version VERSION] [--workspace DIRECTORY] [--no-start]
+Usage: install-engine.sh [--version VERSION] [--workspace DIRECTORY] [--no-start] [--no-modify-path]
                          [--migrate [--as-host | --as-client URL]]
 
 Installs the Ciaobot engine for the current user with uv; the PWA is its UI.
@@ -116,7 +117,8 @@ Installs the Ciaobot engine for the current user with uv; the PWA is its UI.
                        is still running 20s after it is asked to quit, nothing
                        is changed at all. A hand-over keeps the workspace that
                        engine runs in: --workspace may only name that same
-                       existing workspace, and no workspace is ever created.
+                        existing workspace, and no workspace is ever created.
+  --no-modify-path     Do not add ciao to a shell startup file.
   --as-host            With --migrate: treat this Mac as the host, even when its
                        node state cannot be read or trusted.
   --as-client URL      With --migrate: treat this Mac as a client of URL, which
@@ -129,6 +131,70 @@ USAGE
 fail() {
     echo "Ciaobot engine installer: $*" >&2
     exit 1
+}
+
+quote_shell_path() {
+    quoted_path=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+    printf "'%s'" "$quoted_path"
+}
+
+configure_path() {
+    path_shell=${SHELL##*/}
+    path_profile=
+    path_manual="export PATH=$(quote_shell_path "$bin_dir"):\"\$PATH\""
+    case "$path_shell" in
+        zsh)
+            path_profile=${ZDOTDIR:-$HOME}/.zshrc
+            path_line='case ":${PATH:-}:" in *:'"$(quote_shell_path "$bin_dir")"':*) ;; *) export PATH='"$(quote_shell_path "$bin_dir")"':"$PATH" ;; esac'
+            ;;
+        bash)
+            path_profile=$HOME/.bash_profile
+            for path_candidate in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+                if [ -e "$path_candidate" ]; then path_profile=$path_candidate; break; fi
+            done
+            path_line='case ":${PATH:-}:" in *:'"$(quote_shell_path "$bin_dir")"':*) ;; *) export PATH='"$(quote_shell_path "$bin_dir")"':"$PATH" ;; esac'
+            ;;
+        fish)
+            path_profile=${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish
+            path_line="fish_add_path $(quote_shell_path "$bin_dir")"
+            path_manual=$path_line
+            ;;
+        *) path_profile= ;;
+    esac
+    if [ "$no_modify_path" -ne 0 ]; then
+        echo "PATH was not modified. For this terminal run: $path_manual"
+        return
+    fi
+    if [ -z "$path_profile" ]; then
+        echo "Ciaobot installer could not update PATH automatically (unknown shell). For this terminal run: $path_manual"
+        return
+    fi
+    case ":${PATH:-}:" in
+        *:"$bin_dir":*)
+            echo "The ciao executable directory is already on PATH; no shell startup file was changed."
+            return
+            ;;
+    esac
+    if ! mkdir -p "$(dirname "$path_profile")" 2>/dev/null; then
+        echo "Ciaobot installer could not update PATH automatically. For this terminal run: $path_manual"
+        return
+    fi
+    if [ -L "$path_profile" ] ||
+        { [ -e "$path_profile" ] && { [ ! -f "$path_profile" ] || [ ! -w "$path_profile" ]; }; } ||
+        { [ ! -e "$path_profile" ] && [ ! -w "$(dirname "$path_profile")" ]; }; then
+        echo "Ciaobot installer could not update PATH automatically because $path_profile is not a safe writable file. For this terminal run: $path_manual"
+        return
+    fi
+    if grep -qF '# >>> Ciaobot installer PATH >>>' "$path_profile" 2>/dev/null; then
+        echo "Ciaobot installer PATH entry is already present in $path_profile."
+        return
+    fi
+    if ! printf '\n# >>> Ciaobot installer PATH >>>\n%s\n# <<< Ciaobot installer PATH <<<\n' "$path_line" >> "$path_profile" 2>/dev/null; then
+        echo "Ciaobot installer could not update PATH automatically. For this terminal run: $path_manual"
+        return
+    fi
+    echo "Added ciao to future terminal PATHs in $path_profile. To undo, remove the Ciaobot installer PATH block from that file."
+    echo "For this terminal run: $path_manual"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -144,6 +210,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --no-start) no_start=1; shift ;;
+        --no-modify-path) no_modify_path=1; shift ;;
         --migrate) migrate=1; shift ;;
         --as-host) as_host=1; shift ;;
         --as-client)
@@ -229,7 +296,7 @@ find_uv() {
         uv="$HOME/.local/bin/uv"
     else
         # Pinned version and official installer, and the caller's shell
-        # profile is left alone: PATH changes are the user's call.
+        # profile is left alone until the verified engine install completes.
         download "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-installer.sh" \
             "$tmp/uv-installer.sh" || fail "could not download the uv installer"
         UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin" sh "$tmp/uv-installer.sh" >/dev/null \
@@ -943,7 +1010,7 @@ rollback_host() {
     restore_desktop_agent || failure=yes
     if [ -n "$failure" ]; then
         migration_receipt rolled_back "$1 (rollback incomplete: $failure)" || true
-        fail "migration failed and Ciaobot.app's engine could NOT be fully restored: $1. See $migration_dir/receipt.json, and check: $HOME/.local/bin/ciao service status"
+        fail "migration failed and Ciaobot.app's engine could NOT be fully restored: $1. See $migration_dir/receipt.json, and check: $(quote_shell_path "$bin_dir/ciao") service status"
     fi
     # `|| true` on the write that records the rollback: this runs because
     # something already went wrong, and `set -e` taking the shell down here
@@ -969,7 +1036,7 @@ rollback_client() {
     restore_desktop_agent || failure=yes
     if [ -n "$failure" ]; then
         migration_receipt rolled_back "$1 (rollback incomplete: $failure)" || true
-        fail "migration failed and this Mac's local engine could NOT be fully restored: $1. See $migration_dir/receipt.json, and check: $HOME/.local/bin/ciao service status"
+        fail "migration failed and this Mac's local engine could NOT be fully restored: $1. See $migration_dir/receipt.json, and check: $(quote_shell_path "$bin_dir/ciao") service status"
     fi
     migration_receipt rolled_back "$1" || true
     fail "migration failed and this Mac's local engine was put back as it was: $1"
@@ -1622,7 +1689,7 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
     # just written it.
     port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
     [ -n "$port" ] || port=8443
-    install_step "could not start the engine; try: $ciao service status" \
+    install_step "could not start the engine; try: $(quote_shell_path "$ciao") service status" \
         "$ciao" service start --workspace "$workspace" --json >/dev/null
     # A slow first boot is not a failed install: the plist is written, so say
     # so instead of failing an install that did everything it promised. A
@@ -1704,12 +1771,12 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
             if [ -n "$access_denied" ]; then
                 abort_install "$access_denied"
             fi
-            abort_install "the new engine did not answer on http://localhost:$port with version $version within ${health_attempts}s; check: $ciao service status"
+            abort_install "the new engine did not answer on http://localhost:$port with version $version within ${health_attempts}s; check: $(quote_shell_path "$ciao") service status"
         fi
         if [ -n "$access_denied" ]; then
             echo "Ciaobot engine installer: $access_denied" >&2
         else
-            echo "Ciaobot engine installer: the engine is still starting; check: ciao service status" >&2
+            echo "Ciaobot engine installer: the engine is still starting; check: $(quote_shell_path "$ciao") service status" >&2
         fi
     else
         engine_ready=1
@@ -1769,14 +1836,14 @@ if [ "$migrate_path" = host ]; then
             # wrong here: the app is still on disk and still does what it did
             # before, and a run that says nothing about it is the dead-but-
             # misleading state this step exists to end.
-            echo "Ciaobot.app could not be removed automatically; remove it with: ciao desktop uninstall"
+            echo "Ciaobot.app could not be removed automatically; remove it with: $(quote_shell_path "$ciao") desktop uninstall"
         elif [ -d "$migrate_app_bundle" ]; then
             case "$migrate_app_bundle" in
                 *.app)
                     if rm -rf "$migrate_app_bundle"; then
                         echo "Removed the retired Ciaobot.app."
                     else
-                        echo "Ciaobot.app could not be removed automatically; remove it with: ciao desktop uninstall"
+                        echo "Ciaobot.app could not be removed automatically; remove it with: $(quote_shell_path "$ciao") desktop uninstall"
                     fi
                     ;;
                 *)
@@ -1797,17 +1864,18 @@ fi
 echo "Ciaobot engine $version installed."
 echo "  ciao:      $ciao"
 echo "  workspace: $workspace"
+configure_path
 url=
 if [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ]; then
     # Printed to the terminal and nowhere else: the URL is a one-time
     # credential that signs the person at this keyboard in. A failure must not
     # reach the user as "Open Ciaobot: " with nothing after it.
     url_output=$("$ciao" setup-url --workspace "$workspace") \
-        || fail "could not create the sign-in link; run: $ciao setup-url --workspace $workspace"
+        || fail "could not create the sign-in link; run: $(quote_shell_path "$ciao") setup-url --workspace $workspace"
     url=$(printf '%s\n' "$url_output" | tail -1)
     case "$url" in
         http://*) ;;
-        *) fail "could not create the sign-in link; run: $ciao setup-url --workspace $workspace" ;;
+        *) fail "could not create the sign-in link; run: $(quote_shell_path "$ciao") setup-url --workspace $workspace" ;;
     esac
     echo "Open Ciaobot: $url"
     echo "This link signs you in once. Do not share it."
@@ -1817,10 +1885,6 @@ fi
 if [ "$migrate_path" != client ] && [ -f "$workspace/.runtime/welcome-pending" ]; then
     echo "Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager."
 fi
-case ":${PATH:-}:" in
-    *":$bin_dir:"*) ;;
-    *) echo "Add ciao to your PATH: $uv tool update-shell" ;;
-esac
 if [ -t 1 ] && [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ] && command -v open >/dev/null 2>&1; then
     open "$url" >/dev/null 2>&1 || true
 fi
