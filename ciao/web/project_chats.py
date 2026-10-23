@@ -5162,21 +5162,46 @@ class ProjectChatManager:
         path = Path(raw).expanduser()
         return str(path.resolve()) if path.is_dir() else ""
 
+    def _gws_config_dir(self, workspace: str | None) -> tuple[Path, bool]:
+        """The workspace's gws credential directory and whether an account is linked.
+
+        An unlinked workspace gets a per-workspace directory that never holds
+        credentials, so credentials an agent logs in to one unlinked workspace
+        never serve another.
+        """
+        from ciao.gws_auth import profile_config_dir  # noqa: PLC0415
+
+        gws_profile = self._workspace_gws_profile(workspace)
+        config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
+        if config_dir is not None:
+            return config_dir, True
+        slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
+        return Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE), False
+
     def _agent_read_only_for_chat(self, fs_scope: str) -> tuple[str, ...]:
-        """Runtime files a workspace-scoped chat reads but never writes (#1945)."""
+        """Runtime files a workspace-scoped chat reads but never writes (#1945).
+
+        Also the ``gws`` CLI with its links, npm package and node, so
+        ``ciao gws`` runs when it is installed under the home folder (#1959).
+        """
         if fs_scope != "workspace":
             return ()
+        from ciao.fs_sandbox import gws_tool_read_roots  # noqa: PLC0415
+        from ciao.tool_path import login_shell_path  # noqa: PLC0415
         from ciao.workspace_reroot import receipt_path, registry_file  # noqa: PLC0415
 
         runtime = self._config.state_path.parent
-        return (str(receipt_path(runtime)), str(registry_file(runtime)))
+        gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
+        return (str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots)
 
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
         Roots are the chat's agent root and that workspace's vault root,
         resolved and de-duplicated, agent root first. A project's linked
-        repository follows the vault root. A chat granted the data
+        repository follows the vault root. A workspace with a linked Google
+        account also gets that account's credential directory, which `gws`
+        reads and refreshes (#1959). A chat granted the data
         root (the memory-backup setup chat, #1328) also gets that root, last.
         Machine scope never reads them, so they are only computed for the
         workspace case.
@@ -5191,6 +5216,11 @@ class ProjectChatManager:
         linked_repo = self._linked_repo_for_chat(chat)
         if linked_repo:
             roots.append(linked_repo)
+        gws_dir, gws_linked = self._gws_config_dir(workspace)
+        if gws_linked and gws_dir.is_dir():
+            resolved_gws = gws_dir.resolve()
+            if not any(resolved_gws.is_relative_to(Path(root)) for root in roots):
+                roots.append(str(resolved_gws))
         if chat.grants_data_root:
             roots.append(str(backup_scope.data_root(self._config).resolve()))
         return "workspace", tuple(dict.fromkeys(roots))
@@ -5816,14 +5846,7 @@ class ProjectChatManager:
         # with no linked account must not fall through to that login either (it
         # is the operator's own account), so it gets a directory that never
         # holds credentials and a bare `gws` finds none.
-        from ciao.gws_auth import profile_config_dir
-
-        config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
-        if config_dir is None:
-            # One directory per workspace, so credentials an agent logs in
-            # to one unlinked workspace never serve another.
-            slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
-            config_dir = Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE)
+        config_dir, _linked = self._gws_config_dir(workspace)
         env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:

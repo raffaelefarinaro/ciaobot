@@ -11,6 +11,7 @@ import asyncio
 import pytest
 
 from ciao.fs_sandbox import (
+    gws_tool_read_roots,
     SANDBOX_EXEC_PATH,
     FsSandboxUnavailable,
     _quote_seatbelt_subpath,
@@ -731,6 +732,62 @@ def test_node_tool_roots_keep_npm_code_read_only_and_exclude_home_cache(tmp_path
     assert install not in roots
     assert tmp_path not in roots
     assert tmp_path / ".npm" not in roots
+
+
+def test_gws_tool_roots_grant_npm_package_and_node_not_home(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # Windows does not use these sandbox grants or POSIX symlinks.
+    home = tmp_path / "home"
+    package = home / ".local" / "lib" / "node_modules" / "@googleworkspace" / "cli"
+    (package / "bin").mkdir(parents=True)
+    (package / "package.json").write_text("{}")
+    run_js = package / "run.js"
+    run_js.write_text("#!/usr/bin/env node")
+    (package / "bin" / "gws").write_text("native")
+    link_dir = home / ".local" / "bin"
+    link_dir.mkdir(parents=True)
+    link = link_dir / "gws"
+    link.symlink_to(run_js)
+    node_dir = tmp_path / "node-install" / "bin"
+    node_dir.mkdir(parents=True)
+    node = node_dir / "node"
+    node.write_text("node")
+    found = {"gws": str(link), "node": str(node)}
+    monkeypatch.setattr(shutil, "which", lambda tool, path: found.get(tool))
+
+    roots = gws_tool_read_roots("ignored")
+
+    assert package.resolve() in roots
+    assert link in roots
+    assert run_js.resolve() in roots
+    assert node in roots
+    for denied in (home, home / ".local", link_dir):
+        assert denied not in roots
+        assert denied.resolve() not in roots
+
+
+def test_gws_tool_roots_empty_when_not_installed(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda tool, path: None)
+    assert gws_tool_read_roots("ignored") == []
+
+
+def test_gws_tool_roots_plain_binary_skips_node(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gws = bin_dir / "gws"
+    gws.write_text("native")
+    node = bin_dir / "node"
+    node.write_text("node")
+    found = {"gws": str(gws), "node": str(node)}
+    monkeypatch.setattr(shutil, "which", lambda tool, path: found.get(tool))
+
+    roots = gws_tool_read_roots("ignored")
+
+    assert gws in roots
+    assert node not in roots
+    assert bin_dir not in roots
 
 
 def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypatch):

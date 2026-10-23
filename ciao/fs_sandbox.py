@@ -163,14 +163,10 @@ def node_tool_read_roots(path: str) -> list[Path]:
     """
     roots: list[Path] = []
     for tool in ("node", "npm", "npx"):
-        executable = shutil.which(tool, path=path)
-        if executable is None:
-            continue
-        original = Path(executable).absolute()
-        resolved = original.resolve()
-        candidates = [original, resolved, *_symlink_hops(original)]
-        if tool in {"npm", "npx"}:
+        candidates = _tool_read_roots(tool, path)
+        if candidates and tool in {"npm", "npx"}:
             # npm's own entry points are <npm>/bin/{npm,npx}-cli.js.
+            resolved = candidates[0].resolve()
             package = resolved.parent.parent
             if resolved.parent.name == "bin" and (package / "package.json").is_file():
                 candidates.append(package)
@@ -178,6 +174,37 @@ def node_tool_read_roots(path: str) -> list[Path]:
             if candidate not in roots:
                 roots.append(candidate)
     return roots
+
+
+def _tool_read_roots(tool: str, path: str) -> list[Path]:
+    """The executable ``tool`` resolves to on ``path``, its resolved target and links."""
+    executable = shutil.which(tool, path=path)
+    if executable is None:
+        return []
+    original = Path(executable).absolute()
+    resolved = original.resolve()
+    roots: list[Path] = []
+    for candidate in (original, resolved, *_symlink_hops(original)):
+        if candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def gws_tool_read_roots(path: str) -> list[Path]:
+    """Read-only code the ``gws`` CLI runs, for a workspace-scoped chat (#1959).
+
+    Grants the executable, its symlink hops, its npm package folder and node
+    (the package's ``run.js`` starts with ``#!/usr/bin/env node``), never the
+    home folder, ``~/.local/bin`` as a whole or an npm cache.
+    """
+    roots = _tool_read_roots("gws", path)
+    if not roots:
+        return []
+    package = roots[0].resolve().parent
+    if (package / "package.json").is_file():
+        roots.append(package)
+        roots.extend(_tool_read_roots("node", path))
+    return list(dict.fromkeys(roots))
 
 
 def _shadowed_engine_roots(roots: Sequence[Path], engine: Sequence[Path]) -> list[Path]:

@@ -319,7 +319,10 @@ def test_a_linked_repo_with_code_mode_off_is_not_granted(tmp_path: Path) -> None
     assert str(repo.resolve()) not in request.agent_roots
 
 
-def test_workspace_scope_request_grants_runtime_files_read_only(tmp_path: Path) -> None:
+def test_workspace_scope_request_grants_runtime_files_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
     manager = _make_manager(tmp_path)
     config = manager._config
     workspace = config.workspace("personal")
@@ -340,3 +343,89 @@ def test_workspace_scope_request_grants_runtime_files_read_only(tmp_path: Path) 
 
     config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="machine")
     assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+def _workspace_manager(tmp_path: Path) -> tuple[ProjectChatManager, ChatInfo]:
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="workspace")
+    project = manager.create_project("scoped", workspace="personal")
+    return manager, manager.create_chat(project.project_id, provider="claude")
+
+
+def test_workspace_scope_request_grants_gws_tool_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gws_bin = tmp_path / "gws-bin"
+    monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [gws_bin])
+    manager, chat = _workspace_manager(tmp_path)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    runtime = manager._config.state_path.parent
+    assert request.agent_read_only == (
+        str(runtime / "migration" / "workspace-rooting.json"),
+        str(runtime / "workspaces.json"),
+        str(gws_bin),
+    )
+    assert str(gws_bin) not in request.agent_roots
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+def test_workspace_scope_grants_linked_gws_credentials_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.gws_auth import profile_config_dir
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    try:
+        manager, chat = _workspace_manager(tmp_path)
+        monkeypatch.setattr(manager, "_workspace_gws_profile", lambda workspace: "personal")
+        creds = profile_config_dir(manager._config, "personal")
+        assert creds is not None
+        creds.mkdir(parents=True)
+
+        request = manager.build_agent_request(chat, prompt="hi")
+
+        agent_root = manager._config.agent_root("personal").resolve()
+        assert not creds.resolve().is_relative_to(agent_root)
+        assert request.agent_roots.count(str(creds.resolve())) == 1
+    finally:
+        reset_reroot_cache()
+
+
+def test_workspace_scope_skips_unlinked_or_missing_gws_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.gws_auth import profile_config_dir
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    try:
+        manager, chat = _workspace_manager(tmp_path)
+        monkeypatch.setattr(manager, "_workspace_gws_profile", lambda workspace: "")
+        (tmp_path / ".runtime" / "gws-unlinked" / "personal").mkdir(parents=True)
+
+        roots = manager.build_agent_request(chat, prompt="hi").agent_roots
+        assert not any("secrets" in r or "gws-unlinked" in r for r in roots)
+
+        monkeypatch.setattr(manager, "_workspace_gws_profile", lambda workspace: "personal")
+        creds = profile_config_dir(manager._config, "personal")
+        assert creds is not None and not creds.exists()
+
+        roots = manager.build_agent_request(chat, prompt="hi").agent_roots
+        assert str(creds.resolve()) not in roots
+    finally:
+        reset_reroot_cache()
