@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, test, vi, type Mock } from 'vitest'
-import { createPinia as newPinia, setActivePinia } from 'pinia'
+import { createPinia as newPinia, getActivePinia, setActivePinia } from 'pinia'
 import type { ProjectInfo, ChatInfo, ChatMessage } from '../lib/types'
 import type { ServerRow } from '../lib/chatHistory'
 import {
@@ -7755,14 +7755,14 @@ describe('older history pages', () => {
           }),
     )
     await store.loadMessages(chatId)
-    expect(store.canLoadOlder(chatId)).toBe(true)
+    expect(store.canLoadOlderByChat[chatId]).toBe(true)
 
     await store.loadOlderMessages(chatId)
 
     expect(store.messages[chatId].map(m => m.content)).toEqual([
       'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
     ])
-    expect(store.canLoadOlder(chatId)).toBe(false)
+    expect(store.canLoadOlderByChat[chatId]).toBe(false)
   })
 
   test('still reaches the oldest page after the history grows', async () => {
@@ -7802,7 +7802,56 @@ describe('older history pages', () => {
     expect(store.messages[chatId].map(m => m.content)).toEqual([
       'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
     ])
-    expect(store.canLoadOlder(chatId)).toBe(false)
+    expect(store.canLoadOlderByChat[chatId]).toBe(false)
+  })
+
+  test('pagination state reads do not replace the active pinia', async () => {
+    const piniaA = createPinia()
+    const storeA = useProjectStore(piniaA)
+    const chatId = 'chat-older-pinia'
+    apiGet.mockResolvedValue({
+      items: [{ role: 'user', content: 'old', i: 1, sent_at: '2026-08-24T10:00:00Z' }],
+      total: 2,
+      offset: 1,
+      limit: 1,
+      hasMore: true,
+      nextOffset: 1,
+    })
+    await storeA.loadMessages(chatId)
+
+    const piniaB = createPinia()
+    setActivePinia(piniaB)
+    useProjectStore(piniaB)
+
+    expect(storeA.canLoadOlderByChat[chatId]).toBe(true)
+    expect(storeA.isLoadingOlderByChat[chatId]).toBe(false)
+    expect(getActivePinia()).toBe(piniaB)
+  })
+
+  test('pagination state stays reactive while an older page is loading', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-older-reactive'
+    let resolvePage!: (value: unknown) => void
+    apiGet.mockImplementation((path: string) => path.includes('offset=')
+      ? new Promise(resolve => { resolvePage = resolve })
+      : Promise.resolve({
+          items: [{ role: 'user', content: 'new', i: 1, sent_at: '2026-08-24T10:00:00Z' }],
+          total: 2,
+          offset: 1,
+          limit: 1,
+          hasMore: true,
+          nextOffset: 1,
+        }))
+    await store.loadMessages(chatId)
+    expect(store.canLoadOlderByChat[chatId]).toBe(true)
+    expect(store.isLoadingOlderByChat[chatId]).toBe(false)
+
+    const loading = store.loadOlderMessages(chatId)
+    await nextTick()
+    expect(store.isLoadingOlderByChat[chatId]).toBe(true)
+    resolvePage({ items: [], total: 2, offset: 0, limit: 1, hasMore: false, nextOffset: null })
+    await loading
+    expect(store.isLoadingOlderByChat[chatId]).toBe(false)
   })
 })
 

@@ -32,10 +32,9 @@ import ChatPanel from '../ChatPanel.vue'
 
 // Every panel this file mounts is torn down when its test ends. A panel that
 // outlives its test keeps its scroll-settle loop alive, and that loop calls
-// `store.canLoadOlder()` on a requestAnimationFrame: Pinia treats a setup
-// store's plain function as an action, and an action resets the one global
-// "active pinia" the next `useProjectStore()` reads. A leftover panel could
-// therefore hand the next test the previous test's store.
+// `store.loadOlderMessages()` on a requestAnimationFrame. Store actions reset
+// the one global "active pinia" the next `useProjectStore()` reads. A leftover
+// panel could therefore hand the next test the previous test's store.
 enableAutoUnmount(afterEach)
 
 const ChildStub = defineComponent({
