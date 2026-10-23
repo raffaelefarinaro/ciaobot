@@ -40,7 +40,7 @@
           type="button"
           class="agent-context-system-toggle"
           :aria-expanded="systemPromptOpen"
-          :aria-controls="systemPromptId"
+          :aria-controls="systemPromptOpen ? systemPromptId : undefined"
           @click="systemPromptOpen = !systemPromptOpen"
         >
           <span class="agent-context-row-top">
@@ -50,7 +50,7 @@
           <small>Added to the provider's own system prompt · every session</small>
         </button>
         <div v-if="systemPromptOpen" :id="systemPromptId" class="agent-context-system-body">
-          <button type="button" class="agent-context-link" @click="copySystemPrompt">{{ copied ? 'Copied' : 'Copy' }}</button>
+          <button type="button" class="agent-context-link" aria-live="polite" @click="copySystemPrompt">{{ copied ? 'Copied' : 'Copy' }}</button>
           <pre class="agent-context-system-text" tabindex="0">{{ systemPrompt }}</pre>
         </div>
       </div>
@@ -106,10 +106,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, useId, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
 import { linkifyText } from '../lib/filePaths'
 import { joinRepoPath, repoName } from '../lib/repo'
+import { writeClipboard } from '../lib/codeCopy'
 import { fetchSystemPrompt } from '../lib/systemPrompt'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
 
@@ -204,13 +205,14 @@ const systemPromptId = useId()
 const systemPromptTokens = computed(() => tokensFor(systemPrompt.value.length))
 onMounted(async () => { systemPrompt.value = await fetchSystemPrompt() })
 const copied = ref(false)
+let copyTimer: ReturnType<typeof setTimeout> | undefined
 async function copySystemPrompt() {
-  try {
-    await navigator.clipboard.writeText(systemPrompt.value)
-    copied.value = true
-    setTimeout(() => { copied.value = false }, 1500)
-  } catch { /* clipboard unavailable or denied */ }
+  if (!(await writeClipboard(systemPrompt.value))) return
+  copied.value = true
+  clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => { copied.value = false }, 1500)
 }
+onBeforeUnmount(() => clearTimeout(copyTimer))
 
 const loadedTokens = computed(() => {
   let total = guide.value.path ? guideTokens.value : 0

@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import AgentContextSection from '../AgentContextSection.vue'
+import { writeClipboard } from '../../lib/codeCopy'
 import type { ProjectInfo } from '../../lib/types'
+
+vi.mock('../../lib/codeCopy', () => ({ writeClipboard: vi.fn() }))
 
 const PROJECT = {
   project_id: 'p1',
@@ -75,6 +78,59 @@ describe('AgentContextSection', () => {
   it('hides the system prompt row when the fetch fails', async () => {
     const wrapper = await mountWithSystemPrompt(() => new Response('boom', { status: 500 }))
     expect(wrapper.find('.agent-context-system').exists()).toBe(false)
+    expect(wrapper.get('.agent-context-summary .agent-context-meta').text()).toBe('1k tokens')
+  })
+
+  it('hides the system prompt row when the text is empty', async () => {
+    const wrapper = await mountWithSystemPrompt(() => new Response(JSON.stringify({ text: '', chars: 0 }), { status: 200 }))
+    expect(wrapper.find('.agent-context-system').exists()).toBe(false)
+    expect(wrapper.get('.agent-context-summary .agent-context-meta').text()).toBe('1k tokens')
+  })
+
+  describe('copying the system prompt', () => {
+    afterEach(() => { vi.useRealTimers() })
+
+    async function openedSection() {
+      const wrapper = await mountWithSystemPrompt(promptOk)
+      await wrapper.get('.agent-context-system-toggle').trigger('click')
+      return wrapper
+    }
+
+    it('says Copied, writes the text, then goes back to Copy after 1.5 seconds', async () => {
+      vi.useFakeTimers()
+      vi.mocked(writeClipboard).mockResolvedValue(true)
+      const wrapper = await openedSection()
+      const copy = wrapper.get('.agent-context-system-body button')
+      expect(copy.text()).toBe('Copy')
+      await copy.trigger('click')
+      await flushPromises()
+      expect(writeClipboard).toHaveBeenCalledWith(SYSTEM_PROMPT)
+      expect(copy.text()).toBe('Copied')
+      vi.advanceTimersByTime(1500)
+      await flushPromises()
+      expect(copy.text()).toBe('Copy')
+    })
+
+    it('keeps Copy when the clipboard write fails', async () => {
+      vi.useFakeTimers()
+      vi.mocked(writeClipboard).mockResolvedValue(false)
+      const wrapper = await openedSection()
+      const copy = wrapper.get('.agent-context-system-body button')
+      await copy.trigger('click')
+      await flushPromises()
+      expect(copy.text()).toBe('Copy')
+    })
+
+    it('clears the Copied timer on unmount', async () => {
+      vi.useFakeTimers()
+      vi.mocked(writeClipboard).mockResolvedValue(true)
+      const wrapper = await openedSection()
+      await wrapper.get('.agent-context-system-body button').trigger('click')
+      await flushPromises()
+      wrapper.unmount()
+      expect(() => vi.advanceTimersByTime(1500)).not.toThrow()
+      expect(vi.getTimerCount()).toBe(0)
+    })
   })
 
   it('keeps Always loaded closed behind a summary that names its cost', async () => {
