@@ -510,6 +510,24 @@ def test_setup_workspace_defers_git_for_existing_notes_and_external_vault(tmp_pa
     assert (vault / "ideas.md").read_text(encoding="utf-8") == "private\n"
 
 
+def test_setup_workspace_initialize_git_commits_workspace_and_external_vault(tmp_path: Path) -> None:
+    """The explicit flag is the only consent, and it must reach both helpers.
+
+    Every other test here only asserts that nothing was created, so a flag that
+    silently stopped being forwarded would still look green.
+    """
+    ws, vault = tmp_path / "workspace", tmp_path / "notes"
+    ws.mkdir()
+    vault.mkdir()
+    (vault / "ideas.md").write_text("private\n", encoding="utf-8")
+    setup_workspace(ws, vault_root=vault, vault_mode="existing", initialize_git=True)
+    for root in (ws, vault):
+        assert (root / ".git").is_dir(), root
+        log = _git(root, "log", "--oneline")
+        assert "Initialize" in log.stdout, log.stderr
+    assert (vault / "ideas.md").read_text(encoding="utf-8") == "private\n"
+
+
 def test_setup_workspace_rerun_does_not_initialize_deferred_history(tmp_path: Path) -> None:
     ws = tmp_path / "workspace"
     setup_workspace(ws)

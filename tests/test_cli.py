@@ -785,6 +785,24 @@ def test_setup_yes_does_not_consent_to_git_initialization(tmp_path: Path) -> Non
     assert not (workspace / ".git").exists()
 
 
+def test_setup_initialize_git_creates_workspace_history(tmp_path: Path) -> None:
+    """The explicit CLI flag is the consent; it must actually reach the helper.
+
+    Without this the flag could silently stop being forwarded and every other
+    setup test would still pass, because they only assert that nothing was made.
+    """
+    workspace = tmp_path / "workspace"
+    argv = _setup_argv(workspace, tmp_path / "LaunchAgents", tmp_path / "Applications", initialize_git=True)
+
+    assert cli.main(argv) == 0
+    assert (workspace / ".git").is_dir()
+    log = subprocess.run(
+        ["git", "-C", str(workspace), "log", "--oneline"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert "Initialize Ciaobot workspace" in log.stdout, log.stderr
+
+
 def _stub_setup_for_launchd(workspace: Path, **kwargs) -> list[Path]:
     root = workspace.expanduser().resolve()
     (root / ".runtime").mkdir(parents=True)
