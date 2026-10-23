@@ -6,8 +6,7 @@
 // One mark per kind of live work, so a working turn, a subagent and a shell
 // run no longer draw the same pulsing dot. Shape carries the meaning, not
 // colour: working pulses, an agent orbits, a run is a diamond with a dot tracing
-// its edges. Decorative only: the
-// caller owns the accessible name.
+// its edges. Decorative only: the caller owns the accessible name.
 export type ActivityGlyphKind = 'working' | 'agent' | 'run' | 'run-failed'
 defineProps<{ kind: ActivityGlyphKind }>()
 </script>
@@ -75,7 +74,8 @@ defineProps<{ kind: ActivityGlyphKind }>()
   height: 9px;
   margin: 2px; /* the rotated diagonal is ~12.7px */
   transform: rotate(45deg);
-  border: 1.5px solid color-mix(in srgb, var(--fg2) 55%, transparent);
+  color: var(--fg2);
+  border: 1.5px solid color-mix(in srgb, currentColor 55%, transparent);
 }
 
 .activity-glyph--run::after,
@@ -85,14 +85,14 @@ defineProps<{ kind: ActivityGlyphKind }>()
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: var(--fg);
+  background: currentColor;
   offset-path: path('M-0.75,-0.75 H6.75 V6.75 H-0.75 Z');
   offset-rotate: 0deg;
   animation: activity-glyph-trace 1.8s linear infinite;
 }
 
-.activity-glyph--run-failed { border-color: color-mix(in srgb, var(--error) 70%, transparent); }
-.activity-glyph--run-failed::after { background: var(--error); animation: none; }
+.activity-glyph--run-failed { color: var(--error); }
+.activity-glyph--run-failed::after { animation: none; }
 
 @keyframes activity-glyph-trace {
   from { offset-distance: 0%; }

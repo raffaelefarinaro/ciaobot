@@ -298,6 +298,8 @@ onBeforeUnmount(() => { observer?.disconnect() })
 .composer-activity-seg--error { color: var(--error); }
 .composer-activity-seg--muted,
 .composer-activity-seg--muted .activity-glyph { color: var(--fg3); }
+/* A settled run's mark is still. */
+.composer-activity-seg--outcome .activity-glyph::after { animation: none; }
 
 .composer-activity-popover {
   /* Popper supplies the fixed placement; this is only the surface. */
