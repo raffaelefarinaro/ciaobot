@@ -2631,7 +2631,7 @@ function checkScroll() {
   // page in. The store's loadingOlder flag debounces repeat fires.
   if (el.scrollTop <= 80) {
     const chatId = store.activeChatId
-    if (chatId && store.canLoadOlder(chatId) && !store.isLoadingOlder(chatId)) {
+    if (chatId && store.canLoadOlderByChat[chatId] && !store.isLoadingOlderByChat[chatId]) {
       void loadOlderAnchored()
     }
   }

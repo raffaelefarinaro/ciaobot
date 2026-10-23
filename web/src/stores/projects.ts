@@ -3658,13 +3658,13 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Paginated history: older pages + lazy part expansion ────────────
 
-  function canLoadOlder(chatId: string): boolean {
-    return Boolean(historyMeta.value[chatId]?.hasMore)
-  }
-
-  function isLoadingOlder(chatId: string): boolean {
-    return Boolean(loadingOlder.value[chatId])
-  }
+  const canLoadOlderByChat = computed(() => Object.fromEntries(
+    Object.entries(historyMeta.value).map(([chatId, meta]) => [chatId, Boolean(meta?.hasMore)]),
+  ))
+  const isLoadingOlderByChat = computed(() => Object.fromEntries(
+    [...new Set([...Object.keys(historyMeta.value), ...Object.keys(loadingOlder.value)])]
+      .map(chatId => [chatId, Boolean(loadingOlder.value[chatId])]),
+  ))
 
   /** Fetch the previous page above the loaded window and prepend it. The
    * caller (ChatPanel) preserves scroll position across the prepend. */
@@ -6867,6 +6867,7 @@ export const useProjectStore = defineStore('projects', () => {
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
+    canLoadOlderByChat, isLoadingOlderByChat,
     // Actions
     setQueuedDelivery,
     fetchAll, fetchWorkspaces, createWorkspace, reorderWorkspaces, updateWorkspace,
@@ -6889,7 +6890,7 @@ export const useProjectStore = defineStore('projects', () => {
     terminalOfferReadStart, dismissTerminalOffer,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
-    canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
+    loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs, reconnectNow,
     engineSeenAliveWithin,
     beginServerRestart, restoreState,
