@@ -713,7 +713,9 @@ describe('ProjectSidebar update badge', () => {
     const settingsLink = wrapper.get('a[href="/settings"]')
 
     expect(settingsLink.classes()).toContain('nav-item--warning')
-    expect(settingsLink.attributes('data-note')).toBe('check')
+    // A failure is the warning dot, never a coloured word.
+    expect(settingsLink.find('.nav-item-alert').exists()).toBe(true)
+    expect(settingsLink.attributes('data-note')).toBeUndefined()
     expect(settingsLink.attributes('aria-label')).toBe('settings — action required')
 
     wrapper.unmount()
@@ -751,6 +753,7 @@ describe('ProjectSidebar update badge', () => {
     const wrapper = await mountSidebar()
     await nextTick()
     expect(wrapper.get('a[href="/schedules"]').classes()).not.toContain('nav-item--warning')
+    expect(wrapper.find('a[href="/schedules"] .nav-item-alert').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -759,7 +762,9 @@ describe('ProjectSidebar update badge', () => {
     useTaskStore().schedules = [scheduleIn('personal', { last_status: 'error' })]
     const wrapper = await mountSidebar()
     await nextTick()
-    expect(wrapper.get('a[href="/schedules"]').classes()).toContain('nav-item--warning')
+    const link = wrapper.get('a[href="/schedules"]')
+    expect(link.classes()).toContain('nav-item--warning')
+    expect(link.find('.nav-item-alert').exists()).toBe(true)
     wrapper.unmount()
   })
 

@@ -158,10 +158,7 @@
           <router-link
             to="/"
             class="nav-item"
-            :class="{
-              'nav-item--active': mode === 'chat' || mode === 'project',
-              'nav-item--working': isAnyChatWorking
-            }"
+            :class="{ 'nav-item--active': mode === 'chat' || mode === 'project' }"
             title="Home"
             :data-count="todayCount || undefined"
             :aria-label="todayCount > 0 ? `Home — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Home (assistant is working)' : 'Home')"
@@ -178,6 +175,7 @@
 
             </span>
             <span class="nav-item-label" aria-hidden="true">Home</span>
+            <span v-if="isAnyChatWorking" class="spinner-dot" aria-hidden="true"></span>
           </router-link>
           <router-link
             to="/schedules"
@@ -203,6 +201,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Automations</span>
+            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"></span>
           </router-link>
           <router-link
             to="/memory"
@@ -279,6 +278,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Settings</span>
+            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"></span>
           </router-link>
         </nav>
 
@@ -336,7 +336,7 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item schedule-item--once"
-                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
+                :class="{ 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
@@ -358,7 +358,7 @@
                 aria-label="New automation"
                 title="New automation"
                 @click="emit('new-schedule')"
-              >New</button>
+              ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
             </div>
             <p v-if="!userRoutines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
             <div v-else class="schedule-group-items">
@@ -367,7 +367,7 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
+                :class="{ 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
@@ -391,7 +391,7 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
+                :class="{ 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
@@ -594,7 +594,7 @@
             aria-label="New project"
             title="New project"
             @click="addProject"
-          >New</button>
+          ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
           <button
             type="button"
             class="sidebar-label-icon archive-btn"
@@ -1143,12 +1143,9 @@ const memoryCount = computed(() => {
   const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
   return proposals.scopedRows(workspace).length + retirement
 })
-// Settings has no count; a word says what kind of attention it wants.
-const settingsNote = computed(() => {
-  if (hasBlockingHousekeeping.value) return 'check'
-  if (store.packageStatus?.update_available) return 'update'
-  return ''
-})
+// Settings has no count. A blocking action is the warning dot like any other
+// failure; an available update is news, not trouble, so it is a muted word.
+const settingsNote = computed(() => (store.packageStatus?.update_available ? 'update' : ''))
 
 function projectAttention(projectId: string): number {
   return store.projectNeedsInput(projectId) + store.projectUnread(projectId)
@@ -2284,19 +2281,29 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Subtle section counts: plain numerals on the right of the row, drawn from
    a data attribute so they stay out of the link's text (its aria-label
-   carries the full sentence). Needs-you on Home uses the accent colour;
-   everything else stays muted. */
+   carries the full sentence). One colour role per signal: every count is
+   the same muted numeral, a failure is the warning dot (.nav-item-alert),
+   live work is the spinner dot, and the accent marks only the current row.
+   Icons never change colour. */
 .nav-item[data-count]::after,
 .nav-item[data-note]::after {
-  margin-left: auto;
   color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
 .nav-item[data-count]::after { content: attr(data-count); }
-.nav-item[data-note]::after { content: attr(data-note); color: var(--warning); font-family: var(--font); }
-.nav-item[href="/"][data-count]::after { color: var(--accent); font-weight: 600; }
+.nav-item[data-note]::after { content: attr(data-note); font-family: var(--font); }
+
+.nav-item-alert {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.nav-item .spinner-dot { margin-left: 0; }
 
 /* Coarse pointers get the full 44px target on every rail row. */
 @media (pointer: coarse) {
@@ -2304,8 +2311,10 @@ async function confirmDeleteChat(chatId: string) {
   .sidebar-new-chat { min-height: var(--touch); }
 }
 
-/* aria-hidden because .nav-item already carries the full aria-label. */
+/* aria-hidden because .nav-item already carries the full aria-label. It
+   grows, so the dots and the count after it sit at the row's right edge. */
 .nav-item-label {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: inherit;
@@ -2324,56 +2333,11 @@ async function confirmDeleteChat(chatId: string) {
   outline-offset: 1px;
 }
 
-.nav-item--working svg {
-  animation: pulse-working 2.2s infinite ease-in-out;
-  color: var(--accent);
-}
-
-.nav-item--warning svg {
-  animation: pulse-warning 2.2s infinite ease-in-out;
-  color: var(--warning);
-}
-
-@keyframes pulse-working {
-  0%, 100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.55;
-    transform: scale(0.92);
-  }
-}
-
-@keyframes pulse-warning {
-  0%, 100% {
-    opacity: 1;
-    transform: scale(1);
-    filter: drop-shadow(0 0 0px var(--warning));
-  }
-  50% {
-    opacity: 0.7;
-    transform: scale(1.06);
-    filter: drop-shadow(0 0 1px var(--warning));
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .nav-item--working svg,
-  .nav-item--warning svg {
-    animation: none;
-  }
-}
-
 .nav-item--active,
 .nav-item--active:hover {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   background: color-mix(in srgb, var(--accent) 13%, transparent);
   color: var(--fg);
-}
-
-.nav-item--active .nav-item-icon {
-  color: var(--accent);
 }
 
 .workspace-toggle {
@@ -3018,17 +2982,22 @@ async function confirmDeleteChat(chatId: string) {
 }
 .sidebar-label-row .sidebar-list-label,
 .sidebar-label-row .schedule-group-header { flex: 1; min-width: 0; margin: 0; }
+/* A ghost action: muted at rest, a fill on hover. Never the accent, which in
+   the sidebar marks only the current row and the workspace. */
 .sidebar-label-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   min-height: 28px;
   padding: 0 8px;
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
-  color: var(--accent);
+  color: var(--fg2);
   font: 600 var(--text-xs)/1 var(--font);
   cursor: pointer;
 }
-.sidebar-label-link:hover { background: var(--bg3); }
+.sidebar-label-link:hover { background: var(--bg3); color: var(--fg); }
 .sidebar-label-icon {
   width: 28px;
   height: 28px;
@@ -3301,7 +3270,6 @@ async function confirmDeleteChat(chatId: string) {
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
-.schedule-item--missed .schedule-time { color: var(--warning); }
 .schedule-item--disabled .schedule-label { color: var(--fg3); }
 .schedule-item .missed-dot {
   width: 6px;
