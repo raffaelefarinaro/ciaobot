@@ -24,7 +24,7 @@
         <span v-else class="composer-activity-label">{{ agentsLabel }}</span>
       </button>
       <button
-        v-if="compact && runs.length"
+        v-if="runs.length"
         type="button"
         class="composer-activity-seg composer-activity-seg--runs"
         :title="runsTitle"
@@ -35,26 +35,9 @@
         @click="toggle('runs', $event)"
       >
         <ActivityGlyph kind="run" />
-        <span class="composer-activity-count">{{ runs.length }}</span>
+        <span v-if="compact" class="composer-activity-count">{{ runs.length }}</span>
+        <span v-else class="composer-activity-label">{{ runsLabel }}</span>
       </button>
-      <template v-if="!compact">
-        <button
-          v-for="run in runs"
-          :key="run.run_id"
-          type="button"
-          class="composer-activity-seg composer-activity-seg--run"
-          :title="`${backgroundRunLabel(run)} · ${run.cmd.join(' ')}`"
-          :aria-label="`Background run: ${backgroundRunLabel(run)}, ${backgroundRunMinutes(run, now)}`"
-          aria-haspopup="dialog"
-          :aria-expanded="openedBy === run.run_id"
-          :aria-controls="popoverId"
-          @click="toggle(run.run_id, $event)"
-        >
-          <ActivityGlyph kind="run" />
-          <span class="composer-activity-label">{{ backgroundRunLabel(run) }}</span>
-          <span class="composer-activity-elapsed">{{ backgroundRunMinutes(run, now) }}</span>
-        </button>
-      </template>
       <button
         v-if="outcome"
         type="button"
@@ -163,6 +146,7 @@ const popoverId = computed(() => `composer-activity-${props.chatId}`)
 
 const agentsLabel = computed(() => (props.agentCount === 1 ? '1 agent' : `${props.agentCount} agents`))
 const agentsTitle = computed(() => (props.agentCount === 1 ? '1 agent running' : `${props.agentCount} agents running`))
+const runsLabel = computed(() => (props.runs.length === 1 ? '1 shell' : `${props.runs.length} shells`))
 const runsTitle = computed(() =>
   props.runs.length === 1 ? `Background run: ${backgroundRunLabel(props.runs[0])}` : `${props.runs.length} background runs`,
 )
@@ -225,14 +209,12 @@ function onInteractOutside(e: CustomEvent<{ originalEvent: Event }>) {
 
 watch(hasActivity, (active) => { if (!active) close(false) })
 
-// The part that opened the popover can vanish (run ended, wide/compact switch,
-// agents gone). Close without moving focus: there is nothing to return it to.
+// The part that opened the popover can vanish (runs ended, agents gone). Close without moving focus: there is nothing to return it to.
 const openerRendered = computed(() => {
   const key = openedBy.value
   if (key === null) return true
   if (key === 'agents') return props.agentCount > 0
-  if (key === 'runs') return compact.value && props.runs.length > 0
-  return !compact.value && props.runs.some(r => r.run_id === key)
+  return props.runs.length > 0
 })
 watch(openerRendered, (ok) => { if (!ok) close(false) })
 watch(() => props.chatId, () => close(false))
@@ -300,14 +282,6 @@ onBeforeUnmount(() => { observer?.disconnect() })
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.composer-activity-elapsed {
-  flex-shrink: 0;
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
 }
 
 .composer-activity-count {
