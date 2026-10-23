@@ -107,9 +107,29 @@ describe('Settings asset rows show one origin badge', () => {
     const { app, host } = await mountSettings('subagents')
     try {
       expect(badgesOf(host, 'researcher')).toEqual(['Global'])
+      expect(Array.from(host.querySelectorAll('.settings-rail-assets .rail-kv')).map(row => row.textContent?.replace(/\s+/g, ' ').trim())).toContain('Global1')
     } finally {
       app.unmount()
       host.remove()
+    }
+  })
+
+  it('keeps unclassified origins separate from Global', async () => {
+    const assets = responses['/api/agent-assets'] as { subagents: Array<Record<string, unknown>> }
+    assets.subagents.push({ name: 'mystery', description: 'd', source: 'unknown', scope: 'mystery', path: '/unknown', editable: true, vault_path: '', content: '' })
+    const store = useProjectStore()
+    await store.fetchWorkspaces()
+    store.activeWorkspace = 'personal'
+
+    const { app, host } = await mountSettings('subagents')
+    try {
+      const summary = Array.from(host.querySelectorAll('.settings-rail-assets .rail-kv')).map(row => row.textContent?.replace(/\s+/g, ' ').trim())
+      expect(summary).toContain('Global1')
+      expect(summary).toContain('Other1')
+    } finally {
+      app.unmount()
+      host.remove()
+      assets.subagents.pop()
     }
   })
 
@@ -121,6 +141,7 @@ describe('Settings asset rows show one origin badge', () => {
     const { app, host } = await mountSettings('commands')
     try {
       expect(badgesOf(host, 'deploy')).toEqual(['Installed'])
+      expect(Array.from(host.querySelectorAll('.settings-rail-assets .rail-kv')).map(row => row.textContent?.replace(/\s+/g, ' ').trim())).toContain('Installed1')
     } finally {
       app.unmount()
       host.remove()
