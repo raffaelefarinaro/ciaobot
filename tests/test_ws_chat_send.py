@@ -344,6 +344,29 @@ def test_duplicate_send_id_does_not_start_a_second_turn() -> None:
     assert echo["turn_index"] == 7
 
 
+def test_replayed_parked_send_id_is_suppressed_by_real_manager(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("parked-send", workspace="personal")
+    chat = manager.create_chat(project.project_id, title="parked-send")
+    chat.pending_queue = [{
+        "id": "q-parked", "text": "hello", "images": [], "send_id": "s-parked",
+    }]
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+
+    client = signed_in(TestClient(app))
+    with client.websocket_connect(f"/ws/chat/{chat.chat_id}") as ws:
+        ws.send_text('{"type":"message","text":"hello","send_id":"s-parked"}')
+        echo = ws.receive_json()
+
+    assert echo["type"] == "user_echo"
+    assert echo["duplicate"] is True
+    assert echo["send_id"] == "s-parked"
+    assert manager.get_active_stream(chat.chat_id) is None
+
+
 def test_every_send_frame_is_logged_with_its_send_id(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -440,6 +463,8 @@ async def test_send_id_survives_a_metadata_reload(tmp_path: Path) -> None:
     chat = pcm.create_chat(project.project_id, title="send-id")
 
     pcm.start_stream(chat.chat_id, "hello", send_id="s-1")
+    chat.record_send_ids(0, ["s-2"])
+    pcm._save()
     found = pcm.find_turn_by_send_id(chat.chat_id, "s-1")
     assert found is not None
     assert found["turn_index"] == 0
@@ -458,6 +483,7 @@ async def test_send_id_survives_a_metadata_reload(tmp_path: Path) -> None:
     found_again = reloaded.find_turn_by_send_id(chat.chat_id, "s-1")
     assert found_again is not None
     assert found_again["turn_index"] == 0
+    assert reloaded.find_turn_by_send_id(chat.chat_id, "s-2")["turn_index"] == 0
     # An unknown id owns no turn.
     assert reloaded.find_turn_by_send_id(chat.chat_id, "s-unknown") is None
 
@@ -486,12 +512,20 @@ async def test_the_send_id_history_is_bounded(tmp_path: Path) -> None:
 
     chat_info = pcm.get_chat(chat.chat_id)
     assert chat_info is not None
+    chat_info.record_send_ids(total - 1, ["s-last-companion"])
+    pcm._save()
+
+    chat_info = pcm.get_chat(chat.chat_id)
+    assert chat_info is not None
     assert len(chat_info.user_turn_send_ids) == SEND_ID_HISTORY_TURNS
     # The oldest turns are gone; the newest is still found.
     assert pcm.find_turn_by_send_id(chat.chat_id, "s-0") is None
     found = pcm.find_turn_by_send_id(chat.chat_id, f"s-{total - 1}")
     assert found is not None
     assert found["turn_index"] == total - 1
+    companion = pcm.find_turn_by_send_id(chat.chat_id, "s-last-companion")
+    assert companion is not None
+    assert companion["turn_index"] == total - 1
 
 
 async def test_a_queued_flush_prunes_the_send_id_history(tmp_path: Path) -> None:

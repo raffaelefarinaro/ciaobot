@@ -505,6 +505,33 @@ class ProjectInfo:
 # dedup only needs the recent sends. Left unbounded, the map grew with
 # every turn of every chat and was persisted with the chat metadata.
 SEND_ID_HISTORY_TURNS = 64
+MAX_SEND_IDS_PER_TURN = 100
+
+
+def _entry_send_ids(entry: dict) -> list[str]:
+    send_ids = [str(entry["send_id"])] if entry.get("send_id") else []
+    send_ids.extend(str(send_id) for send_id in (entry.get("send_ids") or []))
+    return list(dict.fromkeys(send_ids))
+
+
+def _entries_within_send_id_limit(
+    chat: "ChatInfo", turn_index: int, entries: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    key = str(turn_index)
+    recorded = chat.user_turn_send_ids.get(key)
+    owned = {recorded} if isinstance(recorded, str) else (
+        set(recorded) if isinstance(recorded, list) else set()
+    )
+    accepted: list[dict] = []
+    overflow: list[dict] = []
+    for entry in entries:
+        additions = set(_entry_send_ids(entry)) - owned
+        if len(owned) + len(additions) > MAX_SEND_IDS_PER_TURN:
+            overflow.append(entry)
+            continue
+        accepted.append(entry)
+        owned.update(additions)
+    return accepted, overflow
 
 
 def _prune_send_id_history(send_ids: dict) -> None:
@@ -806,8 +833,43 @@ class ChatInfo:
         for a duplicate resend, so the older ones are dropped instead of
         growing the chat metadata for the life of the chat.
         """
-        self.user_turn_send_ids[str(turn_index)] = send_id
+        self.record_send_ids(turn_index, [send_id])
+
+    def record_send_ids(self, turn_index: int, send_ids: list[str]) -> None:
+        """Record every client send id that contributed to one user turn."""
+        key = str(turn_index)
+        previous = self.user_turn_send_ids.get(key)
+        recorded = [previous] if isinstance(previous, str) else (
+            list(previous) if isinstance(previous, list) else []
+        )
+        additions = list(
+            dict.fromkeys(sid for sid in send_ids if sid and sid not in recorded)
+        )
+        if len(recorded) + len(additions) > MAX_SEND_IDS_PER_TURN:
+            raise ValueError(
+                f"A user turn cannot own more than {MAX_SEND_IDS_PER_TURN} send ids"
+            )
+        for send_id in additions:
+            recorded.append(send_id)
+        if not recorded:
+            return
+        self.user_turn_send_ids[key] = recorded[0] if len(recorded) == 1 else recorded
         _prune_send_id_history(self.user_turn_send_ids)
+
+    def remove_send_ids(self, turn_index: int, send_ids: list[str]) -> None:
+        """Remove selected IDs from a turn without disturbing other owners."""
+        key = str(turn_index)
+        previous = self.user_turn_send_ids.get(key)
+        recorded = [previous] if isinstance(previous, str) else (
+            list(previous) if isinstance(previous, list) else []
+        )
+        remaining = [send_id for send_id in recorded if send_id not in send_ids]
+        if not remaining:
+            self.user_turn_send_ids.pop(key, None)
+        else:
+            self.user_turn_send_ids[key] = (
+                remaining[0] if len(remaining) == 1 else remaining
+            )
 
 
 def chat_pin_payload(chat: ChatInfo) -> dict[str, Any]:
@@ -6315,13 +6377,19 @@ class ProjectChatManager:
         return self._broker.get(chat_id)
 
     def has_pending_send(self, chat_id: str, send_id: str) -> bool:
-        """True when the chat's live queue already holds this client send id."""
+        """True when a live or parked queue entry holds this client send id."""
         if not send_id:
             return False
         stream = self._broker.get(chat_id)
-        if stream is None:
+        if stream is not None and stream.has_pending_send(send_id):
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        return stream.has_pending_send(send_id)
+        return any(
+            send_id == entry.get("send_id") or send_id in (entry.get("send_ids") or [])
+            for entry in chat.pending_queue
+        )
 
     def queue_message(
         self,
@@ -6453,6 +6521,16 @@ class ProjectChatManager:
         # turn: texts joined with a blank line and every image, in list order.
         # The turn keeps an origin only when every entry shares it. The rest of
         # the waiting queue stays.
+        turn_index = chat.user_turn_count
+        selected, overflow = _entries_within_send_id_limit(
+            chat, turn_index, selected
+        )
+        if overflow and not selected:
+            raise ValueError(
+                f"This turn can own at most {MAX_SEND_IDS_PER_TURN} send ids; "
+                "the entries remain queued."
+            )
+        overflow_entry_ids = [str(entry["id"]) for entry in overflow]
         text = "\n\n".join(
             t for t in (str(e.get("text", "")).strip() for e in selected) if t
         )
@@ -6465,6 +6543,29 @@ class ProjectChatManager:
         origin = shared_origin(selected)
         if not text and not images:
             return False  # nothing to send (images gone): entries stay waiting
+        send_ids = [
+            str(sid)
+            for e in selected
+            for sid in ([e["send_id"]] if e.get("send_id") else [])
+            + list(e.get("send_ids") or [])
+        ]
+        previous_send_ids = chat.user_turn_send_ids.get(str(turn_index))
+        send_id_history_before = {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in chat.user_turn_send_ids.items()
+        }
+        previously_owned = (
+            {previous_send_ids}
+            if isinstance(previous_send_ids, str)
+            else set(previous_send_ids)
+            if isinstance(previous_send_ids, list)
+            else set()
+        )
+        newly_owned = [sid for sid in send_ids if sid not in previously_owned]
+        # Reserve ownership before removing the parked entries or calling the
+        # synchronous start path, which can re-enter message handling.
+        chat.record_send_ids(turn_index, send_ids)
+        self._save()
         sent_ids = {id(e) for e in selected}
         chat.pending_queue = [e for e in chat.pending_queue if id(e) not in sent_ids]
         self._save()
@@ -6473,10 +6574,18 @@ class ProjectChatManager:
         except BaseException:
             # The turn did not start: the entries are still waiting.
             chat.pending_queue = [*selected, *chat.pending_queue]
+            # Reservation may have pruned old turn slots. Restore any such
+            # pre-existing owners before removing only this dispatch's IDs.
+            for key, value in send_id_history_before.items():
+                chat.user_turn_send_ids.setdefault(key, value)
+            chat.remove_send_ids(turn_index, newly_owned)
+            _prune_send_id_history(chat.user_turn_send_ids)
             self._save()
             raise
         # What still waits stays on the chat; publish it with the new stream.
         stream.publish_pending()
+        if overflow_entry_ids:
+            self._publish_steer_fallback(stream, overflow_entry_ids, "send_id_limit")
         return True
 
     async def steer_queue(self, chat_id: str) -> None:
@@ -6508,6 +6617,16 @@ class ProjectChatManager:
             if blank:
                 self._publish_steer_fallback(stream, blank, "not_running")
             entries = stream.steer_candidates()
+            if not entries:
+                return
+            turn_index = chat.user_turn_count
+            entries, overflow = _entries_within_send_id_limit(
+                chat, turn_index, entries
+            )
+            if overflow:
+                overflow_ids = [str(entry["id"]) for entry in overflow]
+                stream.set_delivery(overflow_ids, "queue")
+                self._publish_steer_fallback(stream, overflow_ids, "send_id_limit")
             if not entries:
                 return
             entry_ids = [str(e["id"]) for e in entries]
@@ -6616,6 +6735,7 @@ class ProjectChatManager:
         if chat is None:
             return
         cancelled_origin = ""
+        cancelled_send_ids: list[str] = []
         if turn_index is not None:
             if chat.user_turn_count == turn_index + 1:
                 chat.user_turn_count = turn_index
@@ -6624,7 +6744,9 @@ class ProjectChatManager:
                 chat.user_turn_images.pop(key, None)
                 chat.user_turn_unattended.pop(key, None)
                 chat.user_turn_steered.pop(key, None)
-                chat.user_turn_send_ids.pop(key, None)
+                cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
+                if isinstance(cancelled_send_ids, str):
+                    cancelled_send_ids = [cancelled_send_ids]
                 cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
                 self._streaming.discard_turn_perf(chat_id, turn_index)
             else:
@@ -6648,6 +6770,8 @@ class ProjectChatManager:
         }
         if cancelled_origin:
             entry["origin"] = cancelled_origin
+        if cancelled_send_ids:
+            entry["send_ids"] = cancelled_send_ids
         chat.pending_queue = [*chat.pending_queue, entry]
         self._save()
         stream.publish_queue_state(chat.pending_queue)
@@ -6697,6 +6821,15 @@ class ProjectChatManager:
                 # whether a person is present. A steer into a scheduled turn
                 # must not make it look attended.
                 chat.user_turn_unattended[str(turn_index)] = True
+            chat.record_send_ids(
+                turn_index,
+                [
+                    str(sid)
+                    for e in entries
+                    for sid in ([e["send_id"]] if e.get("send_id") else [])
+                    + list(e.get("send_ids") or [])
+                ],
+            )
             chat.last_activity_at = sent_at
             chat.last_read_at = sent_at  # user sending = implicitly read
             self._save()
@@ -7751,7 +7884,8 @@ class ProjectChatManager:
         found_key: str | None = None
         found_index = -1
         for key, recorded in send_ids.items():
-            if recorded != send_id:
+            recorded_ids = [recorded] if isinstance(recorded, str) else recorded
+            if not isinstance(recorded_ids, list) or send_id not in recorded_ids:
                 continue
             text = str(key)
             if not text.isdecimal():

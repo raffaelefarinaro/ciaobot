@@ -505,7 +505,7 @@ export interface RunningSubagentsResponse {
 // What a queued message will do: wait for the next turn, or be handed to the
 // running one through the provider's native steering.
 export type QueueDelivery = 'queue' | 'steer'
-export type SteerFallbackReason = 'no_turn' | 'not_running' | 'finished' | 'stopped'
+export type SteerFallbackReason = 'no_turn' | 'not_running' | 'finished' | 'stopped' | 'send_id_limit'
 
 export type WsEvent =
   // parent_tool_use_id is set when the event came from inside a Task
