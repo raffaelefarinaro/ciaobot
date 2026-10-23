@@ -60,6 +60,14 @@ describe('ComposerActivity', () => {
     two.unmount()
   })
 
+  it('draws a successful run outcome as a run glyph in the ok tone', () => {
+    const ok = mountBar({ finished: run('r1', '', 0, { status: 'ok' }) })
+    const seg = ok.get('.composer-activity-seg--outcome')
+    expect(seg.classes()).toContain('composer-activity-seg--ok')
+    expect(seg.find('.activity-glyph--run').exists()).toBe(true)
+    ok.unmount()
+  })
+
   it('says how a finished run ended and opens Chat details from it', async () => {
     const failed = mountBar({ finished: run('r1', '', 0, { status: 'error', exit_code: 1 }) })
     const seg = failed.get('.composer-activity-seg--outcome')

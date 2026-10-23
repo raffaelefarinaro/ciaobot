@@ -789,7 +789,7 @@
                       v-if="taskSignals.isTaskChat(chat)"
                       class="chat-task-tag"
                       :title="taskBadgeTitle(chat)"
-                    >task</span>
+                    ><TaskGlyph /></span>
                     <!-- The tag hides with the row's other marks on hover, so the
                          qualifier also travels as text: the row title for a
                          pointer, a hidden line for a screen reader. -->
@@ -797,9 +797,10 @@
                     <span
                       v-if="isChatCodeModeOn(chat, project.repo)"
                       class="chat-code-tag"
+                      role="img"
                       :title="codeBadgeTitle(chat, project.repo)"
                       :aria-label="codeBadgeTitle(chat, project.repo)"
-                    >code</span>
+                    >›_</span>
                     <span
                       v-if="branchChip(chat, project.repo)"
                       class="chat-repo-tag chat-repo-tag--code-off"
@@ -973,6 +974,7 @@ import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
+import TaskGlyph from './TaskGlyph.vue'
 import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
 import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
@@ -2727,24 +2729,23 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
 }
 
-/* A delegated task's chat says so in words, as a small squared tag
-   (DESIGN.md: --radius-xs, the keycap's tokens) so it cannot read as a count.
-   It never shrinks; the title truncates first, and the tag stays short. */
+/* The task and code marks are glyphs (code `›_`, task checkbox); the names
+   live in title/aria. They never shrink; the title truncates first. */
 .chat-task-tag,
 .chat-code-tag {
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
   height: 16px;
-  padding: 0 4px;
-  box-sizing: border-box;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
   color: var(--fg3);
-  font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
 }
 
-/* Same squared tag as .chat-task-tag, but it can truncate (branch names run long). */
+.chat-code-tag {
+  font: 700 calc(11px * var(--font-scale))/1 var(--font-mono);
+  letter-spacing: -0.04em;
+}
+
+/* A squared tag that can truncate (branch names run long). */
 .chat-repo-tag {
   flex: 0 1 auto;
   min-width: 0;

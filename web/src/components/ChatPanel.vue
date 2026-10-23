@@ -72,7 +72,7 @@
                 aria-label="Code mode is on. Show repository details"
                 title="Code mode is on"
                 @click.stop="showDetails('repo')"
-              ><span class="chat-code-badge-tag" aria-hidden="true">code</span></button>
+              ><span class="chat-code-badge-tag" aria-hidden="true">›_</span></button>
             </div>
           </div>
         </div>
@@ -5547,9 +5547,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   -webkit-line-clamp: 2;
   line-clamp: 2;
 }
-.chat-code-badge { display: inline-grid; place-items: center; flex: none; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
-.chat-code-badge-tag { display: inline-grid; place-items: center; height: 16px; padding: 0 4px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: var(--radius-xs); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font: 600 calc(10px * var(--font-scale))/1 var(--font-mono); }
-.chat-code-badge:hover .chat-code-badge-tag { border-color: var(--accent); }
+.chat-code-badge { display: inline-grid; place-items: center; flex: none; min-width: 24px; min-height: 24px; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
+.chat-code-badge-tag { display: inline-grid; place-items: center; height: 20px; padding: 0 3px; color: var(--accent); font: 700 calc(14px * var(--font-scale))/1 var(--font-mono); letter-spacing: -0.04em; }
+.chat-code-badge:hover { background: var(--bg3); }
 .chat-code-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (pointer: coarse), (max-width: 768px) { .chat-code-badge { min-width: var(--touch); min-height: var(--touch); } }
 

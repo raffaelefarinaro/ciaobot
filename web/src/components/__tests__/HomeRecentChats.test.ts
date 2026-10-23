@@ -699,7 +699,7 @@ describe('delegated task chats on Home', () => {
     const row = wrapper.get('.home-tier--needsYou').findAll('.home-chat-item')
       .find(r => r.text().includes('A quiet chat'))!
     expect(row.get('.home-chat-project').text()).toBe('Personal project')
-    expect(row.get('.home-chat-task').text()).toBe('task')
+    expect(row.get('.home-chat-task').find('.task-glyph').exists()).toBe(true)
     // Delegation is the relation this chat has with the task, and the badge
     // says so rather than leaving the word `task` to speak for it.
     expect(row.get('.home-chat-task').attributes('title')).toBe('Delegated board task')
@@ -776,7 +776,10 @@ describe('delegated task chats on Home', () => {
     await nextTick()
     const tag = rowFor(wrapper, 'A quiet chat').find('.home-chat-code')
     expect(tag.exists()).toBe(codeMode && linked)
-    if (tag.exists()) expect(tag.text()).toBe('code')
+    if (tag.exists()) {
+      expect(tag.text()).toBe('›_')
+      expect(tag.attributes('aria-label')).toBe('Code mode is on')
+    }
     wrapper.unmount()
   })
 })
@@ -820,8 +823,8 @@ describe('linked task chats on Home', () => {
   it('tags a linked task chat and says it is only linked', async () => {
     const wrapper = await mountWithLinkedTask()
     const tag = rowFor(wrapper, 'A quiet chat').get('.home-chat-task')
-    // The same squared word as a delegated chat.
-    expect(tag.text()).toBe('task')
+    // The same checkbox glyph as a delegated chat.
+    expect(tag.find('.task-glyph').exists()).toBe(true)
     // A link is a relation, not an attempt, and the badge says which it is.
     expect(tag.attributes('title')).toBe('Linked to a board task')
     expect(tag.attributes('aria-label')).toBeUndefined()
