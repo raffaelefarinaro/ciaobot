@@ -5961,6 +5961,13 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
 
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
+    if tracker is not None:
+        startup_id = getattr(tracker, "startup_id", None)
+        engine_pid = getattr(tracker, "engine_pid", None)
+        if isinstance(startup_id, str) and startup_id:
+            payload["startup_id"] = startup_id
+        if isinstance(engine_pid, int) and not isinstance(engine_pid, bool):
+            payload["pid"] = engine_pid
     # The port the engine binds is taken (#1654): the engine could not start,
     # and a client has to be able to tell that from "still starting" without
     # reading the phase's prose.

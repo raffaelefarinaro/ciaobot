@@ -16,6 +16,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao.main import StartupTracker
 from ciao.web.routes_api import _cached_update_hint, startup_status_endpoint
 
 
@@ -99,3 +100,44 @@ def test_endpoint_serves_without_any_update_plumbing_configured() -> None:
     body = _client().get("/api/startup-status").json()
     assert body["update_available"] is False
     assert body["latest_version"] == ""
+
+
+def test_endpoint_reports_only_current_engine_correlation_identity() -> None:
+    app = Starlette(routes=[Route("/api/startup-status", startup_status_endpoint)])
+    tracker = StartupTracker(startup_id="opaque-run-id", engine_pid=1234)
+    app.state.startup_tracker = tracker
+    client = TestClient(app)
+    body = client.get("/api/startup-status").json()
+    second_body = client.get("/api/startup-status").json()
+    assert body["startup_id"] == "opaque-run-id"
+    assert body["pid"] == 1234
+    assert second_body["startup_id"] == body["startup_id"]
+    assert second_body["pid"] == body["pid"]
+    assert body["phases"] == []
+    assert body["overall_ready"] is False
+    assert not ({"workspace", "runtime", "token", "secret", "control_token"} & body.keys())
+
+
+def test_endpoint_omits_identity_for_legacy_tracker() -> None:
+    app = Starlette(routes=[Route("/api/startup-status", startup_status_endpoint)])
+    app.state.startup_tracker = SimpleNamespace(to_dict=lambda: {"phases": [], "overall_ready": False})
+    body = TestClient(app).get("/api/startup-status").json()
+    assert "startup_id" not in body
+    assert "pid" not in body
+
+
+def test_endpoint_omits_invalid_startup_identity_fields() -> None:
+    app = Starlette(routes=[Route("/api/startup-status", startup_status_endpoint)])
+    tracker = StartupTracker()
+    setattr(tracker, "startup_id", 123)
+    setattr(tracker, "engine_pid", True)
+    app.state.startup_tracker = tracker
+    body = TestClient(app).get("/api/startup-status").json()
+    assert "startup_id" not in body
+    assert "pid" not in body
+
+
+def test_endpoint_without_engine_tracker_does_not_fabricate_identity() -> None:
+    body = _client().get("/api/startup-status").json()
+    assert "startup_id" not in body
+    assert "pid" not in body
