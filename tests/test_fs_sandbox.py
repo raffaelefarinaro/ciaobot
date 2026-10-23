@@ -17,6 +17,7 @@ from ciao.fs_sandbox import (
     gws_tool_read_roots,
     SANDBOX_EXEC_PATH,
     FsSandboxUnavailable,
+    _SYSTEM_READ_SUBPATHS,
     _quote_seatbelt_subpath,
     _seatbelt_profile,
     claude_file_tool_guard,
@@ -1134,3 +1135,279 @@ def test_bwrap_ro_binds_read_only_inside_root_after_root_bind(tmp_path, monkeypa
     root_bind = triples.index(["--bind", str(root), str(root)])
     assert triples.index(["--ro-bind", str(pinned), str(pinned)]) > root_bind
     assert str(missing) not in argv
+
+
+def _secrets_tree(tmp_path: Path) -> tuple[Path, Path, Path, Path, list[Path]]:
+    """root/secrets with a linked account (gws-a), another account and a loose file."""
+    root = tmp_path / "root"
+    secrets = root / "secrets"
+    linked = secrets / "gws-a"
+    other = secrets / "gws-b"
+    linked.mkdir(parents=True)
+    other.mkdir()
+    (linked / "client_secret.json").write_text("{}", encoding="utf-8")
+    (linked / "credentials.json").write_text("{}", encoding="utf-8")
+    (other / "credentials.json").write_text("{}", encoding="utf-8")
+    (secrets / "other.json").write_text("{}", encoding="utf-8")
+    pins = [linked / "client_secret.json", linked / "credentials.json"]
+    return root, secrets, linked, other, pins
+
+
+def _fake_darwin(tmp_path, monkeypatch):
+    fake_binary = tmp_path / "sandbox-exec"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.SANDBOX_EXEC_PATH", str(fake_binary))
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+
+
+def test_seatbelt_denies_secrets_then_regrants_linked_after_system_allow(tmp_path, monkeypatch):
+    _fake_darwin(tmp_path, monkeypatch)
+    root, secrets, linked, _other, pins = _secrets_tree(tmp_path)
+
+    argv = opencode_sandbox_prefix(
+        roots=[root], read_only=pins, denied=[secrets], regrant=[linked]
+    )
+
+    profile = argv[2]
+    system = "(allow file-read* " + " ".join(f'(subpath "{p}")' for p in _SYSTEM_READ_SUBPATHS) + ")"
+    allow = f'(allow file-read* file-write* (subpath "{_quote_seatbelt_subpath(str(root))}"))'
+    deny = f'(deny file-read* file-write* (subpath "{_quote_seatbelt_subpath(str(secrets))}"))'
+    regrant = f'(allow file-read* file-write* (subpath "{_quote_seatbelt_subpath(str(linked))}"))'
+    pin = f'(deny file-write* (subpath "{_quote_seatbelt_subpath(str(pins[0]))}"))'
+    assert profile.count(deny) == profile.count(regrant) == 1
+    assert profile.index(allow) < profile.index(system) < profile.index(deny)
+    assert profile.index(deny) < profile.index(regrant) < profile.rindex(pin)
+
+
+def test_seatbelt_is_unchanged_without_denied_paths(tmp_path):
+    root, _secrets, _linked, _other, pins = _secrets_tree(tmp_path)
+
+    plain = _seatbelt_profile([root], pins, pins)
+
+    assert _seatbelt_profile([root], pins, pins, denied=(), regrant=()) == plain
+    assert "file-read* file-write* (subpath" in plain
+    assert "deny file-read*" not in plain
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file(),
+    reason="needs macOS sandbox-exec",
+)
+def test_darwin_seatbelt_hides_other_accounts_and_keeps_linked(tmp_path):
+    # tmp_path lives under /private, which the system read allow covers, so this
+    # also proves the deny follows that allow.
+    tmp_path = tmp_path.resolve()
+    root, secrets, linked, other, pins = _secrets_tree(tmp_path)
+    prefix = opencode_sandbox_prefix(
+        roots=[root], read_only=pins, denied=[secrets], regrant=[linked]
+    )
+
+    def run(command: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run([*prefix, "/bin/sh", "-c", command], capture_output=True, timeout=30)
+
+    assert run(f"cat '{other}/credentials.json'").returncode != 0
+    assert run(f"cat '{secrets}/other.json'").returncode != 0
+    assert run(f"cat '{linked}/client_secret.json'").returncode == 0
+    assert run(f"echo x > '{linked}/token.json'").returncode == 0
+    assert (linked / "token.json").read_text(encoding="utf-8").strip() == "x"
+    assert run(f"echo x > '{linked}/credentials.json'").returncode != 0
+    assert (linked / "credentials.json").read_text(encoding="utf-8") == "{}"
+
+
+def _fake_linux(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+
+
+def test_bwrap_masks_secrets_between_root_bind_and_linked_bind(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # bwrap does not run on Windows.
+    _fake_linux(monkeypatch)
+    root, secrets, linked, other, pins = _secrets_tree(tmp_path)
+
+    argv = opencode_sandbox_prefix(
+        roots=[root], read_only=[*pins, other / "credentials.json"], denied=[secrets], regrant=[linked]
+    )
+
+    triples = _bwrap_triples(argv)
+    root_bind = triples.index(["--bind", str(root), str(root)])
+    mask_at = next(i for i, t in enumerate(triples) if t[:2] == ["--tmpfs", str(secrets)])
+    linked_bind = triples.index(["--bind", str(linked), str(linked)])
+    pin = triples.index(["--ro-bind", str(pins[0]), str(pins[0])])
+    assert root_bind < mask_at < linked_bind < pin
+    # A pin inside secrets but outside the linked account would re-expose host content.
+    assert str(other / "credentials.json") not in argv
+
+
+def test_bwrap_skips_secrets_mask_when_missing_or_symlink_or_outside_roots(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # bwrap does not run on Windows.
+    _fake_linux(monkeypatch)
+    root = tmp_path / "root"
+    root.mkdir()
+    missing = root / "secrets"
+    target = tmp_path / "target"
+    target.mkdir()
+    link = root / "linked-secrets"
+    link.symlink_to(target)
+    outside = tmp_path / "elsewhere" / "secrets"
+    outside.mkdir(parents=True)
+
+    for denied in (missing, link, outside):
+        argv = opencode_sandbox_prefix(roots=[root], denied=[denied], regrant=[])
+        assert "--tmpfs" not in argv[argv.index("/tmp") + 1 :]
+    assert not missing.exists()
+
+
+def test_claude_settings_secrets_linux(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root, secrets, linked, _other, pins = _secrets_tree(tmp_path)
+
+    settings = claude_sandbox_settings(
+        scope="workspace", mode="auto", roots=[root], read_only=pins, denied=[secrets], regrant=[linked]
+    )
+
+    assert settings is not None
+    filesystem = settings["filesystem"]
+    assert str(Path.home()) in filesystem["denyRead"]
+    assert str(secrets) in filesystem["denyRead"]
+    assert str(linked) in filesystem["allowRead"]
+    assert str(linked) in filesystem["allowWrite"]
+    assert str(secrets) not in filesystem["denyWrite"]
+    for pin in pins:
+        assert str(pin) in filesystem["denyWrite"]
+
+
+def test_claude_settings_secrets_darwin(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root, secrets, linked, other, pins = _secrets_tree(tmp_path)
+
+    settings = claude_sandbox_settings(
+        scope="workspace", mode="auto", roots=[root], read_only=pins, denied=[secrets], regrant=[linked]
+    )
+
+    assert settings is not None
+    filesystem = settings["filesystem"]
+    assert f"{secrets}/*" in filesystem["denyRead"]
+    assert str(other) in filesystem["denyWrite"]
+    assert str(secrets / "other.json") in filesystem["denyWrite"]
+    assert str(linked) not in filesystem["denyWrite"]
+    assert str(linked) in filesystem["allowRead"]
+    assert str(linked) in filesystem["allowWrite"]
+
+
+def _nested_secrets_tree(tmp_path: Path) -> tuple[Path, Path, Path, list[Path]]:
+    """root/ws/secrets/{gws-a, gws-b}: the workspace sits one level below the root."""
+    root = tmp_path / "root"
+    ws = root / "ws"
+    secrets = ws / "secrets"
+    linked = secrets / "gws-a"
+    (secrets / "gws-b").mkdir(parents=True)
+    linked.mkdir()
+    (linked / "credentials.json").write_text("{}", encoding="utf-8")
+    return root, secrets, linked, [linked / "credentials.json"]
+
+
+def test_seatbelt_blocks_unlinking_the_root_and_the_account_dir(tmp_path, monkeypatch):
+    _fake_darwin(tmp_path, monkeypatch)
+    root, secrets, linked, pins = _nested_secrets_tree(tmp_path)
+
+    profile = opencode_sandbox_prefix(
+        roots=[root], read_only=pins, denied=[secrets], regrant=[linked]
+    )[2]
+
+    unlink = [line for line in profile.splitlines() if line.startswith("(deny file-write-unlink")]
+    assert len(unlink) == 1
+    for path in (root, root / "ws", secrets, linked, pins[0]):
+        assert f'(literal "{_quote_seatbelt_subpath(str(path))}")' in unlink[0]
+    assert f'(literal "{_quote_seatbelt_subpath(str(root.parent))}")' not in unlink[0]
+    # Last match wins, so it follows every allow for the same paths.
+    assert profile.index(unlink[0]) > profile.rindex(
+        f'(allow file-read* file-write* (subpath "{_quote_seatbelt_subpath(str(linked))}"))'
+    )
+
+
+def test_seatbelt_has_no_unlink_rule_without_denied_paths(tmp_path):
+    root, _secrets, _linked, pins = _nested_secrets_tree(tmp_path)
+
+    assert "file-write-unlink" not in _seatbelt_profile([root], [], pins)
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file(),
+    reason="needs macOS sandbox-exec",
+)
+def test_darwin_seatbelt_blocks_moving_secrets_ancestors_and_the_account_dir(tmp_path):
+    tmp_path = tmp_path.resolve()
+    root, secrets, linked, pins = _nested_secrets_tree(tmp_path)
+    prefix = opencode_sandbox_prefix(
+        roots=[root], read_only=pins, denied=[secrets], regrant=[linked]
+    )
+
+    def run(command: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run([*prefix, "/bin/sh", "-c", command], capture_output=True, timeout=30)
+
+    assert run(f"mv '{root}/ws' '{root}/ws2'").returncode != 0
+    assert run(f"mv '{linked}' '{root}/o'").returncode != 0
+    assert run(f"mv '{secrets}' '{root}/s2'").returncode != 0
+    assert secrets.is_dir() and linked.is_dir()
+    assert run(f"echo x > '{linked}/t.tmp' && mv '{linked}/t.tmp' '{linked}/token.json'").returncode == 0
+    assert (linked / "token.json").read_text(encoding="utf-8").strip() == "x"
+
+
+@pytest.mark.parametrize("name", ["se*crets", "se?crets", "se[crets", "se]crets"])
+def test_claude_macos_settings_refuse_glob_characters_in_the_denied_folder(
+    tmp_path, monkeypatch, name
+):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    secrets = root / name
+    secrets.mkdir(parents=True)
+
+    with pytest.raises(FsSandboxUnavailable, match="glob"):
+        claude_sandbox_settings(
+            scope="workspace", mode="auto", roots=[root], denied=[secrets], regrant=[]
+        )
+
+
+def test_claude_macos_settings_refuse_glob_characters_in_a_child_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    secrets = root / "secrets"
+    secrets.mkdir(parents=True)
+    (secrets / "a[1].json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FsSandboxUnavailable, match="glob"):
+        claude_sandbox_settings(
+            scope="workspace", mode="auto", roots=[root], denied=[secrets], regrant=[]
+        )
+
+
+def test_claude_macos_settings_fail_closed_when_the_denied_folder_cannot_be_listed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    secrets = root / "secrets"
+    secrets.mkdir(parents=True)
+    real_iterdir = Path.iterdir
+
+    def broken(self):
+        if self == secrets:
+            raise PermissionError("denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", broken)
+
+    with pytest.raises(FsSandboxUnavailable, match="secrets"):
+        claude_sandbox_settings(
+            scope="workspace", mode="auto", roots=[root], denied=[secrets], regrant=[]
+        )

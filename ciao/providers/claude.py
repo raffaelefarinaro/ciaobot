@@ -660,7 +660,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._permission_gate = PermissionGate()
         self._mcp_token = ""
         # Filesystem scope and roots the live CLI process was started with.
-        self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        self._fs_scope_key: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]] = ("machine", (), (), ())
         # Spawn-only options the live CLI process was started with.
         self._spawn_key: tuple[object, ...] = ()
         # Fire-and-forget closes of dead clients, held so they are not collected.
@@ -746,7 +746,7 @@ class ClaudeProvider(BaseSDKProvider):
             and self._connected
             and (
                 provider_reuse_key(request) != self._mcp_token
-                or (request.agent_fs_scope, request.agent_roots) != self._fs_scope_key
+                or (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except) != self._fs_scope_key
             )
         ):
             # MCP configuration, the shell environment and the filesystem
@@ -828,6 +828,8 @@ class ClaudeProvider(BaseSDKProvider):
                 mode=request.mode,
                 roots=roots,
                 read_only=[Path(p) for p in request.agent_read_only],
+                denied=[Path(p) for p in request.agent_denied],
+                regrant=[Path(p) for p in request.agent_denied_except],
             )
             sandbox = cast(SandboxSettings, sandbox_dict)
             agent_root, *other_roots = request.agent_roots
@@ -847,7 +849,7 @@ class ClaudeProvider(BaseSDKProvider):
         linked_repo = linked_repo_of(request)
         if linked_repo and linked_repo not in {str(d) for d in add_dirs}:
             add_dirs.append(linked_repo)
-        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
 
         # The SDK reads the initialize deadline from os.environ when it builds
         # the client, so it has to be set before ClaudeSDKClient() below.

@@ -1645,7 +1645,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
         # Filesystem scope and roots the live server was started with.
-        self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        self._fs_scope_key: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]] = ("machine", (), (), ())
         # The read-only files' identities when it started (`_read_only_snapshot`).
         self._read_only_snapshot: tuple[tuple[str, tuple[int, int] | None], ...] = ()
         self._linked_repo: str = ""  # linked repo the live server was started with
@@ -2251,7 +2251,7 @@ class OpencodeProvider(BaseSDKProvider):
             if (
                 self._process.returncode is None
                 and provider_reuse_key(request) == self._mcp_token
-                and (request.agent_fs_scope, request.agent_roots) == self._fs_scope_key
+                and (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except) == self._fs_scope_key
                 and _read_only_snapshot(request) == self._read_only_snapshot
                 and linked_repo_of(request) == self._linked_repo
             ):
@@ -2318,6 +2318,8 @@ class OpencodeProvider(BaseSDKProvider):
         prefix = opencode_sandbox_prefix(
             roots=roots,
             read_only=[*read_only, *(Path(p) for p in request.agent_read_only)],
+            denied=[Path(p) for p in request.agent_denied],
+            regrant=[Path(p) for p in request.agent_denied_except],
         )
         for folder in writable:
             folder.mkdir(parents=True, exist_ok=True)
@@ -2354,7 +2356,7 @@ class OpencodeProvider(BaseSDKProvider):
         if config_content:
             env["OPENCODE_CONFIG_CONTENT"] = config_content
         self._mcp_token = provider_reuse_key(request)
-        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
         self._read_only_snapshot = read_only_snapshot
 
         # Say it now, while the environment we are about to hand over is in
@@ -2532,7 +2534,7 @@ class OpencodeProvider(BaseSDKProvider):
             reader.cancel()
         self._base_url = ""
         self._mcp_token = ""
-        self._fs_scope_key = ("machine", ())
+        self._fs_scope_key = ("machine", (), (), ())
         self._read_only_snapshot = ()
         self._linked_repo = ""
         self._session_handover_context = ""
