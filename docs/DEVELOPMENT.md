@@ -163,8 +163,15 @@ wheel with `uv tool install`; writes the install receipt with absolute paths;
 then runs `ciao setup` and `ciao service start` and prints the one-time login URL
 to the terminal. It refuses to take over an engine the retired app manages
 unless it is re-run with `--migrate`, and refuses to overwrite a `ciao` it did
-not install. `--migrate`
-is the app→terminal hand-over (#576): after the same manifest and digest
+not install. After a successful install, the installer adds a marked PATH entry
+to the current user's supported shell startup file (zsh, bash or fish), if the
+resolved executable directory is not already on `PATH`, so a new terminal can
+run `ciao`. The zsh/bash block checks membership when each shell starts. Use
+`--no-modify-path` to leave shell files unchanged;
+the installer prints a quoted command for the current terminal either way. The
+installer process cannot change the PATH of the terminal that launched it. The
+managed block can be removed from the named startup file to undo the change.
+`--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool
 environment in `~/.local/state/ciaobot/migration/before/` (an absent file is

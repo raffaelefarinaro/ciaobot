@@ -717,6 +717,202 @@ def test_installer_says_where_the_generated_password_is_shown(tmp_path: Path) ->
 
 @runs_the_sh_installer
 @needs_local_tools
+def test_default_zsh_path_update_is_marked_and_idempotent(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    startup = harness["home"] / ".zshrc"
+    startup.write_text("# keep me\n", encoding="utf-8")
+    env = {"SHELL": "/bin/zsh"}
+
+    first = _run_installer(harness, "--version", VERSION, "--no-start", env=env)
+    second = _run_installer(harness, "--version", VERSION, "--no-start", env=env)
+
+    stanza = '# >>> Ciaobot installer PATH >>>'
+    assert first.returncode == second.returncode == 0
+    assert startup.read_text(encoding="utf-8").count(stanza) == 1
+    assert f"export PATH='{harness['home']}/.local/bin':\"$PATH\"" in startup.read_text(encoding="utf-8")
+    assert "PATH entry is already present" in second.stdout
+
+    sourced = subprocess.run(
+        ["sh", "-c", '. "$1"; . "$1"; . "$1"; printf %s "$PATH"', "sh", str(startup)],
+        env={**os.environ, "HOME": str(harness["home"]), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert sourced.returncode == 0, sourced.stderr
+    assert sourced.stdout.split(":").count(str(harness["home"] / ".local/bin")) == 1
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_dangling_zsh_profile_symlink_is_not_followed(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    startup = harness["home"] / ".zshrc"
+    target = harness["home"] / "missing-zsh-profile"
+    startup.symlink_to(target)
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", env={"SHELL": "/bin/zsh"}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert startup.is_symlink()
+    assert not target.exists()
+    assert "not a safe writable file" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_does_not_edit_profile_when_bin_dir_is_already_on_path(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    startup = harness["home"] / ".zshrc"
+    original = "# user config\n"
+    startup.write_text(original, encoding="utf-8")
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start",
+        env={
+            "SHELL": "/bin/zsh",
+            "PATH": f"{harness['fakebin']}:{harness['home']}/.local/bin:/usr/bin:/bin",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert startup.read_text(encoding="utf-8") == original
+    assert "already on PATH" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_no_modify_path_leaves_all_shell_profiles_untouched(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    startup = harness["home"] / ".zshrc"
+    original = "# user content\n"
+    startup.write_text(original, encoding="utf-8")
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", "--no-modify-path",
+        env={"SHELL": "/bin/zsh"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert startup.read_text(encoding="utf-8") == original
+    assert f"export PATH='{harness['home']}/.local/bin':\"$PATH\"" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_unknown_shell_does_not_receive_a_posix_profile_edit(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", env={"SHELL": "/bin/unknown"}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not list(harness["home"].glob(".*rc"))
+    assert "could not update PATH automatically" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_zdotdir_controls_the_zsh_startup_file(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    zdotdir = harness["home"] / "zsh config"
+    zdotdir.mkdir()
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start",
+        env={"SHELL": "/bin/zsh", "ZDOTDIR": str(zdotdir)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (zdotdir / ".zshrc").is_file()
+    assert not (harness["home"] / ".zshrc").exists()
+    assert f"'{harness['home']}/.local/bin'" in (zdotdir / ".zshrc").read_text()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_bash_login_path_update_uses_effective_login_profile(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    profile = harness["home"] / ".bash_login"
+    profile.write_text("# login settings\n", encoding="utf-8")
+    (harness["home"] / ".profile").write_text("# lower precedence\n", encoding="utf-8")
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", env={"SHELL": "/bin/bash"}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "# >>> Ciaobot installer PATH >>>" in profile.read_text(encoding="utf-8")
+    assert "Ciaobot installer PATH >>>" not in (harness["home"] / ".profile").read_text()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fish_path_update_uses_fish_syntax(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", env={"SHELL": "/usr/local/bin/fish"}
+    )
+
+    fish_config = harness["home"] / ".config/fish/config.fish"
+    assert result.returncode == 0, result.stderr
+    assert "fish_add_path '" in fish_config.read_text(encoding="utf-8")
+    assert "For this terminal run: fish_add_path '" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_custom_uv_bin_directory_is_used_in_path_guidance(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    custom_bin = harness["home"] / "custom tools"
+    uv = harness["fakebin"] / "uv"
+    uv_source = uv.read_text(encoding="utf-8").replace(
+        "$HOME/.local/bin", "$HOME/custom tools"
+    ).replace(
+        'ln -s ../share/uv/tools/ciaobot/bin/ciao "$HOME/custom tools/ciao"',
+        'ln -s "$HOME/.local/share/uv/tools/ciaobot/bin/ciao" "$HOME/custom tools/ciao"',
+    )
+    uv.write_text(
+        uv_source,
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", "--no-modify-path",
+        env={"SHELL": "/bin/zsh"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"'{custom_bin}':\"$PATH\"" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_start_failure_hint_quotes_ciao_path_with_spaces(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    custom_bin = harness["home"] / "custom tools"
+    uv = harness["fakebin"] / "uv"
+    uv_source = uv.read_text(encoding="utf-8").replace(
+        "$HOME/.local/bin", "$HOME/custom tools"
+    ).replace(
+        'ln -s ../share/uv/tools/ciaobot/bin/ciao "$HOME/custom tools/ciao"',
+        'ln -s "$HOME/.local/share/uv/tools/ciaobot/bin/ciao" "$HOME/custom tools/ciao"',
+    )
+    uv.write_text(uv_source, encoding="utf-8")
+    (harness["home"] / "fail-ciao-service-start").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert f"try: '{custom_bin}/ciao' service status" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
 def test_installer_is_quiet_about_a_password_it_did_not_generate(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
 
@@ -2748,7 +2944,7 @@ def test_migrate_host_reports_a_bundle_it_could_not_remove(tmp_path: Path) -> No
     # exactly here and nowhere else in the run.
     assert _app_bundle(tmp_path).is_dir()
     assert "Ciaobot.app could not be removed automatically" in result.stdout
-    assert "ciao desktop uninstall" in result.stdout
+    assert f"'{harness['home']}/.local/bin/ciao' desktop uninstall" in result.stdout
     assert "Removed the retired Ciaobot.app." not in result.stdout
 
 
@@ -2960,7 +3156,7 @@ def test_migrate_resumes_a_receipt_that_never_recorded_the_bundle(
     assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
     assert _app_bundle(tmp_path).is_dir()
     assert "Ciaobot.app could not be removed automatically" in retry.stdout
-    assert "ciao desktop uninstall" in retry.stdout
+    assert f"'{home}/.local/bin/ciao' desktop uninstall" in retry.stdout
     assert "Removed the retired Ciaobot.app." not in retry.stdout
 
 
@@ -3890,4 +4086,3 @@ def test_installer_still_prints_the_link_when_the_engine_came_up(
 
     assert result.returncode == 0, result.stderr
     assert "Open Ciaobot: http://localhost:8443/?setup=tok" in result.stdout
-
