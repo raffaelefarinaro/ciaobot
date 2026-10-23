@@ -151,6 +151,31 @@ function optionFor(items: ReturnType<VueWrapper['findAll']>, model: string) {
   return option!
 }
 
+/** The ids a picker trigger is named by, resolved to their text. */
+function triggerNameParts(trigger: ReturnType<VueWrapper['get']>): string[] {
+  return (trigger.attributes('aria-labelledby') || '')
+    .split(' ')
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent?.trim() ?? `<missing ${id}>`)
+}
+
+describe('Settings → Providers picker names', () => {
+  it('names each picker trigger after its row label and the current value', async () => {
+    const wrapper = await mountModelsTab()
+    try {
+      const row = providerRow(wrapper, 'Claude Code')
+      const triggers = row.findAll('.model-selector__trigger')
+      expect(triggers.length).toBeGreaterThanOrEqual(2)
+      const names = triggers.map((t) => triggerNameParts(t))
+      const value = (i: number) => triggers[i].get('.model-selector__label').text()
+      expect(names[0]).toEqual(['Default model', value(0)])
+      expect(names[1]).toEqual(['Session insights', value(1)])
+    } finally {
+      wrapper.unmount()
+    }
+  })
+})
+
 describe('Settings → Providers model names', () => {
   it('names a namespaced model the way the chat picker does', async () => {
     const wrapper = await mountModelsTab()

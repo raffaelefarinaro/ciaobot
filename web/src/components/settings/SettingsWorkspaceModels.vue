@@ -31,11 +31,12 @@
       </div>
 
       <div class="set-subrow">
-        <span class="ws-label set-subrow-label">Default model</span>
+        <span :id="`workspace-model-${form.name}`" class="ws-label set-subrow-label">Default model</span>
         <div class="set-subrow-control">
           <ModelSelector
             :model-value="override('model') || WS_DEFAULT"
             :sections="modelSections"
+            :labelled-by="`workspace-model-${form.name}`"
             :disabled="saving || !providerAvailable"
             @update:model-value="setField('model', $event, true)"
           />
@@ -78,6 +79,7 @@
 
       <div class="set-subrow">
         <span
+          :id="`workspace-insights-model-${form.name}`"
           class="ws-label set-subrow-label"
           title="Reads archived chats, closed projects and task resolutions into memory, names new chats, and checks schedule results for this provider. Automatic uses the chat's own model; Claude schedule checks use Haiku."
         >Session insights</span>
@@ -85,6 +87,7 @@
           <ModelSelector
             :model-value="override('insights_model') || WS_DEFAULT"
             :sections="insightsSections"
+            :labelled-by="`workspace-insights-model-${form.name}`"
             :disabled="saving || !providerAvailable"
             @update:model-value="setField('insights_model', $event, true)"
           />
