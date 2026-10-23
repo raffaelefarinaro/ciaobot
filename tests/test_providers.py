@@ -3167,3 +3167,61 @@ async def test_claude_second_initialize_timeout_is_not_retried_again(
     # One retry, then the error is the user's: a machine failing every spawn
     # must not loop.
     assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_workspace_scope_passes_read_only_files_to_the_sandbox(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    registry = tmp_path / "rt" / "workspaces.json"
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(tmp_path / "agent"), str(tmp_path / "vault")),
+        agent_read_only=(str(registry),),
+    )
+
+    await provider._ensure_connected(request)
+
+    filesystem = captured["options"].sandbox["filesystem"]
+    assert str(registry) in filesystem["allowRead"]
+    assert str(registry) not in filesystem["allowWrite"]
+
+
+async def test_opencode_workspace_scope_passes_read_only_files_to_the_prefix(tmp_path, monkeypatch):
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    request.extra_env = {"PATH": str(tmp_path / "node-bin")}
+    request.agent_read_only = (str(tmp_path / "rt" / "workspaces.json"),)
+    monkeypatch.setattr("ciao.providers.opencode.node_tool_read_roots", lambda path: [])
+    _capture_spawn(monkeypatch, [])
+    calls: list[list[Path]] = []
+    xdg = tmp_path / "xdg"
+    for name in ("DATA", "STATE", "CONFIG"):
+        monkeypatch.setenv(f"XDG_{name}_HOME", str(xdg / name.lower()))
+    (xdg / "config" / "opencode").mkdir(parents=True)
+    binary = tmp_path / "install" / "bin" / "opencode"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("", encoding="utf-8")
+
+    def fake_prefix(*, roots, read_only=()):
+        calls.append(list(read_only))
+        return ["sandbox-exec", "-p", "PROFILE"]
+
+    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", fake_prefix)
+
+    with pytest.raises(_SpawnCaptured):
+        await provider._start_server_once(request, str(binary))
+
+    assert Path(request.agent_read_only[0]) in calls[0]

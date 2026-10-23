@@ -227,9 +227,12 @@ def engine_read_roots() -> list[Path]:
 
 
 def claude_sandbox_settings(
-    *, scope: str, mode: str, roots: list[Path]
+    *, scope: str, mode: str, roots: list[Path], read_only: Sequence[Path] = ()
 ) -> dict[str, Any] | None:
-    """Sandbox settings dict for the Claude provider, or None for machine."""
+    """Sandbox settings dict for the Claude provider, or None for machine.
+
+    ``read_only`` files are readable but never added to ``allowWrite`` (#1945).
+    """
     if scope == "machine":
         return None
     if scope != "workspace":
@@ -262,7 +265,7 @@ def claude_sandbox_settings(
             # ``allowRead`` alone confines nothing: deny the home directory
             # and re-allow the roots inside it (#1174).
             "denyRead": [str(Path.home())],
-            "allowRead": [str(p) for p in [*roots, *engine]],
+            "allowRead": [str(p) for p in [*roots, *read_only, *engine]],
             "allowWrite": [str(p) for p in roots],
             # The roots grant write access, so an engine folder inside one is denied
             # it by name, as OpenCode's profile shadows it (#1208).
@@ -481,8 +484,15 @@ def opencode_sandbox_prefix(
             # A symlink is never bound (bwrap cannot bind onto one), and a
             # folder under an earlier bind is already there. Shadowed folders
             # are bound after the roots, so they are left out of this pass.
+            # A missing path would abort bwrap (a pre-re-root install has no
+            # receipt file). A bound file keeps its inode, so a registry
+            # rewritten by rename shows the old content until the server
+            # restarts, and a receipt created after the server started is
+            # likewise invisible until it restarts: a known Linux-only staleness.
             directories = [
-                str(path) for path in read_only if not path.is_symlink() and path not in shadowed
+                str(path)
+                for path in read_only
+                if not path.is_symlink() and path not in shadowed and path.exists()
             ]
             bound: list[str] = list(_BWRAP_RO_DIRS)
             for text in directories:

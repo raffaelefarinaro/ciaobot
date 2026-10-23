@@ -9399,11 +9399,28 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
     return gws_auth_helper.main_entry(argv)
 
 
+# EX_NOPERM. Hardcoded: ``os.EX_NOPERM`` does not exist on Windows.
+RUNTIME_STATE_UNREADABLE_EXIT = 77
+
+
 def main(argv: list[str] | None = None) -> int:
     use_utf8_stdio()
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return _dispatch(argv_list)
+    except Exception as exc:
+        # The import lives in the handler so the agent fast path never pays for it.
+        from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
+
+        if not isinstance(exc, RuntimeStateUnreadable):
+            raise
+        print(f"ciao: {exc}", file=sys.stderr)
+        return RUNTIME_STATE_UNREADABLE_EXIT
+
+
+def _dispatch(argv_list: list[str]) -> int:
     # The agent surface (`ciao memory …`, `ciao vault search …`): dispatch
     # before building the operator parser so a call from a chat costs
     # interpreter start-up, not this module's import graph. ``ciao.agent_cli``

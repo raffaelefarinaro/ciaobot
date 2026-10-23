@@ -214,6 +214,24 @@ def plan(install_root: Path, vault_root: Path, workspaces: list[str]) -> RerootP
     return result
 
 
+class RuntimeStateUnreadable(RuntimeError):
+    """Ciaobot's runtime state exists but this process may not read it (#1945).
+
+    Raised instead of guessing: a denied receipt or registry would otherwise
+    read as "not re-rooted" / "no workspaces" and send the caller to the
+    wrong vault. Typically a workspace-scoped chat's sandbox.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        super().__init__(
+            f"cannot read Ciaobot runtime state at {self.path}: permission denied. "
+            "This shell's filesystem sandbox does not grant it; run the command "
+            "from a terminal outside the chat, or set the workspace's file access "
+            "to whole machine."
+        )
+
+
 def receipt_path(runtime_root: Path) -> Path:
     return Path(runtime_root) / "migration" / "workspace-rooting.json"
 
@@ -258,6 +276,21 @@ def mark_born_per_root(
     return [path]
 
 
+def _load_receipt_json(path: Path) -> Any | None:
+    """The parsed receipt file, None when absent or malformed.
+
+    A denied read raises ``RuntimeStateUnreadable`` rather than reading as absent.
+    """
+    try:
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except PermissionError as exc:
+        raise RuntimeStateUnreadable(path) from exc
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
     """The receipt of a COMPLETED re-rooting, or None.
 
@@ -266,12 +299,8 @@ def read_receipt(runtime_root: Path) -> dict[str, Any] | None:
     would permanently block the run that fixes the install. This is the same
     defect D4 found in the earlier migrations.
     """
-    path = receipt_path(runtime_root)
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    data = _load_receipt_json(receipt_path(runtime_root))
+    if data is None:
         return None
     if not isinstance(data, dict):
         return None
@@ -286,12 +315,8 @@ def peek_receipt(runtime_root: Path) -> dict[str, Any] | None:
     job is to surface that work needs to READ the refusal, so it reads this
     instead — the same split ``vault_rehome`` already makes for the same reason.
     """
-    path = receipt_path(runtime_root)
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    data = _load_receipt_json(receipt_path(runtime_root))
+    if data is None:
         return None
     return data if isinstance(data, dict) else None
 

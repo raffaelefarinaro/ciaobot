@@ -2290,7 +2290,10 @@ class OpencodeProvider(BaseSDKProvider):
         effective_env = {**os.environ, **(request.extra_env or {})}
         writable, read_only, cache_home = _sandboxed_server_dirs(binary, path=effective_env.get("PATH", ""))
         roots = [Path(root) for root in request.agent_roots] + writable
-        prefix = opencode_sandbox_prefix(roots=roots, read_only=read_only)
+        prefix = opencode_sandbox_prefix(
+            roots=roots,
+            read_only=[*read_only, *(Path(p) for p in request.agent_read_only)],
+        )
         for folder in writable:
             folder.mkdir(parents=True, exist_ok=True)
         # Exec the resolved binary: an npm install puts a symlink in

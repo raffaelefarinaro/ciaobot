@@ -5162,6 +5162,15 @@ class ProjectChatManager:
         path = Path(raw).expanduser()
         return str(path.resolve()) if path.is_dir() else ""
 
+    def _agent_read_only_for_chat(self, fs_scope: str) -> tuple[str, ...]:
+        """Runtime files a workspace-scoped chat reads but never writes (#1945)."""
+        if fs_scope != "workspace":
+            return ()
+        from ciao.workspace_reroot import receipt_path, registry_file  # noqa: PLC0415
+
+        runtime = self._config.state_path.parent
+        return (str(receipt_path(runtime)), str(registry_file(runtime)))
+
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
@@ -6061,6 +6070,7 @@ class ProjectChatManager:
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             agent_fs_scope=fs_scope,
             agent_roots=fs_roots,
+            agent_read_only=self._agent_read_only_for_chat(fs_scope),
             linked_repo=self._linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
@@ -6536,6 +6546,7 @@ class ProjectChatManager:
                 disallowed_tools=self.disallowed_tools_for_chat(chat),
                 agent_fs_scope=fs_scope,
                 agent_roots=fs_roots,
+                agent_read_only=self._agent_read_only_for_chat(fs_scope),
                 linked_repo=self._linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )

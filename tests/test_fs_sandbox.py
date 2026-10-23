@@ -224,6 +224,8 @@ def test_darwin_seatbelt_backslash_root_stays_confined(tmp_path):
 
 def test_read_only_dirs_are_readable_and_never_writable(tmp_path, monkeypatch):
     root, config = tmp_path / "root", tmp_path / "config"
+    # bwrap skips a read-only path that does not exist (#1945); a real config dir does.
+    config.mkdir()
     profile = _seatbelt_profile([root], read_only=[config])
     assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(config))}"))' in profile
     assert _writable_rules(profile) == 1
@@ -429,6 +431,8 @@ def test_claude_denies_writes_to_an_engine_inside_a_root(tmp_path, monkeypatch):
 
 def test_engine_install_is_read_only_in_every_profile(tmp_path, monkeypatch):
     engine = tmp_path / "engine"
+    # bwrap skips a read-only path that does not exist (#1945); a real install does.
+    engine.mkdir()
     monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [engine])
     root = tmp_path / "root"
 
@@ -727,3 +731,75 @@ def test_node_tool_roots_keep_npm_code_read_only_and_exclude_home_cache(tmp_path
     assert install not in roots
     assert tmp_path not in roots
     assert tmp_path / ".npm" not in roots
+
+
+def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypatch):
+    root = tmp_path / "root-a"
+    granted = tmp_path / "runtime" / "workspaces.json"
+    engine = tmp_path / "engine"
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [engine])
+
+    settings = claude_sandbox_settings(
+        scope="workspace", mode="auto", roots=[root], read_only=[granted]
+    )
+
+    assert settings is not None
+    filesystem = settings["filesystem"]
+    assert filesystem["allowRead"] == [str(root), str(granted), str(engine)]
+    assert str(granted) not in filesystem["allowWrite"]
+
+
+def test_bwrap_skips_missing_read_only_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    existing = tmp_path / "workspaces.json"
+    existing.write_text("{}", encoding="utf-8")
+    missing = tmp_path / "missing.json"
+
+    argv = opencode_sandbox_prefix(roots=[tmp_path / "root"], read_only=[existing, missing])
+
+    triple = ["--ro-bind", str(existing), str(existing)]
+    assert any(argv[i : i + 3] == triple for i in range(len(argv)))
+    assert str(missing) not in argv
+
+
+def test_darwin_seatbelt_reads_a_granted_runtime_file_only(tmp_path):
+    if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
+        try:
+            prefix = opencode_sandbox_prefix(roots=[tmp_path])
+        except FsSandboxUnavailable:
+            pass
+        else:
+            assert "bwrap" in prefix[0]
+        return
+
+    base = tmp_path.resolve()
+    root = base / "root"
+    root.mkdir()
+    receipt = base / "runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("receipt", encoding="utf-8")
+    prefix = opencode_sandbox_prefix(roots=[root], read_only=[receipt])
+
+    allowed = subprocess.run([*prefix, "/bin/cat", str(receipt)], capture_output=True, timeout=30)
+    assert allowed.returncode == 0
+    assert allowed.stdout == b"receipt"
+    # pytest's tmp lives under /private, which the profile reads anyway, so the
+    # read above passes without the grant: assert the grant on the profile text.
+    profile = prefix[2]
+    assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(receipt))}"))' in profile
+    assert not any(
+        "file-write*" in line and str(receipt) in line for line in profile.splitlines()
+    )
+    ok = root / "ok.txt"
+    control = subprocess.run(
+        [*prefix, "/bin/sh", "-c", f"echo ok > '{ok}'"], capture_output=True, timeout=30
+    )
+    assert control.returncode == 0
+    assert ok.read_text(encoding="utf-8").strip() == "ok"
+    written = subprocess.run(
+        [*prefix, "/bin/sh", "-c", f"echo x > '{receipt}'"], capture_output=True, timeout=30
+    )
+    assert written.returncode != 0
+    assert receipt.read_text(encoding="utf-8") == "receipt"

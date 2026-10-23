@@ -824,7 +824,10 @@ class ClaudeProvider(BaseSDKProvider):
                 )
             roots = [Path(root) for root in request.agent_roots]
             sandbox_dict: dict[str, Any] | None = claude_sandbox_settings(
-                scope=request.agent_fs_scope, mode=request.mode, roots=roots
+                scope=request.agent_fs_scope,
+                mode=request.mode,
+                roots=roots,
+                read_only=[Path(p) for p in request.agent_read_only],
             )
             sandbox = cast(SandboxSettings, sandbox_dict)
             agent_root, *other_roots = request.agent_roots

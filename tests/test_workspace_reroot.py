@@ -3834,3 +3834,56 @@ def test_a_hand_moved_install_is_still_recorded_and_pointed_at_repair(
     assert receipt["born_per_root"] is False
     # The derived files still have to be rebuilt, and the command says so.
     assert "`ciao workspace-reroot --repair`" in out
+
+
+def _deny_is_file(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    real_is_file = Path.is_file
+
+    def is_file(self: Path, *args: object, **kwargs: object) -> bool:
+        if self == target:
+            raise PermissionError(errno.EPERM, "denied")
+        return real_is_file(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+
+
+def test_read_receipt_raises_when_the_receipt_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / ".runtime"
+    assert workspace_reroot.read_receipt(runtime) is None
+    assert workspace_reroot.peek_receipt(runtime) is None
+
+    receipt = receipt_path(runtime)
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"status": "migrated"}), encoding="utf-8")
+    _deny_is_file(monkeypatch, receipt)
+
+    with pytest.raises(workspace_reroot.RuntimeStateUnreadable) as read_exc:
+        workspace_reroot.read_receipt(runtime)
+    assert read_exc.value.path == receipt
+    with pytest.raises(workspace_reroot.RuntimeStateUnreadable) as peek_exc:
+        workspace_reroot.peek_receipt(runtime)
+    assert peek_exc.value.path == receipt
+
+
+def test_from_env_raises_when_the_registry_is_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.config import CiaoConfig
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    registry = runtime / "workspaces.json"
+    registry.write_text("{}", encoding="utf-8")
+    _deny_is_file(monkeypatch, registry)
+
+    with pytest.raises(workspace_reroot.RuntimeStateUnreadable) as exc:
+        CiaoConfig.from_env(
+            {
+                "PWA_AUTH_TOKEN": "x",
+                "CIAO_WORKSPACE": str(tmp_path),
+                "CIAO_RUNTIME_ROOT": str(runtime),
+            }
+        )
+    assert exc.value.path == registry.resolve()
