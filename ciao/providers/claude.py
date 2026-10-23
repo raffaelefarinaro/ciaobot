@@ -1195,6 +1195,17 @@ class ClaudeProvider(BaseSDKProvider):
             except Exception:
                 logger.debug("Between-turns drain task ended with error", exc_info=True)
 
+    async def _capture_catalog_evidence(self, client: ClaudeSDKClient) -> None:
+        from ciao.providers.catalog_evidence import invalidate_claude_catalog, record_claude_models
+
+        root = Path(self.workspace_root)
+        try:
+            record_claude_models(root, await client.get_server_info())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            invalidate_claude_catalog(root)
+
     async def run_streaming(
         self,
         request: AgentRequest,
@@ -1337,6 +1348,7 @@ class ClaudeProvider(BaseSDKProvider):
                     # is a real error for this turn.
                     await _connect_with_deadline(client)
                     self._connected = True
+                    await self._capture_catalog_evidence(client)
                 await asyncio.wait_for(client.query(payload), timeout=120)
 
                 pending_result: ResultEvent | None = None

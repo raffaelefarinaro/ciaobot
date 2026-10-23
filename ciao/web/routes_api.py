@@ -1022,6 +1022,10 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     provider = request.path_params["provider"]
     action = request.path_params["action"]
     config = request.app.state.config
+    if provider == "claude" and action in {"verify", "logout"}:
+        from ciao.providers.catalog_evidence import invalidate_claude_catalog
+
+        invalidate_claude_catalog()
     if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
@@ -5728,16 +5732,37 @@ async def schedule_detail(request: Request) -> JSONResponse:
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
+    from ciao.providers.catalog_evidence import claude_catalog_evidence, invalidate_claude_catalog
+
+    workspace_name = request.query_params.get("workspace")
+    if workspace_name:
+        workspace_config = config.workspace(workspace_name)
+        if workspace_config is None:
+            return JSONResponse({"error": "unknown workspace"}, status_code=400)
+        workspace_root = config.agent_root(workspace_name)
+    else:
+        workspace_root = Path(config.workspace_root)
     # `?refresh=1` bypasses the opencode catalog cache. The catalog is served on
     # demand so a provider connected in another window shows up immediately.
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
     opencode_catalog = await OpencodeProvider.model_catalog(
-        config.workspace_root, force=refresh
+        workspace_root, force=refresh
     )
-    # opencode is bring-your-own-provider: its catalog is whatever backends the
-    # user has connected, so an empty list simply means "not signed in yet".
+    if refresh:
+        invalidate_claude_catalog(workspace_root)
+    claude_evidence = claude_catalog_evidence(workspace_root)
+    opencode_evidence_models = [
+        {"id": str(item.get("model")), "label": str(item.get("label") or item.get("model"))}
+        for item in opencode_catalog if item.get("model")
+    ]
+    opencode_evidence = {
+        "status": "observed" if opencode_evidence_models else "unknown",
+        "source": "opencode_catalog" if opencode_evidence_models else None,
+        "models": opencode_evidence_models,
+        "reason": None if opencode_evidence_models else "no_models_reported",
+    }
     opencode_models = [
         str(item.get("model") or "") for item in opencode_catalog if item.get("model")
     ]
@@ -5787,6 +5812,15 @@ async def list_models(request: Request) -> JSONResponse:
         ],
         "model_reasoning_levels": model_reasoning_levels,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
+        "provider_catalog_evidence": {
+            "claude": {
+                "status": claude_evidence.status,
+                "source": claude_evidence.source,
+                "models": [{"id": model.id, "label": model.label} for model in claude_evidence.models],
+                "reason": claude_evidence.reason,
+            },
+            "opencode": opencode_evidence,
+        },
     })
 
 
