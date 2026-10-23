@@ -648,3 +648,96 @@ def test_warm_gh_token_runs_off_loop(tmp_path: Path, monkeypatch: pytest.MonkeyP
     )
     asyncio.run(manager.warm_gh_token(chat))
     assert len(threaded) == 1
+
+
+def _linked_account(manager: ProjectChatManager) -> Path:
+    from ciao.gws_auth import profile_config_dir
+
+    creds = profile_config_dir(manager._config, "personal")
+    assert creds is not None
+    creds.mkdir(parents=True)
+    (creds / "credentials.json").write_text("{}", encoding="utf-8")
+    return creds.resolve()
+
+
+def test_pre_reroot_request_denies_secrets_and_regrants_linked_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    creds = _linked_account(manager)
+    (tmp_path / "secrets" / "gws-other").mkdir()
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == (str((tmp_path / "secrets").resolve()),)
+    assert request.agent_denied_except == (str(creds),)
+
+
+def test_rerooted_request_has_no_denied_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    try:
+        manager, chat = _credentials_request(tmp_path, monkeypatch)
+        _linked_account(manager)
+
+        request = manager.build_agent_request(chat, prompt="hi")
+
+        assert request.agent_denied == ()
+        assert request.agent_denied_except == ()
+    finally:
+        reset_reroot_cache()
+
+
+def test_code_mode_linked_repo_covering_secrets_denies_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    try:
+        manager, chat = _credentials_request(tmp_path, monkeypatch)
+        creds = _linked_account(manager)
+        project = manager._projects[chat.project_id]
+        project.repo_path = str(tmp_path)
+        chat.code_mode = True
+
+        request = manager.build_agent_request(chat, prompt="hi")
+
+        assert str(tmp_path.resolve()) in request.agent_roots
+        assert request.agent_denied == (str((tmp_path / "secrets").resolve()),)
+        assert request.agent_denied_except == (str(creds),)
+    finally:
+        reset_reroot_cache()
+
+
+def test_machine_scope_request_has_no_denied_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    _linked_account(manager)
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == ()
+    assert request.agent_denied_except == ()
+
+
+def test_unlinked_chat_denies_secrets_with_no_regrant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch, linked=False)
+    (tmp_path / "secrets").mkdir()
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == (str((tmp_path / "secrets").resolve()),)
+    assert request.agent_denied_except == ()

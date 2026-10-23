@@ -5286,6 +5286,26 @@ class ProjectChatManager:
             return gws_dir.resolve()
         return None
 
+    def _agent_denied_for_chat(
+        self, chat: ChatInfo, fs_scope: str, fs_roots: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The hidden ``secrets`` folder and the linked account re-allowed in it (#1968).
+
+        Set only in workspace scope when ``secrets`` is a real directory (not a
+        symlink) strictly inside a granted root: the agent's shell could then
+        read every account's credentials. The sandbox stays pure; the decision
+        is made here, where the workspace root, roots and linked account are known.
+        """
+        if fs_scope != "workspace":
+            return (), ()
+        secrets = Path(self._config.workspace_root).resolve() / "secrets"
+        if secrets.is_symlink() or not secrets.is_dir():
+            return (), ()
+        if not any(secrets != Path(root) and secrets.is_relative_to(root) for root in fs_roots):
+            return (), ()
+        gws = self._granted_gws_dir(chat)
+        return (str(secrets),), ((str(gws),) if gws else ())
+
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
@@ -6215,6 +6235,7 @@ class ProjectChatManager:
             extra_env[AGENT_TOKEN_ENV] = token
 
         fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
+        denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -6228,6 +6249,8 @@ class ProjectChatManager:
             agent_fs_scope=fs_scope,
             agent_roots=fs_roots,
             agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
+            agent_denied=denied,
+            agent_denied_except=denied_except,
             linked_repo=self._linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
@@ -6749,6 +6772,7 @@ class ProjectChatManager:
                     if attachment:
                         images.append(attachment)
             fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
+            denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
             request = AgentRequest(
                 prompt=text,
                 model=self._runtime_model_for_chat(chat),
@@ -6761,6 +6785,8 @@ class ProjectChatManager:
                 agent_fs_scope=fs_scope,
                 agent_roots=fs_roots,
                 agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
+                agent_denied=denied,
+                agent_denied_except=denied_except,
                 linked_repo=self._linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )

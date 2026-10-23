@@ -159,6 +159,12 @@ class AgentRequest:
     agent_fs_scope: str = "machine"
     agent_roots: tuple[str, ...] = ()
     agent_read_only: tuple[str, ...] = ()
+    # Workspace scope only (#1968): ``agent_denied`` is the resolved ``secrets``
+    # directory when it lies inside a granted root, hidden from the agent;
+    # ``agent_denied_except`` is the linked account's directory inside it,
+    # re-allowed read-write. Empty when ``secrets`` is not covered by a root.
+    agent_denied: tuple[str, ...] = ()
+    agent_denied_except: tuple[str, ...] = ()
     # Resolved path of the project's linked git repository ("" = none). Both
     # providers load its skills and allow it in every filesystem scope; it is
     # fixed when the provider process starts.

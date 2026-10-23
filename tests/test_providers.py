@@ -1364,7 +1364,7 @@ async def test_a_changed_root_set_rebuilds_the_claude_client(
     data_root = tmp_path
     provider._client = object()  # type: ignore[assignment]
     provider._connected = True
-    provider._fs_scope_key = ("workspace", (str(agent_root),))
+    provider._fs_scope_key = ("workspace", (str(agent_root),), (), ())
 
     async def fake_disconnect() -> None:
         stopped.append(True)
@@ -1403,7 +1403,7 @@ async def test_an_unchanged_root_set_reuses_the_claude_client(
     provider._current_model = "sonnet"
     provider._current_mode = "auto"
     agent_root = str(tmp_path / "agent")
-    provider._fs_scope_key = ("workspace", (agent_root,))
+    provider._fs_scope_key = ("workspace", (agent_root,), (), ())
 
     async def fake_disconnect() -> None:
         stopped.append(True)
@@ -1500,7 +1500,7 @@ async def test_claude_scope_change_reconnects_live_process(
     provider._client = object()
     provider._connected = True
     provider._mcp_token = provider_reuse_key(request)
-    provider._fs_scope_key = ("machine", ())
+    provider._fs_scope_key = ("machine", (), (), ())
 
     async def fake_disconnect() -> None:
         captured["disconnects"] += 1
@@ -1568,7 +1568,7 @@ async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypa
     binary.parent.mkdir(parents=True)
     binary.write_text("", encoding="utf-8")
 
-    def fake_prefix(*, roots, read_only=()):
+    def fake_prefix(*, roots, read_only=(), denied=(), regrant=()):
         calls.append((list(roots), list(read_only)))
         return ["sandbox-exec", "-p", "PROFILE"]
 
@@ -1624,7 +1624,7 @@ async def test_opencode_workspace_scope_does_not_spawn_when_the_sandbox_is_missi
     provider, request = _opencode_scope_fixture(tmp_path, "workspace")
     spawned = _capture_spawn(monkeypatch)
 
-    def missing_sandbox(*, roots, read_only=()):
+    def missing_sandbox(*, roots, read_only=(), denied=(), regrant=()):
         raise FsSandboxUnavailable("no sandbox tool")
 
     monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", missing_sandbox)
@@ -1643,7 +1643,7 @@ async def test_opencode_scope_change_restarts_the_live_server(tmp_path, monkeypa
     provider._client = live
     provider._process = SimpleNamespace(returncode=None)
     provider._mcp_token = provider_reuse_key(request)
-    provider._fs_scope_key = ("machine", ())
+    provider._fs_scope_key = ("machine", (), (), ())
     events: list[str] = []
 
     async def fake_disconnect():
@@ -1665,7 +1665,12 @@ async def test_opencode_scope_change_restarts_the_live_server(tmp_path, monkeypa
     # Same scope and roots: the live server is reused.
     provider._client = live
     provider._process = SimpleNamespace(returncode=None)
-    provider._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+    provider._fs_scope_key = (
+        request.agent_fs_scope,
+        request.agent_roots,
+        request.agent_denied,
+        request.agent_denied_except,
+    )
     assert await provider._ensure_server(request) is live
 
 
@@ -1680,7 +1685,12 @@ def _live_scoped_opencode(tmp_path, monkeypatch, granted):
     provider._client = live
     provider._process = SimpleNamespace(returncode=None)
     provider._mcp_token = provider_reuse_key(request)
-    provider._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+    provider._fs_scope_key = (
+        request.agent_fs_scope,
+        request.agent_roots,
+        request.agent_denied,
+        request.agent_denied_except,
+    )
     provider._read_only_snapshot = _read_only_snapshot(request)
     events: list[str] = []
 
@@ -3324,7 +3334,7 @@ async def test_opencode_workspace_scope_passes_read_only_files_to_the_prefix(tmp
     binary.parent.mkdir(parents=True)
     binary.write_text("", encoding="utf-8")
 
-    def fake_prefix(*, roots, read_only=()):
+    def fake_prefix(*, roots, read_only=(), denied=(), regrant=()):
         calls.append(list(read_only))
         return ["sandbox-exec", "-p", "PROFILE"]
 
