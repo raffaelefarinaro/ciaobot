@@ -53,7 +53,14 @@ from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.port_in_use import BIND_PHASE
-from ciao.web.auth import LOOPBACK_HOST_NAMES, _same_origin, is_loopback_client
+from ciao.web.auth import (
+    LOOPBACK_HOST_NAMES,
+    _localhost_request,
+    _same_origin,
+    _setup_finish_origin_allowed,
+    _setup_finish_refusal,
+    is_loopback_client,
+)
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
@@ -6106,59 +6113,6 @@ async def setup_status_endpoint(request: Request) -> JSONResponse:
 
 
 
-def _host_name(value: str) -> str:
-    host = value.strip()
-    if host.startswith("["):
-        end = host.find("]")
-        host = host[1:end] if end != -1 else host
-    elif host.count(":") == 1:
-        host = host.rsplit(":", 1)[0]
-    return host.rstrip(".").lower()
-
-
-def _localhost_request(request: Request) -> bool:
-    """True when the TCP peer is this machine AND the Host names a local address.
-
-    The peer check is what makes it local: during first run the server binds
-    0.0.0.0, and a LAN client can send ``Host: localhost`` freely. The Host
-    check stays on top of it so a DNS-rebound page on this machine cannot
-    drive the setup routes either.
-    """
-    if not is_loopback_client(request):
-        return False
-    name = _host_name(request.headers.get("host", ""))
-    if not name:
-        name = (request.url.hostname or "").rstrip(".").lower()
-    # 0.0.0.0 is an accepted local Host spelling, not a loopback network
-    # address: a browser pointed at it can only reach the viewer's own machine
-    # (users copy it from the uvicorn bind-address log). It is accepted only
-    # because the peer above is a real loopback TCP peer.
-    return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
-
-
-def _same_host_header(request: Request, value: str) -> bool:
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return False
-    if not parsed.hostname:
-        return False
-    request_host = _host_name(request.headers.get("host", ""))
-    if not request_host:
-        request_host = (request.url.hostname or "").rstrip(".").lower()
-    return parsed.hostname.rstrip(".").lower() == request_host
-
-
-def _setup_finish_origin_allowed(request: Request) -> bool:
-    origin = request.headers.get("origin")
-    if origin:
-        return _same_host_header(request, origin)
-    referer = request.headers.get("referer")
-    if referer:
-        return _same_host_header(request, referer)
-    return True
-
-
 def _interactive_foreground_run() -> bool:
     """True when setup can hand the bootstrap server to launchd.
 
@@ -6196,16 +6150,9 @@ def _schedule_launchd_server_handoff() -> bool:
 async def setup_finish_endpoint(request: Request) -> JSONResponse:
     """Write real setup config from bootstrap mode and request supervisor restart."""
     config = request.app.state.config
-    if not getattr(config, "bootstrap_mode", False):
-        return JSONResponse({"error": "setup finish is only available in bootstrap mode"}, status_code=409)
-    if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
-        return JSONResponse(
-            {
-                "error": "setup finish is localhost-only — open the wizard at "
-                f"http://localhost:{config.pwa_port}"
-            },
-            status_code=403,
-        )
+    refusal = _setup_finish_refusal(request)
+    if refusal is not None:
+        return refusal
     try:
         body = await request.json()
     except ValueError:

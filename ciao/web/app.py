@@ -29,6 +29,7 @@ from ciao.web.routes_mcp import (
     mcp_usage_endpoint,
 )
 from ciao.web.auth import AuthMiddleware, make_serializer
+from ciao.web.request_limits import ApiRequestBodyLimitMiddleware
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
     create_command_endpoint,
@@ -793,6 +794,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     middleware = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer),
+        Middleware(ApiRequestBodyLimitMiddleware),
     ]
 
     @asynccontextmanager

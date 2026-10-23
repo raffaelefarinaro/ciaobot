@@ -306,6 +306,27 @@ def _stop_server_sync(process: subprocess.Popen[bytes], tree: ProcessTree) -> No
         tree.close()
 
 
+def _read_only_snapshot(request: AgentRequest) -> tuple[tuple[str, tuple[int, int] | None], ...]:
+    """Identity of each granted read-only file, for the server reuse decision (#1960).
+
+    Linux only: ``bwrap`` binds a file by inode when the server starts, so a
+    registry replaced by rename keeps showing its old content and a receipt
+    created later is never bound. A changed snapshot restarts the server with
+    fresh binds. Seatbelt grants by path, so macOS never needs the restart.
+    """
+    if request.agent_fs_scope != "workspace" or not sys.platform.startswith("linux"):
+        return ()
+    snapshot: list[tuple[str, tuple[int, int] | None]] = []
+    for raw in request.agent_read_only:
+        try:
+            st = os.stat(raw)
+        except OSError:  # missing or unreadable: nothing is bound
+            snapshot.append((raw, None))
+            continue
+        snapshot.append((raw, (st.st_ino, st.st_mtime_ns)))
+    return tuple(snapshot)
+
+
 async def _spawn_server(
     *argv: str, **kwargs: Any
 ) -> tuple[asyncio.subprocess.Process, ProcessTree]:
@@ -1625,6 +1646,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._mcp_token: str = ""
         # Filesystem scope and roots the live server was started with.
         self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        # The read-only files' identities when it started (`_read_only_snapshot`).
+        self._read_only_snapshot: tuple[tuple[str, tuple[int, int] | None], ...] = ()
         self._linked_repo: str = ""  # linked repo the live server was started with
         # Background work of this chat's session. It outlives a turn, so it is
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
@@ -2219,22 +2242,24 @@ class OpencodeProvider(BaseSDKProvider):
 
         A changed MCP token forces a full restart: opencode reads MCP
         configuration at server scope, so the running process cannot be
-        re-pointed at a new token. A changed filesystem scope does too: the
-        sandbox wraps the server process itself. A changed filesystem scope or
-        linked repo does too.
+        re-pointed at a new token. A changed filesystem scope or linked repo
+        does too, since the sandbox wraps the server process itself, and on
+        Linux so does a replaced, created or deleted read-only runtime file
+        (`_read_only_snapshot`).
         """
         if self._client is not None and self._process is not None:
             if (
                 self._process.returncode is None
                 and provider_reuse_key(request) == self._mcp_token
                 and (request.agent_fs_scope, request.agent_roots) == self._fs_scope_key
+                and _read_only_snapshot(request) == self._read_only_snapshot
                 and linked_repo_of(request) == self._linked_repo
             ):
                 return self._client
             if self._process.returncode is None and self.background_work_outstanding:
                 logger.warning(
-                    "Restarting the OpenCode server for %s (agent token, filesystem scope or linked repo "
-                    "changed) stops %d background shell(s) and %d background subagent(s)",
+                    "Restarting the OpenCode server for %s (agent token, filesystem scope, runtime file "
+                    "or linked repo changed) stops %d background shell(s) and %d background subagent(s)",
                     self.workspace_root,
                     len(self._background_shells),
                     len(self._background_children),
@@ -2310,6 +2335,10 @@ class OpencodeProvider(BaseSDKProvider):
     ) -> httpx.AsyncClient:
         """Start, validate, and register one opencode server process."""
         port = _free_port()
+        # Before the argv: the prefix decides each bind as it is built, so a
+        # file changed in between shows up as a difference next turn and
+        # restarts, instead of being recorded as already bound.
+        read_only_snapshot = _read_only_snapshot(request)
         argv, sandbox_env = self._server_launch(request, binary, port)
         self._password = secrets.token_urlsafe(24)
         env = {
@@ -2326,6 +2355,7 @@ class OpencodeProvider(BaseSDKProvider):
             env["OPENCODE_CONFIG_CONTENT"] = config_content
         self._mcp_token = provider_reuse_key(request)
         self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+        self._read_only_snapshot = read_only_snapshot
 
         # Say it now, while the environment we are about to hand over is in
         # hand: an unresolved placeholder becomes an empty credential and only
@@ -2503,6 +2533,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._base_url = ""
         self._mcp_token = ""
         self._fs_scope_key = ("machine", ())
+        self._read_only_snapshot = ()
         self._linked_repo = ""
         self._session_handover_context = ""
         self._reset_settings()
