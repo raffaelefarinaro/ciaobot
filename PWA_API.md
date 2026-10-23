@@ -35,6 +35,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/api/onboarding` | Read the installation and registered-workspace lifecycle receipt (signed browser session required). |
+| PATCH | `/api/onboarding` | Advance or step back one target with `{"expected_revision": n, "target": {"kind":"installation"}, "step":"runtime"}`. Only progress changes; status is server-controlled. |
+| POST | `/api/onboarding/complete` | Complete a target with `{"expected_revision": n, "target": {"kind":"installation"}}`; its step must already be `finish`. |
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie and end this browser's terminal grant |
 | GET | `/api/auth/check` | Verify current session |
@@ -1019,10 +1022,15 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedu
   -H 'content-type: application/json' \
   -d '{"time":"01:00","timezone":"Europe/Zurich","frequency":"daily","prompt":"Memory curation","web_project_id":"proj-...","workspace":"personal","archive_policy":"auto"}'
 
-# Update archive behavior.
+# Update a routine's local clock and IANA timezone. For packaged system
+# routines, PATCH may also change enabled/workspace/model/provider/archive_policy
+# and time/timezone; prompt/title/command/frequency/target are package-owned and
+# rejected. System timing is persisted on the existing routine ID, not as a
+# duplicate user schedule. `time` is local HH:MM in `timezone`, including DST.
+# Untouched packaged fan-out rows retain their staggered defaults.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/schedules/$SID" \
   -H 'content-type: application/json' \
-  -d '{"archive_policy":"auto"}'
+  -d '{"time":"21:30","timezone":"Europe/Zurich"}'
 
 # Run a schedule on demand. Auto-archived routines can return archived_to.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedule-run/$SID"
@@ -2111,3 +2119,4 @@ moment it is exposed.
 ## Naming
 
 See `README.md` "Project naming convention" for folder layout, frontmatter, and the auto-created `General` project.
+Onboarding mutations return the full receipt. Revisions are global: a successful change increments once; repeating the current step at the current revision is a no-write success; any other stale mutation returns `409 onboarding_revision_conflict`. Completed targets replay successfully even with an old revision; exempt targets remain closed. Errors use `{error, code}` (`400 invalid_onboarding_request`, `404 onboarding_target_not_found`, `409 onboarding_target_closed` / `onboarding_finish_required`, `503 onboarding_not_initialized`, `500 onboarding_state_unavailable`). Completion records journey progress only: it does not verify provider connection, model readiness, backup or folder state. Deferred provider setup does not block it.
