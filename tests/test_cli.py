@@ -707,7 +707,7 @@ def test_remove_legacy_app_shortcuts_keeps_the_legacy_app_bundle(tmp_path: Path)
     assert (app_root / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
 
 
-def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool = False) -> list[str]:
+def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool = False, initialize_git: bool = False) -> list[str]:
     argv = [
         "setup",
         "--workspace", str(workspace),
@@ -718,6 +718,8 @@ def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool =
     ]
     if yes:
         argv.append("--yes")
+    if initialize_git:
+        argv.append("--initialize-git")
     return argv
 
 
@@ -769,6 +771,36 @@ def test_setup_yes_overrides_repoint_guard(tmp_path: Path) -> None:
     assert cli.main(_setup_argv(first, launch_agents, apps)) == 0
     assert cli.main(_setup_argv(second, launch_agents, apps, yes=True)) == 0
     assert (second / ".env").exists()
+
+
+def test_setup_defers_git_unless_initialize_git_is_explicit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert cli.main(_setup_argv(workspace, tmp_path / "LaunchAgents", tmp_path / "Applications")) == 0
+    assert not (workspace / ".git").exists()
+
+
+def test_setup_yes_does_not_consent_to_git_initialization(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert cli.main(_setup_argv(workspace, tmp_path / "LaunchAgents", tmp_path / "Applications", yes=True)) == 0
+    assert not (workspace / ".git").exists()
+
+
+def test_setup_initialize_git_creates_workspace_history(tmp_path: Path) -> None:
+    """The explicit CLI flag is the consent; it must actually reach the helper.
+
+    Without this the flag could silently stop being forwarded and every other
+    setup test would still pass, because they only assert that nothing was made.
+    """
+    workspace = tmp_path / "workspace"
+    argv = _setup_argv(workspace, tmp_path / "LaunchAgents", tmp_path / "Applications", initialize_git=True)
+
+    assert cli.main(argv) == 0
+    assert (workspace / ".git").is_dir()
+    log = subprocess.run(
+        ["git", "-C", str(workspace), "log", "--oneline"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert "Initialize Ciaobot workspace" in log.stdout, log.stderr
 
 
 def _stub_setup_for_launchd(workspace: Path, **kwargs) -> list[Path]:

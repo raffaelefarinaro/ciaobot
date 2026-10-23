@@ -60,6 +60,17 @@ def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
     assert ".env" not in tracked
 
 
+def test_ensure_workspace_git_defers_missing_repository(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "notes.md").write_text("private notes\n", encoding="utf-8")
+
+    ensure_workspace_git(root, initialize_if_missing=False)
+
+    assert not (root / ".git").exists()
+    assert not (root / ".gitignore").exists()
+
+
 def test_the_workspace_gitignore_re_includes_the_automation_store(
     tmp_path: Path,
 ) -> None:
@@ -340,6 +351,17 @@ def test_ensure_vault_git_initializes_fresh_vault(tmp_path: Path) -> None:
     assert ".gitignore" in tracked
 
 
+def test_ensure_vault_git_defers_missing_repository(tmp_path: Path) -> None:
+    vault = tmp_path / "brain"
+    vault.mkdir()
+    (vault / "MEMORY.md").write_text("private notes\n", encoding="utf-8")
+
+    ensure_vault_git(vault, initialize_if_missing=False)
+
+    assert not (vault / ".git").exists()
+    assert not (vault / ".gitignore").exists()
+
+
 def test_ensure_vault_git_appends_gitignore_to_existing_vault_repo(tmp_path: Path) -> None:
     vault = tmp_path / "notes"
     vault.mkdir()
@@ -398,6 +420,7 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
     ws = tmp_path / "workspace"
     setup_workspace(
         ws,
+        initialize_git=True,
         launch_agents_dir=tmp_path / "LaunchAgents",
         app_dir=tmp_path / "Applications",
     )
@@ -453,6 +476,7 @@ def test_setup_workspace_git_inits_external_vault(tmp_path: Path) -> None:
     setup_workspace(
         ws,
         vault_root=vault,
+        initialize_git=True,
         launch_agents_dir=tmp_path / "LaunchAgents",
         app_dir=tmp_path / "Applications",
     )
@@ -473,6 +497,71 @@ def test_setup_workspace_git_inits_external_vault(tmp_path: Path) -> None:
     # The workspace repo neither tracks nor contains the external vault.
     ws_tracked = _git(ws, "ls-files").stdout.splitlines()
     assert not any(path.startswith("memory-vault/") for path in ws_tracked)
+
+
+def test_setup_workspace_defers_git_for_existing_notes_and_external_vault(tmp_path: Path) -> None:
+    ws, vault = tmp_path / "workspace", tmp_path / "notes"
+    ws.mkdir()
+    vault.mkdir()
+    (vault / "ideas.md").write_text("private\n", encoding="utf-8")
+    setup_workspace(ws, vault_root=vault, vault_mode="existing")
+    assert not (ws / ".git").exists()
+    assert not (vault / ".git").exists()
+    assert (vault / "ideas.md").read_text(encoding="utf-8") == "private\n"
+
+
+def test_setup_workspace_initialize_git_commits_workspace_and_external_vault(tmp_path: Path) -> None:
+    """The explicit flag is the only consent, and it must reach both helpers.
+
+    Every other test here only asserts that nothing was created, so a flag that
+    silently stopped being forwarded would still look green.
+    """
+    ws, vault = tmp_path / "workspace", tmp_path / "notes"
+    ws.mkdir()
+    vault.mkdir()
+    (vault / "ideas.md").write_text("private\n", encoding="utf-8")
+    setup_workspace(ws, vault_root=vault, vault_mode="existing", initialize_git=True)
+    for root in (ws, vault):
+        assert (root / ".git").is_dir(), root
+        log = _git(root, "log", "--oneline")
+        assert "Initialize" in log.stdout, log.stderr
+    assert (vault / "ideas.md").read_text(encoding="utf-8") == "private\n"
+
+
+def test_setup_workspace_rerun_does_not_initialize_deferred_history(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    setup_workspace(ws)
+    setup_workspace(ws)
+    assert not (ws / ".git").exists()
+
+
+def test_setup_workspace_preserves_parent_repo_index_head_branch_and_remote(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    _git(parent, "init", "-b", "trunk")
+    _git(parent, "-c", "user.name=test", "-c", "user.email=test@local", "commit", "--allow-empty", "-m", "base")
+    _git(parent, "remote", "add", "origin", "https://example.invalid/repo.git")
+    ws = parent / "workspace"
+    ws.mkdir()
+    (ws / "staged.md").write_text("staged\n", encoding="utf-8")
+    _git(parent, "add", "workspace/staged.md")
+    before = (_git(parent, "rev-parse", "HEAD").stdout, _git(parent, "write-tree").stdout,
+              _git(parent, "diff", "--cached", "--name-only").stdout,
+              _git(parent, "branch", "--show-current").stdout, _git(parent, "remote", "-v").stdout)
+    setup_workspace(ws)
+    after = (_git(parent, "rev-parse", "HEAD").stdout, _git(parent, "write-tree").stdout,
+             _git(parent, "diff", "--cached", "--name-only").stdout,
+             _git(parent, "branch", "--show-current").stdout, _git(parent, "remote", "-v").stdout)
+    assert after == before
+
+
+def test_deferred_setup_repairs_existing_repo_ignore_guards(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _git(ws, "init", "-b", "trunk")
+    setup_workspace(ws)
+    assert (ws / ".gitignore").is_file()
+    assert _git(ws, "branch", "--show-current").stdout.strip() == "trunk"
 
 
 def test_setup_workspace_rerun_honors_existing_env_vault_root(

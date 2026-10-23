@@ -784,7 +784,7 @@ def _ensure_exact_bytes(root: Path) -> None:
     )
 
 
-def ensure_workspace_git(root: Path) -> None:
+def ensure_workspace_git(root: Path, *, initialize_if_missing: bool = True) -> None:
     """Make sure the workspace is a git repository with a protective .gitignore.
 
     Snapshots and sync rely on git; a fresh workspace gets `git init` plus an
@@ -795,14 +795,17 @@ def ensure_workspace_git(root: Path) -> None:
     if shutil.which("git") is None:
         print("git not found; skipping workspace git init", file=sys.stderr)
         return
-    _ensure_workspace_gitignore(root)
     probe = subprocess.run(
         ["git", *EXACT_BYTES, "-C", str(root), "rev-parse", "--is-inside-work-tree"],
         capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0 and probe.stdout.strip() == "true":
+        _ensure_workspace_gitignore(root)
         _ensure_exact_bytes(root)
         return
+    if not initialize_if_missing:
+        return
+    _ensure_workspace_gitignore(root)
     init = subprocess.run(
         ["git", *EXACT_BYTES, "init", "-b", "main", str(root)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -848,7 +851,7 @@ def _ensure_vault_gitignore(root: Path) -> None:
     gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8", newline="")
 
 
-def ensure_vault_git(root: Path) -> None:
+def ensure_vault_git(root: Path, *, initialize_if_missing: bool = True) -> None:
     """Make sure the vault is (in) a git repository.
 
     Matters when the vault lives outside the workspace (an existing notes
@@ -880,6 +883,8 @@ def ensure_vault_git(root: Path) -> None:
         if toplevel == root:
             _ensure_vault_gitignore(root)
             _ensure_exact_bytes(root)
+        return
+    if not initialize_if_missing:
         return
     _ensure_vault_gitignore(root)
     init = subprocess.run(
@@ -1010,6 +1015,7 @@ def setup_workspace(
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
     confirm_repoint: bool = False,
+    initialize_git: bool = False,
     sync_failures: list[str] | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
@@ -1510,11 +1516,11 @@ def setup_workspace(
             _remove_legacy_app_shortcuts(app_root_dir)
             _disable_legacy_menubar_agent(launch_dir)
 
-    ensure_workspace_git(root)
+    ensure_workspace_git(root, initialize_if_missing=initialize_git)
     # A vault outside the workspace (existing notes folder) gets its own
     # repo. Runs after the workspace init so the default nested vault is
     # never double-initialized.
-    ensure_vault_git(vault_path)
+    ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 
     return written
 
@@ -1665,6 +1671,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             launch_agents_dir=args.launch_agents_dir,
             app_dir=args.app_dir,
             confirm_repoint=args.yes,
+            initialize_git=args.initialize_git,
             sync_failures=sync_failures,
         )
     except RuntimeError as exc:
@@ -7445,6 +7452,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("."),
         help="Workspace directory to initialize.",
+    )
+    setup_parser.add_argument(
+        "--initialize-git",
+        action="store_true",
+        default=False,
+        help=("Create local history and an initial commit of nonignored workspace "
+              "and external-vault contents; local only, no remote or upload."),
     )
     setup_parser.add_argument(
         "--workspace-name",
