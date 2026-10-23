@@ -531,6 +531,13 @@ async def _async_main(*, supervised: bool = False) -> int:
         port=config.pwa_port,
     )
     with lock:
+        from ciao.onboarding import ensure_startup_receipt
+
+        ensure_startup_receipt(
+            config.state_path.parent,
+            workspace_root=config.workspace_root,
+            bootstrap_mode=config.bootstrap_mode,
+        )
         # One-time import of the retired CIAO_WORKSPACES variable; it writes
         # the registry, so it runs under the lock like the persist below.
         config.import_legacy_workspaces_env()

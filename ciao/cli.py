@@ -1078,8 +1078,16 @@ def setup_workspace(
                     "choose a folder outside ~/Desktop, ~/Documents and ~/Downloads, such as "
                     "~/Ciaobot."
                 )
+    from ciao.onboarding import ensure_receipt, read_receipt
+    from ciao.setup_marker import is_set_up_workspace
+
+    runtime_root = root / ".runtime"
+    receipt_created = read_receipt(runtime_root) is None
+    ensure_receipt(runtime_root, established_install=is_set_up_workspace(root))
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    if receipt_created:
+        written.append(runtime_root / "onboarding.json")
     setup_selected_vault = vault_root is not None
     vault_value = str(vault_root) if vault_root is not None else "memory-vault"
     if vault_root is None and vault_mode == "existing":

@@ -56,6 +56,9 @@ async def test_startup_persists_normalized_registry_only_after_lock(
             self.startup_id = "test-startup-id"
 
         def __enter__(self):
+            from ciao.onboarding import read_receipt
+
+            assert read_receipt(config.state_path.parent) is None
             events.append("lock")
             return self
 
@@ -66,17 +69,27 @@ async def test_startup_persists_normalized_registry_only_after_lock(
         state_path=tmp_path / ".runtime" / "state.json",
         workspace_root=tmp_path,
         pwa_port=8443,
+        bootstrap_mode=False,
         _workspace_registry_changed=True,
     )
 
     def persist() -> None:
         assert events == ["lock", "import", "gws"]
+        # Persistence creates durable legacy evidence only after startup has
+        # initialized the fresh receipt; it cannot retroactively exempt it.
+        config.state_path.parent.mkdir(parents=True, exist_ok=True)
+        (config.state_path.parent / "workspaces.json").write_text("[]")
         events.append("persist")
 
     config.persist_workspace_registry = persist
 
     def import_legacy() -> list[str]:
         assert events == ["lock"]
+        from ciao.onboarding import read_receipt
+
+        receipt = read_receipt(config.state_path.parent)
+        assert receipt is not None
+        assert receipt.installation.status == "in_progress"
         events.append("import")
         return []
 
@@ -101,3 +114,7 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     assert await main._async_main() == 0
     assert events == ["lock", "import", "gws", "persist", "run", "unlock"]
+    from ciao.onboarding import read_receipt
+
+    receipt = read_receipt(config.state_path.parent)
+    assert receipt is not None and receipt.installation.status == "in_progress"
