@@ -274,7 +274,10 @@ def claude_sandbox_settings(
         # recreated for a link outside the bound folders, so a uv alias under
         # the denied home may not resolve in Claude's shell. Unverified: it needs
         # a signed-in Linux Claude, so the behaviour is left as is.
+        # The filter applies to read-only grants too: a symlink such as
+        # ``~/.local/bin/gws`` is dropped there, and its resolved target stays granted.
         engine = [path for path in engine if not path.is_symlink()]
+        read_only = [path for path in read_only if not path.is_symlink()]
     return {
         "enabled": True,
         "autoAllowBashIfSandboxed": mode == "auto",

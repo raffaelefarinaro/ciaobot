@@ -806,6 +806,66 @@ def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypat
     assert str(granted) not in filesystem["allowWrite"]
 
 
+def test_claude_settings_drop_read_only_symlinks_on_linux(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # Creating a symlink needs a privilege Windows does not grant by default.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    target = tmp_path / "target"
+    target.write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    settings = claude_sandbox_settings(
+        scope="workspace", mode="auto", roots=[tmp_path / "root"], read_only=[link, target]
+    )
+
+    assert settings is not None
+    allow_read = settings["filesystem"]["allowRead"]
+    assert str(target) in allow_read
+    assert str(link) not in allow_read
+
+
+def test_bwrap_grants_gws_link_package_and_node(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # bwrap does not run on Windows and symlinks need a privilege there.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    home = tmp_path / "home"
+    package = home / ".local" / "lib" / "node_modules" / "@googleworkspace" / "cli"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text("{}")
+    run_js = package / "run.js"
+    run_js.write_text("#!/usr/bin/env node")
+    link_dir = home / ".local" / "bin"
+    link_dir.mkdir(parents=True)
+    link = link_dir / "gws"
+    link.symlink_to(run_js)
+    node_dir = tmp_path / "node-install" / "bin"
+    node_dir.mkdir(parents=True)
+    node = node_dir / "node"
+    node.write_text("node")
+
+    argv = opencode_sandbox_prefix(
+        roots=[tmp_path / "root"], read_only=[link, run_js, package, node]
+    )
+
+    triples = _bwrap_triples(argv)
+    assert ["--symlink", os.readlink(link), str(link)] in triples
+    assert ["--ro-bind", str(package), str(package)] in triples
+    assert ["--ro-bind", str(node), str(node)] in triples
+    # run.js comes before the package in read_only and is not under an earlier
+    # bind (``_under``), so it is bound itself; the package, not being under
+    # run.js, is bound as well. The link is never bound, only recreated.
+    assert ["--ro-bind", str(run_js), str(run_js)] in triples
+    assert ["--ro-bind", str(link), str(link)] not in triples
+    for denied in (home, home / ".local", link_dir):
+        assert ["--ro-bind", str(denied), str(denied)] not in triples
+        assert ["--bind", str(denied), str(denied)] not in triples
+
+
 def test_bwrap_skips_missing_read_only_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
