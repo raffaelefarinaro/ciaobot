@@ -7033,20 +7033,51 @@ def _service_command(args: argparse.Namespace) -> int:
                     as_json=as_json,
                 )
             runtime = macos_service.discover_runtime()
+        # The run that is there before the kickstart (if any) must not pass
+        # for the one the kickstart starts, so its identity is read first.
+        previous = macos_service.read_lock_owner(runtime)
+        started_at = time.time()
         result = macos_service.start_service(runtime=runtime)
         if result.ok:
-            # The engine has to boot before it can fail, so a start that
-            # reports "started" before the engine has had the time to fail
-            # reports a hope. The wait ends as soon as the engine serves its
-            # port or records that it could not bind it (#1654).
-            macos_service.wait_for_engine(runtime)
-            reason = macos_service.port_in_use_reason(runtime)
-            if reason is not None:
+            # `start_service` submits the start; it does not confirm it. The
+            # engine has to boot before it can fail, so a start reported
+            # before the engine answered as itself reports a hope (#1654).
+            # The wait ends when the new engine answers with the identity its
+            # lock carries, when it records a bind failure or a denial, or at
+            # the deadline, which is a failure, not a start (#1938).
+            outcome = macos_service.wait_for_engine(
+                runtime, previous=previous, started_at=started_at,
+            )
+            if outcome.state == "timeout":
+                # The weaker bind-failure signal, launchd's last exit code,
+                # is read once the deadline passed: an unsupervised engine
+                # that exited on a taken port leaves no record of its own.
+                reason = macos_service.port_in_use_reason(runtime)
+                if reason is not None:
+                    outcome = macos_service.StartOutcome("port_in_use", reason)
+            if outcome.ok:
+                result = macos_service.ServiceResult(
+                    True,
+                    "start",
+                    outcome.message,
+                    {
+                        **result.details,
+                        "verified": True,
+                        "startup_id": outcome.startup_id,
+                        "pid": outcome.pid,
+                    },
+                )
+            else:
                 result = macos_service.ServiceResult(
                     False,
                     "start",
-                    reason,
-                    {**result.details, "port_in_use": True},
+                    outcome.message,
+                    {
+                        **result.details,
+                        "verified": False,
+                        "start_outcome": outcome.state,
+                        "port_in_use": outcome.state == "port_in_use",
+                    },
                 )
     elif action == "restart":
         result = macos_service.restart_service(force=bool(args.force))
