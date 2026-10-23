@@ -9408,11 +9408,14 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
-    from ciao.workspace_reroot import RuntimeStateUnreadable
-
     try:
         return _dispatch(argv_list)
-    except RuntimeStateUnreadable as exc:
+    except Exception as exc:
+        # The import lives in the handler so the agent fast path never pays for it.
+        from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
+
+        if not isinstance(exc, RuntimeStateUnreadable):
+            raise
         print(f"ciao: {exc}", file=sys.stderr)
         return RUNTIME_STATE_UNREADABLE_EXIT
 

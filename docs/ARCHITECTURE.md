@@ -930,7 +930,12 @@ direct browser/engine trust model that replaced the retired client-origin
 model: `docs/REMOTE_BOUNDARY.md` records what it is. Workspace filesystem scope
 (`agent_fs_scope`, #1133) confines the agent and its shell: workspace scope is the
 Claude `sandbox.filesystem` settings plus the OpenCode `sandbox-exec`/`bwrap`
-prefix, and machine scope is the previous unconfined behavior. Workspace scope also grants two runtime files read-only, the re-rooting receipt and `workspaces.json` (`AgentRequest.agent_read_only`, #1945), so the agent's own `ciao` CLI resolves the same paths as the engine; the rest of the runtime directory stays denied. A CLI that still cannot read them exits 77 with `RuntimeStateUnreadable` rather than guessing a layout. A project's
+prefix, and machine scope is the previous unconfined behavior.
+Workspace scope also grants two runtime files read-only, the re-rooting receipt
+and `workspaces.json` (`AgentRequest.agent_read_only`, #1945), so the agent's
+own `ciao` CLI resolves the same paths as the engine; the rest of the runtime
+directory stays denied. A CLI that still cannot read them exits 77 with
+`RuntimeStateUnreadable` rather than guessing a layout. A project's
 linked repository is added to a chat's roots (workspace scope) only when the chat is in code mode. It is passed to
 Claude as an add-dir and to opencode as `skills.paths` in `OPENCODE_CONFIG_CONTENT`
 in every scope, fixed when the provider process starts; a change applies from the

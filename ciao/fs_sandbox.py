@@ -487,7 +487,8 @@ def opencode_sandbox_prefix(
             # A missing path would abort bwrap (a pre-re-root install has no
             # receipt file). A bound file keeps its inode, so a registry
             # rewritten by rename shows the old content until the server
-            # restarts: a known Linux-only staleness.
+            # restarts, and a receipt created after the server started is
+            # likewise invisible until it restarts: a known Linux-only staleness.
             directories = [
                 str(path)
                 for path in read_only

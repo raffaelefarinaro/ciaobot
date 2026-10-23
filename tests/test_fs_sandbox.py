@@ -785,8 +785,19 @@ def test_darwin_seatbelt_reads_a_granted_runtime_file_only(tmp_path):
     allowed = subprocess.run([*prefix, "/bin/cat", str(receipt)], capture_output=True, timeout=30)
     assert allowed.returncode == 0
     assert allowed.stdout == b"receipt"
-    # pytest's tmp lives under /private, which the profile reads anyway, so a
-    # sibling secret would not be denied here; only the write denial is probed.
+    # pytest's tmp lives under /private, which the profile reads anyway, so the
+    # read above passes without the grant: assert the grant on the profile text.
+    profile = prefix[2]
+    assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(receipt))}"))' in profile
+    assert not any(
+        "file-write*" in line and str(receipt) in line for line in profile.splitlines()
+    )
+    ok = root / "ok.txt"
+    control = subprocess.run(
+        [*prefix, "/bin/sh", "-c", f"echo ok > '{ok}'"], capture_output=True, timeout=30
+    )
+    assert control.returncode == 0
+    assert ok.read_text(encoding="utf-8").strip() == "ok"
     written = subprocess.run(
         [*prefix, "/bin/sh", "-c", f"echo x > '{receipt}'"], capture_output=True, timeout=30
     )
