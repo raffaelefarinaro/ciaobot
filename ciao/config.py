@@ -367,6 +367,10 @@ PERMISSION_MODES: tuple[str, ...] = ("manual", "auto", "bypass")
 
 MEMORY_HANDOVERS: tuple[str, ...] = ("off", "dismiss", "all")
 DEFAULT_MEMORY_HANDOVER = "off"
+# New user-created workspaces start with predicted memory suggestions enabled.
+# Keep the registry/load default above conservative so older workspaces whose
+# files omit this field remain unchanged.
+DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER = "all"
 
 
 def coerce_memory_handover(raw: object) -> str:

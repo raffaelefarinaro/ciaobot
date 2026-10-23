@@ -35,7 +35,7 @@ async function open(): Promise<void> {
 <template>
   <button v-if="variant === 'row'" type="button" class="terminal-row" @click="open">
     <span class="terminal-row-glyph" aria-hidden="true">›_</span>
-    <span>Open in Terminal</span>
+    <span>Open terminal</span>
     <span class="terminal-row-arrow" aria-hidden="true">→</span>
   </button>
   <button v-else type="button" class="terminal-button" @click="open">Open in Terminal</button>

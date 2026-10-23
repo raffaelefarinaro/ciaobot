@@ -326,11 +326,9 @@ describe('ChatPanel naming placeholder', () => {
     // Close, then title, then badge: the order the header documents.
     const order = Array.from(row.element.children).map(el => el.className)
     expect(order).toEqual(['btn-icon close-btn', 'pane-title chat-title', 'chat-code-badge'])
-    // The project sits beside the row, never inside it, so a second line
-    // under the title cannot drag the close control off the title's centre.
-    // A named project is required here: General renders no crumb at all, and
-    // the assertion would then pass wherever the crumb lived.
-    expect(wrapper.find('.header-breadcrumb > .breadcrumb-scope').exists()).toBe(true)
+    // Project context is available elsewhere and does not become another
+    // line in the chat title header.
+    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(row.find('.breadcrumb-scope').exists()).toBe(false)
 
     store.chats[0].code_mode = false

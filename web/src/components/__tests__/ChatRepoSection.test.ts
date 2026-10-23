@@ -34,6 +34,9 @@ describe('ChatRepoSection', () => {
 
   it('shows name, branch and clean state for the main checkout', () => {
     const wrapper = mountSection(repo, {})
+    const heading = wrapper.get('.chat-repo-heading')
+    expect(heading.get('.rail-label').text()).toBe('Repository')
+    expect(heading.get('.chat-repo-name').text()).toBe('app')
     expect(wrapper.get('.chat-repo-name').text()).toBe('app')
     expect(wrapper.get('.chat-repo-name').attributes('title')).toBe('/r/app')
     // The summary carries the branch, not the folder; the folder is in the body.
