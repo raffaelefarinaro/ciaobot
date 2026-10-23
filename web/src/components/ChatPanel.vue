@@ -19,10 +19,7 @@
     >
       <template #title>
         <div class="header-left">
-          <div class="header-breadcrumb" :class="{ 'header-breadcrumb--stacked': !isWidePane }">
-            <!-- The project is the context envelope for this chat. The workspace
-                 is already the sidebar's scope, so repeating it here would add
-                 a second, competing location cue. It links to the project page. -->
+          <div class="header-breadcrumb">
             <div class="chat-title-row">
               <!-- Same 18px stroke icon in the same 30px box as the trailing header
                    actions, so the close control reads as one of them. It used to be
@@ -76,13 +73,6 @@
                 title="Code mode is on"
                 @click.stop="showDetails('repo')"
               ><span class="chat-code-badge-tag" aria-hidden="true">code</span></button>
-            </div>
-            <div v-if="projectCrumb && !railShown && project" class="breadcrumb-scope">
-              <router-link
-                :to="`/project/${project.project_id}`"
-                class="breadcrumb-project"
-                :title="`Open ${projectCrumb}`"
-              ><span>{{ projectCrumb }}</span></router-link>
             </div>
           </div>
         </div>
@@ -2312,12 +2302,6 @@ watch(() => chat.value?.chat_id, () => {
   inspectorOpen.value = false
 })
 
-// The workspace is already the sidebar's scope. The chat header repeats only
-// the project, and only when it adds information beyond the implicit General.
-const projectCrumb = computed(() => {
-  const name = project.value?.name
-  return name && name !== 'General' ? name : null
-})
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
@@ -5522,9 +5506,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .close-btn { color: var(--fg3); flex: none; }
 .close-btn:hover { color: var(--fg); }
 
-/* One line: the chat title, then its project as a muted context control
-   (opens the project context). The workspace is the sidebar's scope, so it
-   is not repeated here. */
+/* The title header names the conversation only; project context lives in
+   Chat details and the sidebar rather than competing with the title. */
 .header-breadcrumb {
   display: flex;
   align-items: center;
@@ -5570,67 +5553,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .chat-code-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (pointer: coarse), (max-width: 768px) { .chat-code-badge { min-width: var(--touch); min-height: var(--touch); } }
 
-/* A pane too narrow for the Chat details rail (a phone, or a desktop pane
-   squeezed by the sidebar or a pinned file) gives the title its own row and
-   puts the project under it, so neither truncates the other to a stub. */
-.header-breadcrumb--stacked {
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  row-gap: 2px;
-}
-.header-breadcrumb--stacked .chat-title-row {
-  width: 100%;
-}
-.header-breadcrumb--stacked .breadcrumb-scope {
-  max-width: 100%;
-}
-
-.breadcrumb-scope {
-  flex: 0 1 auto;
-  max-width: 40%;
-  font-size: var(--text-sm);
-  line-height: 1.35;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* The project links to its page. */
-.breadcrumb-project {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  max-width: 100%;
-  min-height: 28px;
-  padding: 2px var(--space-1);
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--fg3);
-  font: inherit;
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.breadcrumb-project > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.breadcrumb-project:hover {
-  border-color: var(--border);
-  background: var(--bg3);
-  color: var(--accent);
-}
-
-.breadcrumb-project:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
 .chat-title {
   cursor: pointer;
 }
@@ -7931,20 +7853,13 @@ details[open] > .activity-summary::before {
 }
 
 @media (max-width: 768px) {
-  /* Mobile header: the title/project stack comes from
-     .header-breadcrumb--stacked (a phone is never wide enough for the rail);
-     this keeps the action buttons on safe tap targets. */
+  /* Keep the title header compact while preserving safe tap targets. */
   :deep(.pane-header) {
     padding-left: calc(12px + var(--safe-left));
     padding-right: calc(12px + var(--safe-right));
   }
   :deep(.header-title) { text-align: left; min-width: 0; }
   .header-left { min-width: 0; }
-  /* With the project on the line below, the title keeps to one line so the
-     pair stays as tall as the icons beside it. */
-  .header-breadcrumb--stacked:has(.breadcrumb-scope) .pane-title.chat-title {
-    -webkit-line-clamp: 1;
-  }
   .chat-archive-btn {
     color: var(--fg2);
   }
@@ -7960,8 +7875,6 @@ details[open] > .activity-summary::before {
   }
   .chat-archive-btn:hover { color: var(--fg); }
   .chat-archive-label { display: none; }
-  /* The scope/title stack is the base layout now, so this block only carries
-     what a narrow header changes about it. */
   /* PaneHeader drops every pane title to --text-sm on narrow screens, which is
      right for a title competing with a page tag and a wordmark. This header has
      neither, and the title has its own full-width row, so it keeps body size and

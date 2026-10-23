@@ -88,6 +88,15 @@ describe('FileViewerModal', () => {
     expect(document.activeElement).toBe(dialog.element)
   })
 
+  it('marks HTML previews so mobile layout can remove the document inset', async () => {
+    const store = openViewer()
+    store.kind = 'html'
+    store.path = 'Workspace/dashboard.html'
+    await settle()
+
+    expect(wrapper!.get('.fv-body').classes()).toContain('fv-body-html')
+  })
+
   it('renders shared vault metadata and resolves related notes in the viewer', async () => {
     const store = openViewer()
     store.path = 'notes/lv-order-capture.md'
