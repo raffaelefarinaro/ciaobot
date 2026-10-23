@@ -5291,20 +5291,23 @@ class ProjectChatManager:
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """The hidden ``secrets`` folder and the linked account re-allowed in it (#1968).
 
-        Set only in workspace scope when ``secrets`` is a real directory (not a
-        symlink) strictly inside a granted root: the agent's shell could then
+        Set only in workspace scope when ``secrets`` (or, if it is a symlink,
+        its resolved target) is a directory strictly inside a granted root: the agent's shell could then
         read every account's credentials. The sandbox stays pure; the decision
         is made here, where the workspace root, roots and linked account are known.
         """
         if fs_scope != "workspace":
             return (), ()
         secrets = Path(self._config.workspace_root).resolve() / "secrets"
-        if secrets.is_symlink() or not secrets.is_dir():
+        if not secrets.is_dir():
             return (), ()
-        if not any(secrets != Path(root) and secrets.is_relative_to(root) for root in fs_roots):
+        # A symlinked ``secrets`` hides its resolved target. No regrant applies:
+        # ``_granted_gws_dir`` refuses an account directory reached through it.
+        target = secrets.resolve()
+        if not any(target != Path(root) and target.is_relative_to(root) for root in fs_roots):
             return (), ()
-        gws = self._granted_gws_dir(chat)
-        return (str(secrets),), ((str(gws),) if gws else ())
+        gws = None if secrets.is_symlink() else self._granted_gws_dir(chat)
+        return (str(target),), ((str(gws),) if gws else ())
 
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.

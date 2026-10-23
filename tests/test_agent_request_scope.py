@@ -741,3 +741,30 @@ def test_unlinked_chat_denies_secrets_with_no_regrant(
 
     assert request.agent_denied == (str((tmp_path / "secrets").resolve()),)
     assert request.agent_denied_except == ()
+
+
+def test_symlinked_secrets_inside_a_root_denies_the_resolved_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch, linked=False)
+    target = tmp_path / "vault" / "real-secrets"
+    target.mkdir(parents=True)
+    (tmp_path / "secrets").symlink_to(target, target_is_directory=True)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == (str(target.resolve()),)
+    assert request.agent_denied_except == ()
+
+
+def test_symlinked_secrets_pointing_outside_every_root_is_not_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch, linked=False)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (tmp_path / "secrets").symlink_to(outside, target_is_directory=True)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == ()

@@ -2862,6 +2862,50 @@ async def test_a_changed_root_set_restarts_the_opencode_server(
 
 
 @pytest.mark.asyncio
+async def test_a_changed_denied_except_restarts_the_opencode_server(tmp_path, monkeypatch):
+    """Re-linking a Google account changes the re-allowed folder in the sandbox
+    profile, so the server must restart."""
+    from types import SimpleNamespace
+
+    from ciao.models import provider_reuse_key
+
+    provider = _provider(tmp_path)
+    provider._client = object()  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "workspace"
+        agent_roots = ("/w/agent",)
+        agent_denied = ("/w/agent/secrets",)
+        agent_denied_except = ("/w/agent/secrets/gws-b",)
+        agent_read_only: tuple = ()
+
+    request = Request()
+    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
+    provider._fs_scope_key = (
+        "workspace",
+        ("/w/agent",),
+        ("/w/agent/secrets",),
+        ("/w/agent/secrets/gws-a",),
+    )
+    stopped: list[bool] = []
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._process = None
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
+
+    with pytest.raises(FileNotFoundError):
+        await provider._ensure_server(request)  # type: ignore[arg-type]
+    assert stopped == [True]
+
+
+@pytest.mark.asyncio
 async def test_database_lock_during_startup_retries_after_contention(tmp_path, monkeypatch):
     """A shared opencode SQLite lock gets short in-process startup retries."""
     provider = _provider(tmp_path)

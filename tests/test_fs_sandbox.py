@@ -1299,3 +1299,115 @@ def test_claude_settings_secrets_darwin(tmp_path, monkeypatch):
     assert str(linked) not in filesystem["denyWrite"]
     assert str(linked) in filesystem["allowRead"]
     assert str(linked) in filesystem["allowWrite"]
+
+
+def _nested_secrets_tree(tmp_path: Path) -> tuple[Path, Path, Path, list[Path]]:
+    """root/ws/secrets/{gws-a, gws-b}: the workspace sits one level below the root."""
+    root = tmp_path / "root"
+    ws = root / "ws"
+    secrets = ws / "secrets"
+    linked = secrets / "gws-a"
+    (secrets / "gws-b").mkdir(parents=True)
+    linked.mkdir()
+    (linked / "credentials.json").write_text("{}", encoding="utf-8")
+    return root, secrets, linked, [linked / "credentials.json"]
+
+
+def test_seatbelt_blocks_unlinking_the_root_and_the_account_dir(tmp_path, monkeypatch):
+    _fake_darwin(tmp_path, monkeypatch)
+    root, secrets, linked, pins = _nested_secrets_tree(tmp_path)
+
+    profile = opencode_sandbox_prefix(
+        roots=[root], read_only=pins, denied=[secrets], regrant=[linked]
+    )[2]
+
+    unlink = [line for line in profile.splitlines() if line.startswith("(deny file-write-unlink")]
+    assert len(unlink) == 1
+    for path in (root, root / "ws", secrets, linked, pins[0]):
+        assert f'(literal "{_quote_seatbelt_subpath(str(path))}")' in unlink[0]
+    assert f'(literal "{_quote_seatbelt_subpath(str(root.parent))}")' not in unlink[0]
+    # Last match wins, so it follows every allow for the same paths.
+    assert profile.index(unlink[0]) > profile.rindex(
+        f'(allow file-read* file-write* (subpath "{_quote_seatbelt_subpath(str(linked))}"))'
+    )
+
+
+def test_seatbelt_has_no_unlink_rule_without_denied_paths(tmp_path):
+    root, _secrets, _linked, pins = _nested_secrets_tree(tmp_path)
+
+    assert "file-write-unlink" not in _seatbelt_profile([root], [], pins)
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file(),
+    reason="needs macOS sandbox-exec",
+)
+def test_darwin_seatbelt_blocks_moving_secrets_ancestors_and_the_account_dir(tmp_path):
+    tmp_path = tmp_path.resolve()
+    root, secrets, linked, pins = _nested_secrets_tree(tmp_path)
+    prefix = opencode_sandbox_prefix(
+        roots=[root], read_only=pins, denied=[secrets], regrant=[linked]
+    )
+
+    def run(command: str) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run([*prefix, "/bin/sh", "-c", command], capture_output=True, timeout=30)
+
+    assert run(f"mv '{root}/ws' '{root}/ws2'").returncode != 0
+    assert run(f"mv '{linked}' '{root}/o'").returncode != 0
+    assert run(f"mv '{secrets}' '{root}/s2'").returncode != 0
+    assert secrets.is_dir() and linked.is_dir()
+    assert run(f"echo x > '{linked}/t.tmp' && mv '{linked}/t.tmp' '{linked}/token.json'").returncode == 0
+    assert (linked / "token.json").read_text(encoding="utf-8").strip() == "x"
+
+
+@pytest.mark.parametrize("name", ["se*crets", "se?crets", "se[crets", "se]crets"])
+def test_claude_macos_settings_refuse_glob_characters_in_the_denied_folder(
+    tmp_path, monkeypatch, name
+):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    secrets = root / name
+    secrets.mkdir(parents=True)
+
+    with pytest.raises(FsSandboxUnavailable, match="glob"):
+        claude_sandbox_settings(
+            scope="workspace", mode="auto", roots=[root], denied=[secrets], regrant=[]
+        )
+
+
+def test_claude_macos_settings_refuse_glob_characters_in_a_child_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    secrets = root / "secrets"
+    secrets.mkdir(parents=True)
+    (secrets / "a[1].json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FsSandboxUnavailable, match="glob"):
+        claude_sandbox_settings(
+            scope="workspace", mode="auto", roots=[root], denied=[secrets], regrant=[]
+        )
+
+
+def test_claude_macos_settings_fail_closed_when_the_denied_folder_cannot_be_listed(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    secrets = root / "secrets"
+    secrets.mkdir(parents=True)
+    real_iterdir = Path.iterdir
+
+    def broken(self):
+        if self == secrets:
+            raise PermissionError("denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", broken)
+
+    with pytest.raises(FsSandboxUnavailable, match="secrets"):
+        claude_sandbox_settings(
+            scope="workspace", mode="auto", roots=[root], denied=[secrets], regrant=[]
+        )

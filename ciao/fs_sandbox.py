@@ -346,6 +346,11 @@ def engine_read_roots() -> list[Path]:
     return seen
 
 
+# Claude treats these as pattern characters in a sandbox path, so a name holding
+# one would deny a different set of paths than it names.
+_DENY_GLOB_CHARS = frozenset("*?[]")
+
+
 def claude_sandbox_settings(
     *,
     scope: str,
@@ -390,13 +395,27 @@ def claude_sandbox_settings(
             # macOS: a glob denyRead gets a carve-out for nested allows, a plain
             # entry would hide the regranted folder too. denyWrite has no
             # carve-out, so every child except the regranted ones is listed.
-            # UNVERIFIED: the glob read-deny needs a live macOS check.
+            # Verified live with Claude Code 2.1.309 on 2026-10-23: a nested read
+            # in another account is refused, the regrant can be read and written,
+            # the pins are write-denied, and moving secrets or the account dir is
+            # refused. Limits: denyWrite lists the children present at spawn, so a
+            # child created later stays read-denied but is writable until the
+            # client restarts, and `ls secrets` still lists names.
+            if _DENY_GLOB_CHARS & set(str(folder)):
+                raise FsSandboxUnavailable(
+                    f"cannot hide {folder}: its path contains a glob character"
+                )
+            try:
+                children = sorted(folder.iterdir())
+            except OSError as exc:
+                raise FsSandboxUnavailable(f"cannot hide {folder}: it cannot be listed ({exc})") from exc
+            for child in children:
+                if _DENY_GLOB_CHARS & set(child.name):
+                    raise FsSandboxUnavailable(
+                        f"cannot hide {folder}: {child.name!r} contains a glob character"
+                    )
             deny_read.append(f"{folder}/*")
-            deny_write.extend(
-                str(child)
-                for child in sorted(folder.iterdir())
-                if not any(child == r for r in regranted)
-            )
+            deny_write.extend(str(child) for child in children if child not in regranted)
         else:
             # Linux: denyRead is a tmpfs, then the allow re-binds the regrant.
             # Not in denyWrite: its ro-bind is emitted last and would re-expose
@@ -596,6 +615,18 @@ def _seatbelt_profile(
         for path in shadowed:
             quoted = _quote_seatbelt_subpath(str(path))
             lines.append(f'(deny file-write* (subpath "{quoted}"))')
+        # A rename needs unlink on its source, and the subpath rules follow the
+        # path, not the inode: moving the secrets folder, the account folder or
+        # any folder above them inside a root would carry the data out from under
+        # the rules. Last match wins, so this follows every allow (#1968).
+        pinned = {
+            str(q)
+            for p in (*denied, *regrant, *shadowed)
+            for q in (p, *p.parents)
+            if q == p or any(q == r or q.is_relative_to(r) for r in roots)
+        }
+        listed = " ".join(f'(literal "{_quote_seatbelt_subpath(q)}")' for q in sorted(pinned))
+        lines.append(f"(deny file-write-unlink {listed})")
     # The devices every shell touches: redirects to /dev/null, the terminal a
     # tool's process runs on, and the random sources. Without /dev/null a
     # tool's `< /dev/null` fails and its spawn never returns (#1174).

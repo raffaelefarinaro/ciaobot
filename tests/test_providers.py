@@ -1423,6 +1423,43 @@ async def test_an_unchanged_root_set_reuses_the_claude_client(
 
 
 @pytest.mark.asyncio
+async def test_a_changed_denied_except_restarts_the_claude_client(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    stopped: list[bool] = []
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", lambda options: object())
+    provider._client = object()  # type: ignore[assignment]
+    provider._connected = True
+    provider._current_model = "sonnet"
+    provider._current_mode = "auto"
+    agent_root = str(tmp_path / "agent")
+    provider._fs_scope_key = ("workspace", (agent_root,), (), ())
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._connected = False
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(agent_root,),
+        agent_denied_except=(str(tmp_path / "agent" / "secrets" / "gws-a"),),
+    )
+    provider._spawn_key = provider._spawn_key_for(request)
+
+    await provider._ensure_connected(request)
+
+    assert stopped == [True]
+
+
+@pytest.mark.asyncio
 async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
