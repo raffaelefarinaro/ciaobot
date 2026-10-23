@@ -1553,6 +1553,11 @@ function clearedDate(note: VaultClearedNote): string {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* Narrow layouts need full-size targets even when the browser reports a
+     fine primary pointer (for example, a resized desktop window). */
+  .vr-pending-link,
+  .vr-actions .mr-link { min-height: var(--touch); }
+
   .vr-load-state {
     align-items: stretch;
     flex-direction: column;
