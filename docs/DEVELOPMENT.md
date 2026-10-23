@@ -57,6 +57,25 @@ desktop-shell actions (`login`, `migrate`, `migration-classify`, `rollback`) and
 `update-engine` are not available on Windows and say so; `stop` and `restart`
 refuse while a chat would be interrupted (working, or holding an open question/approval card) unless `--force` is given.
 
+`ciao service start` on macOS reports two different things, and its exit code
+tells them apart. The launchd submission (`enable`, `bootstrap`, `kickstart`)
+is what `start_service()` does and what the move and update workers consume:
+it returns as soon as launchd accepted the job. The CLI then waits for the
+engine it started to answer *as itself*: the runtime's `server.lock` must name
+a new run (a fresh `startup_id`, this install's port and runtime directory,
+status `running`) and `/api/startup-status` on the port must report that same
+`startup_id`. A bare 2xx from whatever listens on the port, the run that was
+there before the kickstart, or another Ciaobot runtime do not count. The wait
+ends early on a recorded bind failure or a workspace-access denial written
+since the kickstart, and reports those. Reaching the deadline
+(`START_SETTLE_TIMEOUT_S`, 30 s) is `"start_outcome": "timeout"` with exit
+code 1 — an unconfirmed start, never "started". The deadline rests on a
+measurement: a cold `python -m ciao run` from a checkout served its port after
+4.1 s and was ready at 4.7 s (2026-10-23, Apple Silicon), so the previous 2 s
+wait expired before some engines had bound at all; a launchd-spawned install
+adds interpreter start-up and first import on top. A verified start carries
+`"verified": true` with the `startup_id` and `pid` it confirmed.
+
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 
 A fresh first logical workspace and workspaces added later in Settings live at

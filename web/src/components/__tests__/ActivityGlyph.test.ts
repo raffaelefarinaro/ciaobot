@@ -8,8 +8,8 @@ describe('ActivityGlyph', () => {
     const expected: Array<[ActivityGlyphKind, string]> = [
       ['working', ''],
       ['agent', ''],
-      ['run', '›_'],
-      ['run-failed', '›_'],
+      ['run', ''],
+      ['run-failed', ''],
     ]
     for (const [kind, text] of expected) {
       const wrapper = mount(ActivityGlyph, { props: { kind } })

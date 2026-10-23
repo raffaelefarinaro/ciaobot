@@ -2798,6 +2798,8 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     with pytest.raises(RuntimeError, match="incompatible build"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -2832,11 +2834,13 @@ async def test_a_changed_root_set_restarts_the_opencode_server(
         mcp_token = ""
         agent_fs_scope = "workspace"
         agent_roots = ("/w/agent", "/w/data")
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
         agent_read_only: tuple = ()
 
     request = Request()
     provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = ("workspace", live_roots)
+    provider._fs_scope_key = ("workspace", live_roots, (), ())
     stopped: list[bool] = []
 
     async def fake_disconnect() -> None:
@@ -2855,6 +2859,50 @@ async def test_a_changed_root_set_restarts_the_opencode_server(
     else:
         assert await provider._ensure_server(request) is live_client  # type: ignore[arg-type]
         assert stopped == []
+
+
+@pytest.mark.asyncio
+async def test_a_changed_denied_except_restarts_the_opencode_server(tmp_path, monkeypatch):
+    """Re-linking a Google account changes the re-allowed folder in the sandbox
+    profile, so the server must restart."""
+    from types import SimpleNamespace
+
+    from ciao.models import provider_reuse_key
+
+    provider = _provider(tmp_path)
+    provider._client = object()  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "workspace"
+        agent_roots = ("/w/agent",)
+        agent_denied = ("/w/agent/secrets",)
+        agent_denied_except = ("/w/agent/secrets/gws-b",)
+        agent_read_only: tuple = ()
+
+    request = Request()
+    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
+    provider._fs_scope_key = (
+        "workspace",
+        ("/w/agent",),
+        ("/w/agent/secrets",),
+        ("/w/agent/secrets/gws-a",),
+    )
+    stopped: list[bool] = []
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._process = None
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
+
+    with pytest.raises(FileNotFoundError):
+        await provider._ensure_server(request)  # type: ignore[arg-type]
+    assert stopped == [True]
 
 
 @pytest.mark.asyncio
@@ -2908,6 +2956,8 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -2973,6 +3023,8 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -3119,6 +3171,8 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     with pytest.raises(RuntimeError, match="port already in use"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -3167,6 +3221,8 @@ async def test_opencode_process_does_not_inherit_the_agent_token(tmp_path, monke
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -5028,11 +5084,13 @@ async def test_a_changed_linked_repo_restarts_the_opencode_server(
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
         linked_repo = "/r/new"
 
     request = Request()
     provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = ("machine", ())
+    provider._fs_scope_key = ("machine", (), (), ())
     provider._linked_repo = live_repo
     stopped: list[bool] = []
 
@@ -5087,6 +5145,8 @@ async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypat
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
         linked_repo = str(repo)
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]

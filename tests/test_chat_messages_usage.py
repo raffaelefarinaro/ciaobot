@@ -310,3 +310,115 @@ line B
     assert assistant[0]["timestamp"] == "2026-10-09T14:12:07Z"
     assert assistant[0]["usage"] == {"input_tokens": "4", "output_tokens": "157"}
     assert [r["content"] for r in rows if r["role"] == "user"] == ["run hi"]
+
+
+def _durable_turn(user_text: str, answer_text: str, turn_index: int, pct: str) -> list[dict]:
+    return [
+        {"role": "user", "content": user_text, "turn_index": turn_index},
+        {
+            "role": "assistant",
+            "content": answer_text,
+            "usage": {"input_tokens": "1", "output_tokens": "2", "context_pct": pct},
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_usage_follows_text_pairing_across_a_missing_middle_turn(
+    monkeypatch,
+) -> None:
+    """A send that never reached record_turn leaves a hole in the MIDDLE of the
+    durable transcript; usage must follow the user text, not the position."""
+    transcript_rows = [
+        *_durable_turn("one", "a1", 0, "10.0%"),
+        *_durable_turn("three", "a3", 2, "30.0%"),
+    ]
+    segment = [
+        *_sdk_turn("one", "a1"),
+        *_sdk_turn("two", "a2"),
+        *_sdk_turn("three", "a3"),
+    ]
+    monkeypatch.setattr(ts, "_read_session_segment", lambda _sid, _dirs: segment)
+
+    rows = await ts._assemble_chat_messages(
+        _pcm(transcript_rows), _config(), _chat(user_turn_count=3)
+    )
+
+    assert [r["turn_index"] for r in rows if r.get("role") == "user"] == [0, 1, 2]
+    by_text = {r["content"]: r for r in rows if r.get("role") == "assistant"}
+    assert by_text["a1"].get("usage", {}).get("context_pct") == "10.0%"
+    assert "usage" not in by_text["a2"]
+    assert by_text["a3"].get("usage", {}).get("context_pct") == "30.0%"
+
+
+@pytest.mark.asyncio
+async def test_claude_usage_in_flight_turn_still_gets_no_metadata(monkeypatch) -> None:
+    transcript_rows = [
+        *_durable_turn("one", "a1", 0, "10.0%"),
+        *_durable_turn("two", "a2", 1, "20.0%"),
+    ]
+    segment = [
+        *_sdk_turn("one", "a1"),
+        *_sdk_turn("two", "a2"),
+        *_sdk_turn("three", "a3"),
+    ]
+    monkeypatch.setattr(ts, "_read_session_segment", lambda _sid, _dirs: segment)
+
+    rows = await ts._assemble_chat_messages(
+        _pcm(transcript_rows), _config(), _chat(user_turn_count=3)
+    )
+
+    by_text = {r["content"]: r for r in rows if r.get("role") == "assistant"}
+    assert by_text["a1"].get("usage", {}).get("context_pct") == "10.0%"
+    assert by_text["a2"].get("usage", {}).get("context_pct") == "20.0%"
+    assert "usage" not in by_text["a3"]
+
+
+def _durable_error_turn(user_text: str, turn_index: int, pct: str) -> list[dict]:
+    rows = _durable_turn(user_text, "failed", turn_index, pct)
+    rows[1]["is_error"] = True
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_claude_usage_failed_send_retried_later_keeps_its_own_turns(
+    monkeypatch,
+) -> None:
+    transcript_rows = [
+        *_durable_error_turn("continue", 0, "1.0%"),
+        *_durable_turn("B", "aB", 1, "2.0%"),
+        *_durable_turn("continue", "ac", 2, "3.0%"),
+    ]
+    segment = [*_sdk_turn("B", "aB"), *_sdk_turn("continue", "ac")]
+    monkeypatch.setattr(ts, "_read_session_segment", lambda _sid, _dirs: segment)
+
+    rows = await ts._assemble_chat_messages(
+        _pcm(transcript_rows), _config(), _chat(user_turn_count=3)
+    )
+
+    by_text = {r["content"]: r for r in rows if r.get("role") == "assistant"}
+    assert by_text["aB"].get("usage", {}).get("context_pct") == "2.0%"
+    assert by_text["ac"].get("usage", {}).get("context_pct") == "3.0%"
+
+
+@pytest.mark.asyncio
+async def test_claude_usage_failed_send_between_turns_does_not_shift_usage(
+    monkeypatch,
+) -> None:
+    transcript_rows = [
+        *_durable_turn("A", "aA", 0, "1.0%"),
+        *_durable_error_turn("continue", 1, "2.0%"),
+        *_durable_turn("B", "aB", 2, "3.0%"),
+        *_durable_turn("continue", "ac", 3, "4.0%"),
+    ]
+    segment = [*_sdk_turn("A", "aA"), *_sdk_turn("B", "aB"), *_sdk_turn("continue", "ac")]
+    monkeypatch.setattr(ts, "_read_session_segment", lambda _sid, _dirs: segment)
+
+    rows = await ts._assemble_chat_messages(
+        _pcm(transcript_rows), _config(), _chat(user_turn_count=4)
+    )
+
+    by_text = {r["content"]: r for r in rows if r.get("role") == "assistant"}
+    assert by_text["aA"].get("usage", {}).get("context_pct") == "1.0%"
+    assert by_text["aB"].get("usage", {}).get("context_pct") == "3.0%"
+    assert by_text["ac"].get("usage", {}).get("context_pct") == "4.0%"

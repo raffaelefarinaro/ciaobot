@@ -286,6 +286,25 @@ def _inside_roots(roots: Sequence[Path], paths: Sequence[Path]) -> list[Path]:
     return [path for path in paths if any(path.is_relative_to(root) for root in roots)]
 
 
+def _denied_inside_roots(
+    roots: Sequence[Path], denied: Sequence[Path], regrant: Sequence[Path]
+) -> tuple[list[Path], list[Path]]:
+    """The hidden folders and re-allowed folders that apply to these roots (#1968).
+
+    A denied folder counts only when it is a real directory (never a symlink)
+    strictly inside a root; anything else is dropped, so nothing is masked or
+    created for a missing or redirected path. A regrant counts only when it is
+    a directory inside a kept denied folder.
+    """
+    kept = [
+        d
+        for d in denied
+        if d.is_dir() and not d.is_symlink() and any(d != root and d.is_relative_to(root) for root in roots)
+    ]
+    again = [r for r in regrant if r.is_dir() and any(r.is_relative_to(d) for d in kept)]
+    return kept, again
+
+
 @functools.cache
 def engine_read_roots() -> list[Path]:
     """The running engine's install, readable (never writable) in workspace scope.
@@ -327,14 +346,27 @@ def engine_read_roots() -> list[Path]:
     return seen
 
 
+# Claude treats these as pattern characters in a sandbox path, so a name holding
+# one would deny a different set of paths than it names.
+_DENY_GLOB_CHARS = frozenset("*?[]")
+
+
 def claude_sandbox_settings(
-    *, scope: str, mode: str, roots: list[Path], read_only: Sequence[Path] = ()
+    *,
+    scope: str,
+    mode: str,
+    roots: list[Path],
+    read_only: Sequence[Path] = (),
+    denied: Sequence[Path] = (),
+    regrant: Sequence[Path] = (),
 ) -> dict[str, Any] | None:
     """Sandbox settings dict for the Claude provider, or None for machine.
 
     ``read_only`` files are readable but never added to ``allowWrite`` (#1945).
     A ``read_only`` path inside a root stays write-denied by name (``denyWrite``),
     so a root that grants a folder can still pin single files in it (#1959).
+    ``denied`` folders inside a root are hidden, except the ``regrant`` folders
+    inside them, which stay read-write (#1968).
     """
     if scope == "machine":
         return None
@@ -354,6 +386,41 @@ def claude_sandbox_settings(
         # ``~/.local/bin/gws`` is dropped there, and its resolved target stays granted.
         engine = [path for path in engine if not path.is_symlink()]
         read_only = [path for path in read_only if not path.is_symlink()]
+    hidden, regranted = _denied_inside_roots(roots, denied, regrant)
+    deny_read = [str(Path.home())]
+    deny_write = [str(p) for p in _inside_roots(roots, [*engine, *read_only])]
+    # Read from the bundled Claude CLI 2.1.306 (minified), #1968.
+    for folder in hidden:
+        if sys.platform == "darwin":
+            # macOS: a glob denyRead gets a carve-out for nested allows, a plain
+            # entry would hide the regranted folder too. denyWrite has no
+            # carve-out, so every child except the regranted ones is listed.
+            # Verified live with Claude Code 2.1.309 on 2026-10-23: a nested read
+            # in another account is refused, the regrant can be read and written,
+            # the pins are write-denied, and moving secrets or the account dir is
+            # refused. Limits: denyWrite lists the children present at spawn, so a
+            # child created later stays read-denied but is writable until the
+            # client restarts, and `ls secrets` still lists names.
+            if _DENY_GLOB_CHARS & set(str(folder)):
+                raise FsSandboxUnavailable(
+                    f"cannot hide {folder}: its path contains a glob character"
+                )
+            try:
+                children = sorted(folder.iterdir())
+            except OSError as exc:
+                raise FsSandboxUnavailable(f"cannot hide {folder}: it cannot be listed ({exc})") from exc
+            for child in children:
+                if _DENY_GLOB_CHARS & set(child.name):
+                    raise FsSandboxUnavailable(
+                        f"cannot hide {folder}: {child.name!r} contains a glob character"
+                    )
+            deny_read.append(f"{folder}/*")
+            deny_write.extend(str(child) for child in children if child not in regranted)
+        else:
+            # Linux: denyRead is a tmpfs, then the allow re-binds the regrant.
+            # Not in denyWrite: its ro-bind is emitted last and would re-expose
+            # the real directory.
+            deny_read.append(str(folder))
     return {
         "enabled": True,
         "autoAllowBashIfSandboxed": mode == "auto",
@@ -370,12 +437,12 @@ def claude_sandbox_settings(
             # Claude Code reads everywhere unless a path is denied, so
             # ``allowRead`` alone confines nothing: deny the home directory
             # and re-allow the roots inside it (#1174).
-            "denyRead": [str(Path.home())],
-            "allowRead": [str(p) for p in [*roots, *read_only, *engine]],
-            "allowWrite": [str(p) for p in roots],
+            "denyRead": deny_read,
+            "allowRead": [str(p) for p in [*roots, *read_only, *engine, *regranted]],
+            "allowWrite": [str(p) for p in [*roots, *regranted]],
             # The roots grant write access, so an engine folder or a read-only path
             # inside one is denied it by name, as OpenCode's profile shadows it (#1208).
-            "denyWrite": [str(p) for p in _inside_roots(roots, [*engine, *read_only])],
+            "denyWrite": deny_write,
         },
     }
 
@@ -469,9 +536,17 @@ def _quote_seatbelt_subpath(root: str) -> str:
 
 
 def _seatbelt_profile(
-    roots: list[Path], read_only: Sequence[Path] = (), shadowed: Sequence[Path] = ()
+    roots: list[Path],
+    read_only: Sequence[Path] = (),
+    shadowed: Sequence[Path] = (),
+    denied: Sequence[Path] = (),
+    regrant: Sequence[Path] = (),
 ) -> str:
-    """The seatbelt profile; ``shadowed`` paths sit inside a root and stay read-only."""
+    """The seatbelt profile; ``shadowed`` paths sit inside a root and stay read-only.
+
+    ``denied`` folders inside a root are hidden, except the ``regrant`` folders
+    in them (#1968).
+    """
     # NOTE (issue #1148, live-tested on macOS): two details differ from the
     # first draft. `process-exec`/`process-fork` take no `*` suffix
     # (`process-fork*` is an "unbound variable" profile parse error, exit 65),
@@ -526,6 +601,32 @@ def _seatbelt_profile(
         lines.append(f'(allow file-read* (subpath "{quoted}"))')
     system = " ".join(f'(subpath "{p}")' for p in _SYSTEM_READ_SUBPATHS)
     lines.append(f"(allow file-read* {system})")
+    # The hidden folders follow the system read allow, which covers /private,
+    # so a workspace under it is hidden too. The regrant follows its deny, or
+    # the deny would hide it as well, and the write pins repeat after the
+    # regrant so they stay write-denied inside it (#1968).
+    if denied:
+        for path in denied:
+            quoted = _quote_seatbelt_subpath(str(path))
+            lines.append(f'(deny file-read* file-write* (subpath "{quoted}"))')
+        for path in regrant:
+            quoted = _quote_seatbelt_subpath(str(path))
+            lines.append(f'(allow file-read* file-write* (subpath "{quoted}"))')
+        for path in shadowed:
+            quoted = _quote_seatbelt_subpath(str(path))
+            lines.append(f'(deny file-write* (subpath "{quoted}"))')
+        # A rename needs unlink on its source, and the subpath rules follow the
+        # path, not the inode: moving the secrets folder, the account folder or
+        # any folder above them inside a root would carry the data out from under
+        # the rules. Last match wins, so this follows every allow (#1968).
+        pinned = {
+            str(q)
+            for p in (*denied, *regrant, *shadowed)
+            for q in (p, *p.parents)
+            if q == p or any(q == r or q.is_relative_to(r) for r in roots)
+        }
+        listed = " ".join(f'(literal "{_quote_seatbelt_subpath(q)}")' for q in sorted(pinned))
+        lines.append(f"(deny file-write-unlink {listed})")
     # The devices every shell touches: redirects to /dev/null, the terminal a
     # tool's process runs on, and the random sources. Without /dev/null a
     # tool's `< /dev/null` fails and its spawn never returns (#1174).
@@ -553,7 +654,11 @@ def _seatbelt_profile(
 
 
 def opencode_sandbox_prefix(
-    *, roots: list[Path], read_only: Sequence[Path] = ()
+    *,
+    roots: list[Path],
+    read_only: Sequence[Path] = (),
+    denied: Sequence[Path] = (),
+    regrant: Sequence[Path] = (),
 ) -> list[str]:
     """Argv prefix confining the OpenCode server to the workspace roots.
 
@@ -561,7 +666,9 @@ def opencode_sandbox_prefix(
     (the server's own install and config, which an unconfined server later
     loads as code). The engine's own install is always added read-only, so the
     agent can run ``ciao`` (#1185). A ``read_only`` path inside a root stays
-    readable but write-denied (#1959).
+    readable but write-denied (#1959). A ``denied`` folder strictly inside a root
+    is hidden (seatbelt deny, bwrap tmpfs) except the ``regrant`` folders in it,
+    which stay read-write; a missing or symlinked one is ignored (#1968).
     """
     if not roots:
         raise ValueError("roots must not be empty")
@@ -569,6 +676,7 @@ def opencode_sandbox_prefix(
     # stays read-only by a rule that follows the root's grant, not by a grant.
     engine = engine_read_roots()
     shadowed = _inside_roots(roots, [*engine, *read_only])
+    hidden, regranted = _denied_inside_roots(roots, denied, regrant)
     read_only = [
         *(path for path in read_only if path not in shadowed),
         *(path for path in engine if path not in shadowed),
@@ -576,7 +684,7 @@ def opencode_sandbox_prefix(
     platform = sys.platform
     if platform == "darwin":
         if Path(SANDBOX_EXEC_PATH).is_file():
-            return [SANDBOX_EXEC_PATH, "-p", _seatbelt_profile(roots, read_only, shadowed)]
+            return [SANDBOX_EXEC_PATH, "-p", _seatbelt_profile(roots, read_only, shadowed, hidden, regranted)]
         raise FsSandboxUnavailable(_FS_SANDBOX_UNAVAILABLE)
     if platform.startswith("linux"):
         bwrap = shutil.which("bwrap")
@@ -612,8 +720,20 @@ def opencode_sandbox_prefix(
             for root in roots:
                 text = str(root)
                 argv.extend(["--bind", text, text])
+            # The secrets mask follows the root binds, then the linked account is
+            # bound back over it (#1968). Both folders were checked to exist.
+            for folder in hidden:
+                argv.extend(["--tmpfs", str(folder)])
+            for folder in regranted:
+                argv.extend(["--bind", str(folder), str(folder)])
             # Mounted after the writable binds so the read-only mount sits on top.
+            # A path inside a masked folder but outside its regrant would put
+            # host content back over the tmpfs, so it is skipped.
             for path in shadowed:
+                if any(path.is_relative_to(d) for d in hidden) and not any(
+                    path.is_relative_to(r) for r in regranted
+                ):
+                    continue
                 if not path.is_symlink() and path.exists():
                     text = str(path)
                     argv.extend(["--ro-bind", text, text])

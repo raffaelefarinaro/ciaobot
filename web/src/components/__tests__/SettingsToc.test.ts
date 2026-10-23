@@ -183,3 +183,16 @@ it('gives Keyboard shortcuts the same labelled section heading as its neighbours
     wrapper.unmount()
   }
 })
+
+it('starts shortcut bindings collapsed and lets the user expand them', async () => {
+  const { wrapper } = await mountSettings()
+  try {
+    const disclosure = wrapper.get('.shortcut-disclosure')
+    expect((disclosure.element as HTMLDetailsElement).open).toBe(false)
+    await disclosure.get('summary').trigger('click')
+    expect((disclosure.element as HTMLDetailsElement).open).toBe(true)
+    expect(disclosure.find('.shortcut-setting-list').exists()).toBe(true)
+  } finally {
+    wrapper.unmount()
+  }
+})

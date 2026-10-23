@@ -78,8 +78,10 @@ afterEach(() => {
 
 describe('SettingsMemoryHandover', () => {
   it("fetches the active workspace's agreement on mount", async () => {
-    await mountCard()
+    const view = await mountCard()
     expect(apiGet).toHaveBeenCalledWith('/api/proposals/handover?workspace=personal')
+    expect(view.text()).toContain('New workspaces start at Dismiss and accept')
+    expect(view.text()).toContain('You can change this choice at any time')
   })
 
   it('shows the rate and per-verdict breakdown', async () => {
