@@ -255,6 +255,13 @@ def _is_initialize_timeout(exc: BaseException) -> bool:
     return isinstance(exc, Exception) and str(exc).startswith(_INITIALIZE_TIMEOUT_MESSAGE)
 
 
+def _catalog_account_generation() -> int:
+    """Account generation to tag a capture with, read before connecting."""
+    from ciao.providers.catalog_evidence import account_generation
+
+    return account_generation()
+
+
 async def _connect_with_deadline(client: ClaudeSDKClient) -> None:
     """Connect to the CLI, naming a missed initialize as a retryable miss."""
     try:
@@ -1195,12 +1202,16 @@ class ClaudeProvider(BaseSDKProvider):
             except Exception:
                 logger.debug("Between-turns drain task ended with error", exc_info=True)
 
-    async def _capture_catalog_evidence(self, client: ClaudeSDKClient) -> None:
+    async def _capture_catalog_evidence(
+        self, client: ClaudeSDKClient, *, generation: int | None = None
+    ) -> None:
         from ciao.providers.catalog_evidence import invalidate_claude_catalog, record_claude_models
 
         root = Path(self.workspace_root)
         try:
-            record_claude_models(root, await client.get_server_info())
+            record_claude_models(
+                root, await client.get_server_info(), expected_generation=generation
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1346,9 +1357,10 @@ class ClaudeProvider(BaseSDKProvider):
                     # Only an initialize handshake that missed its deadline is
                     # worth a fresh spawn; every other control-request failure
                     # is a real error for this turn.
+                    catalog_generation = _catalog_account_generation()
                     await _connect_with_deadline(client)
                     self._connected = True
-                    await self._capture_catalog_evidence(client)
+                    await self._capture_catalog_evidence(client, generation=catalog_generation)
                 await asyncio.wait_for(client.query(payload), timeout=120)
 
                 pending_result: ResultEvent | None = None

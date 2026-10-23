@@ -260,11 +260,32 @@ def test_expired_evidence_returns_unknown_without_stale_models(tmp_path: Path, m
 
 
 def test_claude_logout_and_verify_drop_earlier_observations(tmp_path: Path, monkeypatch) -> None:
-    """Account identity is shared, so a re-auth must not keep old evidence."""
+    """Account identity is shared, so a re-auth must not keep old evidence.
+
+    The CLI and the provider probes are stubbed: this asserts the invalidation
+    contract, never the operator's real authentication state.
+    """
     import asyncio
     from types import SimpleNamespace
 
-    from ciao.web.routes_api import provider_connection_action
+    from ciao.web import routes_api
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    commands: list[list[str]] = []
+
+    def _fake_run(command, **_kwargs):
+        commands.append(list(command))
+        return _Completed()
+
+    monkeypatch.setattr(routes_api.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        routes_api, "_provider_config_payload",
+        lambda _config: {"connections": {"claude": {"ok": True}}},
+    )
 
     for action in ("verify", "logout"):
         record_claude_models(tmp_path, {"models": [{"value": "m", "displayName": "M"}]})
@@ -273,5 +294,8 @@ def test_claude_logout_and_verify_drop_earlier_observations(tmp_path: Path, monk
             path_params={"provider": "claude", "action": action},
             app=SimpleNamespace(state=SimpleNamespace(config=_route_config(tmp_path))),
         )
-        asyncio.run(provider_connection_action(request))
+        asyncio.run(routes_api.provider_connection_action(request))
         assert claude_catalog_evidence(tmp_path).status == "unknown", action
+
+    # The bundled CLI path varies by install; the subcommand is the contract.
+    assert [command[-2:] for command in commands] == [["auth", "logout"]]

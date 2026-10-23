@@ -24,8 +24,25 @@ class CatalogEvidence:
 
 
 _TTL_SECONDS = 300.0
+# One install has a handful of workspaces; anything beyond this is stale roots
+# from renames or moves that nobody will read again.
+_MAX_ROOTS = 32
 _cache: dict[Path, tuple[float, tuple[RuntimeModel, ...]]] = {}
 _lock = threading.Lock()
+# Bumped whenever the Claude account identity may change. A capture holds the
+# generation it started under, so a connection that finishes after a logout
+# cannot repopulate evidence for the account that just signed out.
+_generation = 0
+
+
+def account_generation() -> int:
+    with _lock:
+        return _generation
+
+
+def _prune(now: float) -> None:
+    for key in [k for k, (observed_at, _) in _cache.items() if now - observed_at >= _TTL_SECONDS]:
+        _cache.pop(key, None)
 
 
 def parse_claude_models(info: object) -> tuple[RuntimeModel, ...] | None:
@@ -52,14 +69,25 @@ def parse_claude_models(info: object) -> tuple[RuntimeModel, ...] | None:
     return tuple(result)
 
 
-def record_claude_models(root: Path, info: object) -> None:
+def record_claude_models(
+    root: Path, info: object, *, expected_generation: int | None = None
+) -> None:
     key = root.resolve()
     parsed = parse_claude_models(info)
     with _lock:
+        if expected_generation is not None and expected_generation != _generation:
+            # The account changed while this connection was opening; its
+            # metadata describes the previous one.
+            return
+        now = time.monotonic()
+        _prune(now)
         if parsed is None:
             _cache.pop(key, None)
-        else:
-            _cache[key] = (time.monotonic(), parsed)
+            return
+        if key not in _cache and len(_cache) >= _MAX_ROOTS:
+            oldest = min(_cache, key=lambda item: _cache[item][0])
+            _cache.pop(oldest, None)
+        _cache[key] = (now, parsed)
 
 
 def claude_catalog_evidence(root: Path) -> CatalogEvidence:
@@ -83,3 +111,16 @@ def invalidate_claude_catalog(root: Path | None = None) -> None:
             _cache.clear()
         else:
             _cache.pop(root.resolve(), None)
+
+
+def invalidate_claude_account_evidence() -> None:
+    """Drop every root and fence captures that started before this call.
+
+    A chat connection already in flight may finish after a logout and try to
+    record the previous account's models; bumping the generation before the
+    awaited sign-out work makes those captures reject themselves.
+    """
+    global _generation
+    with _lock:
+        _generation += 1
+        _cache.clear()

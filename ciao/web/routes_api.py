@@ -1022,10 +1022,15 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     provider = request.path_params["provider"]
     action = request.path_params["action"]
     config = request.app.state.config
+    drop_account_evidence = None
     if provider == "claude" and action in {"verify", "logout"}:
-        from ciao.providers.catalog_evidence import invalidate_claude_catalog
+        from ciao.providers.catalog_evidence import invalidate_claude_account_evidence
 
-        invalidate_claude_catalog()
+        # Before the awaited sign-out work, so an in-flight connection cannot
+        # repopulate the previous account's models afterwards, and again on the
+        # way out to drop anything recorded while it ran.
+        invalidate_claude_account_evidence()
+        drop_account_evidence = invalidate_claude_account_evidence
     if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
@@ -1071,6 +1076,8 @@ async def provider_connection_action(request: Request) -> JSONResponse:
 
             await asyncio.to_thread(clear_claude_discovery_cache)
         payload = await asyncio.to_thread(_provider_config_payload, config)
+        if drop_account_evidence is not None:
+            drop_account_evidence()
         return JSONResponse(payload["connections"].get(provider, {}))
     if action == "logout":
         try:
@@ -1094,6 +1101,8 @@ async def provider_connection_action(request: Request) -> JSONResponse:
                 {"error": (run.stderr or run.stdout or "logout failed").strip()},
                 status_code=400,
             )
+        if drop_account_evidence is not None:
+            drop_account_evidence()
         return JSONResponse({"ok": True})
     return JSONResponse({"error": "unsupported action"}, status_code=404)
 
