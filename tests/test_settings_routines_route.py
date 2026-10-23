@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 
 from starlette.applications import Starlette
@@ -108,6 +109,40 @@ def test_patch_insights_enabled_is_ignored(tmp_path):
     assert "insights_enabled" not in resp.json()
     saved = json.loads((tmp_path / ".runtime" / "app_settings.json").read_text())
     assert "insights_enabled" not in saved
+
+
+@pytest.mark.parametrize(
+    "unrelated",
+    [
+        {"keyboard_send_mode": "enter"},
+        {"theme": "dark"},
+        {"server_defaults": {"log_level": "debug"}, "dev_mode": True},
+    ],
+)
+def test_routines_patch_rejects_keyboard_and_appearance_fields(tmp_path, unrelated):
+    client, config = _make_client(tmp_path)
+    store = client.app.state.app_settings
+    before = asdict(store.settings)
+
+    response = client.patch("/api/settings/routines", json=unrelated)
+
+    assert response.status_code == 400
+    assert asdict(store.settings) == before
+    assert config.dev_mode is False
+
+
+def test_legacy_ignored_key_does_not_allow_other_unrelated_keys(tmp_path):
+    client, _config = _make_client(tmp_path)
+    store = client.app.state.app_settings
+    before = asdict(store.settings)
+
+    response = client.patch(
+        "/api/settings/routines",
+        json={"insights_enabled": False, "keyboard_send_mode": "enter"},
+    )
+
+    assert response.status_code == 400
+    assert asdict(store.settings) == before
 
 
 def test_patch_applies_provider_default_models(tmp_path):

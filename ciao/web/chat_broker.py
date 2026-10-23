@@ -112,6 +112,8 @@ def _flushed_entry(entry: dict) -> dict:
         flushed["origin"] = str(entry["origin"])
     if entry.get("send_id"):
         flushed["send_id"] = str(entry["send_id"])
+    if entry.get("send_ids"):
+        flushed["send_ids"] = list(entry["send_ids"])
     return flushed
 
 
@@ -652,6 +654,7 @@ class ChatStream:
         "_done",
         "prompt_text",
         "_pending",
+        "_draining",
         "_pending_id_seq",
         # Turn indexes of steers delivered into this turn; the drive loop
         # stamps them with the turn's completion time at the ResultEvent.
@@ -709,6 +712,10 @@ class ChatStream:
         # entry is {"id": str, "text": str, "images": list[str]} where images
         # are ref strings (resolved back to ImageAttachments at flush time).
         self._pending: list[dict] = []
+        # Entry currently removed by drain_one but not yet echoed, parked, or
+        # intentionally skipped. It remains an owner for WS idempotency while
+        # the drive loop awaits work such as a provider reload.
+        self._draining: list[dict] = []
         self._pending_id_seq = 0
         self.steered_turn_indexes: list[int] = []
         self.early_steer_deliveries: set[str] = set()
@@ -805,13 +812,29 @@ class ChatStream:
         """True when a queued entry already carries this client send id."""
         if not send_id:
             return False
-        return any(entry.get("send_id") == send_id for entry in self._pending)
+        return any(
+            entry.get("send_id") == send_id
+            or send_id in (entry.get("send_ids") or [])
+            for entry in [*self._pending, *self._draining]
+        )
 
     def drain_one(self) -> dict | None:
         """Return and remove the next queued message, or None if empty."""
         if not self._pending:
             return None
-        return _flushed_entry(self._pending.pop(0))
+        entry = _flushed_entry(self._pending.pop(0))
+        self._draining.append(entry)
+        return entry
+
+    def finish_drain_one(self, entry: dict) -> None:
+        """Release the idempotency owner once a drained entry changes state."""
+        self._draining = [current for current in self._draining if current is not entry]
+
+    def take_draining(self) -> list[dict]:
+        """Take entries left in the drain window for teardown parking."""
+        entries = self._draining
+        self._draining = []
+        return entries
 
     def drain_pending(self) -> list[dict]:
         """Return and clear any queued messages. Kept for compatibility."""
@@ -860,6 +883,10 @@ class ChatStream:
             }
             if entry.get("origin"):
                 d["origin"] = entry["origin"]
+            if entry.get("send_id"):
+                d["send_id"] = str(entry["send_id"])
+            if entry.get("send_ids"):
+                d["send_ids"] = list(entry["send_ids"])
             adopted.append(d)
         self._pending = [*adopted, *self._pending]
 

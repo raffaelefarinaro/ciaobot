@@ -326,6 +326,7 @@ export const useProjectStore = defineStore('projects', () => {
     not_running: 'Nothing was running to steer into, so it was queued instead.',
     no_turn: 'Nothing was running to steer into, so it was queued instead.',
     stopped: 'Stopped before it was steered. It stays in the queue.',
+    send_id_limit: 'That steer batch was too large to deduplicate safely; overflow was queued for the next turn.',
   }
   type QueuedMessage = { id: string; text: string; images?: string[]; delivery: QueueDelivery; steering?: boolean; waiting?: boolean }
   function makeQueuedId(): string {

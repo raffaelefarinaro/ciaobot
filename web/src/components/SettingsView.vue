@@ -709,12 +709,13 @@
                 <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
-                    <span class="ws-label set-subrow-label">Default model</span>
+                    <span :id="`default-model-label-${connKey}`" class="ws-label set-subrow-label">Default model</span>
                     <div class="set-subrow-control">
                       <ModelSelector
                         v-if="getProviderSection(String(connKey))?.configurable"
                         :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
                         :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :labelled-by="`default-model-label-${connKey}`"
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
                       />
@@ -723,6 +724,7 @@
                   </div>
                   <div class="set-subrow">
                     <span
+                      :id="`insights-model-label-${connKey}`"
                       class="ws-label set-subrow-label"
                       title="Reads archived chats, closed projects and task resolutions into memory, names new chats, and checks schedule results for this provider. Automatic uses the chat's own model; Claude schedule checks use Haiku."
                     >Session insights</span>
@@ -731,6 +733,7 @@
                         v-if="getProviderSection(String(connKey))?.configurable"
                         :model-value="providerInsightsModelSelectorValue(String(connKey) as AliasProviderKey)"
                         :sections="providerInsightsModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :labelled-by="`insights-model-label-${connKey}`"
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderInsightsModel(String(connKey) as AliasProviderKey, $event)"
                       />

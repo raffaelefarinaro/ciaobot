@@ -115,6 +115,10 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   await expect(page.locator(COMPOSER)).toBeVisible()
   await expect(page).toHaveURL(new RegExp(CHAT_PATH))
 
+  // A pointer with a keyboard behind it has no use for on-screen keys: the
+  // row is rendered for the layout but hidden until a coarse pointer.
+  await expect(pane.locator('.tp-keys')).toBeHidden()
+
   // The documented way out: Shift+Tab hands the keyboard to the panel's own
   // controls, and the shell never sees the key.
   await page.keyboard.press('Shift+Tab')
@@ -375,7 +379,31 @@ test.describe('on a phone', () => {
     expect(box.height).toBeGreaterThanOrEqual(600)
     expect(box.width).toBeGreaterThanOrEqual(360)
 
-    // Every control in it is a 44px target.
+    // A shell is started, and with it the keys a soft keyboard cannot
+    // produce appear under the screen. Enter is tapped rather than typed, so
+    // the byte provably came from the row.
+    await pane.getByRole('button', { name: 'New terminal session' }).click()
+    const keys = pane.getByRole('toolbar', { name: 'Terminal keys' })
+    await expect(keys).toBeVisible()
+    const field = pane.locator('.tp-surface textarea')
+    await expect(field).toBeEditable()
+    await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()
+    await pane.locator('.tp-surface').click()
+    await page.keyboard.type(`echo ${OUTPUT}-keys`)
+    await keys.getByRole('button', { name: 'Enter' }).click()
+    await expect(pane.locator('.tp-surface')).toContainText(`${OUTPUT}-keys`)
+    // The tap left the keyboard on the shell.
+    await expect(field).toBeFocused()
+    // A hung command is interruptible from the row: Ctrl+C ends `sleep` and
+    // the prompt answers again.
+    await page.keyboard.type('sleep 30')
+    await keys.getByRole('button', { name: 'Enter' }).click()
+    await keys.getByRole('button', { name: 'Control C' }).click()
+    await page.keyboard.type(`echo ${OUTPUT}-after`)
+    await keys.getByRole('button', { name: 'Enter' }).click()
+    await expect(pane.locator('.tp-surface')).toContainText(`${OUTPUT}-after`)
+
+    // Every control in it is a 44px target, the key row included.
     const controls = pane.locator('button')
     const count = await controls.count()
     expect(count).toBeGreaterThan(0)
