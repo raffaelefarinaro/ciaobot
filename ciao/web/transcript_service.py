@@ -1125,10 +1125,16 @@ def _align_user_turns(
                 missing -= 1
                 shifts.append((len(session_user_rows), "skipped", index, row))
             continue
-        if text != session_texts[session_pos] and has_session_counterpart(text, session_pos):
+        if (
+            text != session_texts[session_pos]
+            and not failed_turn(index)
+            and has_session_counterpart(text, session_pos)
+        ):
             # The session holds sends the durable store never recorded (a send
             # that never reached record_turn). They own no durable turn, so
-            # move past them to this turn's own row before pairing it.
+            # move past them to this turn's own row before pairing it. A failed
+            # turn keeps the fall-through so the run-length and lost-turn logic
+            # decide.
             session_pos = session_texts.index(text, session_pos)
         if text == session_texts[session_pos]:
             # `retryFromError` re-sends the same text after a failure, so a run
