@@ -39,6 +39,15 @@ carried by the session.
   engine while the browser's origin is https, and the port may differ across
   the hop too. A browser cannot set `X-Forwarded-Host`, so only a fronting
   proxy declares it.
+- `ApiRequestBodyLimitMiddleware` (`ciao/web/request_limits.py`) is inside
+  `AuthMiddleware`, so session, origin and loopback-peer refusals never consume
+  the body. HTTP `/api/*` gets a 1 MiB default; only exact upload/write
+  method-and-route pairs receive finite exceptions. It rejects both oversized
+  declared lengths and actual streamed bytes, spools admitted bodies with a
+  1 MiB in-memory threshold and replays them unchanged. `/ws/*`, `/hooks/*` and
+  `/share-target` do not pass through it. Malformed or excessively nested JSON
+  is refused as 400 before handler dispatch; application errors are not
+  translated as parse failures.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update

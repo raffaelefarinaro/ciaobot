@@ -747,6 +747,19 @@ prompt, so the browser never needs the host path. Saved-page `.mht`/`.mhtml`
 files are accepted as binary project attachments and served as downloads rather
 than executable inline content.
 
+HTTP `/api/*` requests have a 1 MiB default body limit. Exact route/method
+exceptions preserve supported upload and write contracts: project files and
+chat attachments allow 512 MiB of files plus at most 1 MiB multipart overhead;
+chat image uploads allow a 1,001 MiB aggregate (the 100-file × 10 MiB supported
+batch size plus 1 MiB overhead);
+`POST /api/skills/import` remains capped at 10 MiB; and workspace file writes
+allow a 13 MiB JSON body so a 2 MiB UTF-8 text value can be escaped in JSON
+with bounded metadata. Declared and received bytes are both checked. Admitted
+bodies use bounded-memory spooling and are replayed to handlers. Other `/api`
+routes, including public bootstrap/status endpoints, remain bounded by the
+default. WebSockets, webhook ingress and `/share-target` are outside this HTTP
+API limit; their own policies remain authoritative.
+
 **Chats**
 
 ```bash
