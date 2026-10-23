@@ -320,7 +320,7 @@ def _read_only_snapshot(request: AgentRequest) -> tuple[tuple[str, tuple[int, in
     for raw in request.agent_read_only:
         try:
             st = os.stat(raw)
-        except OSError:
+        except OSError:  # missing or unreadable: nothing is bound
             snapshot.append((raw, None))
             continue
         snapshot.append((raw, (st.st_ino, st.st_mtime_ns)))
@@ -2242,10 +2242,10 @@ class OpencodeProvider(BaseSDKProvider):
 
         A changed MCP token forces a full restart: opencode reads MCP
         configuration at server scope, so the running process cannot be
-        re-pointed at a new token. A changed filesystem scope does too: the
-        sandbox wraps the server process itself. A changed filesystem scope or
-        linked repo does too, and on Linux so does a replaced or newly created
-        read-only runtime file (`_read_only_snapshot`).
+        re-pointed at a new token. A changed filesystem scope or linked repo
+        does too, since the sandbox wraps the server process itself, and on
+        Linux so does a replaced, created or deleted read-only runtime file
+        (`_read_only_snapshot`).
         """
         if self._client is not None and self._process is not None:
             if (
@@ -2258,8 +2258,8 @@ class OpencodeProvider(BaseSDKProvider):
                 return self._client
             if self._process.returncode is None and self.background_work_outstanding:
                 logger.warning(
-                    "Restarting the OpenCode server for %s (agent token, filesystem scope or linked repo "
-                    "changed) stops %d background shell(s) and %d background subagent(s)",
+                    "Restarting the OpenCode server for %s (agent token, filesystem scope, runtime file "
+                    "or linked repo changed) stops %d background shell(s) and %d background subagent(s)",
                     self.workspace_root,
                     len(self._background_shells),
                     len(self._background_children),
@@ -2335,6 +2335,10 @@ class OpencodeProvider(BaseSDKProvider):
     ) -> httpx.AsyncClient:
         """Start, validate, and register one opencode server process."""
         port = _free_port()
+        # Before the argv: the prefix decides each bind as it is built, so a
+        # file changed in between shows up as a difference next turn and
+        # restarts, instead of being recorded as already bound.
+        read_only_snapshot = _read_only_snapshot(request)
         argv, sandbox_env = self._server_launch(request, binary, port)
         self._password = secrets.token_urlsafe(24)
         env = {
@@ -2351,7 +2355,7 @@ class OpencodeProvider(BaseSDKProvider):
             env["OPENCODE_CONFIG_CONTENT"] = config_content
         self._mcp_token = provider_reuse_key(request)
         self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
-        self._read_only_snapshot = _read_only_snapshot(request)
+        self._read_only_snapshot = read_only_snapshot
 
         # Say it now, while the environment we are about to hand over is in
         # hand: an unresolved placeholder becomes an empty credential and only

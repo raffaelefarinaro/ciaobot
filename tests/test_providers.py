@@ -1732,6 +1732,40 @@ async def test_opencode_linux_restarts_when_a_granted_file_appears(tmp_path, mon
     assert events == ["disconnect", "start"]
 
 
+async def test_opencode_linux_restarts_when_a_granted_file_is_deleted(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    registry = tmp_path / "workspaces.json"
+    registry.write_text("[]", encoding="utf-8")
+    provider, request, live, events = _live_scoped_opencode(tmp_path, monkeypatch, registry)
+
+    registry.unlink()
+    assert await provider._ensure_server(request) == "fresh"
+    assert events == ["disconnect", "start"]
+
+
+async def test_opencode_snapshot_predates_the_sandbox_binds(tmp_path, monkeypatch):
+    # A receipt written while the bwrap argv is built was skipped by it, so the
+    # recorded snapshot must still say "missing" and the next turn must restart.
+    from ciao.providers.opencode import _read_only_snapshot
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    receipt = tmp_path / "workspace-rooting.json"
+    request.agent_read_only = (str(receipt),)
+    _capture_spawn(monkeypatch)
+
+    def racing_launch(req, binary, port):
+        receipt.write_text('{"status": "migrated"}', encoding="utf-8")
+        return ["opencode", "serve"], {}
+
+    monkeypatch.setattr(provider, "_server_launch", racing_launch)
+    with pytest.raises(_SpawnCaptured):
+        await provider._start_server_once(request, "/bin/opencode")
+
+    assert provider._read_only_snapshot == ((str(receipt), None),)
+    assert provider._read_only_snapshot != _read_only_snapshot(request)
+
+
 async def test_opencode_darwin_keeps_the_server_when_a_granted_file_is_replaced(tmp_path, monkeypatch):
     # Seatbelt grants by path, so a replaced file is already visible.
     monkeypatch.setattr(sys, "platform", "darwin")
