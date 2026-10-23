@@ -668,6 +668,9 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         "env": {
             "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
             "HOME": str(home),
+            # Keep shell-specific startup-file writes inside the disposable
+            # home even when the host/CI environment sets a global XDG path.
+            "XDG_CONFIG_HOME": str(home / ".config"),
             "CIAO_RELEASE_BASE_URL": f"file://{tmp_path / 'rel'}",
             "TMPDIR": str(tmp_path),
         },
