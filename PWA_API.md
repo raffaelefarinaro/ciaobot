@@ -171,6 +171,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-move/dirs` | List local subdirectories for the Move workspace folder picker (host browser only: loopback peer, local `Host`, exact same-origin `Origin`) |
 | POST | `/api/workspace-move/plan` | Dry-run moving the install workspace to `{target}`: `{ok, refusals, warnings}` (host browser only: loopback peer, local `Host`, exact same-origin `Origin`) |
 | POST | `/api/workspace-move` | Start moving the install workspace to `{target}`: detached drain, stop, move, repoint, restart (host browser only: loopback peer, local `Host`, exact same-origin `Origin`; 202) |
+
 | GET | `/api/stats` | Read CLI stats |
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
@@ -245,6 +246,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 ```
 
 `healthy` means a reliable scan found no actionable items. `needs_attention` means a reliable scan found findings. `error` means one or more required inputs could not be inspected reliably; `total_issues` includes those scan errors, while `total_errors` counts them separately. Each section object contains its detailed counts, findings, and local errors. An unexpected handler failure returns HTTP 500 with `{"error":"failed to run AI OS audit"}`.
+
+The workspace-move operation record includes `denied` and, when launchd observed it, `startup_exit_code`. A destination access denial or engine startup exit 78 is captured before rollback; the source engine's successful restart can clear the shared denial notice without erasing the operation's diagnosis.
 
 ## Agent recipes
 

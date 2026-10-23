@@ -329,6 +329,12 @@ def _loaded_job(
     )
 
 
+def server_last_exit_code(*, uid: int | None = None, runner: Runner = subprocess.run) -> int | None:
+    """Read launchd's last observed server exit code without changing service state."""
+    _loaded, _arguments, exit_code = _loaded_job(_getuid() if uid is None else uid, runner)
+    return exit_code
+
+
 def _plist_matches_loaded(
     loaded_arguments: list[str] | None,
     plist_arguments: list[str] | None,
