@@ -1795,6 +1795,10 @@ class CiaoConfig:
         try:
             if workspaces_path.is_file():
                 workspaces_json = workspaces_path.read_text(encoding="utf-8")
+        except PermissionError as exc:
+            from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
+
+            raise RuntimeStateUnreadable(workspaces_path) from exc
         except OSError:
             workspaces_json = ""
 

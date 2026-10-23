@@ -317,3 +317,26 @@ def test_a_linked_repo_with_code_mode_off_is_not_granted(tmp_path: Path) -> None
 
     assert request.linked_repo == ""
     assert str(repo.resolve()) not in request.agent_roots
+
+
+def test_workspace_scope_request_grants_runtime_files_read_only(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="workspace")
+    project = manager.create_project("scoped", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    runtime = config.state_path.parent
+    expected = (
+        str(runtime / "migration" / "workspace-rooting.json"),
+        str(runtime / "workspaces.json"),
+    )
+    assert request.agent_read_only == expected
+    assert not set(expected) & set(request.agent_roots)
+
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="machine")
+    assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
