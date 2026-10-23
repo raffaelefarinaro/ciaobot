@@ -911,8 +911,11 @@ def test_gh_token_cached_only_never_runs_subprocess(monkeypatch):
     assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
     assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) == "tok"
     assert len(calls) == 1
+    # Past the TTL a cache-only read still returns the last good token: a
+    # retry or steer after a long turn must not lose GH_TOKEN.
     monkeypatch.setattr("ciao.fs_sandbox._GH_TOKEN_TTL", 0.0)
-    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) is None
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) == "tok"
+    assert len(calls) == 1
 
 
 def test_gh_token_failure_not_cached(monkeypatch):

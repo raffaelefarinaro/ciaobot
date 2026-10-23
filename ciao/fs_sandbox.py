@@ -244,18 +244,19 @@ def gh_token_for_sandbox(
     environment already carries ``GH_TOKEN`` / ``GITHUB_TOKEN`` (the chat
     inherits it), or gh has no token. The token is never logged.
 
-    A token is cached for ``_GH_TOKEN_TTL`` seconds; failures are never cached.
-    ``cached_only`` returns the cache and never starts a process, so a caller on
-    the event loop cannot block it.
+    A fetch is reused for ``_GH_TOKEN_TTL`` seconds; failures are never cached.
+    ``cached_only`` returns the last good token whatever its age and never
+    starts a process, so a caller on the event loop cannot block, and a retry or
+    steer after a long turn keeps the token the turn started with.
     """
     if gh is None or env.get("GH_TOKEN") or env.get("GITHUB_TOKEN"):
         return None
     key = (gh, env.get("GH_CONFIG_DIR"), env.get("XDG_CONFIG_HOME"), env.get("HOME"))
     hit = _gh_token_cache.get(key)
+    if cached_only:
+        return hit[0] if hit is not None else None
     if hit is not None and time.monotonic() - hit[1] < _GH_TOKEN_TTL:
         return hit[0]
-    if cached_only:
-        return None
     try:
         result = subprocess.run(
             [gh, "auth", "token", "--hostname", "github.com"],
