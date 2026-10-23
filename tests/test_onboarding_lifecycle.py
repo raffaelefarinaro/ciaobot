@@ -198,8 +198,8 @@ def test_replace_failure_preserves_receipt_and_cleans_temp(tmp_path: Path, monke
 
 
 def _stub_setup_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "ensure_workspace_git", lambda root: None)
-    monkeypatch.setattr(cli, "ensure_vault_git", lambda root: None)
+    monkeypatch.setattr(cli, "ensure_workspace_git", lambda root, **_: None)
+    monkeypatch.setattr(cli, "ensure_vault_git", lambda root, **_: None)
 
 
 def test_fresh_setup_creates_pending_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
