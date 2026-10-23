@@ -14,6 +14,7 @@ import site
 import subprocess
 import sys
 import sysconfig
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -223,7 +224,18 @@ def gh_config_read_root(env: Mapping[str, str]) -> Path | None:
     return path.resolve() if path.is_dir() else None
 
 
-def gh_token_for_sandbox(gh: str | None, env: Mapping[str, str]) -> str | None:
+_GH_TOKEN_TTL = 60.0
+_gh_token_cache: dict[tuple[str, str | None, str | None, str | None], tuple[str, float]] = {}
+
+
+def clear_gh_token_cache() -> None:
+    """Forget every cached gh token (tests)."""
+    _gh_token_cache.clear()
+
+
+def gh_token_for_sandbox(
+    gh: str | None, env: Mapping[str, str], *, cached_only: bool = False
+) -> str | None:
     """The ``gh`` login token, to pass into a workspace-scoped chat (#1961).
 
     The macOS keychain is outside a workspace sandbox, so the engine reads gh's
@@ -231,21 +243,35 @@ def gh_token_for_sandbox(gh: str | None, env: Mapping[str, str]) -> str | None:
     read it, as it could read ``hosts.yml``. None when gh is missing, the
     environment already carries ``GH_TOKEN`` / ``GITHUB_TOKEN`` (the chat
     inherits it), or gh has no token. The token is never logged.
+
+    A token is cached for ``_GH_TOKEN_TTL`` seconds; failures are never cached.
+    ``cached_only`` returns the cache and never starts a process, so a caller on
+    the event loop cannot block it.
     """
     if gh is None or env.get("GH_TOKEN") or env.get("GITHUB_TOKEN"):
+        return None
+    key = (gh, env.get("GH_CONFIG_DIR"), env.get("XDG_CONFIG_HOME"), env.get("HOME"))
+    hit = _gh_token_cache.get(key)
+    if hit is not None and time.monotonic() - hit[1] < _GH_TOKEN_TTL:
+        return hit[0]
+    if cached_only:
         return None
     try:
         result = subprocess.run(
             [gh, "auth", "token", "--hostname", "github.com"],
             capture_output=True,
             text=True,
-            timeout=5,
+            encoding="utf-8",
+            timeout=2,
             env=dict(env),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
     token = result.stdout.strip()
-    return token if result.returncode == 0 and token else None
+    if result.returncode != 0 or not token:
+        return None
+    _gh_token_cache[key] = (token, time.monotonic())
+    return token
 
 
 def _inside_roots(roots: Sequence[Path], paths: Sequence[Path]) -> list[Path]:

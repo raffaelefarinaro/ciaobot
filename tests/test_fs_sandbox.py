@@ -12,6 +12,7 @@ import pytest
 
 from ciao.fs_sandbox import (
     gh_config_read_root,
+    clear_gh_token_cache,
     gh_token_for_sandbox,
     gws_tool_read_roots,
     SANDBOX_EXEC_PATH,
@@ -876,6 +877,60 @@ def test_gh_token_for_sandbox_none_cases(monkeypatch):
     ):
         monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", run_returning(outcome))
         assert gh_token_for_sandbox("/bin/gh", {}) is None
+
+
+def _gh_run(monkeypatch, outcomes):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        outcome = outcomes[min(len(calls), len(outcomes)) - 1]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return subprocess.CompletedProcess(args, *outcome)
+
+    monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", fake_run)
+    return calls
+
+
+def test_gh_token_cache_hit_skips_subprocess(monkeypatch):
+    clear_gh_token_cache()
+    calls = _gh_run(monkeypatch, [(0, "tok\n", "")])
+
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    assert len(calls) == 1
+
+
+def test_gh_token_cached_only_never_runs_subprocess(monkeypatch):
+    clear_gh_token_cache()
+    calls = _gh_run(monkeypatch, [(0, "tok\n", "")])
+
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) is None
+    assert calls == []
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) == "tok"
+    assert len(calls) == 1
+    monkeypatch.setattr("ciao.fs_sandbox._GH_TOKEN_TTL", 0.0)
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) is None
+
+
+def test_gh_token_failure_not_cached(monkeypatch):
+    clear_gh_token_cache()
+    calls = _gh_run(monkeypatch, [(1, "", "no"), (0, "tok\n", "")])
+
+    assert gh_token_for_sandbox("/bin/gh", {}) is None
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    assert len(calls) == 2
+
+
+def test_gh_token_runs_expected_argv(monkeypatch):
+    clear_gh_token_cache()
+    calls = _gh_run(monkeypatch, [(0, "tok\n", "")])
+
+    gh_token_for_sandbox("/bin/gh", {})
+
+    assert calls == [["/bin/gh", "auth", "token", "--hostname", "github.com"]]
 
 
 def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypatch):
