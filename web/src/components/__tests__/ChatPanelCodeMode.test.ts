@@ -228,7 +228,7 @@ describe('ChatPanel code badge', () => {
     store.projects[0].repo = REPO
     store.chats[0].code_mode = true
     await flushPromises()
-    expect(wrapper.get('.chat-title-row .chat-code-badge').text()).toBe('code')
+    expect(wrapper.get('.chat-title-row .chat-code-badge').text()).toBe('›_')
     expect(wrapper.find('.header-actions .repo-chip').exists()).toBe(false)
 
     store.chats[0].code_mode = false

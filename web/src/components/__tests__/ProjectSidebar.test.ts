@@ -164,9 +164,9 @@ describe('ProjectSidebar chat actions', () => {
     const rows = wrapper.findAll('.chat-item')
     const delegated = rows.find(row => row.text().includes('Copy me'))!
     const plain = rows.find(row => row.text().includes('Plain chat'))!
-    expect(delegated.get('.chat-task-tag').text()).toBe('task')
-    // The row's accessible name comes from its content, so it says "task" too.
-    expect(delegated.text()).toContain('task')
+    expect(delegated.get('.chat-task-tag').find('.task-glyph').exists()).toBe(true)
+    // The row's accessible name comes from its content, so it says the relation too.
+    expect(delegated.text()).toContain('Delegated board task')
     expect(plain.find('.chat-task-tag').exists()).toBe(false)
     expect(delegated.attributes('title'))
       .toBe('Copy me\nDrag to move to another project\nDelegated board task')
@@ -181,7 +181,7 @@ describe('ProjectSidebar chat actions', () => {
     const wrapper = await mountSidebar()
 
     const tag = wrapper.get('.chat-item .chat-task-tag')
-    expect(tag.text()).toBe('task')
+    expect(tag.find('.task-glyph').exists()).toBe(true)
     expect(tag.attributes('title')).toBe('Delegated board task')
     // The tag hides while the row is hovered or focused, so the qualifier is
     // also text: in the row's title for a pointer, in a hidden line for AT.
@@ -197,8 +197,8 @@ describe('ProjectSidebar chat actions', () => {
     const wrapper = await mountSidebar()
 
     const tag = wrapper.get('.chat-item .chat-task-tag')
-    // The same squared word as a delegated chat, so the row reads as one.
-    expect(tag.text()).toBe('task')
+    // The same checkbox glyph as a delegated chat, so the row reads as one.
+    expect(tag.find('.task-glyph').exists()).toBe(true)
     // The relation is what says delegation apart: a link is not an attempt.
     expect(tag.attributes('title')).toBe('Linked to a board task')
     expect(wrapper.get('.chat-item').attributes('title')).toContain('Linked to a board task')
@@ -223,7 +223,7 @@ describe('ProjectSidebar chat actions', () => {
     signals.tasks = [delegatedTask({ chat_id: chatId })]
     signals.loadedWorkspace = 'personal'
     const wrapper = await mountSidebar()
-    expect(wrapper.get('.chat-item .chat-task-tag').text()).toBe('task')
+    expect(wrapper.get('.chat-item .chat-task-tag').find('.task-glyph').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -975,7 +975,8 @@ describe('ProjectSidebar accessible context menus', () => {
     const wrapper = await mountSidebar()
     await flushPromises()
     expect(wrapper.findAll('.chat-code-tag')).toHaveLength(1)
-    expect(wrapper.get('.chat-code-tag').text()).toBe('code')
+    expect(wrapper.get('.chat-code-tag').text()).toBe('›_')
+    expect(wrapper.get('.chat-code-tag').attributes('role')).toBe('img')
     wrapper.unmount()
 
     store.projects[0].repo = null
@@ -997,7 +998,8 @@ describe('ProjectSidebar accessible context menus', () => {
     const wrapper = await mountSidebar()
     await flushPromises()
     const code = wrapper.get('.chat-code-tag')
-    expect(code.text()).toBe('code')
+    expect(code.text()).toBe('›_')
+    expect(code.attributes('role')).toBe('img')
     expect(code.attributes('title')).toContain('feat-x')
     expect(code.attributes('title')).toContain('/r/app-wt')
     expect(code.attributes('aria-label')).toContain('feat-x')

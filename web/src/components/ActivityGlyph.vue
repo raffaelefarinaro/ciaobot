@@ -1,12 +1,12 @@
 <template>
-  <span class="activity-glyph" :class="`activity-glyph--${kind}`" aria-hidden="true"><template v-if="kind === 'run' || kind === 'run-failed'">›_</template></span>
+  <span class="activity-glyph" :class="`activity-glyph--${kind}`" aria-hidden="true"></span>
 </template>
 
 <script setup lang="ts">
 // One mark per kind of live work, so a working turn, a subagent and a shell
 // run no longer draw the same pulsing dot. Shape carries the meaning, not
-// colour: working pulses, an agent orbits, a run is a static prompt (it can go
-// for hours and the user stops it, so it does not move). Decorative only: the
+// colour: working pulses, an agent orbits, a run is a diamond with a dot tracing
+// its edges. Decorative only: the
 // caller owns the accessible name.
 export type ActivityGlyphKind = 'working' | 'agent' | 'run' | 'run-failed'
 defineProps<{ kind: ActivityGlyphKind }>()
@@ -65,17 +65,39 @@ defineProps<{ kind: ActivityGlyphKind }>()
   animation: activity-glyph-orbit 1.6s linear infinite;
 }
 
-/* A shell run: a static terminal prompt, neutral. Failure is the only colour. */
+/* A shell run: a diamond whose edges a dot traces, neutral. Same motion
+   language as the orbit, a shape neither the agent ring nor the task
+   checkbox uses. Failure is red and still. */
 .activity-glyph--run,
 .activity-glyph--run-failed {
-  padding: 0 1px;
-  color: var(--fg2);
-  font: 700 calc(10px * var(--font-scale))/1 var(--font-mono);
-  letter-spacing: -0.04em;
-  white-space: nowrap;
+  box-sizing: border-box;
+  width: 9px;
+  height: 9px;
+  margin: 2px; /* the rotated diagonal is ~12.7px */
+  transform: rotate(45deg);
+  border: 1.5px solid color-mix(in srgb, var(--fg2) 55%, transparent);
 }
 
-.activity-glyph--run-failed { color: var(--error); }
+.activity-glyph--run::after,
+.activity-glyph--run-failed::after {
+  content: "";
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--fg);
+  offset-path: path('M-0.75,-0.75 H6.75 V6.75 H-0.75 Z');
+  offset-rotate: 0deg;
+  animation: activity-glyph-trace 1.8s linear infinite;
+}
+
+.activity-glyph--run-failed { border-color: color-mix(in srgb, var(--error) 70%, transparent); }
+.activity-glyph--run-failed::after { background: var(--error); animation: none; }
+
+@keyframes activity-glyph-trace {
+  from { offset-distance: 0%; }
+  to { offset-distance: 100%; }
+}
 
 @keyframes activity-glyph-pulse {
   0%, 100% { transform: scale(0.55); opacity: 0.35; }
@@ -94,7 +116,8 @@ defineProps<{ kind: ActivityGlyphKind }>()
 @media (prefers-reduced-motion: reduce) {
   .activity-glyph--working,
   .activity-glyph--working::before,
-  .activity-glyph--agent::after {
+  .activity-glyph--agent::after,
+  .activity-glyph--run::after {
     animation: none;
   }
 

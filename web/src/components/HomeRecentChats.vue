@@ -96,11 +96,11 @@
                       v-if="taskSignals.isTaskChat(chat)"
                       class="home-chat-task"
                       :title="taskBadgeTitle(chat)"
-                    >task</span>
+                    ><TaskGlyph /></span>
                     <!-- A plain span cannot be named, so the relation also reads
                          as text: in the row title for a pointer, and here for AT. -->
                     <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
-                    <span v-if="isChatCodeModeOn(chat, store.projectFor(chat.chat_id)?.repo)" class="home-chat-task home-chat-code" title="Code mode is on">code</span>
+                    <span v-if="isChatCodeModeOn(chat, store.projectFor(chat.chat_id)?.repo)" class="home-chat-code" role="img" aria-label="Code mode is on" title="Code mode is on">›_</span>
                   </span>
                   <!-- Project plus a status phrase read from the same signals
                        that sorted the row into its tier, so the sub-line can
@@ -201,6 +201,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { isChatCodeModeOn } from '../lib/codeMode'
 import ChatSignals from './ChatSignals.vue'
+import TaskGlyph from './TaskGlyph.vue'
 
 type NewWorkspaceChatAction = { workspace: string; projectId: string; isCreating: boolean }
 
@@ -1202,21 +1203,22 @@ defineExpose({ onArrow })
   white-space: nowrap;
 }
 
-.home-chat-heading:has(.home-chat-task) .home-chat-title { flex: 0 1 auto; }
+.home-chat-heading:has(.home-chat-task, .home-chat-code) .home-chat-title { flex: 0 1 auto; }
 
-/* The sidebar's task and code tags (ProjectSidebar `.chat-task-tag`,
-   `.chat-code-tag`): a squared mono word after the title, never colour. */
-.home-chat-task {
-  display: inline-grid;
-  place-items: center;
+/* The sidebar's task and code marks (ProjectSidebar `.chat-task-tag`,
+   `.chat-code-tag`): a checkbox glyph and a mono `›_` after the title. */
+.home-chat-task,
+.home-chat-code {
+  display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
   height: 16px;
-  padding: 0 4px;
-  box-sizing: border-box;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
   color: var(--fg3);
-  font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
+}
+
+.home-chat-code {
+  font: 700 calc(11px * var(--font-scale))/1 var(--font-mono);
+  letter-spacing: -0.04em;
 }
 
 .home-chat-project + .home-chat-status::before {
