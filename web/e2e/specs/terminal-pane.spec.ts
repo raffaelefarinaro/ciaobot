@@ -74,7 +74,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await isolate(page, `terminal-pane-${testInfo.workerIndex}`)
 })
 
-test('the terminal opens from a chat, takes a command, and keeps its session when hidden', async ({ page }, testInfo) => {
+test('the terminal opens from a chat, takes a command, and keeps its session when closed', async ({ page }, testInfo) => {
   await boot(page, CHAT_PATH, COMPOSER)
 
   // The chat's own Terminal section is the way into the browser terminal: it
@@ -90,9 +90,9 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   await expect(pane.locator('.tp-status')).toContainText('fixture.local')
 
   // No shell is running yet, and starting one is an explicit act.
-  await expect(pane.locator('.tp-session')).toHaveCount(0)
-  await pane.getByRole('button', { name: 'New session' }).click()
-  await expect(pane.locator('.tp-session')).toHaveCount(1)
+  await expect(pane.getByRole('tab')).toHaveCount(0)
+  await pane.getByRole('button', { name: 'New terminal session' }).click()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
 
   // The shell answers.
   const surface = pane.locator('.tp-surface')
@@ -118,10 +118,10 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   // The documented way out: Shift+Tab hands the keyboard to the panel's own
   // controls, and the shell never sees the key.
   await page.keyboard.press('Shift+Tab')
-  await expect(pane.getByRole('button', { name: 'Hide' })).toBeFocused()
+  await expect(pane.getByRole('button', { name: 'Close' })).toBeFocused()
 
-  // Hide detaches; it never ends. The shell keeps running on the engine.
-  await pane.getByRole('button', { name: 'Hide' }).click()
+  // Closing detaches; it never ends. The shell keeps running on the engine.
+  await pane.getByRole('button', { name: 'Close' }).click()
   await expect(pane).toBeHidden()
   // The slot goes back to the chat: no divider, and no tile beside it.
   await expect(page.locator('.chat-split-resizer')).toHaveCount(0)
@@ -137,7 +137,7 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   // the screen.
   await open.click()
   await expect(pane).toBeVisible()
-  await expect(pane.locator('.tp-session')).toHaveCount(1)
+  await expect(pane.getByRole('tab')).toHaveCount(1)
   await expect(pane.locator('.tp-surface')).toContainText(OUTPUT)
 
   // A resize is measured against real cells and told to the engine.
@@ -236,7 +236,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
 
   // The terminal's tile is the pinned file's tile: the same window, with the
   // same chrome, so a frame of the terminal's own cannot slip in.
-  await pane.getByRole('button', { name: 'Hide' }).click()
+  await pane.getByRole('button', { name: 'Close' }).click()
   await expect(pane).toBeHidden()
   await boot(page, '/chat/beta-chat-1', COMPOSER)
   const fileTile = page.locator('.chat-split-side')
@@ -284,7 +284,7 @@ test('a pane too narrow for both columns gets the drawer, not a squeezed chat', 
   expect(columnBox.width).toBeGreaterThanOrEqual(mainBox.width - 1)
 
   // And hiding the terminal gives the chat back exactly what it had.
-  await pane.getByRole('button', { name: 'Hide' }).click()
+  await pane.getByRole('button', { name: 'Close' }).click()
   await expect(pane).toBeHidden()
   const after = (await column.boundingBox())!
   expect(Math.abs(after.width - columnBox.width)).toBeLessThanOrEqual(1)
@@ -341,9 +341,9 @@ test('a chat with no repository opens the terminal too', async ({ page }) => {
   await expect.poll(() => scopeQueries.join(' ')).toContain('chat_id=alpha-chat-2')
 
   // A shell starts here like any other: opening the panel starts nothing.
-  await expect(pane.locator('.tp-session')).toHaveCount(0)
-  await pane.getByRole('button', { name: 'New session' }).click()
-  await expect(pane.locator('.tp-session')).toHaveCount(1)
+  await expect(pane.getByRole('tab')).toHaveCount(0)
+  await pane.getByRole('button', { name: 'New terminal session' }).click()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
 })
 
 test.describe('on a phone', () => {

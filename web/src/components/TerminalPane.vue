@@ -18,9 +18,8 @@
  * gives it up. It is never re-bound to another session, because a screen
  * that showed two sessions would be showing two histories at once.
  *
- * **Hide is not End.** Hiding closes the socket and leaves the shell running
- * on the engine; ending asks the engine to kill it. They are two buttons,
- * and only one of them stops the process.
+ * **Close is not End.** Closing the pane leaves every shell running on the
+ * engine; closing an individual session tab ends only that shell.
  *
  * **The keyboard belongs to the shell while the terminal has focus.**
  * Escape, Tab, the arrows, Ctrl+C and Ctrl+D are the shell's, so the pane
@@ -61,7 +60,7 @@ const emit = defineEmits<{ open: [boolean] }>()
 /** The element the screen is mounted into. It exists for the pane's whole life. */
 const surfaceEl = ref<HTMLElement | null>(null)
 /** The control that leaves the terminal, so the focus escape has somewhere to go. */
-const hideButtonEl = ref<HTMLButtonElement | null>(null)
+const closeButtonEl = ref<HTMLButtonElement | null>(null)
 /**
  * The screen on show, and the session it belongs to.
  *
@@ -87,9 +86,6 @@ const isMobile = ref(false)
  * over the pane, which is always usable.
  */
 const isTile = computed(() => props.inTile && !isMobile.value)
-
-const hasScreen = computed(() => renderer.value !== null)
-const canEnd = computed(() => store.activeSession !== null && !store.ending)
 
 const hostLabel = computed(() => store.status?.host || 'unknown host')
 const platformLabel = computed(() => store.status?.platform || 'unknown platform')
@@ -173,13 +169,13 @@ function focusScreen(): void {
 
 // ── Actions ─────────────────────────────────────────────────────────────
 
-function hide(): void {
-  // Hiding detaches; it never ends. The shell keeps running on the engine.
+function closePane(): void {
+  // Closing detaches; it never ends. The shell keeps running on the engine.
   store.hide()
 }
 
-async function end(): Promise<void> {
-  await store.endSession()
+async function end(session: TerminalSessionInfo): Promise<void> {
+  await store.endSession(session.session_id)
 }
 
 async function create(): Promise<void> {
@@ -188,6 +184,20 @@ async function create(): Promise<void> {
 
 function openSession(session: TerminalSessionInfo): void {
   store.selectSession(session.session_id)
+}
+
+function onTabKeydown(event: KeyboardEvent, index: number): void {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  const tablist = (event.currentTarget as HTMLElement).closest('[role="tablist"]')
+  const tabs = [...(tablist?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [])]
+  if (!tabs.length) return
+  event.preventDefault()
+  const next = event.key === 'Home' ? 0
+    : event.key === 'End' ? tabs.length - 1
+      : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+  tabs[next].focus()
+  const session = store.sessions[next]
+  if (session) openSession(session)
 }
 
 async function takeover(): Promise<void> {
@@ -247,7 +257,7 @@ function onPaneKeydown(event: KeyboardEvent): void {
 
 /** Move the keyboard to the pane's own controls. */
 function focusControls(): void {
-  hideButtonEl.value?.focus()
+  closeButtonEl.value?.focus()
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -326,29 +336,7 @@ onBeforeUnmount(() => {
           <span class="tp-status-item">{{ platformLabel }}</span>
         </p>
       </div>
-      <div class="tp-actions">
-        <button
-          type="button"
-          class="btn-small tp-focus"
-          :disabled="!hasScreen"
-          title="Put the keyboard back in the terminal"
-          @click="focusScreen"
-        >Focus terminal</button>
-        <button
-          ref="hideButtonEl"
-          type="button"
-          class="btn-small tp-hide"
-          title="Hide the terminal. The shell keeps running."
-          @click="hide"
-        >Hide</button>
-        <button
-          type="button"
-          class="btn-small tp-end"
-          :disabled="!canEnd"
-          title="End this session and stop the shell"
-          @click="end"
-        >{{ store.ending ? 'Ending…' : 'End' }}</button>
-      </div>
+      <button ref="closeButtonEl" type="button" class="btn-icon tp-close" title="Close terminal" aria-label="Close" @click="closePane">×</button>
     </header>
 
     <p class="tp-warning">
@@ -358,7 +346,28 @@ onBeforeUnmount(() => {
     <p v-if="truncatedMessage" class="tp-truncated" role="status">{{ truncatedMessage }}</p>
     <p v-if="store.error" class="tp-error" role="alert">{{ store.error }}</p>
 
-    <div v-if="store.status?.available !== false" class="tp-body">
+    <template v-if="store.status?.available !== false">
+      <nav class="tp-sessions" aria-label="Terminal sessions">
+        <div class="tp-tabs" role="tablist" aria-label="Terminal sessions">
+          <div v-for="session in store.sessions" :key="session.session_id" class="tp-tab-wrap">
+            <button type="button" class="tp-tab" role="tab"
+              :aria-selected="session.session_id === store.activeSession?.session_id"
+              :tabindex="session.session_id === store.activeSession?.session_id ? 0 : -1"
+              :title="`${session.folder} · ${sessionState(session)}`"
+              @keydown="onTabKeydown($event, store.sessions.indexOf(session))" @click="openSession(session)">
+              <span class="tp-session-folder">{{ session.folder.split('/').filter(Boolean).at(-1) || session.folder }}</span>
+              <span class="tp-session-state">{{ sessionState(session) }}</span>
+            </button>
+            <button type="button" class="btn-icon tp-session-end" :aria-label="`End terminal session ${session.folder}`" title="End session" :disabled="store.ending" @click="end(session)">×</button>
+          </div>
+          <button type="button" class="btn-icon tp-new" aria-label="New terminal session" :title="store.creating ? 'Starting…' : 'New session'" :disabled="store.creating || store.sessions.length >= 4" @click="create">+</button>
+        </div>
+        <div v-if="store.phase === 'takeover'" class="tp-takeover" role="alert">
+          <p class="tp-takeover-text">Another connection took over this terminal session.</p>
+          <button type="button" class="btn-small tp-takeover-button" @click="takeover">Take over</button>
+        </div>
+      </nav>
+      <div class="tp-body">
       <div class="tp-surface-wrap">
         <div ref="surfaceEl" class="tp-surface" @click="focusScreen"></div>
         <p v-if="store.phase === 'connecting' || store.phase === 'reconnecting'" class="tp-phase" role="status">
@@ -372,39 +381,14 @@ onBeforeUnmount(() => {
         </p>
       </div>
 
-      <aside class="tp-sessions" aria-label="Terminal sessions">
-        <div class="tp-sessions-head">
-          <h3 class="tp-sessions-title">Sessions</h3>
-          <button type="button" class="btn-small tp-new" :disabled="store.creating" @click="create">
-            {{ store.creating ? 'Starting…' : 'New session' }}
-          </button>
-        </div>
-        <ul v-if="store.sessions.length" class="tp-session-list">
-          <li v-for="session in store.sessions" :key="session.session_id" class="tp-session">
-            <span class="tp-session-folder" :title="session.folder">{{ session.folder }}</span>
-            <span class="tp-session-state">{{ sessionState(session) }}</span>
-            <button
-              v-if="session.session_id !== store.activeSession?.session_id"
-              type="button"
-              class="btn-small tp-session-open"
-              @click="openSession(session)"
-            >Open</button>
-            <span v-else class="tp-session-current">Showing</span>
-          </li>
-        </ul>
-        <p v-else class="tp-sessions-empty">No shell is running here yet.</p>
-        <div v-if="store.phase === 'takeover'" class="tp-takeover" role="alert">
-          <p class="tp-takeover-text">Another connection took over this terminal session.</p>
-          <button type="button" class="btn-small tp-takeover-button" @click="takeover">Take over</button>
-        </div>
-      </aside>
-    </div>
+      </div>
+    </template>
 
     <p class="tp-hint">
       The terminal keeps the keyboard while it has focus: Escape, Tab, the
       arrows, Ctrl+C and Ctrl+D go to the shell. Press
       <kbd>Shift</kbd>+<kbd>Tab</kbd> to come back to these controls, or use
-      <strong>Hide</strong> to leave the terminal — the shell keeps running.
+      <strong>Close</strong> to leave the terminal — the shell keeps running.
     </p>
   </section>
 </template>
@@ -428,15 +412,6 @@ onBeforeUnmount(() => {
   height: 100%;
   min-height: 0;
   background: transparent;
-}
-/* A tile is narrow, so the body stacks: the screen takes the room and the
-   session list keeps a slice of the height under it. */
-.terminal-pane--tile .tp-body {
-  flex-direction: column;
-}
-.terminal-pane--tile .tp-sessions {
-  flex: 0 0 auto;
-  max-height: 30%;
 }
 .tp-head {
   display: flex;
@@ -473,13 +448,7 @@ onBeforeUnmount(() => {
   max-width: 100%;
   min-width: 0;
 }
-.tp-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  flex: 0 0 auto;
-  align-items: center;
-}
+.tp-close { flex: 0 0 auto; }
 .tp-warning,
 .tp-truncated,
 .tp-error,
@@ -535,45 +504,47 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 .tp-sessions {
-  flex: 0 0 240px;
+  flex: 0 0 auto;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  overflow: auto;
+  overflow: hidden;
 }
-.tp-sessions-head {
+.tp-tabs {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
+  gap: 2px;
+  overflow-x: auto;
+  padding: 0 var(--space-3) var(--space-1);
+  border-bottom: 1px solid var(--border);
 }
-.tp-sessions-title {
-  margin: 0;
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--fg3);
-}
-.tp-session-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-.tp-session {
+.tp-tab-wrap {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: 4px 6px;
+  flex: 0 0 auto;
+  min-width: 0;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   background: var(--bg3);
 }
+.tp-tab-wrap:has(.tp-tab[aria-selected="true"]) {
+  background: var(--bg);
+  border-bottom-color: var(--bg);
+}
+.tp-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  max-width: 220px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.tp-tab:focus-visible,
+.tp-session-end:focus-visible,
+.tp-new:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tp-session-folder {
-  flex: 1;
   min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -581,17 +552,13 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tp-session-state,
-.tp-session-current {
+.tp-session-state {
   flex: 0 0 auto;
   font-size: var(--text-xs);
   color: var(--fg3);
 }
-.tp-sessions-empty {
-  margin: 0;
-  font-size: var(--text-xs);
-  color: var(--fg3);
-}
+.tp-session-end { flex: 0 0 auto; }
+.tp-new { flex: 0 0 auto; }
 .tp-takeover {
   display: flex;
   flex-direction: column;
@@ -623,31 +590,21 @@ onBeforeUnmount(() => {
 .terminal-pane--drawer .tp-body {
   flex-direction: column;
 }
-.terminal-pane--drawer .tp-sessions {
-  flex: 0 0 auto;
-  max-height: 34%;
-}
-/* On a phone the header stacks: the buttons take their own row, so the
-   status line gets the full width and the path is a line of it rather
-   than a column. A tile stacks it for the same reason: it is a narrow
-   window, and a row of three buttons leaves the title no room. */
+/* The terminal title and engine details wrap in narrow drawers and tiles. */
 .terminal-pane--drawer .tp-head,
 .terminal-pane--tile .tp-head {
   flex-direction: column;
   align-items: stretch;
 }
-.terminal-pane--drawer .tp-actions,
-.terminal-pane--tile .tp-actions {
-  justify-content: flex-start;
-}
 @media (pointer: coarse) {
-  .tp-actions :deep(button),
-  .tp-session-open,
+  .tp-close,
+  .tp-session-end,
   .tp-takeover-button,
   .tp-new {
     min-height: var(--touch);
     min-width: var(--touch);
   }
-  .tp-session { min-height: var(--touch); }
+  .tp-tab-wrap { min-height: var(--touch); }
+  .tp-tab { min-height: var(--touch); }
 }
 </style>

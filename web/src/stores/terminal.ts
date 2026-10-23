@@ -1239,8 +1239,10 @@ export const useTerminalStore = defineStore('terminal', () => {
    * selected while the request was in flight keeps its own connection: the
    * list loses the ended row, and nothing else moves.
    */
-  async function endSession(): Promise<boolean> {
-    const session = activeSession.value
+  async function endSession(sessionId?: string): Promise<boolean> {
+    const session = sessionId
+      ? sessions.value.find((entry) => entry.session_id === sessionId)
+      : activeSession.value
     if (!session) return false
     if (ending.value) return false
     ending.value = true
