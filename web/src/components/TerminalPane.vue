@@ -38,6 +38,13 @@
  * instead of reaching the shell. It has to exist: the shell keeps Tab, so
  * without it the keyboard could not leave the terminal at all, and a pane
  * that cannot be left is a keyboard trap.
+ *
+ * **A soft keyboard has no Escape.** A phone or tablet cannot produce
+ * Escape, Tab, the arrows, Ctrl+C or Ctrl+D, so on a coarse pointer the
+ * pane shows a row of on-screen keys under the screen (#1894). Each one
+ * sends the byte sequence a hardware key would, through the same input path
+ * as a keystroke, and none of them takes the focus from the shell: a tap
+ * that moved the focus would also dismiss the soft keyboard.
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useTerminalStore } from '../stores/terminal'
@@ -165,6 +172,58 @@ function applyInputState(): void {
 /** Put the keyboard on the screen. */
 function focusScreen(): void {
   renderer.value?.focus()
+}
+
+// ── On-screen keys ──────────────────────────────────────────────────────
+
+/**
+ * The keys a soft keyboard cannot produce, as the bytes a hardware key sends.
+ *
+ * The arrows are the normal-mode CSI sequences. A full-screen program that
+ * switched the terminal to application cursor mode expects SS3 (`ESC O A`)
+ * instead; readline and every shell prompt accept CSI, which is what the
+ * row exists for. Enter is a carriage return, as the terminal's own Enter is.
+ */
+const ON_SCREEN_KEYS: ReadonlyArray<{ label: string; name: string; bytes: string }> = [
+  { label: 'Esc', name: 'Escape', bytes: '\x1b' },
+  { label: 'Tab', name: 'Tab', bytes: '\t' },
+  { label: 'Ctrl+C', name: 'Control C', bytes: '\x03' },
+  { label: 'Ctrl+D', name: 'Control D', bytes: '\x04' },
+  { label: '\u2191', name: 'Up arrow', bytes: '\x1b[A' },
+  { label: '\u2193', name: 'Down arrow', bytes: '\x1b[B' },
+  { label: '\u2190', name: 'Left arrow', bytes: '\x1b[D' },
+  { label: '\u2192', name: 'Right arrow', bytes: '\x1b[C' },
+  { label: 'Enter', name: 'Enter', bytes: '\r' },
+]
+
+const keyEncoder = new TextEncoder()
+
+/** Only a screen that may type may press a key for the user. */
+const keysEnabled = computed(() => renderer.value !== null && store.unlocked && store.phase === 'live')
+
+/**
+ * Send one on-screen key, exactly as a keystroke on the screen would.
+ *
+ * The bytes go through `store.sendInput`, the path the renderer's own
+ * keystrokes take, so they obey the same size and back-pressure rules and
+ * never bypass the connection's acknowledgement.
+ */
+function pressKey(bytes: string): void {
+  if (!keysEnabled.value) return
+  store.sendInput(keyEncoder.encode(bytes))
+}
+
+/**
+ * Keep the focus where it is when a key is tapped.
+ *
+ * A button takes the focus on pointer down; here that would pull the
+ * keyboard off the shell and, on a phone, close the soft keyboard the user
+ * is typing with. Preventing the default keeps the focus on the screen while
+ * the click still fires. Keyboard activation (Tab to the row, Enter) is not
+ * a pointer event and is left alone.
+ */
+function onKeyPointerDown(event: PointerEvent): void {
+  event.preventDefault()
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────
@@ -381,6 +440,22 @@ onBeforeUnmount(() => {
         </p>
       </div>
 
+      <!-- The keys a soft keyboard cannot produce. Rendered only with a
+           screen, and shown only under a coarse pointer (see the sheet). -->
+      <div v-if="renderer" class="tp-keys" role="toolbar" aria-label="Terminal keys">
+        <button
+          v-for="key in ON_SCREEN_KEYS"
+          :key="key.name"
+          type="button"
+          class="tp-key"
+          :aria-label="key.name"
+          :title="key.name"
+          :disabled="!keysEnabled"
+          @pointerdown="onKeyPointerDown"
+          @click="pressKey(key.bytes)"
+        >{{ key.label }}</button>
+      </div>
+
       </div>
     </template>
 
@@ -473,6 +548,7 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   display: flex;
+  flex-direction: column;
   gap: var(--space-3);
   padding: var(--space-2) var(--space-3);
 }
@@ -483,6 +559,32 @@ onBeforeUnmount(() => {
   min-height: 0;
   display: flex;
 }
+/* The on-screen keys exist for a pointer that has no hardware keys. A mouse
+   and a keyboard do not need them, so the row is hidden until the coarse
+   pointer rule below shows it; it sits under the screen, full width, and
+   scrolls sideways rather than wrapping into a second row. */
+.tp-keys {
+  display: none;
+  flex: 0 0 auto;
+  gap: var(--space-1);
+  overflow-x: auto;
+  padding-top: var(--space-2);
+}
+.tp-key {
+  flex: 0 0 auto;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.tp-key:disabled { opacity: 0.5; cursor: default; }
+.tp-key:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tp-surface {
   flex: 1;
   min-width: 0;
@@ -587,9 +689,6 @@ onBeforeUnmount(() => {
   min-height: 0;
   padding-bottom: var(--safe-bottom);
 }
-.terminal-pane--drawer .tp-body {
-  flex-direction: column;
-}
 /* The terminal title and engine details wrap in narrow drawers and tiles. */
 .terminal-pane--drawer .tp-head,
 .terminal-pane--tile .tp-head {
@@ -597,6 +696,7 @@ onBeforeUnmount(() => {
   align-items: stretch;
 }
 @media (pointer: coarse) {
+  .tp-keys { display: flex; }
   .tp-close,
   .tp-session-end,
   .tp-takeover-button,
