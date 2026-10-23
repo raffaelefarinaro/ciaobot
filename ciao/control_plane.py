@@ -56,6 +56,7 @@ from ciao.schedules import (
     publish_automations_changed,
     stamp_fallback_project,
     wall_clock_time_error,
+    normalize_system_schedule_update,
 )
 from ciao.task_attempts import (
     HANDOFF_ATTEMPTS,
@@ -6209,8 +6210,12 @@ class CiaoControlPlane:
 
     def schedule_update(self, principal: AgentPrincipal, schedule_id: str, **changes: Any) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
-        if entry.scope == "system" and any(key not in {"enabled", "workspace", "model", "provider", "archive_policy", "provider_model", "archivePolicy"} for key in changes):
-            raise ControlPlaneError("system_schedule_read_only", "System schedules only allow enabled/workspace/model/provider/archive_policy changes.")
+        system_timing_fields: frozenset[str] = frozenset()
+        if entry.scope == "system":
+            try:
+                changes, system_timing_fields = normalize_system_schedule_update(changes, entry)
+            except ValueError as exc:
+                raise ControlPlaneError("system_schedule_read_only" if "read-only" in str(exc) else "invalid_time", str(exc)) from exc
         # Where this schedule's run bindings actually live: the bound project's
         # own workspace when there is one (an entry written before the workspace
         # field existed carries none of its own), else the stored field.
@@ -6378,7 +6383,10 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_time", time_error)
         # A changed chat/project binding moves where this entry re-homes.
         stamp_fallback_project(updated, self.pcm)
-        self.schedules.replace(updated)
+        if entry.scope == "system":
+            self.schedules.replace(updated, timing_fields=system_timing_fields)
+        else:
+            self.schedules.replace(updated)
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(updated))
 
