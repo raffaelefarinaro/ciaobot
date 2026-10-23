@@ -386,6 +386,85 @@ describe('chat code blocks and long links', () => {
 // through, so `<p id=out>` used to disappear from the bubble and split the line.
 // User text must read as text; the only markup allowed in it is what the app
 // itself writes (the comment-context tags).
+describe('chat URLs', () => {
+  const EXTERNAL = 'target="_blank" rel="noopener noreferrer"'
+
+  it('links a code span that is one URL and keeps its code styling', () => {
+    const html = renderMarkdown('See `https://github.com/foo` for the source.')
+    expect(html).toContain(
+      `<a href="https://github.com/foo" ${EXTERNAL}><code>https://github.com/foo</code></a>`,
+    )
+  })
+
+  it('keeps the query string of a code-span URL intact in the href', () => {
+    const html = renderMarkdown('`https://example.com/search?q=1&r=2#top`')
+    expect(html).toContain('href="https://example.com/search?q=1&amp;r=2#top"')
+    expect(html).toContain('<code>https://example.com/search?q=1&amp;r=2#top</code>')
+  })
+
+  it('escapes a quote inside a code-span URL instead of breaking the attribute', () => {
+    const html = renderMarkdown('`https://example.com/?q="x"`')
+    expect(html).toContain('href="https://example.com/?q=&quot;x&quot;"')
+    expect(html).not.toContain('href="https://example.com/?q=""')
+  })
+
+  it('takes the span literally, so punctuation inside the backticks stays in the href', () => {
+    // Prose drops a trailing dot; a code span is what the author typed.
+    const html = renderMarkdown('`https://example.com/x.`')
+    expect(html).toContain('href="https://example.com/x."')
+  })
+
+  it('leaves a code span alone when it holds more than the URL', () => {
+    const html = renderMarkdown('`curl https://example.com/x` and `not a url`')
+    expect(html).not.toContain('<a')
+    expect(html).toContain('<code>curl https://example.com/x</code>')
+    expect(html).toContain('<code>not a url</code>')
+  })
+
+  it('leaves URLs inside fenced code blocks as plain text', () => {
+    const html = renderMarkdown('```\nhttps://example.com/x\n```')
+    expect(html).not.toContain('<a')
+    expect(html).toContain('https://example.com/x')
+  })
+
+  it('never links an unsafe scheme written in a code span', () => {
+    const html = renderMarkdown('`javascript:alert(1)` `file:///etc/passwd`')
+    expect(html).not.toContain('<a')
+  })
+
+  it('does not turn a code-span URL ending in a file name into a workspace file link', () => {
+    const html = renderMarkdown('`https://example.com/docs/readme.md`')
+    expect(html).not.toContain('file-link')
+    expect(html).toContain('href="https://example.com/docs/readme.md"')
+  })
+
+  it('links a code-span URL in a user bubble too', () => {
+    const html = renderUserMarkdown('try `https://example.com/x`')
+    expect(html).toContain(
+      `<a href="https://example.com/x" ${EXTERNAL}><code>https://example.com/x</code></a>`,
+    )
+  })
+
+  it('links every bare URL in prose and leaves trailing punctuation outside', () => {
+    const html = renderMarkdown(
+      'See https://example.com/a, then https://example.com/b; done (https://example.com/c). Wow https://example.com/d!',
+    )
+    for (const path of ['a', 'b', 'c', 'd']) {
+      expect(html).toContain(`<a href="https://example.com/${path}" ${EXTERNAL}>https://example.com/${path}</a>`)
+    }
+    expect(html).toContain('</a>, then')
+    expect(html).toContain('</a>; done (<a')
+    expect(html).toContain('</a>). Wow')
+    expect(html).toContain('</a>!')
+  })
+
+  it('keeps balanced parentheses inside a bare URL', () => {
+    const html = renderMarkdown('https://en.wikipedia.org/wiki/Foo_(bar) is it')
+    expect(html).toContain('href="https://en.wikipedia.org/wiki/Foo_(bar)"')
+    expect(html).toContain('>https://en.wikipedia.org/wiki/Foo_(bar)</a> is it')
+  })
+})
+
 describe('renderUserMarkdown', () => {
   function render(input: string): HTMLElement {
     const el = document.createElement('div')
