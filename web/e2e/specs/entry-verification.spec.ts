@@ -248,6 +248,7 @@ test.describe('a narrow memory-review layout with a fine pointer', () => {
     expect(await page.evaluate(() => matchMedia('(pointer: fine)').matches)).toBe(true)
 
     const row = nadiaRow(page)
+    await expect(row.locator('.vr-entries')).toBeVisible()
     const boxes = await row
       .locator('.vr-actions button:visible, .vr-entry-decision .vr-pending-link:visible')
       .evaluateAll((els) =>
