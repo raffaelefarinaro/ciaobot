@@ -61,21 +61,23 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
 
 <template>
   <section class="rail-section chat-repo-section" aria-labelledby="chat-rail-repo-label">
-    <p id="chat-rail-repo-label" class="rail-label">Repository</p>
-    <div class="chat-repo-head">
-      <p class="chat-repo-name" :title="chip.path">{{ chip.name }}</p>
-      <button
-        v-if="!chip.missing"
-        type="button"
-        class="chat-repo-copy"
-        :aria-label="copied ? 'Path copied' : 'Copy path'"
-        :title="chip.path"
-        @click="copyPath"
-      >
-        <svg v-if="!copied" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 5.5v-2a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3.5V9A1.5 1.5 0 0 0 4 10.5h1.5" /></svg>
-        <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8" /></svg>
-      </button>
-      <span class="sr-only" aria-live="polite">{{ copied ? 'Path copied' : '' }}</span>
+    <div class="chat-repo-heading">
+      <p id="chat-rail-repo-label" class="rail-label">Repository</p>
+      <div class="chat-repo-head">
+        <p class="chat-repo-name" :title="chip.path">{{ chip.name }}</p>
+        <button
+          v-if="!chip.missing"
+          type="button"
+          class="chat-repo-copy"
+          :aria-label="copied ? 'Path copied' : 'Copy path'"
+          :title="chip.path"
+          @click="copyPath"
+        >
+          <svg v-if="!copied" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5" /><path d="M10.5 5.5v-2a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3.5V9A1.5 1.5 0 0 0 4 10.5h1.5" /></svg>
+          <svg v-else width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3.2L13 4.8" /></svg>
+        </button>
+        <span class="sr-only" aria-live="polite">{{ copied ? 'Path copied' : '' }}</span>
+      </div>
     </div>
     <p v-if="chip.missing" class="chat-repo-missing" role="status">The linked folder is missing. Change or unlink it on the project page.</p>
     <div v-else class="chat-repo-meta">
@@ -221,8 +223,10 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
   .repo-code-switch .switch-track,
   .repo-code-switch .switch-track::after { transition: none; }
 }
+.chat-repo-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
+.chat-repo-heading .rail-label { margin: 0; flex: none; }
 .chat-repo-name { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
-.chat-repo-head { display: flex; align-items: baseline; gap: var(--space-2); }
+.chat-repo-head { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
 .chat-repo-copy, .repo-code-info {
   flex: none;
   display: inline-flex;

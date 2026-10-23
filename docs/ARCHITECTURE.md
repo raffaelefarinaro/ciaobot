@@ -778,13 +778,14 @@ operator decides, `GET /api/proposals/history` joins the latest prediction made 
 decision onto the row as `prediction: {verdict, reason, ts, match}`. `GET /api/proposals/handover`
 reports the agreement rate over the newest 50 operator (`via: pwa`) decisions that carry a
 prediction, excluding agent, auto and swept rows; `suggest_handover` is true only while the setting
-is `off`, with at least 20 decisions and a rate of at least 0.9. It is advice: nothing enables
-handover automatically.
+is `off`, with at least 20 decisions and a rate of at least 0.9. It is advice and never changes the
+setting automatically.
 
 A workspace may carry `provider_overrides` (`WorkspaceConfig`, validated by `coerce_provider_overrides`, stored sparse in `.runtime/workspaces.json`): per provider, an override of `model`, `thinking`, `permission_mode` and `insights_model` that sits between an explicit value and the Settings → Providers default. `CiaoConfig.workspace_override` and the `default_*_for_*` methods resolve it keyed by the chat's effective provider; it is operator-only (the session-cookie workspace upsert), is not restored from an archive, and never applies to an MCP-spawned chat's permission mode, which stays clamped to its caller's (`ControlPlane._child_mode`).
 
-The per-workspace `memory_handover` setting (`off`, `dismiss`, `all`; default `off`) lives in
-`.runtime/workspaces.json` and changes only through the session-cookie
+The per-workspace `memory_handover` setting (`off`, `dismiss`, `all`) lives in
+`.runtime/workspaces.json`: new user-created workspaces default to `all`, while loading an existing
+workspace with no stored value still means `off`. It changes only through the session-cookie
 `PATCH /api/workspaces/{name}`. No agent verb, operator CLI, environment variable or control-plane op
 writes it, and the registry sits under the `**/.runtime/**` file-tool deny pattern. As with every
 registry setting, a shell is not path-scoped by that denylist, so an agent that can already run an

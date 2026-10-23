@@ -79,7 +79,7 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
 
   // The chat's own Terminal section is the way into the browser terminal: it
   // is outside the repository's, so a chat without one has it as well.
-  const open = page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' })
+  const open = page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' })
   await expect(open).toBeVisible()
   await open.click()
 
@@ -165,7 +165,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   await page.locator('.work-inspector-trigger').click()
   const details = page.locator('#chat-work-rail')
   await expect(details).toBeVisible()
-  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
   const pane = page.locator('.terminal-pane')
   await expect(pane).toBeVisible()
@@ -263,7 +263,7 @@ test('a pane too narrow for both columns gets the drawer, not a squeezed chat', 
   await page.locator('.work-inspector-trigger').click()
   const details = page.locator('#chat-work-rail')
   await expect(details).toBeVisible()
-  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
   const pane = page.locator('.terminal-pane')
   await expect(pane).toBeVisible()
@@ -307,7 +307,7 @@ test('a pinned file keeps the slot and the terminal falls back to the drawer', a
   await page.locator('.work-inspector-trigger').click()
   const details = page.locator('#chat-work-rail')
   await expect(details).toBeVisible()
-  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
   // The terminal cannot have the slot — the file has it — so it is the
   // drawer over the pane, and the file keeps the tile.
@@ -334,7 +334,7 @@ test('a chat with no repository opens the terminal too', async ({ page }) => {
   await expect(page.locator('.chat-repo-section')).toHaveCount(0)
   const section = page.locator('.chat-rail-terminal')
   await expect(section).toBeVisible()
-  const open = section.getByRole('button', { name: 'Open in Terminal' })
+  const open = section.getByRole('button', { name: 'Open terminal' })
   await expect(open).toBeVisible()
   await open.click()
 
@@ -362,7 +362,7 @@ test.describe('on a phone', () => {
     await page.locator('.work-inspector-trigger').click()
     const details = page.locator('#chat-work-rail')
     await expect(details).toBeVisible()
-    await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+    await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
     const pane = page.locator('.terminal-pane')
     await expect(pane).toBeVisible()

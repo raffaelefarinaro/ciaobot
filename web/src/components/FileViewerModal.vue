@@ -101,7 +101,7 @@
       </header>
 
       <div class="fv-main" ref="mainEl">
-        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv }" ref="bodyEl">
+        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv, 'fv-body-html': store.kind === 'html' }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
           <img
@@ -1975,6 +1975,9 @@ watch(
     width: 100vw;
   }
   .fv-body { padding: 14px 16px; }
+  .fv-body-html { padding: 0; }
+  .fv-body-html :deep(.hav-toolbar) { padding: 14px 16px 0; }
+  .fv-body-html :deep(.hav-code) { padding-right: 16px; padding-left: 16px; }
   .fv-md { max-width: none; }
   .fv-comment-pop {
     left: 8px !important;
