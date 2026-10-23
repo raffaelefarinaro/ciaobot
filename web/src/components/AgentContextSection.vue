@@ -35,6 +35,25 @@
       <span v-if="loadedTokens" class="agent-context-meta">{{ formatTokens(loadedTokens) }} tokens</span>
     </summary>
     <div class="rail-list">
+      <div v-if="systemPrompt" class="rail-item agent-context-row agent-context-system">
+        <button
+          type="button"
+          class="agent-context-system-toggle"
+          :aria-expanded="systemPromptOpen"
+          :aria-controls="systemPromptOpen ? systemPromptId : undefined"
+          @click="systemPromptOpen = !systemPromptOpen"
+        >
+          <span class="agent-context-row-top">
+            <span class="agent-context-name">Ciaobot system prompt</span>
+            <span class="agent-context-meta">{{ formatTokens(systemPromptTokens) }} tokens</span>
+          </span>
+          <small>Added to the provider's own system prompt · every session</small>
+        </button>
+        <div v-if="systemPromptOpen" :id="systemPromptId" class="agent-context-system-body">
+          <button type="button" class="agent-context-link" aria-live="polite" @click="copySystemPrompt">{{ copied ? 'Copied' : 'Copy' }}</button>
+          <pre class="agent-context-system-text" tabindex="0">{{ systemPrompt }}</pre>
+        </div>
+      </div>
       <button
         v-if="guide.path"
         type="button"
@@ -87,10 +106,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useId, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
 import { linkifyText } from '../lib/filePaths'
 import { joinRepoPath, repoName } from '../lib/repo'
+import { writeClipboard } from '../lib/codeCopy'
+import { fetchSystemPrompt } from '../lib/systemPrompt'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
 
 const props = defineProps<{
@@ -176,8 +197,26 @@ function onLoadedToggle(event: Event) {
 }
 watch(() => props.revealKey, (key) => { if (key) loadedOpen.value = true })
 
+// Ciaobot's own prompt is static per engine: fetched once, and a failed fetch
+// hides the row (it is reference, not a user file).
+const systemPrompt = ref('')
+const systemPromptOpen = ref(false)
+const systemPromptId = useId()
+const systemPromptTokens = computed(() => tokensFor(systemPrompt.value.length))
+onMounted(async () => { systemPrompt.value = await fetchSystemPrompt() })
+const copied = ref(false)
+let copyTimer: ReturnType<typeof setTimeout> | undefined
+async function copySystemPrompt() {
+  if (!(await writeClipboard(systemPrompt.value))) return
+  copied.value = true
+  clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => { copied.value = false }, 1500)
+}
+onBeforeUnmount(() => clearTimeout(copyTimer))
+
 const loadedTokens = computed(() => {
   let total = guide.value.path ? guideTokens.value : 0
+  if (systemPrompt.value) total += systemPromptTokens.value
   if (props.project && briefText.value) total += briefTokens.value
   if (repoInstr.value) total += tokensFor(repoInstr.value.chars)
   return total
@@ -276,6 +315,34 @@ const contextPctLabel = computed(() => {
   font-variant-numeric: tabular-nums;
 }
 .agent-context-row small { line-height: 1.4; }
+.agent-context-system-toggle {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  cursor: pointer;
+}
+.agent-context-system-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (pointer: coarse) {
+  .agent-context-system-toggle { min-height: var(--touch); }
+}
+.agent-context-system { cursor: default; }
+.agent-context-system:hover { color: var(--fg); }
+.agent-context-system-body { display: flex; flex-direction: column; align-items: flex-end; margin-top: 4px; }
+.agent-context-system-text {
+  align-self: stretch;
+  max-height: 320px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: calc(11px * var(--font-scale)) / 1.5 var(--font-mono);
+  color: var(--fg2);
+}
 .agent-context-brief { cursor: default; }
 .agent-context-brief:hover { color: var(--fg); }
 .agent-context-repo[role='status'] { cursor: default; }
