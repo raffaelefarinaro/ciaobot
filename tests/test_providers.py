@@ -1669,6 +1669,81 @@ async def test_opencode_scope_change_restarts_the_live_server(tmp_path, monkeypa
     assert await provider._ensure_server(request) is live
 
 
+def _live_scoped_opencode(tmp_path, monkeypatch, granted):
+    """A workspace-scoped provider with a live server started with ``granted`` read-only."""
+    from ciao.models import provider_reuse_key
+    from ciao.providers.opencode import _read_only_snapshot
+
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    request.agent_read_only = (str(granted),)
+    live = object()
+    provider._client = live
+    provider._process = SimpleNamespace(returncode=None)
+    provider._mcp_token = provider_reuse_key(request)
+    provider._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+    provider._read_only_snapshot = _read_only_snapshot(request)
+    events: list[str] = []
+
+    async def fake_disconnect():
+        events.append("disconnect")
+        provider._client = None
+        provider._process = None
+
+    async def fake_start(req, binary):
+        events.append("start")
+        return "fresh"
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    monkeypatch.setattr(provider, "_start_server_once", fake_start)
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda env: "/bin/opencode")
+    return provider, request, live, events
+
+
+def _replace_by_rename(path: Path, text: str) -> None:
+    staged = path.with_name(path.name + ".new")
+    staged.write_text(text, encoding="utf-8")
+    os.replace(staged, path)
+
+
+async def test_opencode_linux_restarts_when_a_granted_file_is_replaced(tmp_path, monkeypatch):
+    # bwrap binds the registry by inode: a rename-replaced file needs a new server (#1960).
+    monkeypatch.setattr(sys, "platform", "linux")
+    registry = tmp_path / "workspaces.json"
+    registry.write_text("[]", encoding="utf-8")
+    provider, request, live, events = _live_scoped_opencode(tmp_path, monkeypatch, registry)
+
+    assert await provider._ensure_server(request) is live
+    assert events == []
+
+    _replace_by_rename(registry, '[{"name": "work"}]')
+    assert await provider._ensure_server(request) == "fresh"
+    assert events == ["disconnect", "start"]
+
+
+async def test_opencode_linux_restarts_when_a_granted_file_appears(tmp_path, monkeypatch):
+    # A receipt missing at launch is never bound; once written, the server restarts (#1960).
+    monkeypatch.setattr(sys, "platform", "linux")
+    receipt = tmp_path / "workspace-rooting.json"
+    provider, request, live, events = _live_scoped_opencode(tmp_path, monkeypatch, receipt)
+
+    assert await provider._ensure_server(request) is live
+    receipt.write_text('{"status": "migrated"}', encoding="utf-8")
+    assert await provider._ensure_server(request) == "fresh"
+    assert events == ["disconnect", "start"]
+
+
+async def test_opencode_darwin_keeps_the_server_when_a_granted_file_is_replaced(tmp_path, monkeypatch):
+    # Seatbelt grants by path, so a replaced file is already visible.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    registry = tmp_path / "workspaces.json"
+    registry.write_text("[]", encoding="utf-8")
+    provider, request, live, events = _live_scoped_opencode(tmp_path, monkeypatch, registry)
+
+    _replace_by_rename(registry, '[{"name": "work"}]')
+    assert await provider._ensure_server(request) is live
+    assert events == []
+
+
 # -- Claude turn client decision log -----------------------------------------
 
 

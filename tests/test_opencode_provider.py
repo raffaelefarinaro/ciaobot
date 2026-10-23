@@ -2832,6 +2832,7 @@ async def test_a_changed_root_set_restarts_the_opencode_server(
         mcp_token = ""
         agent_fs_scope = "workspace"
         agent_roots = ("/w/agent", "/w/data")
+        agent_read_only: tuple = ()
 
     request = Request()
     provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
