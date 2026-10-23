@@ -45,7 +45,7 @@ describe('ComposerActivity', () => {
     wrapper.unmount()
   })
 
-  it('names agents and each live run with a whole-minute age', () => {
+  it('counts agents and shells, naming a single run only in its tooltip', () => {
     const one = mountBar({ agentCount: 1 })
     expect(one.get('.composer-activity-seg--agents').text()).toBe('1 agent')
     expect(one.get('.composer-activity-seg--agents').find('.activity-glyph--agent').exists()).toBe(true)
@@ -53,11 +53,19 @@ describe('ComposerActivity', () => {
 
     const two = mountBar({ agentCount: 2, runs: [run('r1', 'ITTA preview', 319_000)] })
     expect(two.get('.composer-activity-seg--agents').text()).toBe('2 agents')
-    const seg = two.get('.composer-activity-seg--run')
-    expect(seg.get('.composer-activity-label').text()).toBe('ITTA preview')
-    expect(seg.get('.composer-activity-elapsed').text()).toBe('5m')
+    const seg = two.get('.composer-activity-seg--runs')
+    expect(seg.get('.composer-activity-label').text()).toBe('1 shell')
+    expect(seg.attributes('title')).toBe('Background run: ITTA preview')
     expect(seg.find('.activity-glyph--run').exists()).toBe(true)
     two.unmount()
+  })
+
+  it('draws a successful run outcome as a run glyph in the ok tone', () => {
+    const ok = mountBar({ finished: run('r1', '', 0, { status: 'ok' }) })
+    const seg = ok.get('.composer-activity-seg--outcome')
+    expect(seg.classes()).toContain('composer-activity-seg--ok')
+    expect(seg.find('.activity-glyph--run').exists()).toBe(true)
+    ok.unmount()
   })
 
   it('says how a finished run ended and opens Chat details from it', async () => {
@@ -84,7 +92,7 @@ describe('ComposerActivity', () => {
     const agents = wrapper.get('.composer-activity-seg--agents')
     expect(agents.attributes('aria-expanded')).toBe('true')
     expect(agents.attributes('aria-haspopup')).toBe('dialog')
-    expect(wrapper.get('.composer-activity-seg--run').attributes('aria-expanded')).toBe('false')
+    expect(wrapper.get('.composer-activity-seg--runs').attributes('aria-expanded')).toBe('false')
 
     const pop = popover()
     expect(pop).not.toBeNull()
@@ -185,14 +193,14 @@ describe('ComposerActivity', () => {
     const wrapper = mountBar({ agentCount: 2, runs: threeRuns() })
     await nextTick()
     expect(wrapper.get('.composer-activity').classes()).not.toContain('composer-activity--compact')
-    expect(wrapper.findAll('.composer-activity-seg--run')).toHaveLength(3)
+    expect(wrapper.get('.composer-activity-seg--runs .composer-activity-label').text()).toBe('3 shells')
     expect(wrapper.get('.composer-activity-seg--agents .composer-activity-label').text()).toBe('2 agents')
     wrapper.unmount()
   })
 
   it('closes without moving focus when the part that opened it goes away', async () => {
     const wrapper = mountBar({ runs: [run('r1', 'one', 1000), run('r2', 'two', 1000)] })
-    const first = wrapper.findAll('.composer-activity-seg--run')[0]
+    const first = wrapper.get('.composer-activity-seg--runs')
     await first.trigger('click')
     await flushPromises()
     expect(popover()).not.toBeNull()
@@ -200,7 +208,7 @@ describe('ComposerActivity', () => {
     document.body.appendChild(other)
     other.focus()
 
-    await wrapper.setProps({ runs: [run('r2', 'two', 1000)] })
+    await wrapper.setProps({ runs: [] })
     await flushPromises()
     expect(popover()).toBeNull()
     expect(document.activeElement).toBe(other)

@@ -257,7 +257,7 @@ describe('the ways into the browser terminal', () => {
     // One row that is its own label: no separate "Terminal" heading above it.
     expect(section.find('.rail-label').exists()).toBe(false)
     const button = section.get('button')
-    expect(button.text()).toContain('Open in Terminal')
+    expect(button.get('span:nth-child(2)').text()).toBe('Open terminal')
     await button.trigger('click')
     await flushPromises()
 

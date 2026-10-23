@@ -4,7 +4,8 @@
       <p class="section-title">Memory handover</p>
       <p class="hint">
         How much of {{ workspace }}'s memory suggestions Workspace care may settle on its own. It
-        always predicts first; you decide whether it acts.
+        always predicts first; you decide whether it acts. New workspaces start at Dismiss and
+        accept. You can change this choice at any time.
       </p>
     </div>
 

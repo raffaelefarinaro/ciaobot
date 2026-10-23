@@ -83,6 +83,7 @@ from ciao.workspaces import (
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
+from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
@@ -3639,6 +3640,13 @@ async def chat_file_path(request: Request) -> Response:
     if result.suffix.lower() not in extensions:
         return JSONResponse({"error": "unsupported type"}, status_code=415)
     return JSONResponse({"path": result.as_posix()})
+
+
+async def system_prompt(request: Request) -> Response:
+    """The text Ciaobot appends to every provider's system prompt (read-only)."""
+    payload = system_prompt_payload("") or {}
+    text = str(payload.get("append") or "")
+    return JSONResponse({"text": text, "chars": len(text)})
 
 
 async def workspace_file(request: Request) -> Response:

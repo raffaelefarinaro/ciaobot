@@ -179,6 +179,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "claude_ai_connectors": True,
         "gws_profile": "work",
         "color": "amber",
+        "memory_handover": "all",
     }
 
 
@@ -297,6 +298,27 @@ def test_workspace_creation_persists_or_refuses_memory_handover(tmp_path):
     assert refused.status_code == 400
     assert config.workspace("other") is None
     assert registry.read_bytes() == before
+
+
+def test_new_workspace_defaults_to_all_memory_handover_without_changing_existing(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+
+    created = client.post("/api/workspaces", json={"name": "research"})
+
+    assert created.status_code == 201
+    assert config.workspace("personal").memory_handover == "off"
+    assert config.workspace("research").memory_handover == "all"
+    stored = {w["name"]: w for w in json.loads(registry.read_text())}
+    assert stored["research"]["memory_handover"] == "all"
+    listed = client.get("/api/workspaces").json()
+    assert next(w for w in listed["workspaces"] if w["name"] == "research")["memory_handover"] == "all"
+
+    disabled = client.patch("/api/workspaces/research", json={"memory_handover": "off"})
+    assert disabled.status_code == 200
+    assert config.workspace("research").memory_handover == "off"
+    stored = {w["name"]: w for w in json.loads(registry.read_text())}
+    assert "memory_handover" not in stored["research"]
 
 
 def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):

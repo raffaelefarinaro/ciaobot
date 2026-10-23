@@ -4,17 +4,20 @@
       <h2 id="keyboard-shortcuts-title" class="section-title">Keyboard shortcuts</h2>
       <p class="hint">Shortcuts are shared by every device connected to this Ciaobot engine.</p>
     </div>
-    <div class="shortcut-setting-list">
-      <div v-for="id in shortcutIds" :key="id" class="shortcut-setting-row">
-        <span class="shortcut-setting-name">{{ SHORTCUT_LABELS[id] }}</span>
-        <kbd>{{ captureId === id ? 'Press a shortcut…' : displayBinding(effectiveBinding(settings, id), apple) }}</kbd>
-        <button class="btn-small" type="button" @click="captureId = captureId === id ? null : id">
-          {{ captureId === id ? 'Cancel' : 'Change' }}
-        </button>
-        <button class="btn-small" type="button" @click="toggleBinding(id)">{{ effectiveBinding(settings, id) === 'disabled' ? 'Enable' : 'Turn off' }}</button>
-        <button class="btn-small" type="button" :disabled="effectiveBinding(settings, id) === DEFAULT_SHORTCUTS[id]" @click="resetBinding(id)">Reset</button>
+    <details class="shortcut-disclosure">
+      <summary>Shortcut bindings</summary>
+      <div class="shortcut-setting-list">
+        <div v-for="id in shortcutIds" :key="id" class="shortcut-setting-row">
+          <span class="shortcut-setting-name">{{ SHORTCUT_LABELS[id] }}</span>
+          <kbd>{{ captureId === id ? 'Press a shortcut…' : displayBinding(effectiveBinding(settings, id), apple) }}</kbd>
+          <button class="btn-small" type="button" @click="captureId = captureId === id ? null : id">
+            {{ captureId === id ? 'Cancel' : 'Change' }}
+          </button>
+          <button class="btn-small" type="button" @click="toggleBinding(id)">{{ effectiveBinding(settings, id) === 'disabled' ? 'Enable' : 'Turn off' }}</button>
+          <button class="btn-small" type="button" :disabled="effectiveBinding(settings, id) === DEFAULT_SHORTCUTS[id]" @click="resetBinding(id)">Reset</button>
+        </div>
       </div>
-    </div>
+    </details>
     <label class="shortcut-send-setting">
       <span>
         <span class="shortcut-setting-name">Send a message with</span>
@@ -121,6 +124,9 @@ function restoreDefaults(): Promise<void> {
 
 <style scoped>
 .shortcut-setting-list { display: grid; gap: 8px; }
+.shortcut-disclosure { margin-bottom: 8px; }
+.shortcut-disclosure > summary { display: flex; align-items: center; min-height: 44px; color: var(--accent); font-size: var(--text-sm); cursor: pointer; }
+.shortcut-disclosure > summary::marker { color: var(--fg3); }
 .shortcut-setting-row { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto auto auto; align-items: center; gap: 8px; min-height: 44px; }
 .shortcut-setting-row kbd { min-width: 94px; text-align: center; }
 .shortcut-setting-name { font-size: var(--text-sm); }
