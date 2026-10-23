@@ -235,14 +235,14 @@ test.describe('the entry block at 390px and at 200% zoom', () => {
   })
 })
 
-test('narrow memory-review links remain touch sized with a fine pointer', async ({ browser }, testInfo) => {
-  const context = await browser.newContext({
-    baseURL: `http://127.0.0.1:${Number(process.env.CIAO_E2E_PORT || 4599)}`,
-    viewport: { width: 390, height: 844 },
-  })
-  try {
-    const page = await context.newPage()
+test.describe('a narrow memory-review layout with a fine pointer', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test.beforeEach(async ({ page }, testInfo) => {
     await isolate(page, `entries-narrow-fine-${testInfo.workerIndex}`)
+  })
+
+  test('links remain touch sized', async ({ page }) => {
     await boot(page, REVIEW, '.vault-review')
     await withVerification(page)
     expect(await page.evaluate(() => matchMedia('(pointer: fine)').matches)).toBe(true)
@@ -258,9 +258,7 @@ test('narrow memory-review links remain touch sized with a fine pointer', async 
       )
     expect(boxes.length, 'no row controls were measured').toBeGreaterThanOrEqual(1)
     expect(boxes.filter((box) => box.width < 44 || box.height < 44)).toEqual([])
-  } finally {
-    await context.close()
-  }
+  })
 })
 
 test.describe('the entry block at 200% zoom', () => {
