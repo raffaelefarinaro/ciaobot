@@ -75,6 +75,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder; the browser receives bounded `file_refs`, not server paths |
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
+| GET | `/api/system-prompt` | The text Ciaobot appends to every provider's system prompt (`ciao/system_prompt.md`): `{text, chars}`. Read-only; shown in Chat details → Always loaded |
 | GET | `/api/chats/{chat_id}/file-path?path=...` | Resolve an allowlisted chat file to its canonical absolute identity, relative to the chat agent root; no fuzzy lookup |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
 | GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
