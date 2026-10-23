@@ -941,3 +941,61 @@ def test_darwin_seatbelt_reads_a_granted_runtime_file_only(tmp_path):
     )
     assert written.returncode != 0
     assert receipt.read_text(encoding="utf-8") == "receipt"
+
+
+def test_claude_settings_deny_write_on_read_only_inside_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    inside = root / "creds" / "client_secret.json"
+    outside = tmp_path / "runtime" / "workspaces.json"
+
+    settings = claude_sandbox_settings(
+        scope="workspace", mode="auto", roots=[root], read_only=[inside, outside]
+    )
+
+    assert settings is not None
+    filesystem = settings["filesystem"]
+    assert str(inside) in filesystem["denyWrite"]
+    assert str(inside) in filesystem["allowRead"]
+    assert str(outside) not in filesystem["denyWrite"]
+
+
+def test_seatbelt_denies_write_on_read_only_inside_root(tmp_path, monkeypatch):
+    fake_binary = tmp_path / "sandbox-exec"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.SANDBOX_EXEC_PATH", str(fake_binary))
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    inside = root / "creds" / "client_secret.json"
+
+    argv = opencode_sandbox_prefix(roots=[root], read_only=[inside])
+
+    profile = argv[2]
+    allow = f'(allow file-read* file-write* (subpath "{_quote_seatbelt_subpath(str(root))}"))'
+    deny = f'(deny file-write* (subpath "{_quote_seatbelt_subpath(str(inside))}"))'
+    assert deny in profile
+    assert profile.index(deny) > profile.index(allow)
+
+
+def test_bwrap_ro_binds_read_only_inside_root_after_root_bind(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # bwrap does not run on Windows.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root = tmp_path / "root"
+    creds = root / "creds"
+    creds.mkdir(parents=True)
+    pinned = creds / "client_secret.json"
+    pinned.write_text("{}", encoding="utf-8")
+    missing = creds / "credentials.json"
+
+    argv = opencode_sandbox_prefix(roots=[root], read_only=[pinned, missing])
+
+    triples = _bwrap_triples(argv)
+    root_bind = triples.index(["--bind", str(root), str(root)])
+    assert triples.index(["--ro-bind", str(pinned), str(pinned)]) > root_bind
+    assert str(missing) not in argv

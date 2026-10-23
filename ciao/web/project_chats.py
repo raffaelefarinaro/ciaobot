@@ -5181,11 +5181,12 @@ class ProjectChatManager:
     def _agent_read_only_for_chat(self, chat: ChatInfo, fs_scope: str) -> tuple[str, ...]:
         """Runtime files a workspace-scoped chat reads but never writes (#1945).
 
-        Also the ``gws`` CLI with its links, npm package and node, and the
-        linked Google account's credential directory, so ``ciao gws`` runs
-        when it is installed under the home folder (#1959). The credentials
-        stay read-only, so gws cannot write token_cache.json and refreshes
-        the access token on each call.
+        Also the ``gws`` CLI with its links, npm package and node, so
+        ``ciao gws`` runs when it is installed under the home folder (#1959).
+        gws gets its credential directory writable for its token cache (see
+        ``_agent_fs_scope_for_chat``), with the account's ``client_secret.json``
+        and ``credentials.json`` pinned here so they stay write-denied: an
+        agent cannot plant a client secret with a hostile ``token_uri``.
         """
         if fs_scope != "workspace":
             return ()
@@ -5196,23 +5197,38 @@ class ProjectChatManager:
         runtime = self._config.state_path.parent
         gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
         granted = [str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots]
+        gws_dir = self._granted_gws_dir(chat)
+        if gws_dir is not None:
+            for name in ("client_secret.json", "credentials.json"):
+                pinned = gws_dir / name
+                if pinned.exists():
+                    granted.append(str(pinned))
+        return tuple(granted)
+
+    def _granted_gws_dir(self, chat: ChatInfo) -> Path | None:
+        """The linked account's resolved credential directory, or None.
+
+        Resolve before granting: an agent that can write secrets/ must not
+        redirect the profile directory (or secrets itself) to another folder.
+        """
         gws_dir, linked = self._gws_config_dir(self._workspace_for_chat(chat.chat_id))
-        # Resolve before granting: an agent that can write secrets/ must not
-        # redirect the profile directory (or secrets itself) to another folder.
         if (
             linked
             and gws_dir.is_dir()
             and gws_dir.resolve() == Path(self._config.workspace_root).resolve() / "secrets" / gws_dir.name
         ):
-            granted.append(str(gws_dir.resolve()))
-        return tuple(granted)
+            return gws_dir.resolve()
+        return None
 
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
         Roots are the chat's agent root and that workspace's vault root,
         resolved and de-duplicated, agent root first. A project's linked
-        repository follows the vault root. A chat granted the data
+        repository follows the vault root, then the linked Google account's
+        credential directory, writable for gws's token cache (#1959; its client
+        secret and refresh credentials are write-denied, see
+        ``_agent_read_only_for_chat``). A chat granted the data
         root (the memory-backup setup chat, #1328) also gets that root, last.
         Machine scope never reads them, so they are only computed for the
         workspace case.
@@ -5227,6 +5243,9 @@ class ProjectChatManager:
         linked_repo = self._linked_repo_for_chat(chat)
         if linked_repo:
             roots.append(linked_repo)
+        gws_dir = self._granted_gws_dir(chat)
+        if gws_dir is not None and not any(gws_dir.is_relative_to(root) for root in roots):
+            roots.append(str(gws_dir))
         if chat.grants_data_root:
             roots.append(str(backup_scope.data_root(self._config).resolve()))
         return "workspace", tuple(dict.fromkeys(roots))

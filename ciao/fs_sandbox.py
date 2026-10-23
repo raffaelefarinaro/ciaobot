@@ -207,9 +207,13 @@ def gws_tool_read_roots(path: str) -> list[Path]:
     return list(dict.fromkeys(roots))
 
 
-def _shadowed_engine_roots(roots: Sequence[Path], engine: Sequence[Path]) -> list[Path]:
-    """Engine folders inside a writable root: readable there, but never writable."""
-    return [path for path in engine if any(path.is_relative_to(root) for root in roots)]
+def _inside_roots(roots: Sequence[Path], paths: Sequence[Path]) -> list[Path]:
+    """The paths inside a writable root: readable there, but never writable.
+
+    Engine folders and the caller's ``read_only`` paths both stay write-denied
+    by a rule that follows the root's grant.
+    """
+    return [path for path in paths if any(path.is_relative_to(root) for root in roots)]
 
 
 @functools.cache
@@ -259,6 +263,8 @@ def claude_sandbox_settings(
     """Sandbox settings dict for the Claude provider, or None for machine.
 
     ``read_only`` files are readable but never added to ``allowWrite`` (#1945).
+    A ``read_only`` path inside a root stays write-denied by name (``denyWrite``),
+    so a root that grants a folder can still pin single files in it (#1959).
     """
     if scope == "machine":
         return None
@@ -297,9 +303,9 @@ def claude_sandbox_settings(
             "denyRead": [str(Path.home())],
             "allowRead": [str(p) for p in [*roots, *read_only, *engine]],
             "allowWrite": [str(p) for p in roots],
-            # The roots grant write access, so an engine folder inside one is denied
-            # it by name, as OpenCode's profile shadows it (#1208).
-            "denyWrite": [str(p) for p in _shadowed_engine_roots(roots, engine)],
+            # The roots grant write access, so an engine folder or a read-only path
+            # inside one is denied it by name, as OpenCode's profile shadows it (#1208).
+            "denyWrite": [str(p) for p in _inside_roots(roots, [*engine, *read_only])],
         },
     }
 
@@ -484,15 +490,19 @@ def opencode_sandbox_prefix(
     ``roots`` are read-write; ``read_only`` are readable and never writable
     (the server's own install and config, which an unconfined server later
     loads as code). The engine's own install is always added read-only, so the
-    agent can run ``ciao`` (#1185).
+    agent can run ``ciao`` (#1185). A ``read_only`` path inside a root stays
+    readable but write-denied (#1959).
     """
     if not roots:
         raise ValueError("roots must not be empty")
     # An engine folder inside a writable root is already readable there; it
     # stays read-only by a rule that follows the root's grant, not by a grant.
     engine = engine_read_roots()
-    shadowed = _shadowed_engine_roots(roots, engine)
-    read_only = [*read_only, *(path for path in engine if path not in shadowed)]
+    shadowed = _inside_roots(roots, [*engine, *read_only])
+    read_only = [
+        *(path for path in read_only if path not in shadowed),
+        *(path for path in engine if path not in shadowed),
+    ]
     platform = sys.platform
     if platform == "darwin":
         if Path(SANDBOX_EXEC_PATH).is_file():
@@ -534,7 +544,7 @@ def opencode_sandbox_prefix(
                 argv.extend(["--bind", text, text])
             # Mounted after the writable binds so the read-only mount sits on top.
             for path in shadowed:
-                if not path.is_symlink():
+                if not path.is_symlink() and path.exists():
                     text = str(path)
                     argv.extend(["--ro-bind", text, text])
             # A link outside every bind gets recreated inside the sandbox, so it
