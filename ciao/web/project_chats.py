@@ -5178,11 +5178,14 @@ class ProjectChatManager:
         slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
         return Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE), False
 
-    def _agent_read_only_for_chat(self, fs_scope: str) -> tuple[str, ...]:
+    def _agent_read_only_for_chat(self, chat: ChatInfo, fs_scope: str) -> tuple[str, ...]:
         """Runtime files a workspace-scoped chat reads but never writes (#1945).
 
-        Also the ``gws`` CLI with its links, npm package and node, so
-        ``ciao gws`` runs when it is installed under the home folder (#1959).
+        Also the ``gws`` CLI with its links, npm package and node, and the
+        linked Google account's credential directory, so ``ciao gws`` runs
+        when it is installed under the home folder (#1959). The credentials
+        stay read-only, so gws cannot write token_cache.json and refreshes
+        the access token on each call.
         """
         if fs_scope != "workspace":
             return ()
@@ -5192,16 +5195,24 @@ class ProjectChatManager:
 
         runtime = self._config.state_path.parent
         gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
-        return (str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots)
+        granted = [str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots]
+        gws_dir, linked = self._gws_config_dir(self._workspace_for_chat(chat.chat_id))
+        # Resolve before granting: an agent that can write secrets/ must not
+        # redirect the profile directory (or secrets itself) to another folder.
+        if (
+            linked
+            and gws_dir.is_dir()
+            and gws_dir.resolve() == Path(self._config.workspace_root).resolve() / "secrets" / gws_dir.name
+        ):
+            granted.append(str(gws_dir.resolve()))
+        return tuple(granted)
 
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
         Roots are the chat's agent root and that workspace's vault root,
         resolved and de-duplicated, agent root first. A project's linked
-        repository follows the vault root. A workspace with a linked Google
-        account also gets that account's credential directory, which `gws`
-        reads and refreshes (#1959). A chat granted the data
+        repository follows the vault root. A chat granted the data
         root (the memory-backup setup chat, #1328) also gets that root, last.
         Machine scope never reads them, so they are only computed for the
         workspace case.
@@ -5216,11 +5227,6 @@ class ProjectChatManager:
         linked_repo = self._linked_repo_for_chat(chat)
         if linked_repo:
             roots.append(linked_repo)
-        gws_dir, gws_linked = self._gws_config_dir(workspace)
-        if gws_linked and gws_dir.is_dir():
-            resolved_gws = gws_dir.resolve()
-            if not any(resolved_gws.is_relative_to(Path(root)) for root in roots):
-                roots.append(str(resolved_gws))
         if chat.grants_data_root:
             roots.append(str(backup_scope.data_root(self._config).resolve()))
         return "workspace", tuple(dict.fromkeys(roots))
@@ -6093,7 +6099,7 @@ class ProjectChatManager:
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             agent_fs_scope=fs_scope,
             agent_roots=fs_roots,
-            agent_read_only=self._agent_read_only_for_chat(fs_scope),
+            agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
             linked_repo=self._linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
@@ -6569,7 +6575,7 @@ class ProjectChatManager:
                 disallowed_tools=self.disallowed_tools_for_chat(chat),
                 agent_fs_scope=fs_scope,
                 agent_roots=fs_roots,
-                agent_read_only=self._agent_read_only_for_chat(fs_scope),
+                agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
                 linked_repo=self._linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )

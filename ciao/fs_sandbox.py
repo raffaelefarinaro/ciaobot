@@ -201,7 +201,7 @@ def gws_tool_read_roots(path: str) -> list[Path]:
     if not roots:
         return []
     package = roots[0].resolve().parent
-    if (package / "package.json").is_file():
+    if (package / "package.json").is_file() and "node_modules" in package.parts:
         roots.append(package)
         roots.extend(_tool_read_roots("node", path))
     return list(dict.fromkeys(roots))

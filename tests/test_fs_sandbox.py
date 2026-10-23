@@ -790,6 +790,27 @@ def test_gws_tool_roots_plain_binary_skips_node(tmp_path, monkeypatch):
     assert bin_dir not in roots
 
 
+def test_gws_tool_roots_skip_package_json_outside_node_modules(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # Windows does not use these sandbox grants or POSIX symlinks.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gws = bin_dir / "gws"
+    gws.write_text("#!/usr/bin/env node")
+    (bin_dir / "package.json").write_text("{}")
+    node = tmp_path / "node-install" / "node"
+    node.parent.mkdir()
+    node.write_text("node")
+    found = {"gws": str(gws), "node": str(node)}
+    monkeypatch.setattr(shutil, "which", lambda tool, path: found.get(tool))
+
+    roots = gws_tool_read_roots("ignored")
+
+    assert roots == [gws]
+    assert bin_dir not in roots
+    assert node not in roots
+
+
 def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypatch):
     root = tmp_path / "root-a"
     granted = tmp_path / "runtime" / "workspaces.json"

@@ -345,7 +345,11 @@ def test_workspace_scope_request_grants_runtime_files_read_only(
     assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
 
 
-def _workspace_manager(tmp_path: Path) -> tuple[ProjectChatManager, ChatInfo]:
+def _workspace_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ProjectChatManager, ChatInfo]:
+    # Never depend on whether gws is installed on the host running the tests.
+    monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
     manager = _make_manager(tmp_path)
     config = manager._config
     workspace = config.workspace("personal")
@@ -359,8 +363,8 @@ def test_workspace_scope_request_grants_gws_tool_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     gws_bin = tmp_path / "gws-bin"
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
     monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [gws_bin])
-    manager, chat = _workspace_manager(tmp_path)
 
     request = manager.build_agent_request(chat, prompt="hi")
 
@@ -379,7 +383,17 @@ def test_workspace_scope_request_grants_gws_tool_read_only(
     assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
 
 
-def test_workspace_scope_grants_linked_gws_credentials_dir(
+def _credentials_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, linked: bool = True
+):
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        manager, "_workspace_gws_profile", lambda workspace: "personal" if linked else ""
+    )
+    return manager, chat
+
+
+def test_workspace_scope_grants_linked_gws_credentials_dir_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from ciao.gws_auth import profile_config_dir
@@ -389,22 +403,20 @@ def test_workspace_scope_grants_linked_gws_credentials_dir(
     mark_born_per_root(tmp_path, runtime, ["personal"])
     reset_reroot_cache()
     try:
-        manager, chat = _workspace_manager(tmp_path)
-        monkeypatch.setattr(manager, "_workspace_gws_profile", lambda workspace: "personal")
+        manager, chat = _credentials_request(tmp_path, monkeypatch)
         creds = profile_config_dir(manager._config, "personal")
         assert creds is not None
         creds.mkdir(parents=True)
 
         request = manager.build_agent_request(chat, prompt="hi")
 
-        agent_root = manager._config.agent_root("personal").resolve()
-        assert not creds.resolve().is_relative_to(agent_root)
-        assert request.agent_roots.count(str(creds.resolve())) == 1
+        assert request.agent_read_only.count(str(creds.resolve())) == 1
+        assert str(creds.resolve()) not in request.agent_roots
     finally:
         reset_reroot_cache()
 
 
-def test_workspace_scope_skips_unlinked_or_missing_gws_dir(
+def test_workspace_scope_skips_unlinked_gws_credentials_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from ciao.gws_auth import profile_config_dir
@@ -414,18 +426,72 @@ def test_workspace_scope_skips_unlinked_or_missing_gws_dir(
     mark_born_per_root(tmp_path, runtime, ["personal"])
     reset_reroot_cache()
     try:
-        manager, chat = _workspace_manager(tmp_path)
-        monkeypatch.setattr(manager, "_workspace_gws_profile", lambda workspace: "")
-        (tmp_path / ".runtime" / "gws-unlinked" / "personal").mkdir(parents=True)
-
-        roots = manager.build_agent_request(chat, prompt="hi").agent_roots
-        assert not any("secrets" in r or "gws-unlinked" in r for r in roots)
-
-        monkeypatch.setattr(manager, "_workspace_gws_profile", lambda workspace: "personal")
+        manager, chat = _credentials_request(tmp_path, monkeypatch, linked=False)
         creds = profile_config_dir(manager._config, "personal")
-        assert creds is not None and not creds.exists()
+        assert creds is not None
+        creds.mkdir(parents=True)
+        unlinked = tmp_path / ".runtime" / "gws-unlinked" / "personal"
+        unlinked.mkdir(parents=True)
 
-        roots = manager.build_agent_request(chat, prompt="hi").agent_roots
-        assert str(creds.resolve()) not in roots
+        request = manager.build_agent_request(chat, prompt="hi")
+
+        granted = {*request.agent_read_only, *request.agent_roots}
+        assert str(creds.resolve()) not in granted
+        assert str(unlinked.resolve()) not in granted
     finally:
         reset_reroot_cache()
+
+
+def test_workspace_scope_skips_missing_gws_credentials_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.gws_auth import profile_config_dir
+
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    creds = profile_config_dir(manager._config, "personal")
+    assert creds is not None and not creds.exists()
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    granted = {*request.agent_read_only, *request.agent_roots}
+    assert str(creds.resolve()) not in granted
+
+
+def test_workspace_scope_refuses_symlinked_gws_credentials_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform == "win32":
+        return  # Creating a symlink needs a privilege Windows does not grant by default.
+    from ciao.gws_auth import profile_config_dir
+
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    creds = profile_config_dir(manager._config, "personal")
+    assert creds is not None
+    target = tmp_path / "elsewhere" / "ssh"
+    target.mkdir(parents=True)
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    creds.symlink_to(target, target_is_directory=True)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    granted = {*request.agent_read_only, *request.agent_roots}
+    assert str(creds) not in granted
+    assert str(target.resolve()) not in granted
+
+
+def test_workspace_scope_refuses_symlinked_secrets_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform == "win32":
+        return  # Creating a symlink needs a privilege Windows does not grant by default.
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    target = tmp_path / "elsewhere" / "secrets"
+    (target / "gws-personal").mkdir(parents=True)
+    (tmp_path / "secrets").symlink_to(target, target_is_directory=True)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    granted = {*request.agent_read_only, *request.agent_roots}
+    assert str(target.resolve()) not in granted
+    assert str((target / "gws-personal").resolve()) not in granted
+    assert str(tmp_path / "secrets" / "gws-personal") not in granted
