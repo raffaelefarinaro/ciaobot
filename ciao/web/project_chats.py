@@ -5244,7 +5244,8 @@ class ProjectChatManager:
         """Runtime files a workspace-scoped chat reads but never writes (#1945).
 
         Also the ``gws`` CLI with its links, npm package and node, so
-        ``ciao gws`` runs when it is installed under the home folder (#1959).
+        ``ciao gws`` runs when it is installed under the home folder (#1959),
+        and the ``gh`` config directory so ``gh`` finds its login (#1961).
         gws gets its credential directory writable for its token cache (see
         ``_agent_fs_scope_for_chat``), with the account's ``client_secret.json``
         and ``credentials.json`` pinned here so they stay write-denied: an
@@ -5252,7 +5253,7 @@ class ProjectChatManager:
         """
         if fs_scope != "workspace":
             return ()
-        from ciao.fs_sandbox import gws_tool_read_roots  # noqa: PLC0415
+        from ciao.fs_sandbox import gh_config_read_root, gws_tool_read_roots  # noqa: PLC0415
         from ciao.tool_path import login_shell_path  # noqa: PLC0415
         from ciao.workspace_reroot import receipt_path, registry_file  # noqa: PLC0415
 
@@ -5265,6 +5266,9 @@ class ProjectChatManager:
                 pinned = gws_dir / name
                 if pinned.exists():
                     granted.append(str(pinned))
+        gh_dir = gh_config_read_root(os.environ)
+        if gh_dir is not None:
+            granted.append(str(gh_dir))
         return tuple(granted)
 
     def _granted_gws_dir(self, chat: ChatInfo) -> Path | None:
@@ -5970,7 +5974,50 @@ class ProjectChatManager:
             is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
         ):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+        # The macOS keychain is outside a workspace sandbox, so gh cannot read
+        # its own login there: the engine passes the token in (#1961). Only the
+        # cache is read here; ``warm_gh_token`` fills it off the event loop.
+        gh_path = self._gh_path_for_token(chat, project)
+        if gh_path is not None:
+            from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
+
+            gh_token = gh_token_for_sandbox(gh_path, os.environ, cached_only=True)
+            if gh_token:
+                env["GH_TOKEN"] = gh_token
         return env
+
+    def _gh_path_for_token(self, chat: ChatInfo, project: Any) -> str | None:
+        """The ``gh`` executable whose token a chat gets, or None (#1961).
+
+        None outside workspace scope (the chat reaches the keychain itself), in
+        a memory pass (it must not reach an external surface), when gh is not
+        installed or its shim is broken, and when the agent could have written
+        gh: an executable inside a writable root must never run unsandboxed.
+        """
+        fs_scope, roots = self._agent_fs_scope_for_chat(chat)
+        if fs_scope != "workspace" or is_memory_pass_chat(chat, project):
+            return None
+        from ciao.tool_path import resolve_tool  # noqa: PLC0415
+
+        try:
+            gh_path = resolve_tool("gh")
+        except OSError:
+            return None
+        if gh_path is None:
+            return None
+        resolved = Path(gh_path).resolve()
+        if any(resolved.is_relative_to(Path(root).resolve()) for root in roots):
+            return None
+        return gh_path
+
+    async def warm_gh_token(self, chat: ChatInfo) -> None:
+        """Fill the gh token cache off the event loop before a turn starts (#1961)."""
+        gh_path = self._gh_path_for_token(chat, self._projects.get(chat.project_id))
+        if gh_path is None:
+            return
+        from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
+
+        await asyncio.to_thread(gh_token_for_sandbox, gh_path, dict(os.environ))
 
     def _claude_ai_connectors_on(self, workspace: str) -> bool:
         """Whether a Claude chat in ``workspace`` loads the claude.ai connectors.

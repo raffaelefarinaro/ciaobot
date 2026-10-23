@@ -11,6 +11,9 @@ import asyncio
 import pytest
 
 from ciao.fs_sandbox import (
+    gh_config_read_root,
+    clear_gh_token_cache,
+    gh_token_for_sandbox,
     gws_tool_read_roots,
     SANDBOX_EXEC_PATH,
     FsSandboxUnavailable,
@@ -809,6 +812,138 @@ def test_gws_tool_roots_skip_package_json_outside_node_modules(tmp_path, monkeyp
     assert roots == [gws]
     assert bin_dir not in roots
     assert node not in roots
+
+
+def test_gh_config_root_prefers_gh_config_dir(tmp_path):
+    config = tmp_path / "custom-gh"
+    config.mkdir()
+    xdg = tmp_path / "xdg"
+    (xdg / "gh").mkdir(parents=True)
+
+    root = gh_config_read_root({"GH_CONFIG_DIR": str(config), "XDG_CONFIG_HOME": str(xdg)})
+
+    assert root == config.resolve()
+
+
+def test_gh_config_root_uses_xdg_then_home(tmp_path, monkeypatch):
+    xdg = tmp_path / "xdg"
+    (xdg / "gh").mkdir(parents=True)
+    assert gh_config_read_root({"XDG_CONFIG_HOME": str(xdg)}) == (xdg / "gh").resolve()
+
+    home = tmp_path / "home"
+    (home / ".config" / "gh").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert gh_config_read_root({}) == (home / ".config" / "gh").resolve()
+
+
+def test_gh_config_root_missing_returns_none(tmp_path):
+    assert gh_config_read_root({"GH_CONFIG_DIR": str(tmp_path / "absent")}) is None
+
+
+def test_gh_token_for_sandbox_returns_token(monkeypatch):
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, "tok\n", "")
+
+    monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", fake_run)
+
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+
+
+def test_gh_token_for_sandbox_none_cases(monkeypatch):
+    calls = []
+
+    def run_returning(result):
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        return fake_run
+
+    monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", run_returning(None))
+    assert gh_token_for_sandbox(None, {}) is None
+    assert gh_token_for_sandbox("/bin/gh", {"GH_TOKEN": "x"}) is None
+    assert gh_token_for_sandbox("/bin/gh", {"GITHUB_TOKEN": "x"}) is None
+    assert calls == []
+
+    failed = subprocess.CompletedProcess(["gh"], 1, "tok\n", "")
+    empty = subprocess.CompletedProcess(["gh"], 0, "\n", "")
+    for outcome in (
+        failed,
+        empty,
+        subprocess.TimeoutExpired("gh", 5),
+        OSError("boom"),
+    ):
+        monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", run_returning(outcome))
+        assert gh_token_for_sandbox("/bin/gh", {}) is None
+
+
+def _gh_run(monkeypatch, outcomes):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        outcome = outcomes[min(len(calls), len(outcomes)) - 1]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return subprocess.CompletedProcess(args, *outcome)
+
+    monkeypatch.setattr("ciao.fs_sandbox.subprocess.run", fake_run)
+    return calls
+
+
+def test_gh_token_cache_hit_skips_subprocess(monkeypatch):
+    clear_gh_token_cache()
+    calls = _gh_run(monkeypatch, [(0, "tok\n", "")])
+
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    assert len(calls) == 1
+
+
+def test_gh_token_cached_only_never_runs_subprocess(monkeypatch):
+    clear_gh_token_cache()
+    calls = _gh_run(monkeypatch, [(0, "tok\n", "")])
+
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) is None
+    assert calls == []
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) == "tok"
+    assert len(calls) == 1
+    # Past the TTL a cache-only read still returns the last good token: a
+    # retry or steer after a long turn must not lose GH_TOKEN.
+    monkeypatch.setattr("ciao.fs_sandbox._GH_TOKEN_TTL", 0.0)
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) == "tok"
+    assert len(calls) == 1
+
+
+def test_gh_token_failure_not_cached(monkeypatch):
+    clear_gh_token_cache()
+    calls = _gh_run(monkeypatch, [(1, "", "no"), (0, "tok\n", "")])
+
+    assert gh_token_for_sandbox("/bin/gh", {}) is None
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    assert len(calls) == 2
+
+
+def test_gh_token_logout_evicts_the_cached_token(monkeypatch):
+    clear_gh_token_cache()
+    _gh_run(monkeypatch, [(0, "tok\n", ""), (1, "", "not logged in")])
+
+    assert gh_token_for_sandbox("/bin/gh", {}) == "tok"
+    monkeypatch.setattr("ciao.fs_sandbox._GH_TOKEN_TTL", 0.0)
+    assert gh_token_for_sandbox("/bin/gh", {}) is None
+    assert gh_token_for_sandbox("/bin/gh", {}, cached_only=True) is None
+
+
+def test_gh_token_runs_expected_argv(monkeypatch):
+    clear_gh_token_cache()
+    calls = _gh_run(monkeypatch, [(0, "tok\n", "")])
+
+    gh_token_for_sandbox("/bin/gh", {})
+
+    assert calls == [["/bin/gh", "auth", "token", "--hostname", "github.com"]]
 
 
 def test_claude_settings_grant_read_only_files_without_write(tmp_path, monkeypatch):

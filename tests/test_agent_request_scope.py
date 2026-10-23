@@ -383,6 +383,42 @@ def test_workspace_scope_request_grants_gws_tool_read_only(
     assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
 
 
+def test_workspace_scope_grants_gh_config_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gh_dir = tmp_path / "gh-config"
+    gh_dir.mkdir()
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: gh_dir)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(gh_dir) in request.agent_read_only
+    assert str(gh_dir) not in request.agent_roots
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+def test_workspace_scope_injects_gh_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda gh, env, **kw: "tok")
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: "/bin/gh")
+
+    assert manager.build_agent_request(chat, prompt="hi").extra_env["GH_TOKEN"] == "tok"
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    assert "GH_TOKEN" not in manager.build_agent_request(chat, prompt="hi").extra_env
+
+
 def _credentials_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, linked: bool = True
 ):
@@ -538,3 +574,77 @@ def test_workspace_scope_refuses_symlinked_secrets_folder(
     assert str(tmp_path / "secrets" / "gws-personal") not in granted
     assert str(target.resolve() / "gws-personal" / "client_secret.json") not in granted
     assert str(tmp_path / "secrets" / "gws-personal" / "client_secret.json") not in granted
+
+
+def _gh_token_spy(monkeypatch: pytest.MonkeyPatch, token: str = "tok") -> list[object]:
+    calls: list[object] = []
+
+    def spy(gh, env, **kwargs):
+        calls.append(gh)
+        return token
+
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", spy)
+    return calls
+
+
+def test_memory_pass_gets_no_gh_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    calls = _gh_token_spy(monkeypatch)
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: "/bin/gh")
+    monkeypatch.setattr("ciao.web.project_chats.is_memory_pass_chat", lambda chat, project: True)
+
+    assert "GH_TOKEN" not in manager._build_extra_env(chat)
+    assert calls == []
+
+
+def test_unresolvable_gh_gets_no_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    calls = _gh_token_spy(monkeypatch)
+
+    def broken(cmd):
+        raise OSError("broken shim")
+
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", broken)
+
+    assert "GH_TOKEN" not in manager._build_extra_env(chat)
+    assert calls == []
+
+
+def test_gh_inside_a_root_gets_no_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    calls = _gh_token_spy(monkeypatch)
+    _, roots = manager._agent_fs_scope_for_chat(chat)
+    planted = Path(roots[0]) / "gh"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: str(planted))
+
+    assert "GH_TOKEN" not in manager._build_extra_env(chat)
+    assert calls == []
+
+
+def test_warm_gh_token_runs_off_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: "/bin/gh")
+    calls = _gh_token_spy(monkeypatch)
+    threaded: list[object] = []
+    real_to_thread = asyncio.to_thread
+
+    async def to_thread(func, *args, **kwargs):
+        threaded.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr("ciao.web.project_chats.asyncio.to_thread", to_thread)
+
+    asyncio.run(manager.warm_gh_token(chat))
+    assert len(threaded) == 1
+    assert calls == ["/bin/gh"]
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    asyncio.run(manager.warm_gh_token(chat))
+    assert len(threaded) == 1

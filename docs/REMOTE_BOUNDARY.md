@@ -200,6 +200,10 @@ An agent with vault write access can forge the `via=pwa` memory rows and `actor=
 
 A workspace-only chat's sandbox makes the linked Google account's credential directory (`<workspace>/secrets/gws-<profile>`) writable, because `gws` must write its token cache there. `client_secret.json` and `credentials.json` are write-denied by name, but `gws` ranks `credentials.enc`, per-account `credentials.*.enc`, `accounts.json` and `.encryption_key` above them, and those stay writable. A prompt-injected agent can therefore plant credentials for an account it controls. A later unsandboxed `gws` (the operator's terminal, a schedule, a whole-machine chat) would then act as that account, for example writing the operator's files to it. The agent can also read the linked account's refresh token, as it can with whole-machine access. The maintainer accepted this risk. The alternative was a per-chat copy of the directory under `.runtime`, refreshed at each chat start.
 
+### Residual: readable gh token (#1961)
+
+A workspace-only chat's sandbox grants the `gh` config directory (`GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`) read-only. `hosts.yml` there may hold the operator's GitHub OAuth token, so the agent can read it, as it can with whole-machine access. The maintainer accepted this. Because the keychain is outside the sandbox, the engine also reads gh's token and passes it as `GH_TOKEN` in the chat's environment, where the agent can read it. An OpenCode server keeps the `GH_TOKEN` it started with until it restarts, while a Claude chat respawns on a changed token. A token the agent prints, for example via `env`, is stored in the chat transcript.
+
 ## Verification
 
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`
