@@ -31,6 +31,52 @@ async function mountSection(props: Partial<InstanceType<typeof AgentContextSecti
 describe('AgentContextSection', () => {
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
+  const SYSTEM_PROMPT = 'You are Ciao.\n'.repeat(400)
+
+  async function mountWithSystemPrompt(promptResponse: () => Response | Promise<Response>) {
+    setActivePinia(createPinia())
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === '/api/system-prompt') return promptResponse()
+      return url.includes(encodeURIComponent('work/AGENTS.md'))
+        ? new Response('x'.repeat(4000), { status: 200 })
+        : new Response('', { status: 404 })
+    }))
+    const wrapper = mount(AgentContextSection, {
+      props: { project: PROJECT, contextPct: null, compacting: false, compactDisabled: false },
+      global: { stubs: { RouterLink: RouterLinkStub } },
+    })
+    await flushPromises()
+    return wrapper
+  }
+  const promptOk = () => new Response(JSON.stringify({ text: SYSTEM_PROMPT, chars: SYSTEM_PROMPT.length }), { status: 200 })
+
+  it('lists the Ciaobot system prompt first, with its tokens in the total', async () => {
+    const wrapper = await mountWithSystemPrompt(promptOk)
+    const row = wrapper.get('.agent-context-system')
+    expect(wrapper.get('.rail-list').element.firstElementChild).toBe(row.element)
+    expect(row.text()).toContain('Ciaobot system prompt')
+    expect(row.text()).toContain('1.4k tokens')
+    expect(row.text()).toContain("Added to the provider's own system prompt")
+    // 1.4k prompt + 1k guide + a small brief; without the prompt the total would read 1k.
+    expect(wrapper.get('.agent-context-summary .agent-context-meta').text()).toBe('2.4k tokens')
+  })
+
+  it('shows the system prompt text only once its toggle is opened', async () => {
+    const wrapper = await mountWithSystemPrompt(promptOk)
+    expect(wrapper.find('.agent-context-system-text').exists()).toBe(false)
+    const toggle = wrapper.get('.agent-context-system-toggle')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.get('pre.agent-context-system-text').text()).toContain('You are Ciao.')
+    expect(toggle.attributes('aria-controls')).toBe(wrapper.get('.agent-context-system-body').attributes('id'))
+  })
+
+  it('hides the system prompt row when the fetch fails', async () => {
+    const wrapper = await mountWithSystemPrompt(() => new Response('boom', { status: 500 }))
+    expect(wrapper.find('.agent-context-system').exists()).toBe(false)
+  })
+
   it('keeps Always loaded closed behind a summary that names its cost', async () => {
     localStorage.removeItem('ciao.chatDetails.alwaysLoadedOpen')
     const wrapper = await mountSection()

@@ -178,6 +178,7 @@ from ciao.web.routes_api import (
     vault_graph,
     vault_review,
     vault_markdown_paths,
+    system_prompt,
     workspace_binary,
     workspace_file,
     workspace_html,
@@ -475,6 +476,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Host file viewer/editor. Absolute paths are intentional; endpoints
         # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
+        Route("/api/system-prompt", system_prompt, methods=["GET"]),
         # Preview side of the same file for artifacts: text/html under a
         # sandboxing CSP, so the panel can embed the rendered page.
         Route("/api/workspace-html", workspace_html, methods=["GET"]),
