@@ -1762,6 +1762,10 @@ def test_cli_start_reports_an_unconfirmed_start_as_a_failure(tmp_path: Path, mon
     (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
     (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     monkeypatch.setattr(sys, "platform", "darwin")
+    # The forced darwin branch builds the launchd domain from the uid, which
+    # os.getuid does not provide on Windows; the CLI contract under test is
+    # the same there.
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
@@ -1798,6 +1802,7 @@ def test_cli_start_reads_the_launchd_exit_code_after_a_timeout(tmp_path: Path, m
     (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
     (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
@@ -1833,6 +1838,7 @@ def test_cli_start_reports_the_verified_identity(tmp_path: Path, monkeypatch, ca
     (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
     (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
