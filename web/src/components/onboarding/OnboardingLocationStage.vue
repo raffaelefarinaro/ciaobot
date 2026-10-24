@@ -13,21 +13,61 @@ const folderError = ref('')
 const provisionedPath = ref('')
 const existingNotes = ref(false)
 const onHost = isHostOrigin()
-const validName = computed(() => /^[\p{L}\p{N}][\p{L}\p{N} _-]{0,63}$/u.test(name.value.trim()))
-const canContinue = computed(() => Boolean((props.context.provisioned ? provisionedPath.value : folder.value.trim()) && validName.value))
+// The engine's own contract (ciao/workspaces.py): ASCII alphanumerics, then up
+// to 63 more of the same plus underscore and hyphen. A name that passes here and
+// fails there would strand the workspace after the user has moved on.
+const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
+const nameTouched = ref(false)
+const validName = computed(() => NAME_PATTERN.test(name.value.trim()))
+const nameError = computed(() =>
+  nameTouched.value && name.value.trim() && !validName.value
+    ? 'Use letters, numbers, dashes or underscores; start with a letter or number.'
+    : '',
+)
+// A path is only usable once the engine has inspected it, so a typo or an
+// unreadable folder cannot be carried into setup.
+const inspected = ref(false)
+const inspecting = ref(false)
+const chosenFolder = computed(() => (props.context.provisioned ? provisionedPath.value : folder.value.trim()))
+const canContinue = computed(() =>
+  Boolean(chosenFolder.value && validName.value && inspected.value && !folderError.value && !inspecting.value),
+)
 
-watch([folder, name, canContinue], () => emit('state', { dirty: folder.value !== props.context.workspace || !!name.value, pending: false, canContinue: canContinue.value, error: folderError.value || null }), { immediate: true })
+watch(
+  [folder, name, canContinue, folderError, nameError, inspecting, () => props.busy],
+  () => emit('state', {
+    dirty: folder.value !== props.context.workspace || !!name.value,
+    pending: inspecting.value,
+    canContinue: canContinue.value,
+    error: folderError.value || nameError.value || null,
+  }),
+  { immediate: true },
+)
+// Editing the path invalidates the previous inspection.
+watch(folder, () => { inspected.value = false; existingNotes.value = false; folderError.value = '' })
 watch(() => props.context.workspace, value => { folder.value = value })
 
 async function inspect() {
   folderError.value = ''
+  inspected.value = false
   if (props.context.provisioned) return
   if (!folder.value.trim()) { existingNotes.value = false; return }
+  inspecting.value = true
   try {
-    const result = await api.get<{ mode?: string }>(`/api/setup/inspect-folder?path=${encodeURIComponent(folder.value.trim())}`)
+    const result = await api.get<{ mode?: string; ok?: boolean; error?: string }>(
+      `/api/setup/inspect-folder?path=${encodeURIComponent(folder.value.trim())}`,
+    )
+    if (result?.ok === false) {
+      folderError.value = result.error || 'That folder cannot be used. Check the path and try again.'
+      existingNotes.value = false
+      return
+    }
     existingNotes.value = result.mode === 'existing' || result.mode === 'notes'
+    inspected.value = true
   } catch {
     folderError.value = 'Could not inspect this folder. Check the path and try again.'
+  } finally {
+    inspecting.value = false
   }
 }
 onMounted(async () => {
@@ -36,6 +76,7 @@ onMounted(async () => {
       const status = await api.get<SetupStatus>('/api/setup-status')
       provisionedPath.value = status.workspace_root
       folder.value = status.workspace_root
+      inspected.value = true
     } catch { folderError.value = 'Could not load the current Ciaobot folder.' }
   }
 })
@@ -55,8 +96,17 @@ function submit() { if (canContinue.value && !props.busy) emit('continue') }
     </div>
     <div class="field">
       <label for="onboarding-name">Workspace name</label>
-      <input id="onboarding-name" v-model="name" name="name" autocomplete="off" aria-describedby="name-help" @blur="name = name.trim()">
+      <input
+        id="onboarding-name"
+        v-model="name"
+        name="name"
+        autocomplete="off"
+        :aria-invalid="!!nameError"
+        :aria-describedby="nameError ? 'name-help name-error' : 'name-help'"
+        @blur="nameTouched = true; name = name.trim()"
+      >
       <p id="name-help" class="help">You can add more workspaces later.</p>
+      <p v-if="nameError" id="name-error" class="error" role="alert">{{ nameError }}</p>
     </div>
     <button class="continue" type="submit" :disabled="busy || !canContinue">Continue</button>
   </form>
