@@ -632,3 +632,7 @@ The onboarding location stage owns the folder-first location choice and workspac
 `OnboardingRuntimeStage` reads model provenance from
 `/api/models`: runtime-reported models and configured aliases are rendered in separate sections,
 and an unobserved runtime is never described as available.
+
+## Onboarding memory
+
+The Access & memory onboarding stage asks workspace operators to acknowledge a handover choice before continuing. Its suggested “Accept and dismiss” choice applies only while that workspace's onboarding receipt is `in_progress`; it is never written until Continue, and is saved only through the workspace's existing `memory_handover` setting. A missing trusted handover service is reported plainly and does not imply acceptance can act.
