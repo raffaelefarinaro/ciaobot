@@ -852,7 +852,14 @@ vault-versus-repo rules), and the repo's `AGENTS.md`, or `CLAUDE.md` when that i
 absent, capped at `REPO_INSTRUCTIONS_MAX_CHARS` and stripped of envelope markers.
 The block rides the stable facts, and a fingerprint of path, file name and content
 hash is part of `context_digest` (only when non-empty, so unlinked chats keep their
-digest), so editing AGENTS.md re-sends it on the next turn. The branch changes too
+digest), so editing AGENTS.md re-sends it on the next turn. The instructions text
+(capped at 8,000 characters, with a "read <path> for the rest" tail) is inlined
+once per provider session, the first time it is attached (turn 1, or code mode
+switched on mid-session). `ChatInfo.instructions_session_id` records the session
+that took it, committed with the context marker. A later re-send in that session
+(AGENTS.md edited, code mode toggled again) carries the block and rules with a
+pointer to read `<path>/AGENTS.md` instead. A new, rotated or compacted session,
+or a cleared context marker, gets it inline again. The branch changes too
 often for that, so it is a per-turn `linked_repo=<path> branch=<branch>` line.
 The full block is sent only when the chat's `code_mode` is on (effective only in a linked project). Otherwise a light `LINKED_REPO_OFF_HINT` block and `code_mode=off` on the per-turn line are sent, and the fingerprint includes the mode.
 
@@ -878,7 +885,7 @@ Background command runs (`ciao/background.py`) are the third dispatch primitive,
 
 Background automations are instrumented through `ciao/job_runs.py`: title generation, schedule dispatch, the memory pass, and startup/system tasks (vault index refresh, skills update, the five-minute memory backup, Google token health, the one-time legacy memory migration) each record one run (status, duration, model/provider, error) to `.runtime/job_runs.jsonl`. The debug report (`ciao/debug_report.py`) reads the grouped view, and the workspace audit checks the log files; jobs in `RETIRED_JOBS` (removed from the code, but still present in the never-expiring `job_runs_latest.json`) are left out.
 
-`GET /api/agent-assets/audit` exposes `ciao.os_audit.run_os_audit()` to Settings. A successful response is the full report object: `status` (`healthy`, `needs_attention`, or `error`), `total_issues`, `total_errors`, `timestamp`, section objects for `setup_audit`, `vault_hygiene`, `skill_audit`, `rule_audit`, `memory_hygiene`, and `job_runs_audit`, plus the flattened `scan_errors` list. `error` means the scan was not reliable, not merely that actionable findings exist. An unexpected handler failure returns HTTP 500 with `{"error":"failed to run AI OS audit"}`.
+`GET /api/agent-assets/audit` exposes `ciao.os_audit.run_os_audit()` to Settings. A successful response is the full report object: `status` (`healthy`, `needs_attention`, or `error`), `total_issues`, `total_errors`, `timestamp`, section objects for `setup_audit`, `vault_hygiene`, `skill_audit`, `rule_audit`, `memory_hygiene`, and `job_runs_audit`, plus the flattened `scan_errors` list. `skill_audit.warnings` lists over-budget `SKILL.md` files in the user-global `~/.config/opencode/skills`, `~/.claude/skills` and `~/.agents/skills` (OpenCode loads them in full); they are warnings, never defects or scan errors. `error` means the scan was not reliable, not merely that actionable findings exist. An unexpected handler failure returns HTTP 500 with `{"error":"failed to run AI OS audit"}`.
 
 Schedules carry an `archive_policy`: `manual` or `auto`. All schedules execute through the normal chat pipeline for permissions and transcripts. `auto` runs a post-run classifier and archives only when the user does not need to see the result; failed, permission-blocked, retrying, or useful runs stay visible.
 
@@ -955,7 +962,9 @@ kept in the macOS keychain works (#1961). A project's
 linked repository is added to a chat's roots (workspace scope) only when the chat is in code mode. It is passed to
 Claude as an add-dir and to opencode as `skills.paths` in `OPENCODE_CONFIG_CONTENT`
 in every scope, fixed when the provider process starts; a change applies from the
-next turn. The file viewer is not covered. Credential and storage-isolation work tracked by #546 is still open.
+next turn. The same `OPENCODE_CONFIG_CONTENT` caps OpenCode tool output
+(`tool_output`: 1000 lines / 20,000 bytes, `TOOL_OUTPUT_MAX_*` in
+`ciao/providers/opencode.py`) below OpenCode's 2000-line / 51,200-byte default. The file viewer is not covered. Credential and storage-isolation work tracked by #546 is still open.
 
 Write/Edit/MultiEdit/NotebookEdit tool calls are tagged with `file_touch` by
 `ciao/web/chat_broker.py` and surface as standalone `_filecard` entries on

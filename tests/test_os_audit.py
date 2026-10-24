@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import shutil
 from pathlib import Path
+
+import pytest
 
 from ciao import vault_lint
 
@@ -29,6 +32,12 @@ from ciao.os_audit import (
     run_os_audit,
 )
 from ciao.skills_inventory import MAX_SKILL_BYTES
+
+
+@pytest.fixture(autouse=True)
+def _no_real_xdg_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """User-global skill scans resolve ~/.config under the isolated home."""
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
 
 def test_audit_skills_over_budget(tmp_path: Path) -> None:
@@ -71,6 +80,72 @@ def test_audit_skills_deduplicates_provider_projections(tmp_path: Path) -> None:
     res = audit_skills(tmp_path)
     assert res["total_skills"] == 2
     assert res["issues"] == []
+
+
+def test_audit_skills_warns_about_over_budget_user_global_skills(tmp_path: Path) -> None:
+    """OpenCode loads ~/.claude/skills and ~/.agents/skills in full too."""
+    workspace = tmp_path / "ws"
+    (workspace / "skills" / "shared").mkdir(parents=True)
+    (workspace / "skills" / "shared" / "SKILL.md").write_text("# small\n", encoding="utf-8")
+    home = Path.home()  # tests/conftest.py points it at tmp_path / "home"
+    big_claude = home / ".claude" / "skills" / "big-claude"
+    big_claude.mkdir(parents=True)
+    (big_claude / "SKILL.md").write_bytes(b"A" * (MAX_SKILL_BYTES + 1))
+    big_agents = home / ".agents" / "skills" / "big-agents"
+    big_agents.mkdir(parents=True)
+    (big_agents / "SKILL.md").write_bytes(b"A" * (MAX_SKILL_BYTES + 1))
+    small = home / ".agents" / "skills" / "small"
+    small.mkdir(parents=True)
+    (small / "SKILL.md").write_text("# fine\n", encoding="utf-8")
+    # A workspace skill shadows a global one of the same name.
+    shadowed = home / ".claude" / "skills" / "shared"
+    shadowed.mkdir(parents=True)
+    (shadowed / "SKILL.md").write_bytes(b"A" * (MAX_SKILL_BYTES + 1))
+
+    res = audit_skills(workspace)
+
+    assert res["issues"] == [] and res["errors"] == []
+    assert res["over_budget_count"] == 0
+    assert res["user_over_budget_count"] == 2
+    assert sorted(w["skill"] for w in res["warnings"]) == ["big-agents", "big-claude"]
+    assert {w["type"] for w in res["warnings"]} == {"user_skill_over_budget"}
+    report = run_os_audit(workspace_dir=workspace, vault_root=workspace / "memory-vault")
+    assert report["skill_audit"]["user_over_budget_count"] == 2
+    assert "User-global skills over 15 KiB" in format_audit_markdown(report)
+    # Warnings only: they hold no defect and no scan error.
+    shutil.rmtree(home / ".claude")
+    shutil.rmtree(home / ".agents")
+    clean = run_os_audit(workspace_dir=workspace, vault_root=workspace / "memory-vault")
+    assert (clean["defect_count"], clean["total_errors"]) == (
+        report["defect_count"],
+        report["total_errors"],
+    )
+
+
+def test_audit_skills_warns_about_opencode_global_skills(tmp_path: Path) -> None:
+    """OpenCode's own ~/.config/opencode/skills is loaded like the others."""
+    big = Path.home() / ".config" / "opencode" / "skills" / "big-opencode"
+    big.mkdir(parents=True)
+    (big / "SKILL.md").write_bytes(b"A" * (MAX_SKILL_BYTES + 1))
+
+    res = audit_skills(tmp_path / "ws")
+
+    assert [w["skill"] for w in res["warnings"]] == ["big-opencode"]
+
+
+def test_audit_skills_does_not_scan_a_workspace_root_twice_as_user_global(
+    tmp_path: Path,
+) -> None:
+    """A workspace at the home folder is not reported twice."""
+    home = Path.home()
+    big = home / ".claude" / "skills" / "big"
+    big.mkdir(parents=True)
+    (big / "SKILL.md").write_bytes(b"A" * (MAX_SKILL_BYTES + 1))
+
+    res = audit_skills(home)
+
+    assert res["over_budget_count"] == 1
+    assert res["warnings"] == []
 
 
 def test_audit_rules_deduplicates_linked_workspace_guides(tmp_path: Path) -> None:

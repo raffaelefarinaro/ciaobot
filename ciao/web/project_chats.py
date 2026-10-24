@@ -706,6 +706,12 @@ class ChatInfo:
     # project/workspace digest or a new provider session re-sends them.
     context_digest: str = ""
     context_session_id: str = ""
+    # Provider session that has already received the linked repo's
+    # instructions text inline; a later repo change in it gets a pointer.
+    instructions_session_id: str = ""
+    # Set while a turn whose capsule inlines the instructions is in flight;
+    # committed to instructions_session_id with the context marker. Not saved.
+    instructions_inline_pending: bool = False
     # Raw AskUserQuestion JSON (`{"questions": [...]}`) when the model paused
     # this chat on a question the user hasn't answered yet. Set when the
     # headless CLI fires AskUserQuestion (which we interrupt so it can't
@@ -1248,6 +1254,7 @@ class ProjectChatManager:
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
                 context_digest=cd.get("context_digest", ""),
                 context_session_id=cd.get("context_session_id", ""),
+                instructions_session_id=cd.get("instructions_session_id", ""),
                 pending_question=cd.get("pending_question", ""),
                 pending_permission=cd.get("pending_permission", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
@@ -1369,6 +1376,7 @@ class ProjectChatManager:
                     "handover_context_pending": c.handover_context_pending,
                     "context_digest": c.context_digest,
                     "context_session_id": c.context_session_id,
+                    "instructions_session_id": c.instructions_session_id,
                     "pending_question": c.pending_question,
                     "pending_permission": c.pending_permission,
                     "pending_queue": c.pending_queue,
@@ -5365,11 +5373,16 @@ class ProjectChatManager:
             revoke(chat_id)
 
     def _linked_repo_context(
-        self, chat: ChatInfo, project: ProjectInfo | None
+        self,
+        chat: ChatInfo,
+        project: ProjectInfo | None,
+        *,
+        inline_instructions: bool = True,
     ) -> tuple[str, str, str]:
         """(stable block, digest fingerprint, per-turn line); ("", "", "") when unlinked.
 
-        Code mode on: the full block with the repository's instructions. Linked
+        Code mode on: the full block with the repository's instructions, or
+        with a pointer to the file when ``inline_instructions`` is False. Linked
         but off: a light hint naming the path and how to switch on.
         """
         if project is None or not project.repo_path:
@@ -5390,7 +5403,11 @@ class ProjectChatManager:
             return block, f"{path}\0missing", f"linked_repo={path} missing=true"
         ins = read_repo_instructions(path)
         block = render_linked_repo_block(
-            path=path, missing=False, instructions_name=ins.name, instructions_text=ins.text
+            path=path,
+            missing=False,
+            instructions_name=ins.name,
+            instructions_text=ins.text,
+            inline_instructions=inline_instructions,
         )
         return (
             block,
@@ -5417,8 +5434,25 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(chat, project)
+        # The repository instructions are inlined once per provider session:
+        # the first time they are attached, whenever that is (turn 1, or code
+        # mode switched on mid-session from the PWA). A later re-send in a
+        # session that already took the text (AGENTS.md edited, code mode
+        # toggled again) points at the file instead. A cleared context marker
+        # (compaction, cancelled first turn) inlines it again.
+        already_inlined = bool(
+            chat.context_digest
+            and chat.session_id
+            and chat.context_session_id == chat.session_id
+            and chat.instructions_session_id == chat.session_id
+        )
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(
+            chat, project, inline_instructions=not already_inlined
+        )
         include_stable = self._needs_stable_context(chat)
+        chat.instructions_inline_pending = bool(
+            include_stable and chat.code_mode and repo_block and not already_inlined
+        )
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
         # it can write; a machine-scope chat gets no file-access line at all.
@@ -6123,6 +6157,9 @@ class ProjectChatManager:
     def _commit_context_marker(
         chat: ChatInfo, request: AgentRequest, session_id: str
     ) -> bool:
+        if chat.instructions_inline_pending and session_id:
+            chat.instructions_session_id = session_id
+        chat.instructions_inline_pending = False
         if not request.context_digest or not session_id:
             return False
         if (
