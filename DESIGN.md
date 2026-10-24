@@ -273,3 +273,5 @@ Borders are structural, not decorative. Active navigation is marked by a slim ac
 - Don't expose long prompts or diagnostics in full by default on mobile.
 - Don't copy custom styling into a host-native surface when platform conventions are clearer.
 - Don't introduce new colors, radii, shadows, or typefaces when an existing token serves the purpose.
+
+The onboarding care stage follows the setup shell's calm, compact form rhythm: host availability guides the suggested local time, while the editable time and IANA zone are explicit controls. A clear saved/default status and inline error explain whether timing was written; keeping the packaged default is an explicit no-write choice.
