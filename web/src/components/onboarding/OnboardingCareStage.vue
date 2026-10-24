@@ -12,11 +12,23 @@ const time = ref('08:00')
 const timezone = ref(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
 const availability = ref('always on')
 const keepDefault = ref(false)
-const decided = ref(false)
+const savedOnce = ref(false)
 const saving = ref(false)
 const error = ref('')
-const dirty = computed(() => !!routine.value && (time.value !== routine.value.daily_time_utc || timezone.value !== routine.value.timezone_name))
-const state = computed<StageState>(() => ({ dirty: dirty.value, pending: saving.value, canContinue: !!routine.value && decided.value, error: error.value || null }))
+const touchedTime = ref(false)
+// What the engine currently has; `dirty` compares the proposal against it.
+const saved = ref({ time: '08:00', zone: 'UTC' })
+const dirty = computed(() =>
+  !!routine.value && (time.value !== saved.value.time || timezone.value !== saved.value.zone),
+)
+// Continue needs a decision that still matches the fields: a later edit or a
+// failed save invalidates it, and a proposal is not a saved choice.
+const state = computed<StageState>(() => ({
+  dirty: dirty.value,
+  pending: saving.value,
+  canContinue: !!routine.value && !saving.value && !error.value && (keepDefault.value || (savedOnce.value && !dirty.value)),
+  error: error.value || null,
+}))
 watch([state, () => props.busy], () => emit('state', state.value), { immediate: true, deep: true })
 
 async function load() {
@@ -25,26 +37,45 @@ async function load() {
     await store.fetchSchedules()
     routine.value = store.schedules.find(row => row.scope === 'system' && row.schedule_id === `system-memory-curation@${props.context.workspace}`) || null
     if (routine.value) {
-      time.value = routine.value.daily_time_utc
-      timezone.value = routine.value.timezone_name
+      saved.value = { time: routine.value.daily_time_utc, zone: routine.value.timezone_name }
+      // The suggestion is local to this browser; the routine's packaged zone is
+      // only the baseline the proposal is compared against.
+      time.value = suggestedTime()
+      timezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || saved.value.zone
     }
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not load care timing.' }
 }
+// Availability guides the proposal only; the operator can always override it.
+function suggestedTime(): string {
+  if (availability.value === 'daytime') return '13:00'
+  if (availability.value === 'varies') return '09:00'
+  return '08:00'
+}
 async function save() {
   if (!routine.value || !dirty.value) return
+  // Snapshot what is being sent: edits made while the request is in flight must
+  // stay dirty rather than being reported as saved.
+  const submitted = { time: time.value, zone: timezone.value }
   saving.value = true
   error.value = ''
   try {
-    await store.updateSchedule(routine.value.schedule_id, { time: time.value, timezone: timezone.value })
-    // Reflect what was saved so `dirty` settles and the shell can advance; the
-    // row itself keeps its id, cadence, prompt and enabled state.
-    routine.value = { ...routine.value, daily_time_utc: time.value, timezone_name: timezone.value }
+    await store.updateSchedule(routine.value.schedule_id, { time: submitted.time, timezone: submitted.zone })
+    saved.value = submitted
     keepDefault.value = false
-    decided.value = true
-  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not save care timing.' }
-  finally { saving.value = false }
+    savedOnce.value = true
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Could not save care timing.'
+    savedOnce.value = false
+  } finally { saving.value = false }
 }
-function useDefault() { keepDefault.value = true; decided.value = true }
+// Any edit abandons an earlier "keep the packaged default": the fields no
+// longer describe that decision.
+watch([time, timezone], () => { keepDefault.value = false })
+
+function onAvailability(): void {
+  if (!touchedTime.value) time.value = suggestedTime()
+}
+function useDefault() { keepDefault.value = true; savedOnce.value = false }
 onMounted(() => { void load() })
 defineExpose({ refresh: load })
 </script>
@@ -58,11 +89,19 @@ defineExpose({ refresh: load })
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <template v-if="routine">
       <fieldset><legend>When is the host usually available?</legend>
-        <label v-for="answer in ['always on', 'daytime', 'varies']" :key="answer"><input v-model="availability" type="radio" name="availability" :value="answer"> {{ answer }}</label>
+        <label v-for="answer in ['always on', 'daytime', 'varies']" :key="answer">
+          <input
+            v-model="availability"
+            type="radio"
+            name="availability"
+            :value="answer"
+            @change="onAvailability"
+          > {{ answer }}
+        </label>
       </fieldset>
       <p>The suggested time is a local slot; availability only guides this suggestion.</p>
       <div class="fields">
-        <label>Local time <input v-model="time" type="time" required :aria-invalid="!!error" :aria-describedby="error ? 'care-error' : undefined"></label>
+        <label>Local time <input v-model="time" type="time" required @input="touchedTime = true" :aria-invalid="!!error" :aria-describedby="error ? 'care-error' : undefined"></label>
         <label>Timezone <input v-model="timezone" name="timezone" autocomplete="off" required></label>
       </div>
       <p v-if="error" id="care-error" class="error">{{ error }}</p>

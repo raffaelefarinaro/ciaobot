@@ -13,9 +13,9 @@ const routine = {
   enabled: true, timezone_name: 'Europe/Zurich', daily_time_utc: '08:00', scope: 'system',
 }
 
-describe('OnboardingCareStage', () => {
-  beforeEach(() => { setActivePinia(createPinia()); vi.clearAllMocks() })
+beforeEach(() => { setActivePinia(createPinia()); vi.resetAllMocks() })
 
+describe('OnboardingCareStage', () => {
   it('offers the packaged default without writing and enables Continue after explicit choice', async () => {
     vi.mocked(api.get).mockResolvedValue([routine])
     const wrapper = mount(OnboardingCareStage, { props: { context, busy: false } })
@@ -46,5 +46,49 @@ describe('OnboardingCareStage', () => {
     await vi.waitFor(() => expect(wrapper.text()).toContain('No care routine is installed'))
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
     expect(api.patch).not.toHaveBeenCalled()
+  })
+})
+
+describe('OnboardingCareStage safety', () => {
+  it('falls back to a disabled Continue after a failed save', async () => {
+    vi.mocked(api.get).mockResolvedValue([routine])
+    vi.mocked(api.patch).mockRejectedValue(new Error('offline'))
+    const wrapper = mount(OnboardingCareStage, { props: { context, busy: false } })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Workspace care'))
+    await wrapper.get('input[type="time"]').setValue('09:15')
+    await wrapper.get('button[aria-label="Save care timing"]').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('offline'))
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
+  })
+
+  it('does not enable Continue when the fields are edited after keeping the default', async () => {
+    vi.mocked(api.get).mockResolvedValue([routine])
+    const wrapper = mount(OnboardingCareStage, { props: { context, busy: false } })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Workspace care'))
+    await wrapper.get('button[aria-label="Keep packaged default"]').trigger('click')
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
+    await wrapper.get('input[type="time"]').setValue('10:00')
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
+    expect(api.patch).not.toHaveBeenCalled()
+  })
+
+  it('keeps the browser timezone as the editable suggestion', async () => {
+    vi.mocked(api.get).mockResolvedValue([{ ...routine, timezone_name: 'Europe/Zurich' }])
+    const wrapper = mount(OnboardingCareStage, { props: { context, busy: false } })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Workspace care'))
+    const zone = (wrapper.get('input[name="timezone"]').element as HTMLInputElement).value
+    expect(zone).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
+  })
+
+  it('uses the availability answer to propose a slot until the time is edited', async () => {
+    vi.mocked(api.get).mockResolvedValue([routine])
+    const wrapper = mount(OnboardingCareStage, { props: { context, busy: false } })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Workspace care'))
+    await wrapper.findAll('input[name="availability"]')[1].setValue()
+    expect((wrapper.get('input[type="time"]').element as HTMLInputElement).value).toBe('13:00')
+    await wrapper.get('input[type="time"]').setValue('15:00')
+    await wrapper.findAll('input[name="availability"]')[2].setValue()
+    expect((wrapper.get('input[type="time"]').element as HTMLInputElement).value).toBe('15:00')
   })
 })
