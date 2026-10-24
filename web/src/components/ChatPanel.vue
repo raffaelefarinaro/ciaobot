@@ -856,13 +856,15 @@
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
-      <button
-        v-if="steerAllIds.length >= 2"
-        type="button"
-        class="queued-steer-all"
-        :title="store.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
-        @click="steerQueued($event, steerAllIds, 'steer')"
-      >{{ store.isStreaming ? 'Steer all' : 'Send all now' }}</button>
+      <div v-if="steerAllIds.length >= 2" class="queued-head">
+        <span class="queued-count">{{ store.currentQueued.length }} queued</span>
+        <button
+          type="button"
+          class="queued-steer-all"
+          :title="store.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
+          @click="steerQueued($event, steerAllIds, 'steer')"
+        >{{ store.isStreaming ? 'Steer all' : 'Send all now' }}</button>
+      </div>
       <div
         v-for="(q, i) in store.currentQueued"
         :key="q.id || i"
@@ -873,28 +875,6 @@
         :title="queuedChipTitle(q)"
       >
         <span class="queued-steering">{{ q.steering ? 'Steering…' : '' }}</span>
-        <div
-          v-if="!q.steering && store.isStreaming && !q.waiting"
-          class="queued-mode"
-          role="group"
-          :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
-        >
-          <button
-            type="button"
-            class="queued-mode-option"
-            :aria-pressed="q.delivery === 'queue'"
-            title="Send as the next message when the reply finishes"
-            @click="q.delivery === 'queue' || steerQueued($event, [q.id], 'queue')"
-          >Queue</button>
-          <button
-            type="button"
-            class="queued-mode-option"
-            :aria-pressed="q.delivery === 'steer'"
-            title="Send into the running reply now"
-            @click="q.delivery === 'steer' || steerQueued($event, [q.id], 'steer')"
-          >Steer</button>
-        </div>
-        <span v-else-if="!q.steering" class="queued-label">Waiting</span>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
@@ -910,37 +890,64 @@
           </template>
           <span v-else class="queued-text">{{ q.text }}</span>
         </div>
-        <div v-if="!q.steering" class="queued-actions">
-          <button
-            v-if="q.waiting || !store.isStreaming"
-            type="button"
-            class="queued-send-now"
-            :title="store.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
-            @click="steerQueued($event, [q.id], 'steer')"
-          >{{ store.isStreaming ? 'Steer' : 'Send now' }}</button>
-          <button
-            class="queued-action"
-            :disabled="i === 0"
-            title="Move up"
-            @click="store.reorderQueued(chat.chat_id, i, i - 1)"
-          >▲</button>
-          <button
-            class="queued-action"
-            :disabled="i === store.currentQueued.length - 1"
-            title="Move down"
-            @click="store.reorderQueued(chat.chat_id, i, i + 1)"
-          >▼</button>
-          <button
-            v-if="editingQueueId !== q.id"
-            class="queued-action"
-            title="Edit"
-            @click="startEditQueue(q)"
-          >✎</button>
-          <template v-else>
-            <button class="queued-action" title="Save" @click="saveEditQueue(chat.chat_id, q.id)">✓</button>
-            <button class="queued-action" title="Cancel" @click="cancelEditQueue">✕</button>
-          </template>
-          <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message">&times;</button>
+        <div v-if="!q.steering" class="queued-controls">
+          <div
+            v-if="store.isStreaming && !q.waiting"
+            class="queued-mode"
+            role="group"
+            :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
+          >
+            <button
+              type="button"
+              class="queued-mode-option"
+              :aria-pressed="q.delivery === 'queue'"
+              title="Send as the next message when the reply finishes"
+              @click="q.delivery === 'queue' || steerQueued($event, [q.id], 'queue')"
+            >Queue</button>
+            <button
+              type="button"
+              class="queued-mode-option"
+              :aria-pressed="q.delivery === 'steer'"
+              title="Send into the running reply now"
+              @click="q.delivery === 'steer' || steerQueued($event, [q.id], 'steer')"
+            >Steer</button>
+          </div>
+          <span v-else class="queued-label">Waiting</span>
+          <div class="queued-actions">
+            <button
+              v-if="q.waiting || !store.isStreaming"
+              type="button"
+              class="queued-send-now"
+              :title="store.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
+              @click="steerQueued($event, [q.id], 'steer')"
+            >{{ store.isStreaming ? 'Steer' : 'Send now' }}</button>
+            <button
+              class="queued-action"
+              :disabled="i === 0"
+              title="Move up"
+              aria-label="Move up"
+              @click="store.reorderQueued(chat.chat_id, i, i - 1)"
+            ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
+            <button
+              class="queued-action"
+              :disabled="i === store.currentQueued.length - 1"
+              title="Move down"
+              aria-label="Move down"
+              @click="store.reorderQueued(chat.chat_id, i, i + 1)"
+            ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+            <button
+              v-if="editingQueueId !== q.id"
+              class="queued-action"
+              title="Edit"
+              aria-label="Edit queued message"
+              @click="startEditQueue(q)"
+            ><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
+            <template v-else>
+              <button class="queued-action" title="Save" aria-label="Save edit" @click="saveEditQueue(chat.chat_id, q.id)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"/></svg></button>
+              <button class="queued-action" title="Cancel" aria-label="Cancel edit" @click="cancelEditQueue"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            </template>
+            <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          </div>
         </div>
       </div>
     </div>
@@ -7151,114 +7158,64 @@ details[open] > .activity-summary::before {
   display: inline-block;
 }
 
-/* Queued message chips */
-.queued-steer-all,
-.queued-send-now {
-  align-self: flex-start;
-  background: var(--bg3);
-  color: var(--accent);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 10px;
-  cursor: pointer;
+/* Queued message chips. Each chip is the message text, then one control row:
+   the delivery toggle on the left, the edit actions on the right. In a wide
+   pane the two share a line; in a narrow one the controls wrap under the text
+   instead of the text being squeezed between them. */
+.queued-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
   flex-shrink: 0;
 }
-.queued-steer-all:hover,
-.queued-send-now:hover { background: var(--bg2); }
-.queued-mode {
-  display: inline-flex;
-  flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
+.queued-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 0 12px;
 }
-.queued-mode-option {
-  background: none;
-  border: none;
-  color: var(--fg2);
+.queued-count {
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.03em;
-  padding: 3px 8px;
-  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg3);
 }
-.queued-mode-option[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
-.queued-mode-option:not([aria-pressed="true"]):hover { background: var(--bg2); color: var(--fg); }
-.queued-steering:empty { display: none; }
+.queued-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 2px;
+  padding: 4px 4px 4px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--fg2);
+}
 .queued-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.queued-steer-all:disabled,
-.queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
-/* Inset and in --fg: the pressed option is filled with --accent, so an accent
-   ring would vanish on it, and an outer ring is clipped by the group. */
-.queued-mode-option:focus-visible {
-  outline: 2px solid var(--fg);
-  outline-offset: -2px;
-}
+.queued-chip.is-steering { opacity: 0.85; padding: 8px 12px; }
 .queued-steering {
   font-size: 11px;
   font-weight: 600;
   color: var(--accent);
   flex-shrink: 0;
 }
-.queued-chip.is-steering { opacity: 0.85; }
-.steer-notice {
-  padding: 0 0 6px;
-  margin: 0;
-  font-size: 12px;
-  color: var(--fg2);
-}
-.queued-steer-all:focus-visible,
-.queued-send-now:focus-visible,
-.queued-action:focus-visible,
-.queued-remove:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.queued-remove:disabled { opacity: 0.3; cursor: not-allowed; }
-@media (pointer: coarse) {
-  .queued-steer-all,
-  .queued-send-now,
-  .queued-mode-option,
-  .queued-action,
-  .queued-remove {
-    min-height: 44px;
-    min-width: 44px;
-  }
-}
-.queued-messages {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px 0;
-  flex-shrink: 0;
-}
-.queued-chip {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--bg3);
-  border-radius: var(--radius);
-  font-size: 13px;
-  color: var(--fg2);
-}
-.queued-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--accent);
-  flex-shrink: 0;
-}
+.queued-steering:empty { display: none; }
+/* The body's grow factor dwarfs the controls': on a shared line the text takes
+   the free space and the controls sit at their own width on the right; once
+   wrapped, the controls are alone on their line and stretch to push the
+   actions to the far edge. */
 .queued-body {
-  flex: 1 1 140px;
+  flex: 1000 1 240px;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding: 4px 0;
 }
 .queued-images {
   display: flex;
@@ -7277,38 +7234,117 @@ details[open] > .activity-summary::before {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--fg);
 }
-.queued-remove {
-  background: none;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: 4px;
+.queued-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 0 auto;
+}
+.queued-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
   flex-shrink: 0;
 }
-.queued-remove:hover { color: var(--fg); background: var(--bg2); }
+.queued-mode {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+}
+.queued-mode-option {
+  background: none;
+  border: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--fg2);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.queued-mode-option[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+.queued-mode-option:not([aria-pressed="true"]):hover { background: var(--bg2); color: var(--fg); }
+/* Inset and in --fg: the pressed option is filled with --accent, so an accent
+   ring would vanish on it. */
+.queued-mode-option:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: -2px;
+}
 .queued-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.queued-steer-all,
+.queued-send-now {
+  background: none;
+  color: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
   flex-shrink: 0;
 }
-.queued-action {
+.queued-steer-all:hover,
+.queued-send-now:hover { background: var(--bg2); }
+.queued-steer-all:disabled,
+.queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
+.queued-action,
+.queued-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--fg2);
   cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 4px 6px;
-  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--radius-sm);
   flex-shrink: 0;
 }
-.queued-action:hover:not(:disabled) { color: var(--fg); background: var(--bg2); }
-.queued-action:disabled { opacity: 0.3; cursor: not-allowed; }
+.queued-action:hover:not(:disabled),
+.queued-remove:hover { color: var(--fg); background: var(--bg2); }
+.queued-action:disabled,
+.queued-remove:disabled { opacity: 0.3; cursor: not-allowed; }
+.queued-steer-all:focus-visible,
+.queued-send-now:focus-visible,
+.queued-action:focus-visible,
+.queued-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+@media (pointer: coarse) {
+  .queued-steer-all,
+  .queued-send-now,
+  .queued-mode-option {
+    min-height: 44px;
+  }
+  .queued-action,
+  .queued-remove {
+    width: 44px;
+    height: 44px;
+  }
+  .queued-mode { padding: 0; gap: 0; }
+  .queued-mode-option { min-width: 64px; }
+}
+.steer-notice {
+  padding: 0 0 6px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg2);
+}
 .queued-edit-input {
   width: 100%;
   background: var(--bg);
