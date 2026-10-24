@@ -49,6 +49,8 @@ After changes that touch running static assets (anything that lands in `ciao/web
 
 ## Layout
 
+Onboarding's Access & memory stage treats filesystem scope and runtime approval mode as separate choices. It writes only explicit changes through workspace settings; an unset permission mode remains unknown/engine default and is never presented as a known guarantee.
+
 ```
 web/
   index.html              entry HTML, viewport meta, PWA manifest link
@@ -618,5 +620,22 @@ Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks w
 - History shows a row's `prediction` under its text as predicted against decided, with a muted *Matched* or *Missed* badge (a miss is information, never an error) and the prediction `reason` as text. A `[memory]`/`[profile]` row the nightly run settled itself (`via: agent`) reads *Filed by Workspace care* (accepted) or *Dismissed by Workspace care* (dismissed), badges *Acted on prediction*, and offers *Undo* from the row when its change is undoable. The To decide queue never shows a prediction on a pending row, so the agreement rate stays unbiased.
 - Settings → Overview → *Memory handover* (`SettingsMemoryHandover.vue`, a three-way segmented control styled like Theme: arrows select) loads `GET /api/proposals/handover?workspace=` for the active workspace and saves only `{ memory_handover }` through `PATCH /api/workspaces/{name}`. New workspaces start at *Dismiss and accept*; existing workspaces without a stored choice remain *Off*. It never saves on its own: the suggestion is text. Choosing *Dismiss and accept* asks for confirmation, and the card says that it lets queued text reach always-loaded memory, with Undo in History and a cap of 5 changes per run. When the response's `acting_available` is false (a Linux/systemd install, where the gate trusts no service definition) the card says handover cannot act on this install and disables the options.
 
+### Onboarding stages
+
+`components/onboarding/` holds presentation stages that the shell composes; each receives
+`OnboardingStageProps` (`context`, `busy`) and emits `state`, `continue`, `back` and `refresh`.
+A stage owns its domain save and reports whether it succeeded; the shell, never the stage, writes
+progress through the onboarding store.
+
 The onboarding location stage owns the folder-first location choice and workspace name validation; it reports readiness to the shared shell and emits `continue` only on the user's action. It never writes onboarding progress. Provisioned installs treat the current folder as read-only and link to the guarded workspace move flow.
-# Onboarding finishes with an observed setup summary and an optional first task that creates a chat and sends the submitted text; it does not change setup progress itself.
+The onboarding finish stage shows a summary built only from observed values and offers an optional
+first task that creates a chat and sends the submitted text; it does not change setup progress
+itself.
+
+`OnboardingRuntimeStage` reads model provenance from
+`/api/models`: runtime-reported models and configured aliases are rendered in separate sections,
+and an unobserved runtime is never described as available.
+
+## Onboarding memory
+
+The Access & memory onboarding stage asks workspace operators to acknowledge a handover choice before continuing. Its suggested “Accept and dismiss” choice applies only while that workspace's onboarding receipt is `in_progress`; it is never written until Continue, and is saved only through the workspace's existing `memory_handover` setting. A missing trusted handover service is reported plainly and does not imply acceptance can act.
