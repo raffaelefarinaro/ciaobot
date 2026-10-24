@@ -26,6 +26,12 @@ When it finishes it prints a one-time sign-in link and opens it in your browser.
 The link signs you in once. Do not share it. If you lose it, run
 `ciao setup-url --workspace <your workspace folder>` for a new one. If the installer created your password, it also tells you that Ciaobot shows it once on Home on this computer.
 
+On a fresh machine, the installer leaves workspace creation to the browser
+onboarding flow. `-Workspace` suggests a folder but does not create it; after
+you finish setup, the installer activates the logon task. If setup is cancelled,
+resume with `ciao run --installer-bootstrap`. With `-NoStart`, nothing is
+provisioned and that same command resumes setup later.
+
 `iex` cannot take arguments, so to pass an option run the script as a script
 block:
 
