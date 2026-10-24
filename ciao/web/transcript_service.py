@@ -204,6 +204,7 @@ def _failed_tool_use_ids(msgs: list) -> set[str]:
 def _extract_assistant_blocks(
     raw: object,
     workspace_root: Path | None = None,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
@@ -259,6 +260,7 @@ def _extract_assistant_blocks(
             touches = normalize_file_touch_paths(
                 extract_file_touches(name, tinput),
                 workspace_root,
+                agent_root=agent_root,
             )
             entry = {"kind": "tool_use", "name": name, "summary": summary}
             # Kept so the history builder can match this call against its
@@ -1569,6 +1571,7 @@ async def _assemble_chat_messages(
             blocks = _extract_assistant_blocks(
                 m.message,
                 workspace_root=config.workspace_root,
+                agent_root=session_root,
             )
             # Drop the CLI's "No response requested." sentinel that marks
             # interrupted turns. If the message contained ONLY that sentinel

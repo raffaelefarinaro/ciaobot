@@ -62,6 +62,8 @@ from ciao.web.file_snapshots import SnapshotStore
 from ciao import repo_location
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pathlib import Path
+
     from ciao.web.project_chats import ChatInfo
 
 logger = logging.getLogger(__name__)
@@ -114,6 +116,8 @@ class ChatStreamingHost(Protocol):
     ) -> dict[str, Any] | None: ...
 
     def _get_provider(self, chat_id: str) -> ProviderService: ...
+
+    def _agent_root_for_chat(self, chat_id: str) -> Path: ...
 
     async def reload_provider(self, chat_id: str) -> bool: ...
 
@@ -518,6 +522,7 @@ class ChatStreaming:
                             apply_file_touches_to_payload(
                                 payload,
                                 workspace_root=self._host._config.workspace_root,
+                                agent_root=self._host._agent_root_for_chat(chat_id),
                             )
                         if (
                             payload
@@ -1888,6 +1893,7 @@ class ChatStreaming:
                 apply_file_touches_to_payload(
                     payload,
                     workspace_root=self._host._config.workspace_root,
+                    agent_root=self._host._agent_root_for_chat(chat_id),
                 )
                 if stream is None:
                     stream = ChatStream(background=True)

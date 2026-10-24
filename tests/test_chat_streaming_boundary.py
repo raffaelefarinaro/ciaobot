@@ -119,7 +119,13 @@ async def test_provider_pass_keeps_stream_events_and_terminal_outcome() -> None:
 
 
 class _DriveHost:
-    def __init__(self, events: list[StreamEvent], workspace_root: Path) -> None:
+    def __init__(
+        self,
+        events: list[StreamEvent],
+        workspace_root: Path,
+        agent_root: Path | None = None,
+    ) -> None:
+        self._agent_root = agent_root if agent_root is not None else workspace_root
         self.chat = ChatInfo(
             chat_id="chat-1",
             project_id="project-1",
@@ -141,6 +147,10 @@ class _DriveHost:
         self.discarded: list[str] = []
         self.detached_names: list[str] = []
         self.drain_awaits: list[str] = []
+
+    def _agent_root_for_chat(self, chat_id: str) -> Path:
+        del chat_id
+        return self._agent_root
 
     def _fallback_steers(self, chat_id: str, stream: object, reason: str) -> None:
         del chat_id, stream, reason
@@ -727,8 +737,10 @@ async def test_cancel_during_repo_location_refresh_still_finishes_the_turn(
     assert len(done) == 1
 
 
-async def _drive_events(tmp_path: Path, events: list[StreamEvent]):
-    host = _DriveHost(events, tmp_path)
+async def _drive_events(
+    tmp_path: Path, events: list[StreamEvent], agent_root: Path | None = None
+):
+    host = _DriveHost(events, tmp_path, agent_root)
     host._providers["chat-1"] = SimpleNamespace(
         provider=SimpleNamespace(current_session_id="ses_parent")
     )
@@ -801,3 +813,35 @@ async def test_frames_without_a_session_get_the_provider_session(
 
     frames = {f["type"]: f for f in stream.buffered_events()}
     assert frames["tool_use"]["session_id"] == "ses_parent"
+
+
+@pytest.mark.asyncio
+async def test_surfaced_touch_resolves_against_the_chat_agent_root(
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    agent_root = install_root / "personal"
+    (agent_root / "memory-vault").mkdir(parents=True)
+    (agent_root / "memory-vault" / "x.html").write_text("<p>hi</p>")
+    _host, stream = await _drive_events(
+        install_root,
+        [
+            ToolUseEvent(
+                type="tool_use",
+                tool_name="shell",
+                tool_input="ciao file surface memory-vault/x.html",
+                tool_use_id="call_1",
+                file_touches=[
+                    {"file_path": "memory-vault/x.html", "action": "surfaced"}
+                ],
+            ),
+            ResultEvent(type="result", result="done"),
+        ],
+        agent_root,
+    )
+
+    frames = {f["type"]: f for f in stream.buffered_events()}
+    assert frames["tool_use"]["file_touch"] == {
+        "file_path": Path("personal/memory-vault/x.html").as_posix(),
+        "action": "surfaced",
+    }

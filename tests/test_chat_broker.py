@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -629,3 +630,25 @@ def test_deny_tool_use_ignores_empty_id() -> None:
     stream.publish({"type": "text_delta", "text": "x"})
     stream.deny_tool_use("")
     assert all(ev.get("type") != "tool_denied" for ev in stream.buffered_events())
+
+
+def test_relative_touch_resolves_against_agent_root_but_stays_install_relative(
+    tmp_path: Path,
+) -> None:
+    from ciao.web.chat_broker import normalize_file_touch_paths
+
+    install = tmp_path / "install"
+    agent = install / "personal"
+    agent.mkdir(parents=True)
+    out = normalize_file_touch_paths(
+        [
+            {"file_path": "notes/a.md", "action": "written"},
+            {"file_path": str(install / "top.md"), "action": "written"},
+        ],
+        install,
+        agent_root=agent,
+    )
+    assert [t["file_path"] for t in out] == [
+        Path("personal/notes/a.md").as_posix(),
+        "top.md",
+    ]

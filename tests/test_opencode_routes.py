@@ -97,6 +97,14 @@ def test_opencode_chat_messages_render_session_history(
                         "tool": "write",
                         "state": {"status": "completed", "input": {"filePath": "notes.md"}},
                     },
+                    {
+                        "type": "tool",
+                        "tool": "shell",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "ciao file surface notes.md"},
+                        },
+                    },
                     {"type": "text", "text": "world"},
                 ],
             },
@@ -113,6 +121,12 @@ def test_opencode_chat_messages_render_session_history(
     )))
     rows = json.loads(response.body)
 
+    assert any(
+        row.get("tool_name") == "_filecard"
+        and row["file_path"] == "notes.md"
+        and row.get("action") == "surfaced"
+        for row in rows
+    )
     assert rows[0]["role"] == "user"
     assert rows[0]["content"] == "hello"
     assert rows[0]["images"] == ["image.png"]

@@ -702,6 +702,10 @@ def _file_touches(tool: str, raw: object) -> list[dict[str, str]] | None:
     """Paths a tool call writes, for the PWA's file-change cards."""
     if not isinstance(raw, Mapping):
         return None
+    if tool.lower() in {"shell", "bash"}:
+        from ciao.web.chat_broker import extract_file_touches
+
+        return extract_file_touches("bash", raw) or None
     action = {"write": "write", "edit": "edit", "patch": "edit"}.get(tool.lower())
     if action is None:
         return None
