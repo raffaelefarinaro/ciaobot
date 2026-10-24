@@ -175,6 +175,8 @@ the user to reload, never replayed automatically.
 
 ## Colors
 
+The Access & memory onboarding stage keeps filesystem scope separate from approval mode, states that Claude Auto is not a safety guarantee, and never treats OpenCode model instructions as enforced safeguards. Windows has no filesystem sandbox.
+
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
 
 - **Primary orange (`#fb923c`, the `amber` preset):** The brand accent and primary-action color. Use it for the current location, focus, progress, and the single most important action in a region. It replaced the earlier pink `#ff4d6d`, which sat about 15° of hue from the error red and made a primary action read as a failure. Workspaces may override it with a saved accent preset (`amber`, `pink`, `cyan`, `emerald`, `violet`, `blue`, `teal`, `lime`, `fuchsia`); a workspace that saved pink keeps it, and only an unset colour follows the default. Canvas and surface tokens stay fixed.
@@ -273,3 +275,14 @@ Borders are structural, not decorative. Active navigation is marked by a slim ac
 - Don't expose long prompts or diagnostics in full by default on mobile.
 - Don't copy custom styling into a host-native surface when platform conventions are clearer.
 - Don't introduce new colors, radii, shadows, or typefaces when an existing token serves the purpose.
+
+- **Onboarding location:** Ask for the main Ciaobot folder before the workspace name. Before provisioning, it is a candidate location (empty or existing-notes folders are both valid); after provisioning, show the actual path as read-only and direct changes through the guarded move flow. Remote browsers explain that the folder belongs on the Ciaobot computer. Typing never creates, moves, or saves anything; Continue is the explicit handoff to the next stage.
+
+The onboarding care stage follows the setup shell's calm, compact form rhythm: host availability guides the suggested local time, while the editable time and IANA zone are explicit controls. A clear saved/default status and inline error explain whether timing was written; keeping the packaged default is an explicit no-write choice.
+
+## Onboarding: runtime and model
+
+The runtime stage asks for a runtime, then an explicit model. Reported models and configured
+aliases never share a list: the first is evidence from a connected runtime, the second is a set
+of choices whose availability is unknown. Deferring is a first-class choice, not an error, and
+the stage never starts a provider or a model turn on its own.
