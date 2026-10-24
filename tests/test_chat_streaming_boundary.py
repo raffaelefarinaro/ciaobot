@@ -835,13 +835,24 @@ async def test_surfaced_touch_resolves_against_the_chat_agent_root(
                     {"file_path": "memory-vault/x.html", "action": "surfaced"}
                 ],
             ),
+            ToolUseEvent(
+                type="tool_use",
+                tool_name="Write",
+                tool_input="notes/new.md",
+                tool_use_id="call_2",
+                file_touches=[{"file_path": "notes/new.md", "action": "written"}],
+            ),
             ResultEvent(type="result", result="done"),
         ],
         agent_root,
     )
 
-    frames = {f["type"]: f for f in stream.buffered_events()}
-    assert frames["tool_use"]["file_touch"] == {
+    tool_frames = [f for f in stream.buffered_events() if f["type"] == "tool_use"]
+    assert tool_frames[0]["file_touch"] == {
         "file_path": Path("personal/memory-vault/x.html").as_posix(),
         "action": "surfaced",
+    }
+    assert tool_frames[1]["file_touch"] == {
+        "file_path": Path("personal/notes/new.md").as_posix(),
+        "action": "created",
     }

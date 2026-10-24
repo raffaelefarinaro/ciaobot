@@ -73,6 +73,7 @@ def test_opencode_chat_messages_render_session_history(
     """An opencode `ses_*` id must replay via read_thread, not the Claude path."""
     pcm = _manager(tmp_path)
     chat = _opencode_chat(pcm, "ses_003133027ffe")
+    (pcm._agent_root_for_chat(chat.chat_id) / "notes.md").write_text("hi")
     chat.user_turn_images["0"] = ["image.png"]
     pcm._save()
     thread = {
@@ -105,6 +106,14 @@ def test_opencode_chat_messages_render_session_history(
                             "input": {"command": "ciao file surface notes.md"},
                         },
                     },
+                    {
+                        "type": "tool",
+                        "tool": "shell",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "ciao file surface missing.md"},
+                        },
+                    },
                     {"type": "text", "text": "world"},
                 ],
             },
@@ -127,6 +136,7 @@ def test_opencode_chat_messages_render_session_history(
         and row.get("action") == "surfaced"
         for row in rows
     )
+    assert not any(row.get("file_path") == "missing.md" for row in rows)
     assert rows[0]["role"] == "user"
     assert rows[0]["content"] == "hello"
     assert rows[0]["images"] == ["image.png"]

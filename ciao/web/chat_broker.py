@@ -463,8 +463,7 @@ def normalize_file_touch_paths(
             try:
                 canonical = resolved.relative_to(root).as_posix()
             except ValueError:
-                if raw_path.is_absolute():
-                    canonical = str(resolved)
+                canonical = str(resolved)
         item["file_path"] = canonical
         if canonical in seen:
             continue
