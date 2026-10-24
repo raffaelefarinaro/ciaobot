@@ -16,6 +16,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -493,6 +494,7 @@ PLIST
         mkdir -p "$proposed/.runtime"
         printf '[]\n' > "$proposed/.runtime/workspaces.json"
         printf 'PWA_PORT=8443\n' > "$proposed/.env"
+        printf '%s\n' "$proposed" > "$HOME/bootstrap-workspace"
         "__PYTHON__" - "$HOME/Library/LaunchAgents/com.ciao.server.plist" <<'PLIST'
 import pathlib
 import plistlib
@@ -508,7 +510,14 @@ with path.open("wb") as handle:
 PLIST
         ;;
     installer)
-        if [ "${2:-}" = activate ] && [ -f "$HOME/fail-installer-activate" ]; then exit 1; fi
+        # `installer activate --json`: the folder the bootstrap provisioned.
+        if [ "${2:-}" = activate ]; then
+            if [ -f "$HOME/fail-installer-activate" ]; then
+                printf '{"ok": false, "error": "the handoff result is missing"}\n'
+                exit 1
+            fi
+            "__PYTHON__" -c 'import json, sys; print(json.dumps({"ok": True, "workspace": sys.argv[1], "port": 8443}))' "$(cat "$HOME/bootstrap-workspace")"
+        fi
         ;;
     service)
         if [ -f "$HOME/fail-ciao-service-start" ]; then exit 1; fi
@@ -698,11 +707,21 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         rewritten,
         flags=re.MULTILINE,
     )
+    # A fresh install probes its port with the engine's own bind; 8443 is
+    # whatever this machine runs there, so the copy probes a port just freed.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("0.0.0.0", 0))
+    fresh_port = probe.getsockname()[1]
+    probe.close()
+    rewritten = re.sub(
+        r"^FRESH_PORT=.*$", f"FRESH_PORT={fresh_port}", rewritten, count=1, flags=re.MULTILINE
+    )
     script = tmp_path / "install-engine.sh"
     script.write_text(rewritten, encoding="utf-8")
     script.chmod(0o755)
 
     return {
+        "fresh_port": fresh_port,
         "home": home,
         "script": script,
         "release": release,
@@ -767,8 +786,10 @@ def test_fresh_install_opens_the_bootstrap_without_a_suggestion(tmp_path: Path) 
     calls = _log(harness, "ciao-calls.log").splitlines()
     bootstrap = next(line for line in calls if line.startswith("run --installer-bootstrap"))
     assert "--installer-suggest-workspace" not in bootstrap
-    assert "Return to the browser tab to finish onboarding." in result.stdout
-    assert "  workspace:" not in result.stdout
+    assert "Ciaobot is running from the folder you chose." in result.stdout
+    assert f"  workspace: {harness['home'] / 'Ciaobot'}" in result.stdout
+    # The installer says the engine is running only after it answered.
+    assert "/api/startup-status" in _log(harness, "trace.log")
 
 
 @runs_the_sh_installer
@@ -866,6 +887,44 @@ def test_fresh_install_activation_failure_is_reported(tmp_path: Path) -> None:
         "11111111-2222-3333-4444-555555555555"
     ) in result.stderr
     assert _install_receipt(harness)["version"] == VERSION
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_refuses_a_held_port_before_the_wizard(tmp_path: Path) -> None:
+    """The bootstrap serves loopback only, so it would start on a port the
+    activated engine cannot bind; the installer refuses before the wizard."""
+    harness = _harness(tmp_path)
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("0.0.0.0", harness["fresh_port"]))
+    holder.listen(1)
+    try:
+        result = _run_installer(harness, "--version", VERSION)
+    finally:
+        holder.close()
+
+    assert result.returncode == 1, result.stdout
+    assert f"port {harness['fresh_port']} is already in use" in result.stderr
+    calls = _log(harness, "ciao-calls.log")
+    assert "run --installer-bootstrap" not in calls
+    assert "installer activate" not in calls
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_reports_an_engine_that_could_not_bind(tmp_path: Path) -> None:
+    """Activation succeeding is not the engine running: a bind failure after
+    the wizard is reported instead of sending the user back to the browser."""
+    harness = _harness(tmp_path)
+    (harness["home"] / "startup-port-in-use").write_text("8443", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "port 8443 is already in use" in result.stderr
+    assert "Return to the browser tab" not in result.stdout
+    assert "Setup is saved in the folder you chose, but Ciaobot is not answering yet." in result.stdout
 
 
 WELCOME_LINE = (
@@ -3926,7 +3985,7 @@ def test_ordinary_install_runs_the_browser_bootstrap(tmp_path: Path) -> None:
     assert len(bootstrap) == 1
     run_id = bootstrap[0].split("--installer-run-id ")[1].split()[0]
     assert f"--installer-suggest-workspace={workspace}" in bootstrap[0]
-    assert f"installer activate --run-id {run_id}" in calls
+    assert f"installer activate --run-id {run_id} --json" in calls
     assert not any(line.startswith("setup") for line in calls)
     # The folder did not exist when the wizard started: the installer had not
     # created it, and the suggestion is only a suggestion.
