@@ -62,3 +62,15 @@ def test_the_interview_is_reachable_on_request(tmp_path: Path) -> None:
     chat_id = manager.start_onboarding_interview(general.project_id)
     assert chat_id
     assert any(chat.title.endswith("👋") for chat in manager._chats.values())
+
+
+def test_the_interview_context_survives_a_reload(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    general = next(item for item in manager.list_projects("personal") if item.name == "General")
+    chat_id = manager.start_onboarding_interview(general.project_id)
+
+    reloaded = _manager(tmp_path)
+    chat = reloaded.get_chat(chat_id)
+    assert chat is not None
+    assert chat.handover_context_pending is True
+    assert len(chat.handover_messages) == 2

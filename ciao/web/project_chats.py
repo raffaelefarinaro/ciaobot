@@ -1887,6 +1887,9 @@ class ProjectChatManager:
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_msg},
         ]
+        # `create_chat()` already saved; the interview context was assigned after
+        # that, so persist it here or the messages vanish on the next reload.
+        self._save()
         return chat.chat_id
 
     def _onboarding_memory_categories(self, workspace: str) -> tuple[str, str]:
