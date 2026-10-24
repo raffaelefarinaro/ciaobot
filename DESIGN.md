@@ -166,6 +166,13 @@ A real chat reference links to that conversation: the visible label is the chat'
 
 The model picker has two intents. The composer chip only selects: a model change there is saved and never sends. The recovery picker, opened from a failed turn's *Switch model* or the retry card's *Continue with…*, is headed *Choose a model to retry immediately* and says that choosing retries and may incur usage charges, and that a Thinking level picked there applies to that retry, within the levels the current model offers. Choosing there retries exactly once — a pending deferred retry is fired, an error-bubble retry resends the original request with its images — while a provider change still asks for the handover confirmation and a cancelled or failed handover sends nothing. Recovery is discarded when the chat changes or the picker closes, and a rapid second choice cannot send twice. Thinking stays the app's chip control; in recovery a level is staged and validated against the chosen model, falling back to the provider default, and only then saved with the retry. The chips are the current model's set, in a recovery too: the pick applies the model and retries in one go, so there is no moment where they could follow a model the user has not chosen yet.
 
+The first-run onboarding journey has five persisted steps — **Location, Runtime,
+Access & memory, Care, Finish** — and six stage components: Access and Memory
+share one screen and advance the same persisted step only when both are ready.
+The shell owns navigation and progress writes; stages report readiness and
+perform their own domain save or explicit deferral. Conflicts are surfaced for
+the user to reload, never replayed automatically.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
