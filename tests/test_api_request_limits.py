@@ -554,6 +554,26 @@ def test_malformed_json_and_invalid_encoding_are_400_without_dispatch() -> None:
         assert called is False
 
 
+def test_empty_json_labelled_body_reaches_handler() -> None:
+    async def endpoint(request):
+        return Response(json.dumps({"size": len(await request.body())}), media_type="application/json")
+    app = TestClient(ApiRequestBodyLimitMiddleware(Starlette(routes=[
+        Route("/api/read", endpoint, methods=["GET", "POST"]),
+    ])))
+    for method in ("GET", "POST"):
+        response = app.request(method, "/api/read", headers={"content-type": "application/json"})
+        assert response.status_code == 200
+        assert response.json() == {"size": 0}
+
+
+def test_factory_admits_bodiless_get_with_the_pwa_json_header(tmp_path: Path) -> None:
+    # web/src/lib/api.ts sends Content-Type: application/json on every call.
+    client = TestClient(create_app(_config(tmp_path)), raise_server_exceptions=False)
+    client.cookies.set("ciao_session", make_serializer("test-secret").dumps({"user": "owner"}))
+    response = client.get("/api/workspaces", headers={"content-type": "application/json"})
+    assert response.status_code == 200
+
+
 def test_auth_denials_do_not_call_receive(tmp_path: Path) -> None:
     app = create_app(_config(tmp_path))
     async def run(origin: str | None, cookie: str | None) -> tuple[int, bool]:
