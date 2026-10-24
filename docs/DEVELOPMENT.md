@@ -213,6 +213,16 @@ recorded definition is the live one, that definition names the same destination,
 and the destination is a completed workspace; otherwise it reports what is
 uncertain and starts nothing.
 
+A fresh macOS install classifies the machine before creating anything: with no
+engine definition and no configured workspace it skips folder creation,
+`ciao setup` and service registration, runs `ciao run --installer-bootstrap` in
+the foreground (a `--workspace` is passed only as
+`--installer-suggest-workspace`), and activates the service from the matching
+handoff result with `ciao installer activate`. A cancel or guard refusal leaves
+a complete binary install that resumes with `ciao run --installer-bootstrap`,
+and `--no-start` provisions nothing. Migration and existing-workspace installs
+keep the `ciao setup` + `ciao service start` path, as does Linux.
+
 `--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool

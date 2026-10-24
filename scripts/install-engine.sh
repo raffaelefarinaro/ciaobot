@@ -1610,7 +1610,57 @@ install_step "could not write the install receipt" \
 # A client stops here on purpose. It gets no workspace resolved, no setup, no
 # service, no agent: the one thing it must not become is a second writer for a
 # runtime root a host owns.
+
+# A Mac with no engine definition and no configured workspace is onboarded in
+# the browser. This is decided before anything is created: the foreground
+# bootstrap provisions the destination the user confirms, and only a matching
+# handoff result activates the service. Migration and existing installs keep the
+# CLI setup path below.
+fresh_macos=0
+fresh_completed=0
+if [ "$migrate_path" = skip ] && [ "$(uname -s)" = Darwin ]; then
+    fresh_candidate=$workspace
+    [ -n "$fresh_candidate" ] || fresh_candidate="$HOME/Ciaobot"
+    case "$fresh_candidate" in
+        "~") fresh_candidate=$HOME ;;
+        "~/"*) fresh_candidate="$HOME/${fresh_candidate#"~/"}" ;;
+    esac
+    fresh_definition="$HOME/Library/LaunchAgents/$SERVER_LABEL.plist"
+    if [ ! -e "$fresh_definition" ] &&
+        ! is_set_up_workspace "$fresh_candidate" &&
+        ! is_set_up_workspace "$HOME/Ciaobot"; then
+        fresh_macos=1
+    fi
+fi
+
 if [ "$migrate_path" != client ]; then
+    if [ "$fresh_macos" -eq 1 ]; then
+        # Nothing is created here. `ciao run --installer-bootstrap` refuses to
+        # start on a machine that is not fresh, starts the wizard, and writes
+        # one handoff result only after setup succeeded; the parent activates
+        # the service from that result. A cancel or refusal leaves a complete
+        # binary install whose setup can be resumed.
+        if [ "$no_start" -eq 0 ]; then
+            run_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+            [ -n "$run_id" ] || fail "could not generate an installer run id"
+            set -- run --installer-bootstrap --installer-run-id "$run_id"
+            [ -z "$workspace" ] || set -- "$@" --installer-suggest-workspace "$workspace"
+            bootstrap_rc=0
+            "$ciao" "$@" || bootstrap_rc=$?
+            if [ "$bootstrap_rc" -ne 0 ]; then
+                echo "Ciaobot is installed, but setup did not finish. Nothing in a workspace was created or changed by this installer." >&2
+                echo "Resume setup with: ciao run --installer-bootstrap" >&2
+                exit "$bootstrap_rc"
+            fi
+            if ! "$ciao" installer activate --run-id "$run_id"; then
+                echo "Ciaobot is installed, but the background service did not start. Nothing in the chosen folder was deleted or moved." >&2
+                echo "Resume with: ciao installer activate --run-id $run_id" >&2
+                exit 1
+            fi
+            fresh_completed=1
+        fi
+        workspace=
+    else
     # --yes turns off every guard in `ciao setup` (a health check that never
     # comes up, a service silently re-pointed at a different workspace), so it
     # is passed only for the workspace this script detected the engine already
@@ -1682,9 +1732,10 @@ if [ "$migrate_path" != client ]; then
         3) echo "warning: ciao setup could not set up memory regions (see the warning above); continuing install" >&2 ;;
         *) abort_install "ciao setup failed" ;;
     esac
+    fi
 fi
 
-if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
+if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] && [ "$fresh_macos" -eq 0 ]; then
     # The workspace's own `.env` is the authority on the port, and setup has
     # just written it.
     port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
@@ -1863,10 +1914,20 @@ fi
 
 echo "Ciaobot engine $version installed."
 echo "  ciao:      $ciao"
-echo "  workspace: $workspace"
+[ -z "$workspace" ] || echo "  workspace: $workspace"
 configure_path
 url=
-if [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ]; then
+if [ "$fresh_macos" -eq 1 ]; then
+    if [ "$fresh_completed" -eq 1 ]; then
+        echo "Ciaobot is starting from the folder you chose. Return to the browser tab to finish onboarding."
+        echo "If you closed it, open http://localhost:8443 and log in with the password you set."
+        if [ -t 1 ] && command -v open >/dev/null 2>&1; then
+            open "http://localhost:8443" >/dev/null 2>&1 || true
+        fi
+    else
+        echo "Setup was not started. Resume with: ciao run --installer-bootstrap"
+    fi
+elif [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ]; then
     # Printed to the terminal and nowhere else: the URL is a one-time
     # credential that signs the person at this keyboard in. A failure must not
     # reach the user as "Open Ciaobot: " with nothing after it.
@@ -1885,6 +1946,6 @@ fi
 if [ "$migrate_path" != client ] && [ -f "$workspace/.runtime/welcome-pending" ]; then
     echo "Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager."
 fi
-if [ -t 1 ] && [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ] && command -v open >/dev/null 2>&1; then
+if [ -t 1 ] && [ "$fresh_macos" -eq 0 ] && [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ] && command -v open >/dev/null 2>&1; then
     open "$url" >/dev/null 2>&1 || true
 fi
