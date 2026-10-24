@@ -683,6 +683,12 @@ class ChatInfo:
     # project/workspace digest or a new provider session re-sends them.
     context_digest: str = ""
     context_session_id: str = ""
+    # Provider session that has already received the linked repo's
+    # instructions text inline; a later repo change in it gets a pointer.
+    instructions_session_id: str = ""
+    # Set while a turn whose capsule inlines the instructions is in flight;
+    # committed to instructions_session_id with the context marker. Not saved.
+    instructions_inline_pending: bool = False
     # Raw AskUserQuestion JSON (`{"questions": [...]}`) when the model paused
     # this chat on a question the user hasn't answered yet. Set when the
     # headless CLI fires AskUserQuestion (which we interrupt so it can't
@@ -1224,6 +1230,7 @@ class ProjectChatManager:
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
                 context_digest=cd.get("context_digest", ""),
                 context_session_id=cd.get("context_session_id", ""),
+                instructions_session_id=cd.get("instructions_session_id", ""),
                 pending_question=cd.get("pending_question", ""),
                 pending_permission=cd.get("pending_permission", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
@@ -1344,6 +1351,7 @@ class ProjectChatManager:
                     "handover_context_pending": c.handover_context_pending,
                     "context_digest": c.context_digest,
                     "context_session_id": c.context_session_id,
+                    "instructions_session_id": c.instructions_session_id,
                     "pending_question": c.pending_question,
                     "pending_permission": c.pending_permission,
                     "pending_queue": c.pending_queue,
@@ -5401,20 +5409,25 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        # The repository instructions are inlined only on the first stable
-        # send of a provider session. A re-send inside a session that already
-        # took the stable block (code mode switched on, AGENTS.md edited, repo
-        # linked mid-chat) points at the file instead; `ciao chat update --code
-        # on` already hands the agent its text.
-        session_primed = bool(
+        # The repository instructions are inlined once per provider session:
+        # the first time they are attached, whenever that is (turn 1, or code
+        # mode switched on mid-session from the PWA). A later re-send in a
+        # session that already took the text (AGENTS.md edited, code mode
+        # toggled again) points at the file instead. A cleared context marker
+        # (compaction, cancelled first turn) inlines it again.
+        already_inlined = bool(
             chat.context_digest
             and chat.session_id
             and chat.context_session_id == chat.session_id
+            and chat.instructions_session_id == chat.session_id
         )
         repo_block, _repo_fp, repo_line = self._linked_repo_context(
-            chat, project, inline_instructions=not session_primed
+            chat, project, inline_instructions=not already_inlined
         )
         include_stable = self._needs_stable_context(chat)
+        chat.instructions_inline_pending = bool(
+            include_stable and chat.code_mode and repo_block and not already_inlined
+        )
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
         # it can write; a machine-scope chat gets no file-access line at all.
@@ -6119,6 +6132,9 @@ class ProjectChatManager:
     def _commit_context_marker(
         chat: ChatInfo, request: AgentRequest, session_id: str
     ) -> bool:
+        if chat.instructions_inline_pending and session_id:
+            chat.instructions_session_id = session_id
+        chat.instructions_inline_pending = False
         if not request.context_digest or not session_id:
             return False
         if (

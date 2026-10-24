@@ -369,16 +369,19 @@ def test_the_linked_repo_rules_keep_notes_out_of_the_repo() -> None:
 
 
 def _prime(manager, chat, session_id: str = "ses_1") -> None:  # type: ignore[no-untyped-def]
-    """Record that the stable block went out in provider session *session_id*."""
+    """Send a turn's capsule and commit its context marker in provider session *session_id*."""
+    from types import SimpleNamespace
+
     chat.session_id = session_id
-    chat.context_digest = manager._stable_context_marker(chat)[0]
-    chat.context_session_id = session_id
+    manager._build_prompt_prefix(chat)
+    digest = manager._stable_context_marker(chat)[0]
+    manager._commit_context_marker(chat, SimpleNamespace(context_digest=digest), session_id)
 
 
-def test_code_mode_switched_on_mid_session_points_at_agents_md(
+def test_code_mode_switched_on_mid_session_inlines_the_instructions_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The stable block is re-sent, but the instructions text is not repeated."""
+    """Switched on from the PWA, the agent has never seen the text: inline it, then point."""
     manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
     chat.code_mode = False
     _prime(manager, chat)
@@ -386,8 +389,14 @@ def test_code_mode_switched_on_mid_session_points_at_agents_md(
 
     assert manager._needs_stable_context(chat)
     prefix = manager._build_prompt_prefix(chat)
-    assert "[Linked repository]" in prefix
     assert "Code-work rules" in prefix
+    assert "Run make test" in prefix
+
+    _prime(manager, chat)  # that turn went out
+    chat.code_mode = False
+    _prime(manager, chat)
+    chat.code_mode = True
+    prefix = manager._build_prompt_prefix(chat)
     assert f"read {repo}/AGENTS.md" in prefix
     assert "Run make test" not in prefix
 
@@ -397,6 +406,7 @@ def test_agents_md_edited_mid_session_points_at_the_file(
 ) -> None:
     manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
     _prime(manager, chat)
+    assert chat.instructions_session_id == "ses_1"
     (repo / "AGENTS.md").write_text("Run make check", encoding="utf-8")
 
     prefix = manager._build_prompt_prefix(chat)
