@@ -6,8 +6,9 @@ import { useOnboardingPreferences } from '../useOnboardingPreferences'
 
 vi.mock('../../lib/api', () => ({ api: { get: vi.fn() } }))
 
+beforeEach(() => { setActivePinia(createPinia()); vi.resetAllMocks() })
+
 describe('useOnboardingPreferences', () => {
-  beforeEach(() => { setActivePinia(createPinia()); vi.clearAllMocks() })
 
   it('preselects a pending workspace but does not save until explicitly requested', async () => {
     const progress = { revision: 1, schema: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: { studio: { status: 'in_progress', step: 'access_memory' } } }
@@ -74,5 +75,36 @@ describe('onboarding memory preferences consent', () => {
     const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
     await prefs.load()
     expect(prefs.draft.memoryHandover).toBe('off')
+  })
+})
+
+describe('onboarding memory preferences failures', () => {
+  it('keeps the draft after a failed save', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'off', acting_available: true }
+        : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
+    ) as never)
+    const store = useProjectStore()
+    store.updateWorkspace = vi.fn().mockRejectedValue(new Error('offline')) as never
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    await prefs.load()
+    prefs.draft.acknowledged = true
+    expect(await prefs.saveMemoryHandover()).toBe(false)
+    expect(prefs.draft.memoryHandover).toBe('all')
+    expect(prefs.savedHandover.value).toBe('off')
+    expect(prefs.error.value).toContain('offline')
+  })
+
+  it('reports an unavailable trusted service without weakening the choice', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'off', acting_available: false }
+        : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
+    ) as never)
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    await prefs.load()
+    expect(prefs.actingAvailable.value).toBe(false)
+    expect(prefs.draft.memoryHandover).toBe('all')
   })
 })
