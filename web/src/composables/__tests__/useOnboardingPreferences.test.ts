@@ -3,8 +3,9 @@ import { setActivePinia, createPinia } from 'pinia'
 import { api } from '../../lib/api'
 import { useProjectStore } from '../../stores/projects'
 import { useOnboardingPreferences } from '../useOnboardingPreferences'
+import { useOnboardingStore } from '../../stores/onboarding'
 
-vi.mock('../../lib/api', () => ({ api: { get: vi.fn() } }))
+vi.mock('../../lib/api', () => ({ api: { get: vi.fn(), patch: vi.fn(), post: vi.fn() } }))
 
 beforeEach(() => { setActivePinia(createPinia()); vi.resetAllMocks() })
 
@@ -110,26 +111,34 @@ describe('onboarding memory preferences failures', () => {
 })
 
 describe('onboarding memory preferences conflict', () => {
-  it('keeps the saved handover when a later progress read conflicts', async () => {
+  it('keeps the saved handover when a later progress write conflicts', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
       url.startsWith('/api/proposals/handover')
         ? { handover: 'off', acting_available: true }
         : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
     ) as never)
     const store = useProjectStore()
-    store.updateWorkspace = vi.fn().mockResolvedValue({}) as never
+    const update = vi.spyOn(store, 'updateWorkspace').mockResolvedValue(undefined as never)
     const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
     await prefs.load()
     prefs.draft.acknowledged = true
     expect(await prefs.saveMemoryHandover()).toBe(true)
-    expect(prefs.savedHandover.value).toBe('all')
 
-    // The shell's progress PATCH can then lose a revision race; that must not
-    // undo or rewrite the setting that was already saved.
-    vi.mocked(api.get).mockRejectedValue({ status: 409, message: 'conflict' })
-    await prefs.load()
+    // The shell then advances the journey and loses the revision race. That
+    // conflict must surface without restoring or re-writing the saved choice.
+    const onboarding = useOnboardingStore()
+    onboarding.receipt = {
+      schema: 1, revision: 3,
+      installation: { status: 'in_progress', step: 'care' },
+      workspaces: {},
+    }
+    vi.mocked(api.patch).mockRejectedValue({ status: 409, message: 'conflict' })
+    vi.mocked(api.get).mockResolvedValue({ schema: 1, revision: 4, installation: { status: 'in_progress', step: 'care' }, workspaces: {} } as never)
+
+    expect(await onboarding.setStep({ kind: 'installation' }, 'care')).toBe(false)
+    expect(onboarding.conflict).toBe(true)
     expect(prefs.savedHandover.value).toBe('all')
-    expect(prefs.draft.memoryHandover).toBe('all')
-    expect(prefs.error.value).toContain('conflict')
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(update).toHaveBeenCalledWith('personal', { memory_handover: 'all' })
   })
 })
