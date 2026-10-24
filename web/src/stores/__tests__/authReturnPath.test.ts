@@ -27,4 +27,11 @@ describe('safeReturnPath', () => {
     expect(safeReturnPath('/settings?setup_token=abc')).toBeNull()
     expect(safeReturnPath(null)).toBeNull()
   })
+
+  it('rejects a destination that normalizes into the rejected shapes', () => {
+    // `/x/../login` resolves to the login page; `%73` decodes to `s`.
+    expect(safeReturnPath('/x/../login')).toBeNull()
+    expect(safeReturnPath('/?%73etup_token=abc')).toBeNull()
+    expect(safeReturnPath('/?token=abc')).toBeNull()
+  })
 })

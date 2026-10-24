@@ -15,12 +15,17 @@ export function safeReturnPath(requested: string | null | undefined): string | n
   if (!requested.startsWith('/') || requested.startsWith('//') || requested.includes('\\')) return null
   if (/^\/login(?:[/?#]|$)/.test(requested)) return null
   if (/[?&](?:setup_token|token)=/i.test(requested)) return null
+  let resolved: URL
   try {
-    const resolved = new URL(requested, window.location.origin)
-    if (resolved.origin !== window.location.origin) return null
+    resolved = new URL(requested, window.location.origin)
   } catch {
     return null
   }
+  if (resolved.origin !== window.location.origin) return null
+  // Check what the browser will actually visit: `/x/../login` normalizes to the
+  // login page, and `?%73etup_token=` decodes to a setup token.
+  if (/^\/login(?:\/|$)/.test(resolved.pathname)) return null
+  if (resolved.searchParams.has("setup_token") || resolved.searchParams.has("token")) return null
   return requested
 }
 

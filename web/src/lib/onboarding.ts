@@ -46,3 +46,20 @@ export function onboardingProgress(receipt: OnboardingReceipt | null, target: On
   if (!receipt) return null
   return target.kind === 'installation' ? receipt.installation : receipt.workspaces[target.name] ?? null
 }
+
+/**
+ * Whether the shell may advance from `step`. The shared access/memory screen
+ * has two owners, so it advances only when both are ready and neither is busy
+ * or reporting an error; every other step follows its own stage's readiness.
+ */
+export function readyToAdvance(
+  step: OnboardingStep,
+  shell: StageState,
+  access?: StageState | null,
+  memory?: StageState | null,
+): boolean {
+  if (step !== 'access_memory') return shell.canContinue
+  if (!access || !memory) return false
+  const settled = (state: StageState) => state.canContinue && !state.pending && !state.error
+  return settled(access) && settled(memory)
+}

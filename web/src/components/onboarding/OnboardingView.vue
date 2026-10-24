@@ -10,11 +10,12 @@ import OnboardingMemoryStage from './OnboardingMemoryStage.vue'
 import OnboardingCareStage from './OnboardingCareStage.vue'
 import OnboardingFinishStage from './OnboardingFinishStage.vue'
 import { useOnboardingStore } from '../../stores/onboarding'
-import type {
-  OnboardingStageContext,
-  OnboardingStep,
-  OnboardingTarget,
-  StageState,
+import {
+  readyToAdvance,
+  type OnboardingStageContext,
+  type OnboardingStep,
+  type OnboardingTarget,
+  type StageState,
 } from '../../lib/onboarding'
 
 const route = useRoute()
@@ -90,8 +91,7 @@ onMounted(load)
 async function advance(): Promise<void> {
   // On the shared screen readiness lives in the two stage states; the shell's
   // own flag is deliberately off there so Memory's save owns the action.
-  const ready = step.value === 'access_memory' ? combinedReady.value : state.value.canContinue
-  if (!ready || busy.value || !contextReady.value) return
+  if (!readyToAdvance(step.value, state.value, accessState.value, memoryState.value) || busy.value || !contextReady.value) return
   const order: OnboardingStep[] = ['location', 'runtime', 'access_memory', 'care', 'finish']
   if (step.value === 'finish') {
     if (await store.complete(target.value)) await router.replace(validReturn())
