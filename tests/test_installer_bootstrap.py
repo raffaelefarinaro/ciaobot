@@ -12,6 +12,19 @@ from ciao.config import CiaoConfig
 from ciao.web.app import create_app
 
 
+def test_bootstrap_scratch_is_never_an_upgrade_migration_target(tmp_path):
+    from ciao.workspace_reroot import migrate_if_needed
+
+    scratch = tmp_path / "scratch"
+    config = SimpleNamespace(
+        bootstrap_mode=True,
+        workspace_root=scratch,
+        state_path=scratch / "runtime" / "state.json",
+    )
+    assert migrate_if_needed(config) == {"status": "skipped"}
+    assert not scratch.exists()
+
+
 def _parser_run(argv: list[str]):
     parser = cli.build_parser()
     return parser.parse_args(argv)
