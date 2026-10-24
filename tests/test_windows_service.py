@@ -437,3 +437,52 @@ def test_task_workspace_is_the_discovery_identity(tmp_path: Path) -> None:
 
     assert ws.task_workspace(definition) == Path(WORKSPACE)
     assert ws.task_workspace(tmp_path / "absent.xml") is None
+
+def test_engine_task_registered_reads_a_real_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    completed = subprocess.CompletedProcess(
+        ["schtasks.exe"], 0,
+        stdout='\\Ciaobot\\Engine,"N/A","Ready"\n\\Other\\Task,"N/A","Disabled"\n',
+        stderr="",
+    )
+    monkeypatch.setattr(ws.subprocess, "run", _Schtasks(completed))
+    assert ws.engine_task_registered() is True
+
+
+def test_engine_task_registered_treats_an_empty_query_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = subprocess.CompletedProcess(["schtasks.exe"], 0, stdout="", stderr="")
+    monkeypatch.setattr(ws.subprocess, "run", _Schtasks(completed))
+    assert ws.engine_task_registered() is False
+
+
+@pytest.mark.parametrize("stdout", ["garbage\n", '"unterminated\n', "one,two\n", 'x,"y"\n'])
+def test_engine_task_registered_refuses_unrecognised_queries(
+    stdout: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    completed = subprocess.CompletedProcess(["schtasks.exe"], 0, stdout=stdout, stderr="")
+    monkeypatch.setattr(ws.subprocess, "run", _Schtasks(completed))
+    with pytest.raises(ws.WindowsServiceError):
+        ws.engine_task_registered()
+
+
+def test_engine_task_registered_surfaces_a_failed_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed = subprocess.CompletedProcess(
+        ["schtasks.exe"], 1, stdout="", stderr="ERROR: Access is denied."
+    )
+    monkeypatch.setattr(ws.subprocess, "run", _Schtasks(failed))
+    with pytest.raises(ws.WindowsServiceError, match="Access is denied."):
+        ws.engine_task_registered()
+
+
+def test_engine_task_registered_surfaces_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, 10.0)
+
+    monkeypatch.setattr(ws.subprocess, "run", fake)
+    with pytest.raises(ws.WindowsServiceError, match="timed out"):
+        ws.engine_task_registered()

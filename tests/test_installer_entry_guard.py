@@ -86,3 +86,98 @@ def test_configured_cwd_environment_and_legacy_default_root_refuse(monkeypatch, 
     (home / "Ciaobot/.runtime/workspaces.json").touch()
     with pytest.raises(install_discovery.InstallerEntryRefused):
         install_discovery.require_fresh_installer_entry(environ={}, cwd=tmp_path.parent)
+
+
+def _deny(path: Path) -> Path:
+    path.chmod(0o000)
+    return path
+
+
+def _restore(path: Path) -> None:
+    path.chmod(0o700)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_unreadable_launch_agents_directory_refuses_instead_of_reporting_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env, home = _fresh(monkeypatch, tmp_path)
+    live = home / "Library/LaunchAgents"
+    live.mkdir(parents=True)
+    (live / f"{macos_service.SERVER_LABEL}.plist").write_text("bad")
+    _deny(live)
+    try:
+        with pytest.raises(install_discovery.InstallerEntryRefused):
+            install_discovery.require_fresh_installer_entry(environ=env, cwd=tmp_path)
+    finally:
+        _restore(live)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_unreadable_legacy_dotenv_refuses_instead_of_reporting_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env, _ = _fresh(monkeypatch, tmp_path)
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("CIAO_WORKSPACES=/somewhere\n", encoding="utf-8")
+    _deny(dotenv)
+    try:
+        with pytest.raises(install_discovery.InstallerEntryRefused):
+            install_discovery.require_fresh_installer_entry(environ=env, cwd=tmp_path)
+    finally:
+        _restore(dotenv)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_unreadable_registry_directory_refuses_instead_of_reporting_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env, _ = _fresh(monkeypatch, tmp_path)
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text("{}", encoding="utf-8")
+    _deny(runtime)
+    try:
+        with pytest.raises(install_discovery.InstallerEntryRefused):
+            install_discovery.require_fresh_installer_entry(environ=env, cwd=tmp_path)
+    finally:
+        _restore(runtime)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_unreadable_task_directory_refuses_instead_of_reporting_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env, _ = _fresh(monkeypatch, tmp_path, platform="win32")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    service = windows_service.live_task_dir()
+    service.mkdir(parents=True)
+    (service / windows_service.TASK_FILE_NAME).write_text("bad")
+    _deny(service)
+    try:
+        with pytest.raises(install_discovery.InstallerEntryRefused):
+            install_discovery.require_fresh_installer_entry(environ=env, cwd=tmp_path)
+    finally:
+        _restore(service)
+
+
+def test_unreadable_dotenv_is_not_silently_absent_for_the_strict_helper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The permissive legacy reader still returns ``{}``; the guard does not."""
+    from ciao.macos_service import read_dotenv
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("CIAO_WORKSPACES=/somewhere\n", encoding="utf-8")
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        _deny(dotenv)
+        try:
+            assert read_dotenv(dotenv) == {}
+            with pytest.raises(install_discovery.InstallerEntryRefused):
+                install_discovery._strict_set_up_workspace(tmp_path)
+        finally:
+            _restore(dotenv)

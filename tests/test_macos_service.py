@@ -1875,3 +1875,74 @@ def test_cli_start_reports_the_verified_identity(tmp_path: Path, monkeypatch, ca
     assert payload["details"]["verified"] is True
     assert payload["details"]["startup_id"] == "run-7"
     assert payload["details"]["pid"] == 4242
+
+
+def test_server_job_registered_reads_a_real_launchctl_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command, 0,
+            stdout="PID\tStatus\tLabel\n4242\t0\tcom.ciao.server\n-\t0\tother.job\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(macos_service.subprocess, "run", fake)
+    assert macos_service.server_job_registered() is True
+
+
+def test_server_job_registered_treats_a_header_only_listing_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command, 0, stdout="PID\tStatus\tLabel\n", stderr=""
+        )
+
+    monkeypatch.setattr(macos_service.subprocess, "run", fake)
+    assert macos_service.server_job_registered() is False
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "",
+        "garbage\n",
+        "PID\tStatus\tLabel\ncom.ciao.server\n",
+        "PID\tStatus\tLabel\nnot-a-pid\t0\tcom.ciao.server\n",
+        "Job\tState\tLabel\n-\t0\tcom.ciao.server\n",
+    ],
+)
+def test_server_job_registered_refuses_unrecognised_listings(
+    stdout: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(macos_service.subprocess, "run", fake)
+    with pytest.raises(RuntimeError):
+        macos_service.server_job_registered()
+
+
+def test_server_job_registered_surfaces_a_failed_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command, 1, stdout="", stderr="launchctl: bad domain"
+        )
+
+    monkeypatch.setattr(macos_service.subprocess, "run", fake)
+    with pytest.raises(RuntimeError, match="bad domain"):
+        macos_service.server_job_registered()
+
+
+def test_server_job_registered_surfaces_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, 10.0)
+
+    monkeypatch.setattr(macos_service.subprocess, "run", fake)
+    with pytest.raises(RuntimeError, match="Could not query launchd"):
+        macos_service.server_job_registered()

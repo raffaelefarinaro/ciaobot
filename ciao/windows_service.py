@@ -332,25 +332,44 @@ def _failure(action: str, completed: subprocess.CompletedProcess[str]) -> Window
     return WindowsServiceError(f"schtasks {action} failed: {detail}")
 
 
-def engine_task_registered() -> bool:
-    """Strictly query Task Scheduler; malformed or failed output is unknown."""
+def parse_task_query(stdout: str) -> set[str]:
+    """Task names from a ``/Query /FO CSV /NH`` response.
+
+    ``/NH`` suppresses the header, so an empty response is Task Scheduler's
+    legitimate "no tasks". Every other row must have the documented
+    ``TaskName, Next Run Time, Status`` columns: CSV quoting rules alone would
+    accept arbitrary one-column text as a task name.
+    """
     import csv
     import io
 
+    if not stdout.strip():
+        return set()
+    try:
+        rows = list(csv.reader(io.StringIO(stdout), strict=True))
+    except csv.Error as exc:
+        raise WindowsServiceError("Could not parse scheduled task query") from exc
+    names: set[str] = set()
+    for row in rows:
+        if not any(field.strip() for field in row):
+            continue
+        if len(row) < 3:
+            raise WindowsServiceError(
+                f"Unrecognised scheduled task query row: {row!r}"
+            )
+        names.add(row[0].strip().casefold())
+    return names
+
+
+def engine_task_registered() -> bool:
+    """Strictly query Task Scheduler; malformed or failed output is unknown."""
     try:
         completed = _schtasks("/Query", "/FO", "CSV", "/NH")
     except Exception as exc:
         raise WindowsServiceError(f"Could not query scheduled tasks: {exc}") from exc
     if completed.returncode != 0:
         raise _failure("/Query", completed)
-    try:
-        rows = list(csv.reader(io.StringIO(completed.stdout or ""), strict=True))
-    except csv.Error as exc:
-        raise WindowsServiceError("Could not parse scheduled task query") from exc
-    for row in rows:
-        if row and row[0].strip().casefold() == TASK_NAME.casefold():
-            return True
-    return False
+    return TASK_NAME.casefold() in parse_task_query(completed.stdout or "")
 
 
 def task_exists(name: str = TASK_NAME) -> bool:

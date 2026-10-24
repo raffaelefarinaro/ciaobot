@@ -181,12 +181,17 @@ class ServiceResult:
 
 
 def read_dotenv(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
     except OSError:
-        return values
-    for raw in lines:
+        return {}
+    return parse_dotenv(text)
+
+
+def parse_dotenv(text: str) -> dict[str, str]:
+    """Parse ``KEY=value`` lines; the caller decides how the file was read."""
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -318,6 +323,32 @@ def _loaded_definition(uid: int, runner: Runner) -> tuple[bool, list[str] | None
     return loaded, arguments
 
 
+_LAUNCHCTL_LIST_HEADER = ("pid", "status", "label")
+
+
+def parse_launchctl_list(stdout: str) -> set[str]:
+    """Labels from ``launchctl list``; unrecognised output is an error.
+
+    ``launchctl list`` always prints the ``PID Status Label`` header, even with
+    no jobs loaded, so an empty or differently shaped response is not evidence
+    that nothing is registered. Rows are ``PID``, exit status (both ``-`` or an
+    integer) and the label.
+    """
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines or tuple(field.casefold() for field in lines[0].split()) != _LAUNCHCTL_LIST_HEADER:
+        raise RuntimeError("launchctl list returned unrecognised output")
+    labels: set[str] = set()
+    for line in lines[1:]:
+        fields = line.split()
+        if (
+            len(fields) != 3
+            or not all(field == "-" or field.isdigit() for field in fields[:2])
+        ):
+            raise RuntimeError(f"launchctl list returned a malformed row: {line!r}")
+        labels.add(fields[2])
+    return labels
+
+
 def server_job_registered() -> bool:
     """Strictly query launchd for the engine label; uncertainty is an error."""
     try:
@@ -329,11 +360,7 @@ def server_job_registered() -> bool:
         raise RuntimeError(f"Could not query launchd: {exc}") from exc
     if completed.returncode != 0:
         raise RuntimeError(f"launchctl list failed: {(completed.stderr or '').strip()}")
-    for line in (completed.stdout or "").splitlines():
-        fields = line.split()
-        if fields and fields[-1] == SERVER_LABEL:
-            return True
-    return False
+    return SERVER_LABEL in parse_launchctl_list(completed.stdout or "")
 
 
 def _loaded_job(
