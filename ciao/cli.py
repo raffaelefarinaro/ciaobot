@@ -1145,9 +1145,11 @@ def setup_workspace(
     # already holds a `.env` of its own (a notes folder or a project checkout).
     first_setup = not workspaces_registry.exists()
     if first_setup and receipt.installation.status == "in_progress":
-        from ciao.app_settings import AppSettingsStore
+        from ciao.app_settings import AppSettingsStore, needs_new_install_backup_seed
 
-        AppSettingsStore(runtime_root / "app_settings.json").seed_new_install_backup_default()
+        settings_path = runtime_root / "app_settings.json"
+        if needs_new_install_backup_seed(settings_path):
+            AppSettingsStore(settings_path).seed_new_install_backup_default()
     registered_vaults = _setup_registry_vaults(
         workspaces_registry,
         workspace_root=root,

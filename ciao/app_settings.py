@@ -184,9 +184,10 @@ class AppSettings:
     """
 
     # The unattended backup service (ciao/backup_service.py). `backup_enabled`
-    # is the owner's standing decision and defaults on, so an existing install
-    # keeps the branch push it has always had, and a fresh one is backed up
-    # without anybody configuring anything; `backup_paused` is a hold they can
+    # is the owner's standing decision and defaults on for existing installs,
+    # so they keep the branch push they have always had; a genuinely new
+    # install is seeded to false at setup and enables backup explicitly (the
+    # backup settings and the guided setup). `backup_paused` is a hold they can
     # lift. The three timestamps/commit below are the service's own record of
     # what it has already done.
     #
@@ -400,6 +401,23 @@ def _migrate_global_insights_model(raw: dict, settings: AppSettings) -> bool:
         current[provider] = model
         settings.provider_insights_models = _clean_provider_map(current) or None
     return True
+
+
+def needs_new_install_backup_seed(path: Path) -> bool:
+    """Whether ``path`` still has no explicit backup decision.
+
+    Checked before constructing :class:`AppSettingsStore`, because loading it
+    runs schema migrations that rewrite the file: asking "may I seed?" must not
+    change the bytes of a settings file that already carries the owner's
+    choice. An unreadable or non-object file is not eligible either.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return isinstance(raw, dict) and not isinstance(raw.get("backup_enabled"), bool)
 
 
 class AppSettingsStore:

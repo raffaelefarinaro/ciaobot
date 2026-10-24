@@ -880,3 +880,48 @@ def test_non_new_install_does_not_seed_backup(
     path = runtime / "app_settings.json"
     if path.exists():
         assert "backup_enabled" not in json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_an_explicit_settings_file_is_not_rewritten_by_the_seed_check(
+    tmp_path: Path,
+) -> None:
+    """Asking "may I seed?" must not migrate a file that already has the choice.
+
+    Loading `AppSettingsStore` runs a schema migration, so eligibility is
+    decided from the bytes before the store is built.
+    """
+    from ciao.onboarding import ensure_receipt
+
+    workspace = tmp_path / "workspace"
+    runtime = workspace / ".runtime"
+    runtime.mkdir(parents=True)
+    ensure_receipt(runtime, established_install=False)
+    settings = runtime / "app_settings.json"
+    original = {
+        "backup_enabled": True,
+        "backup_paused": True,
+        "insights_model": "claude-sonnet-4-5",
+    }
+    settings.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
+    before = settings.read_bytes()
+
+    setup_workspace(workspace)
+
+    assert settings.read_bytes() == before
+
+
+def test_rerun_with_an_existing_registry_and_pending_receipt_does_not_seed(
+    tmp_path: Path,
+) -> None:
+    """Only the first setup seeds; a rerun keeps whatever the file says."""
+    workspace = tmp_path / "workspace"
+    setup_workspace(workspace)
+    settings = workspace / ".runtime" / "app_settings.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    payload.pop("backup_enabled", None)
+    settings.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    before = settings.read_bytes()
+
+    setup_workspace(workspace)
+
+    assert settings.read_bytes() == before
