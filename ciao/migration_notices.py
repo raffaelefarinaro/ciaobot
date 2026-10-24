@@ -333,6 +333,10 @@ def vault_location_findings(config: Any) -> list[VaultLocationFinding]:
     lister = getattr(config, "workspace_names", None)
     if not callable(resolver) or not callable(standardizer) or not callable(lister):
         return []
+    try:
+        install_root: Path | None = Path(config.workspace_root).resolve()
+    except Exception:  # noqa: BLE001 — advisory; a bad config must not fail
+        install_root = None
     findings: list[VaultLocationFinding] = []
     for name in lister():
         try:
@@ -345,6 +349,10 @@ def vault_location_findings(config: Any) -> list[VaultLocationFinding]:
         # to relocate, and offering a move for a path that is not there is the
         # unactionable tile operators learn to ignore.
         if actual == standard or not actual.is_dir():
+            continue
+        # An existing notes folder kept in place by setup is the install folder
+        # itself: a supported layout, and one `vault-relocate` refuses anyway.
+        if actual == install_root:
             continue
         findings.append(
             VaultLocationFinding(workspace=str(name), actual=actual, standard=standard)
