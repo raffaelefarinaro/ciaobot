@@ -379,7 +379,11 @@ def engine_task_registered() -> bool:
         raise WindowsServiceError(f"Could not query scheduled tasks: {exc}") from exc
     if completed.returncode != 0:
         raise _failure("/Query", completed)
-    return TASK_NAME.casefold() in parse_task_query(completed.stdout or "")
+    if completed.stdout is None:
+        # No output at all is not the same fact as an empty /NH response:
+        # Task Scheduler would have printed the latter.
+        raise WindowsServiceError("Scheduled task query returned no output")
+    return TASK_NAME.casefold() in parse_task_query(completed.stdout)
 
 
 def task_exists(name: str = TASK_NAME) -> bool:

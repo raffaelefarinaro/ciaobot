@@ -510,3 +510,12 @@ def test_engine_task_registered_reads_a_utf16_leaked_bom_query(
     )
     monkeypatch.setattr(ws.subprocess, "run", _Schtasks(completed))
     assert ws.engine_task_registered() is True
+
+
+def test_engine_task_registered_refuses_an_unread_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = subprocess.CompletedProcess(["schtasks.exe"], 0, stdout=None, stderr="")
+    monkeypatch.setattr(ws.subprocess, "run", _Schtasks(completed))
+    with pytest.raises(ws.WindowsServiceError, match="no output"):
+        ws.engine_task_registered()
