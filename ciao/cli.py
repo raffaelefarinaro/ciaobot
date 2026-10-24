@@ -1089,7 +1089,7 @@ def setup_workspace(
 
     runtime_root = root / ".runtime"
     receipt_created = read_receipt(runtime_root) is None
-    ensure_receipt(runtime_root, established_install=is_set_up_workspace(root))
+    receipt = ensure_receipt(runtime_root, established_install=is_set_up_workspace(root))
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     if receipt_created:
@@ -1144,6 +1144,12 @@ def setup_workspace(
     # No registry yet means this folder has never been set up, even when it
     # already holds a `.env` of its own (a notes folder or a project checkout).
     first_setup = not workspaces_registry.exists()
+    if first_setup and receipt.installation.status == "in_progress":
+        from ciao.app_settings import AppSettingsStore, needs_new_install_backup_seed
+
+        settings_path = runtime_root / "app_settings.json"
+        if needs_new_install_backup_seed(settings_path):
+            AppSettingsStore(settings_path).seed_new_install_backup_default()
     registered_vaults = _setup_registry_vaults(
         workspaces_registry,
         workspace_root=root,
