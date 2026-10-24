@@ -28,6 +28,9 @@ dependencies = [
   # certifi before 2026.10.19 still trusts the distrusted emSign roots;
   # `httpx` and `requests` accept any certifi.
   "certifi>=2026.10.19",
+  # opentelemetry-api before 1.45.1 parses tracestate without bounds
+  # (GHSA-xcq7-p3pf-p88h); `claude-agent-sdk[otel]` accepts older releases.
+  "opentelemetry-api>=1.45.1",
   # Agent-facing control plane shared by Claude Code and Codex.
   "mcp>=1.30.0,<2.0",
   "starlette==1.7.0",
