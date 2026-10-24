@@ -87,5 +87,42 @@ describe('OnboardingView advancement', () => {
     await vi.waitFor(() => expect(wrapper.find('.memory-continue').exists()).toBe(true))
     await wrapper.get('.memory-continue').trigger('click')
     await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/onboarding', expect.objectContaining({ step: 'care' })))
+    // The journey moved on, so the care screen is what the operator sees.
+    await vi.waitFor(() => expect(wrapper.text()).toContain('When should workspace care run?'))
+  })
+})
+
+describe('OnboardingView failed save', () => {
+  it('keeps the step and writes nothing when the save fails', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
+      if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot' }) as never
+      return Promise.resolve({}) as never
+    })
+    vi.mocked(api.patch).mockRejectedValue(new Error('offline'))
+
+    const MemoryStub = {
+      name: 'OnboardingMemoryStage',
+      emits: ['state', 'continue'],
+      template: '<button class="memory-continue" @click="$emit(\'state\', { dirty: false, pending: false, canContinue: true, error: null }); $emit(\'continue\')">save</button>',
+    }
+    const AccessStub = {
+      name: 'OnboardingAccessStage',
+      emits: ['state', 'continue'],
+      template: '<div />',
+      mounted(this: { $emit: (event: string, payload: unknown) => void }) {
+        this.$emit('state', { dirty: false, pending: false, canContinue: true, error: null })
+      },
+    }
+    const wrapper = mount(OnboardingView, {
+      global: { stubs: { OnboardingAccessStage: AccessStub, OnboardingMemoryStage: MemoryStub } },
+    })
+    await vi.waitFor(() => expect(wrapper.find('.memory-continue').exists()).toBe(true))
+    await wrapper.get('.memory-continue').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('offline'))
+    // One attempt only, the journey did not move, and no Care screen appeared.
+    expect(vi.mocked(api.patch)).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).not.toContain('When should workspace care run?')
   })
 })
