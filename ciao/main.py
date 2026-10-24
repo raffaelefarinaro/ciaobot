@@ -537,7 +537,13 @@ async def _async_main(
         _enter_installer_bootstrap_environment(config_root=Path.home() / ".ciao" / "installer-bootstrap")
     _ensure_tool_dirs_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
-    config = CiaoConfig.from_env(installer_bootstrap=installer_bootstrap)
+    # Ordinary startup keeps its exact call shape; only the installer mode asks
+    # for the scratch branch.
+    config = (
+        CiaoConfig.from_env(installer_bootstrap=True)
+        if installer_bootstrap
+        else CiaoConfig.from_env()
+    )
 
     from ciao.instance_lock import WorkspaceInstanceLock
 
@@ -560,13 +566,20 @@ async def _async_main(
         config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
+        if installer_bootstrap:
+            return await _run_server_locked(
+                config,
+                supervised=supervised,
+                startup_id=lock.startup_id,
+                engine_pid=os.getpid(),
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+            )
         return await _run_server_locked(
             config,
             supervised=supervised,
             startup_id=lock.startup_id,
             engine_pid=os.getpid(),
-            installer_bootstrap=installer_bootstrap,
-            installer_run_id=installer_run_id,
         )
 
 

@@ -182,6 +182,6 @@ def test_ordinary_run_retains_existing_discovery_and_reexec_behavior(monkeypatch
     monkeypatch.setattr("os.execv", lambda *_args: calls.append({"exec": True}))
 
     assert cli._run_server() == RESTART_EXIT_CODE
-    # The ordinary path still re-execs, and the installer mode stays off.
-    assert calls[0]["installer_bootstrap"] is False
+    # The ordinary path still re-execs, with its original single argument.
+    assert calls[0] == {"supervised": False}
     assert calls[-1] == {"exec": True}
