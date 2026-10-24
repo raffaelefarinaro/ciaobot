@@ -4,6 +4,36 @@ import { api } from '../lib/api'
 import type { ActionResult } from '../lib/types'
 import { clearSharedContent } from '../lib/sharedContent'
 
+/**
+ * A post-login destination, or null when it is not this app's internal path.
+ * Control characters are rejected before parsing because a raw tab makes the
+ * browser normalize `/<tab>/host` into `https://host/`.
+ */
+export function safeReturnPath(
+  requested: string | null | undefined,
+  { allowOnboarding = true }: { allowOnboarding?: boolean } = {},
+): string | null {
+  if (!requested) return null
+  if (/[\u0000-\u001f\u007f]/.test(requested)) return null
+  if (!requested.startsWith('/') || requested.startsWith('//') || requested.includes('\\')) return null
+  if (/^\/login(?:[/?#]|$)/.test(requested)) return null
+  if (/[?&](?:setup_token|token)=/i.test(requested)) return null
+  let resolved: URL
+  try {
+    resolved = new URL(requested, window.location.origin)
+  } catch {
+    return null
+  }
+  if (resolved.origin !== window.location.origin) return null
+  // Check what the browser will actually visit: `/x/../login` normalizes to the
+  // login page, and `?%73etup_token=` decodes to a setup token.
+  if (/^\/login(?:\/|$)/.test(resolved.pathname)) return null
+  if (resolved.searchParams.has("setup_token") || resolved.searchParams.has("token")) return null
+  // The journey's own exit must not loop back into the journey.
+  if (!allowOnboarding && /^\/onboarding(?:\/|$)/.test(resolved.pathname)) return null
+  return requested
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const authenticated = ref(false)
 
@@ -12,8 +42,10 @@ export const useAuthStore = defineStore('auth', () => {
     // result, so the app is a reload away from signed-in.
     await api.post<ActionResult>('/api/auth', { token })
     authenticated.value = true
-    const shared = new URLSearchParams(window.location.search).get('shared')
-    window.location.replace(shared ? `/?shared=${encodeURIComponent(shared)}` : '/')
+    const params = new URLSearchParams(window.location.search)
+    const shared = params.get('shared')
+    const safe = safeReturnPath(params.get('returnTo'))
+    window.location.replace(safe ?? (shared ? `/?shared=${encodeURIComponent(shared)}` : '/'))
   }
 
   async function logout() {

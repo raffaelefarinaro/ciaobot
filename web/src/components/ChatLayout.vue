@@ -114,6 +114,7 @@
                     <HomeNoticeReopen />
                     <HousekeepingStrip />
                   </template>
+                  <HomeOnboardingResume />
                   <HomeWelcomeCard />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
@@ -268,6 +269,7 @@
                     <HomeNoticeReopen />
                     <HousekeepingStrip />
                   </template>
+                  <HomeOnboardingResume />
                   <HomeWelcomeCard />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
@@ -397,6 +399,7 @@ import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
 import HomeSetupCard from './HomeSetupCard.vue'
+import HomeOnboardingResume from './HomeOnboardingResume.vue'
 import HomeWelcomeCard from './HomeWelcomeCard.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
