@@ -279,6 +279,10 @@ Borders are structural, not decorative. Active navigation is marked by a slim ac
 - **Onboarding location:** Ask for the main Ciaobot folder before the workspace name. Before provisioning, it is a candidate location (empty or existing-notes folders are both valid); after provisioning, show the actual path as read-only and direct changes through the guarded move flow. Remote browsers explain that the folder belongs on the Ciaobot computer. Typing never creates, moves, or saves anything; Continue is the explicit handoff to the next stage.
 
 The onboarding care stage follows the setup shell's calm, compact form rhythm: host availability guides the suggested local time, while the editable time and IANA zone are explicit controls. A clear saved/default status and inline error explain whether timing was written; keeping the packaged default is an explicit no-write choice.
+## Onboarding finish
+
+Finish uses observed status labels rather than implying completion, and the first-task composer
+is an explicit, optional action; Continue remains owned by the setup shell.
 
 ## Onboarding: runtime and model
 

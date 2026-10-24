@@ -628,6 +628,9 @@ A stage owns its domain save and reports whether it succeeded; the shell, never 
 progress through the onboarding store.
 
 The onboarding location stage owns the folder-first location choice and workspace name validation; it reports readiness to the shared shell and emits `continue` only on the user's action. It never writes onboarding progress. Provisioned installs treat the current folder as read-only and link to the guarded workspace move flow.
+The onboarding finish stage shows a summary built only from observed values and offers an optional
+first task that creates a chat and sends the submitted text; it does not change setup progress
+itself.
 
 `OnboardingRuntimeStage` reads model provenance from
 `/api/models`: runtime-reported models and configured aliases are rendered in separate sections,
