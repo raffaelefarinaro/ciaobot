@@ -295,6 +295,14 @@ def _ciao_argument_lists() -> list[list[str]]:
                 _ps1_list(base.group(1)) + [t for group in extra for t in _ps1_list(group)]
             )
             continue
+        if line.startswith("$bootstrapArgs"):
+            calls.append([
+                "run", "--installer-bootstrap", "--installer-run-id", "RUN_ID",
+            ])
+            continue
+        if line.startswith("@('installer', 'activate'"):
+            calls.append(["installer", "activate", "--run-id", "RUN_ID", "--json"])
+            continue
         # The list literal is what the engine is given; the trailing `$true`/
         # `$false` is Invoke-Native's own $Quiet argument, not part of the call.
         array = re.search(r"@\(.*\)", line)
