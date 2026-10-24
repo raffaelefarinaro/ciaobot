@@ -5625,6 +5625,24 @@ async def run_schedule_now(request: Request) -> JSONResponse:
     return JSONResponse(result, status_code=201)
 
 
+async def onboarding_interview(request: Request) -> JSONResponse:
+    """Open the guided first-run interview on request (never on install)."""
+    workspace = str(request.query_params.get("workspace") or "").strip()
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    pcm = request.app.state.project_chat_manager
+    general = next(
+        (item for item in pcm.list_projects(workspace) if item.name == "General"),
+        None,
+    )
+    if general is None:
+        return JSONResponse({"error": "workspace not found"}, status_code=404)
+    chat_id = pcm.start_onboarding_interview(general.project_id)
+    if not chat_id:
+        return JSONResponse({"error": "could not open the interview"}, status_code=500)
+    return JSONResponse({"chat_id": chat_id})
+
+
 async def schedule_detail(request: Request) -> JSONResponse:
     """Handle PATCH (update) and DELETE for a single schedule."""
     schedule_id = request.path_params["schedule_id"]
