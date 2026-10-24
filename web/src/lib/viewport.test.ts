@@ -134,4 +134,38 @@ describe('installViewportPlumbing', () => {
     openKeyboard()
     expect(keyboardOpen()).toBe(true)
   })
+
+  it('blurs a text field still focused when the keyboard is swiped away', () => {
+    installViewportPlumbing()
+    settle()
+    const field = document.createElement('textarea')
+    document.body.appendChild(field)
+    field.focus()
+    openKeyboard()
+    expect(document.activeElement).toBe(field)
+
+    vv.height = FULL_HEIGHT
+    vv.dispatchEvent(new Event('resize'))
+    settle()
+
+    expect(keyboardOpen()).toBe(false)
+    expect(document.activeElement).not.toBe(field)
+    expect(appHeight()).toBe(`${FULL_HEIGHT}px`)
+    field.remove()
+  })
+
+  it('leaves focus alone while the keyboard stays open', () => {
+    installViewportPlumbing()
+    settle()
+    const field = document.createElement('textarea')
+    document.body.appendChild(field)
+    field.focus()
+    openKeyboard()
+    vv.height = KEYBOARD_HEIGHT - 40
+    vv.dispatchEvent(new Event('resize'))
+    settle()
+
+    expect(document.activeElement).toBe(field)
+    field.remove()
+  })
 })
