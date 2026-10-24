@@ -108,3 +108,28 @@ describe('onboarding memory preferences failures', () => {
     expect(prefs.draft.memoryHandover).toBe('all')
   })
 })
+
+describe('onboarding memory preferences conflict', () => {
+  it('keeps the saved handover when a later progress read conflicts', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'off', acting_available: true }
+        : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
+    ) as never)
+    const store = useProjectStore()
+    store.updateWorkspace = vi.fn().mockResolvedValue({}) as never
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    await prefs.load()
+    prefs.draft.acknowledged = true
+    expect(await prefs.saveMemoryHandover()).toBe(true)
+    expect(prefs.savedHandover.value).toBe('all')
+
+    // The shell's progress PATCH can then lose a revision race; that must not
+    // undo or rewrite the setting that was already saved.
+    vi.mocked(api.get).mockRejectedValue({ status: 409, message: 'conflict' })
+    await prefs.load()
+    expect(prefs.savedHandover.value).toBe('all')
+    expect(prefs.draft.memoryHandover).toBe('all')
+    expect(prefs.error.value).toContain('conflict')
+  })
+})
