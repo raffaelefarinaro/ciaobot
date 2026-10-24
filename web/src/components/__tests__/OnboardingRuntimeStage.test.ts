@@ -36,9 +36,53 @@ async function mountWithStatus(payload: unknown) {
   return wrapper
 }
 
-beforeEach(() => { vi.clearAllMocks() })
+beforeEach(() => { vi.resetAllMocks() })
 
 describe('OnboardingRuntimeStage', () => {
+  it('saves the selected runtime and model without replacing other overrides', async () => {
+    const wrapper = await mountWithStatus(ready)
+    vi.mocked(api.get).mockResolvedValueOnce(observed)
+    await wrapper.get('.models-empty button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('input[name="model"]').exists()).toBe(true))
+    await wrapper.findAll('input[name="model"]')[0].setValue()
+    vi.mocked(api.get).mockResolvedValueOnce({ workspaces: [{ name: 'personal', provider_overrides: {
+      claude: { permission_mode: 'manual', thinking: 'high' }, opencode: { model: 'other-model' },
+    } }] })
+    vi.mocked(api.patch).mockResolvedValue({})
+    const stage = wrapper.vm as unknown as { save: () => Promise<boolean> }
+    expect(await stage.save()).toBe(true)
+    expect(api.patch).toHaveBeenCalledWith('/api/workspaces/personal', {
+      default_provider: 'claude', provider_overrides: {
+        claude: { model: 'claude-x', permission_mode: 'manual', thinking: 'high' },
+        opencode: { model: 'other-model' },
+      },
+    })
+  })
+
+  it('does not write settings when the choice is deliberately deferred', async () => {
+    const wrapper = await mountWithStatus(missing)
+    await wrapper.get('button.defer').trigger('click')
+    const stage = wrapper.vm as unknown as { save: () => Promise<boolean> }
+    expect(await stage.save()).toBe(true)
+    expect(api.patch).not.toHaveBeenCalled()
+  })
+
+  it('keeps the selection and reports a failed save for retry', async () => {
+    const wrapper = await mountWithStatus(ready)
+    vi.mocked(api.get).mockResolvedValueOnce(observed)
+    await wrapper.get('.models-empty button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('input[name="model"]').exists()).toBe(true))
+    await wrapper.findAll('input[name="model"]')[0].setValue()
+    vi.mocked(api.get).mockResolvedValue({ workspaces: [{ name: 'personal' }] })
+    vi.mocked(api.patch).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({})
+    const stage = wrapper.vm as unknown as { save: () => Promise<boolean> }
+    expect(await stage.save()).toBe(false)
+    expect(wrapper.text()).toContain('offline')
+    expect((wrapper.get('input[name="model"]').element as HTMLInputElement).checked).toBe(true)
+    await wrapper.get('button.retry').trigger('click')
+    await vi.waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true }))
+  })
   it('makes no request and opens no terminal on mount', async () => {
     vi.mocked(api.get).mockResolvedValue(ready)
     const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })

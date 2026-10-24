@@ -59,6 +59,53 @@ describe('OnboardingView', () => {
 })
 
 describe('OnboardingView advancement', () => {
+  it('completes through the visible Finish setup action', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'finish' }, workspaces: {} }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
+      if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot' }) as never
+      if (url === '/api/schedules') return Promise.resolve([]) as never
+      return Promise.resolve({}) as never
+    })
+    vi.mocked(api.post).mockResolvedValue({ schema: 1, revision: 3, installation: { status: 'completed', step: 'finish' }, workspaces: {} } as never)
+    const wrapper = mount(OnboardingView)
+    await vi.waitFor(() => expect((wrapper.get('.finish-stage .primary').element as HTMLButtonElement).disabled).toBe(false))
+    await wrapper.get('.finish-stage .primary').trigger('click')
+    await vi.waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/onboarding/complete', expect.objectContaining({ target: { kind: 'installation' } })))
+    expect(replace).toHaveBeenCalledWith('/')
+  })
+  it('waits for the actual runtime/model save before advancing the receipt', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'runtime' }, workspaces: {} }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', default_provider: 'claude' }] }) as never
+      if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot' }) as never
+      if (url === '/api/settings/providers') return Promise.resolve({ connections: { opencode: { ok: true, auth: 'signed in' } } }) as never
+      if (url.startsWith('/api/models')) return Promise.resolve({ provider_catalog_evidence: { opencode: { status: 'observed', models: [{ id: 'openai/chosen', label: 'Chosen' }] } } }) as never
+      return Promise.resolve({}) as never
+    })
+    let finishSave!: () => void
+    const saved = new Promise<void>(resolve => { finishSave = resolve })
+    vi.mocked(api.patch).mockImplementation((url: string) => url === '/api/workspaces/personal'
+      ? saved.then(() => ({ workspaces: [{ name: 'personal' }] })) as never
+      : Promise.resolve({ schema: 1, revision: 3, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} }) as never)
+    const wrapper = mount(OnboardingView)
+    await vi.waitFor(() => expect(wrapper.find('input[value="opencode"]').exists()).toBe(true))
+    await wrapper.get('input[value="opencode"]').setValue()
+    await wrapper.get('.models-empty button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Load available models'))
+    await wrapper.get('.models-empty button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.find('input[name="model"]').exists()).toBe(true))
+    await wrapper.get('input[name="model"]').setValue()
+    await wrapper.get('footer button.continue').trigger('click')
+    await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/workspaces/personal', {
+      default_provider: 'opencode', provider_overrides: { opencode: { model: 'openai/chosen' } },
+    }))
+    expect(api.patch).not.toHaveBeenCalledWith('/api/onboarding', expect.anything())
+    expect(wrapper.get('footer button.back').attributes('disabled')).toBeDefined()
+    finishSave()
+    await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/onboarding', expect.objectContaining({ step: 'access_memory' })))
+    await vi.waitFor(() => expect(wrapper.get('h1').text()).toBe('Access & memory'))
+  })
   it('advances from the shared screen only after memory saves and access is ready', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {
       if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} }) as never

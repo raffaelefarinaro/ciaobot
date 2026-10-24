@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { api } from '../../lib/api'
-import type { HostTerminalAction, ModelsResponse, RuntimeProvider } from '../../lib/types'
+import type { HostTerminalAction, ModelsResponse, RuntimeProvider, WorkspaceInfo } from '../../lib/types'
+import { apiErrorMessage } from '../../lib/errorMessage'
+import { normalizeOverrides, setOverride } from '../../lib/workspaceOverrides'
 import type { OnboardingStageProps, StageState } from '../../lib/onboarding'
 import HostTerminalButton from '../HostTerminalButton.vue'
 
@@ -24,7 +26,9 @@ const loadingModels = ref(false)
 // which would let the shell advance on a status nobody confirmed.
 const statusError = ref('')
 const modelsError = ref('')
-const error = computed(() => statusError.value || modelsError.value)
+const saveError = ref('')
+const saving = ref(false)
+const error = computed(() => statusError.value || modelsError.value || saveError.value)
 const provider = ref<RuntimeProvider>('claude')
 const selection = ref('')
 const deferred = ref(false)
@@ -42,14 +46,15 @@ const ready = computed(() => !!connection.value && !error.value)
 const terminalAction = computed<HostTerminalAction | undefined>(() => connection.value?.terminal_action)
 const state = computed<StageState>(() => ({
   dirty: false,
-  pending: loadingStatus.value || loadingModels.value,
-  canContinue: ready.value && (!!selection.value || deferred.value),
+  pending: loadingStatus.value || loadingModels.value || saving.value,
+  canContinue: !saving.value && ready.value && (!!selection.value || deferred.value),
   error: error.value || null,
 }))
 
 watch(state, value => emit('state', value), { immediate: true })
 
 function resetChoice(): void {
+  saveError.value = ''
   selection.value = ''
   deferred.value = false
 }
@@ -88,6 +93,7 @@ async function loadModels(): Promise<void> {
 async function retry(): Promise<void> {
   if (statusError.value) await checkAgain()
   else if (modelsError.value) await loadModels()
+  else if (saveError.value) await save()
 }
 
 async function checkAgain(): Promise<void> {
@@ -98,17 +104,47 @@ async function checkAgain(): Promise<void> {
 }
 
 function choose(id: string): void {
+  saveError.value = ''
   selection.value = id
   deferred.value = false
 }
 
 function defer(): void {
+  saveError.value = ''
   selection.value = ''
   deferred.value = true
 }
 
 watch(provider, resetChoice)
-defineExpose({ refresh: checkAgain })
+
+async function save(): Promise<boolean> {
+  if (saving.value || loadingStatus.value || loadingModels.value || !connection.value || statusError.value || modelsError.value) return false
+  if (deferred.value) return true
+  if (!selection.value) return false
+  const chosenProvider = provider.value
+  const chosenModel = selection.value
+  saving.value = true
+  saveError.value = ''
+  try {
+    // Read at save time so choosing a model keeps the workspace's other
+    // provider settings, including approval and thinking overrides.
+    const payload = await api.get<{ workspaces: WorkspaceInfo[] }>('/api/workspaces')
+    const workspace = payload.workspaces.find(item => item.name === props.context.workspace)
+    if (!workspace) throw new Error('The workspace is no longer available.')
+    await api.patch(`/api/workspaces/${encodeURIComponent(props.context.workspace)}`, {
+      default_provider: chosenProvider,
+      provider_overrides: setOverride(normalizeOverrides(workspace.provider_overrides), chosenProvider, 'model', chosenModel),
+    })
+    return true
+  } catch (reason) {
+    saveError.value = apiErrorMessage(reason, 'The runtime and model could not be saved.')
+    return false
+  } finally {
+    saving.value = false
+  }
+}
+
+defineExpose({ refresh: checkAgain, save })
 </script>
 
 <template>
@@ -116,7 +152,7 @@ defineExpose({ refresh: checkAgain })
     <h2 id="runtime-title">Choose a runtime and model</h2>
     <p>Select the runtime first, then choose an explicit model. Nothing connects or sends a model request here.</p>
 
-    <fieldset>
+    <fieldset :disabled="saving">
       <legend>Runtime</legend>
       <label><input v-model="provider" type="radio" value="claude"> Claude Code</label>
       <label><input v-model="provider" type="radio" value="opencode"> OpenCode</label>
@@ -147,7 +183,7 @@ defineExpose({ refresh: checkAgain })
         </button>
       </div>
       <template v-else>
-        <fieldset v-if="reported.length">
+        <fieldset v-if="reported.length" :disabled="saving">
           <legend>Models reported by this runtime</legend>
           <label v-for="model in reported" :key="model.id" class="choice">
             <input type="radio" name="model" :checked="selection === model.id" @change="choose(model.id)">
@@ -155,7 +191,7 @@ defineExpose({ refresh: checkAgain })
           </label>
           <p>A successful reply has not been verified.</p>
         </fieldset>
-        <fieldset v-else-if="configured.length">
+        <fieldset v-else-if="configured.length" :disabled="saving">
           <legend>Configured choices; availability not checked</legend>
           <label v-for="model in configured" :key="model" class="choice">
             <input type="radio" name="model" :checked="selection === model" @change="choose(model)">
@@ -173,7 +209,7 @@ defineExpose({ refresh: checkAgain })
         </p>
       </template>
 
-      <button type="button" class="defer" :aria-pressed="deferred" @click="defer">Decide later</button>
+      <button type="button" class="defer" :disabled="saving" :aria-pressed="deferred" @click="defer">Decide later</button>
       <p v-if="deferred" role="status">Deferred: this choice is recorded as not ready, not as connected.</p>
     </template>
     <div v-else class="models-empty">
