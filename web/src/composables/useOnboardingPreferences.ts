@@ -13,8 +13,8 @@ export function useOnboardingPreferences(target: OnboardingTarget, workspace: st
   const error = ref<string | null>(null)
   const store = useProjectStore()
   let eligible = false
-  let loaded = false
-  const dirty = computed(() => loaded && draft.memoryHandover !== savedHandover.value)
+  const loaded = ref(false)
+  const dirty = computed(() => loaded.value && draft.memoryHandover !== savedHandover.value)
 
   async function load() {
     pending.value = true; error.value = null
@@ -30,13 +30,13 @@ export function useOnboardingPreferences(target: OnboardingTarget, workspace: st
       eligible = onboardingProgress(receipt, target)?.status === 'in_progress'
       draft.memoryHandover = eligible && handover.handover === 'off' ? 'all' : handover.handover
       draft.acknowledged = false
-      loaded = true
+      loaded.value = true
     } catch (reason) { error.value = apiErrorMessage(reason, 'Could not read memory handover settings.') }
     finally { pending.value = false }
   }
 
   async function saveMemoryHandover(): Promise<boolean> {
-    if (!loaded || pending.value || !draft.acknowledged || error.value) return false
+    if (!loaded.value || pending.value || !draft.acknowledged || error.value) return false
     if (!dirty.value) return true
     pending.value = true; error.value = null
     const value = draft.memoryHandover
