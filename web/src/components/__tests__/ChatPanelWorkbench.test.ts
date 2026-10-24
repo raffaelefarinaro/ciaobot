@@ -278,6 +278,40 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
+  it('info trigger sits in the header on a narrow pane', async () => {
+    const observers: Array<() => void> = []
+    let width = 600
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const wrapper = await mountPanel(TURNS)
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    // Narrow: one trigger, in the header actions before Archive, never in the body.
+    expect(wrapper.findAll('.work-inspector-trigger')).toHaveLength(1)
+    const actions = wrapper.get('.pane-header .header-actions')
+    expect(actions.findAll('button').map(b => b.classes())[0]).toContain('work-inspector-trigger')
+    expect(actions.findAll('button')[1].classes()).toContain('chat-archive-btn')
+    expect(wrapper.get('.chat-body').findAll(':scope > .work-inspector-trigger')).toHaveLength(0)
+
+    // Wide with the rail closed: the floating trigger in .chat-body, none in the header.
+    width = 1200
+    observers.forEach(fire => fire())
+    await nextTick()
+    await wrapper.get('#chat-work-rail .chat-rail-hide').trigger('click')
+    expect(wrapper.findAll('.work-inspector-trigger')).toHaveLength(1)
+    expect(actions.find('.work-inspector-trigger').exists()).toBe(false)
+    expect(wrapper.get('.chat-body').findAll(':scope > .work-inspector-trigger')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   describe('a delegated board task', () => {
     const DELEGATION = {
       helper: { kind: 'task_delegation' as const, task_id: 'ship', task_revision: 'r1', attempt_id: 'att-1' },

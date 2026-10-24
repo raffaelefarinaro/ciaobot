@@ -78,9 +78,24 @@
         </div>
       </template>
       <template #actions>
+        <!-- On a narrow pane the Chat details opener sits here, beside Archive,
+             so it never covers the transcript. On a wide pane it floats in the
+             chat body instead (below). -->
+        <button
+          v-if="!isWidePane"
+          ref="inspectorTrigger"
+          type="button"
+          class="btn-icon work-inspector-trigger work-inspector-trigger--header"
+          :aria-expanded="inspectorOpen"
+          aria-controls="chat-work-rail"
+          aria-label="Show chat details"
+          title="Show chat details"
+          @click="toggleWorkDetails"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+        </button>
         <!-- Archive is the header's one action, so it gets words, not just a
-             glyph. Chat details moved out: it opens from the info tab at the
-             top right of the chat body and hides from its own heading. -->
+             glyph. Chat details opens from the info tab and hides from its own heading. -->
         <button
           v-if="!chat.archived"
           type="button"
@@ -103,11 +118,11 @@
     <!-- Chat details, when it is not showing: the rail is hidden on a wide
          pane, or the pane is too narrow for one and it opens as a drawer. -->
     <button
-      v-if="!railShown"
+      v-if="isWidePane && !railShown"
       ref="inspectorTrigger"
       type="button"
       class="btn-icon work-inspector-trigger"
-      :aria-expanded="isWidePane ? false : inspectorOpen"
+      :aria-expanded="false"
       aria-controls="chat-work-rail"
       aria-label="Show chat details"
       title="Show chat details"
@@ -5227,6 +5242,10 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   .work-inspector-trigger { min-width: var(--touch); min-height: var(--touch); }
 }
 .work-inspector-trigger:hover { color: var(--fg); border-color: var(--border-strong); }
+.work-inspector-trigger--header {
+  position: static;
+  flex: none;
+}
 
 .chat-rail-head {
   display: flex;
