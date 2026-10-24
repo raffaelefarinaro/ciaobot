@@ -2774,7 +2774,11 @@ class CiaoControlPlane:
             chat = self.pcm.get_chat(chat_id)
             return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
         if action == "set":
-            chat = self.pcm.set_chat_retry(chat_id, prompt, image_refs=[], reason="mcp")
+            # A retry a scheduled turn arms for itself replays unattended too.
+            unattended = chat_id == principal.chat_id and self._unattended_turn(principal)
+            chat = self.pcm.set_chat_retry(
+                chat_id, prompt, image_refs=[], reason="mcp", unattended=unattended
+            )
             if chat is None:
                 raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
             return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))

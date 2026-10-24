@@ -15,6 +15,9 @@ from ciao import provider_registry
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
 MessagePhase = Literal["commentary", "final_answer"]
 
+# Title a chat carries until auto-title (or the user) names it.
+DEFAULT_CHAT_TITLE = "New Chat"
+
 
 @dataclass(slots=True)
 class ProviderSessionData:

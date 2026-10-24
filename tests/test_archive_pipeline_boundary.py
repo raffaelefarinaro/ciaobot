@@ -233,6 +233,60 @@ async def test_a_normal_archive_queues_the_pass(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "schedule_id", ["system-memory-curation", "system-memory-curation@personal"]
+)
+async def test_a_system_schedule_archive_queues_no_pass(
+    tmp_path: Path, schedule_id: str
+) -> None:
+    """Workspace care is the memory machinery: even a human turn in its chat
+    (a retried run once replayed as attended) does not buy a pass over it."""
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    chat.schedule_id = schedule_id
+    archive = _real_archive(tmp_path, [_automated("Care"), "looks good, carry on"])
+    outcome = ArchiveOutcome(path=archive, turn_count=2)
+
+    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await asyncio.sleep(0)
+
+    assert host.enqueued == []
+    assert host.index_calls == ["index"]
+
+
+@pytest.mark.asyncio
+async def test_a_focused_pass_on_a_system_schedule_archive_still_runs(
+    tmp_path: Path,
+) -> None:
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    chat.schedule_id = "system-memory-curation@personal"
+    archive = _real_archive(tmp_path, ["Care"])
+    outcome = ArchiveOutcome(path=archive, turn_count=1)
+
+    pipeline.run_archive_postprocess(
+        chat.chat_id, outcome, chat, project, focus={"kind": "approved_task"}
+    )
+    await asyncio.sleep(0)
+
+    # A system-schedule chat folds into no project doc.
+    assert host.enqueued == [(chat.chat_id, archive, "")]
+
+
+@pytest.mark.asyncio
+async def test_a_user_schedule_archive_with_a_human_turn_queues_the_pass(
+    tmp_path: Path,
+) -> None:
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    chat.schedule_id = "daily-briefing"
+    archive = _real_archive(tmp_path, [_automated("Brief me"), "move the 3pm"])
+    outcome = ArchiveOutcome(path=archive, turn_count=2)
+
+    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await asyncio.sleep(0)
+
+    assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
+
+
+@pytest.mark.asyncio
 async def test_an_unparseable_archive_still_queues_the_pass(tmp_path: Path) -> None:
     host, pipeline, chat, project, outcome = _setup(tmp_path)
     outcome.path.write_text("not a transcript at all\n", encoding="utf-8")

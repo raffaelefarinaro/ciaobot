@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ciao.config import CiaoConfig
+from ciao.schedules import is_system_schedule_id
 from ciao.transcripts import transcript_has_human_turn
 from ciao.web.chat_broker import EventsHub
 
@@ -124,11 +125,8 @@ class ArchivePipeline:
     @staticmethod
     def _project_doc_path(chat: ChatInfo, project: ProjectInfo | None) -> str:
         """The canonical project doc the memory pass folds into, or ""."""
-        if chat.schedule_id:
-            from ciao.schedules import is_system_schedule_id
-
-            if is_system_schedule_id(chat.schedule_id):
-                return ""
+        if is_system_schedule_id(chat.schedule_id):
+            return ""
         if project is None or project.is_auto:
             return ""
         return project.vault_doc_path
@@ -169,11 +167,20 @@ class ArchivePipeline:
                 and outcome.turn_count > 0
                 and vault_root is not None
             ):
-                # A transcript whose every turn was fired by an automation holds
-                # nothing the pass may record (memory_pass tells it so), so the
-                # pass is not paid for. Unknown (unparseable) does not skip, and
-                # neither does a focused pass the owner asked for.
-                if not focus and not transcript_has_human_turn(outcome.path):
+                # A system-schedule chat (Workspace care) is the memory
+                # machinery itself: a pass over it only re-files what the run
+                # already filed. A transcript whose every turn was fired by an
+                # automation holds nothing the pass may record (memory_pass
+                # tells it so). Neither pass is paid for. Unknown (unparseable)
+                # does not skip, and neither does a focused pass the owner
+                # asked for.
+                if not focus and is_system_schedule_id(chat.schedule_id):
+                    logger.info(
+                        "Skipping the memory pass for %s: system schedule %s",
+                        chat_id,
+                        chat.schedule_id,
+                    )
+                elif not focus and not transcript_has_human_turn(outcome.path):
                     logger.info(
                         "Skipping the memory pass for %s: every user turn in the "
                         "archive is unattended",
