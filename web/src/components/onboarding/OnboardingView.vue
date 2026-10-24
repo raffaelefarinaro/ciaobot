@@ -35,6 +35,7 @@ const context = ref<OnboardingStageContext>({
   provisioned: false,
 })
 const step = ref<OnboardingStep>('location')
+const runtimeStage = ref<InstanceType<typeof OnboardingRuntimeStage> | null>(null)
 const state = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
 const accessState = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
 const memoryState = ref<StageState>({ dirty: false, pending: false, canContinue: false, error: null })
@@ -43,7 +44,8 @@ const memoryState = ref<StageState>({ dirty: false, pending: false, canContinue:
 // stays read-only in provisioned installs.
 const contextReady = ref(false)
 const targetError = ref('')
-const busy = computed(() => store.loading || store.saving)
+const savingRuntime = ref(false)
+const busy = computed(() => store.loading || store.saving || savingRuntime.value)
 const stageProps = computed(() => ({ context: context.value, busy: busy.value }))
 const combinedReady = computed(() =>
   accessState.value.canContinue && memoryState.value.canContinue &&
@@ -93,6 +95,14 @@ async function advance(): Promise<void> {
   // On the shared screen readiness lives in the two stage states; the shell's
   // own flag is deliberately off there so Memory's save owns the action.
   if (!readyToAdvance(step.value, state.value, accessState.value, memoryState.value) || busy.value || !contextReady.value) return
+  if (step.value === 'runtime') {
+    savingRuntime.value = true
+    try {
+      if (!await runtimeStage.value?.save()) return
+    } finally {
+      savingRuntime.value = false
+    }
+  }
   const order: OnboardingStep[] = ['location', 'runtime', 'access_memory', 'care', 'finish']
   if (step.value === 'finish') {
     if (await store.complete(target.value)) await router.replace(validReturn())
@@ -158,13 +168,13 @@ async function reload(): Promise<void> {
   >
     <template #stage>
       <OnboardingLocationStage v-if="step === 'location'" v-bind="stageProps" @state="update" />
-      <OnboardingRuntimeStage v-else-if="step === 'runtime'" v-bind="stageProps" @state="update" />
+      <OnboardingRuntimeStage v-else-if="step === 'runtime'" ref="runtimeStage" v-bind="stageProps" @state="update" />
       <template v-else-if="step === 'access_memory'">
         <OnboardingAccessStage v-bind="stageProps" @state="updateAccess" />
         <OnboardingMemoryStage v-bind="stageProps" @state="updateMemory" @continue="afterMemorySave" />
       </template>
       <OnboardingCareStage v-else-if="step === 'care'" v-bind="stageProps" @state="update" />
-      <OnboardingFinishStage v-else v-bind="stageProps" @state="update" />
+      <OnboardingFinishStage v-else v-bind="stageProps" @state="update" @continue="advance" @back="back" />
     </template>
   </OnboardingShell>
   <p v-else class="onboarding-loading" role="status">Loading setup…</p>
