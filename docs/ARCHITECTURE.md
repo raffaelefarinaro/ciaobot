@@ -852,7 +852,13 @@ vault-versus-repo rules), and the repo's `AGENTS.md`, or `CLAUDE.md` when that i
 absent, capped at `REPO_INSTRUCTIONS_MAX_CHARS` and stripped of envelope markers.
 The block rides the stable facts, and a fingerprint of path, file name and content
 hash is part of `context_digest` (only when non-empty, so unlinked chats keep their
-digest), so editing AGENTS.md re-sends it on the next turn. The branch changes too
+digest), so editing AGENTS.md re-sends it on the next turn. The instructions text
+(capped at 8,000 characters, with a "read <path> for the rest" tail) is inlined
+only on the first stable send of a provider session: a re-send inside a session
+that already took the stable block (code mode switched on, AGENTS.md edited, the
+repo linked mid-chat) carries the block and rules with a pointer to read
+`<path>/AGENTS.md` instead, since `ciao chat update --code on` already returns
+the text. A new, rotated or compacted session gets it inline again. The branch changes too
 often for that, so it is a per-turn `linked_repo=<path> branch=<branch>` line.
 The full block is sent only when the chat's `code_mode` is on (effective only in a linked project). Otherwise a light `LINKED_REPO_OFF_HINT` block and `code_mode=off` on the per-turn line are sent, and the fingerprint includes the mode.
 

@@ -46,7 +46,7 @@ TASK_BOARD_HINT = (
 #: Sent with the stable block (once per provider session), only when linked.
 LINKED_REPO_RULES = (
     "Code-work rules for this linked repository:\n"
-    "- The repository's instructions file shown below governs code conventions, tests and git there; follow it.\n"
+    "- The repository's instructions file named below governs code conventions, tests and git there; follow it.\n"
     "- Your working directory is the Ciaobot workspace, not the repository. Run repository commands inside it "
     "(`cd <path> && ...` or `git -C <path> ...`).\n"
     "- This is a shared checkout. Run `git status` before changing anything and leave changes you did not make alone. "
@@ -79,11 +79,17 @@ def render_linked_repo_block(
     missing: bool,
     instructions_name: str,
     instructions_text: str,
+    inline_instructions: bool = True,
 ) -> str:
     """The multi-line ``[Linked repository]`` block of the stable facts.
 
     The instructions text is not passed through ``_field``: it would flatten the
-    file's newlines and cap it at 1200 characters.
+    file's newlines and cap it at 1200 characters. ``inline_instructions=False``
+    names the file instead of quoting it: the stable block is being re-sent
+    inside a provider session that already started (code mode switched on, the
+    file edited, the repo linked mid-chat), and repeating up to
+    ``REPO_INSTRUCTIONS_MAX_CHARS`` of text on such a turn is the cost the
+    once-per-session stable block exists to avoid.
     """
     shown = _field(path, limit=300)
     if missing:
@@ -94,7 +100,12 @@ def render_linked_repo_block(
             "[End linked repository]"
         )
     block = f"[Linked repository]\npath={shown}\n{LINKED_REPO_RULES}\n"
-    if instructions_name:
+    if instructions_name and not inline_instructions:
+        block += (
+            f"Repository instructions: read {shown}/{instructions_name} before code work "
+            "(again if it changed since you last read it)."
+        )
+    elif instructions_name:
         block += (
             f"[Repository instructions: {shown}/{instructions_name}]\n{instructions_text}\n"
             "[End repository instructions]"

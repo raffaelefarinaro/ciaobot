@@ -5340,11 +5340,16 @@ class ProjectChatManager:
             revoke(chat_id)
 
     def _linked_repo_context(
-        self, chat: ChatInfo, project: ProjectInfo | None
+        self,
+        chat: ChatInfo,
+        project: ProjectInfo | None,
+        *,
+        inline_instructions: bool = True,
     ) -> tuple[str, str, str]:
         """(stable block, digest fingerprint, per-turn line); ("", "", "") when unlinked.
 
-        Code mode on: the full block with the repository's instructions. Linked
+        Code mode on: the full block with the repository's instructions, or
+        with a pointer to the file when ``inline_instructions`` is False. Linked
         but off: a light hint naming the path and how to switch on.
         """
         if project is None or not project.repo_path:
@@ -5365,7 +5370,11 @@ class ProjectChatManager:
             return block, f"{path}\0missing", f"linked_repo={path} missing=true"
         ins = read_repo_instructions(path)
         block = render_linked_repo_block(
-            path=path, missing=False, instructions_name=ins.name, instructions_text=ins.text
+            path=path,
+            missing=False,
+            instructions_name=ins.name,
+            instructions_text=ins.text,
+            inline_instructions=inline_instructions,
         )
         return (
             block,
@@ -5392,7 +5401,19 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(chat, project)
+        # The repository instructions are inlined only on the first stable
+        # send of a provider session. A re-send inside a session that already
+        # took the stable block (code mode switched on, AGENTS.md edited, repo
+        # linked mid-chat) points at the file instead; `ciao chat update --code
+        # on` already hands the agent its text.
+        session_primed = bool(
+            chat.context_digest
+            and chat.session_id
+            and chat.context_session_id == chat.session_id
+        )
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(
+            chat, project, inline_instructions=not session_primed
+        )
         include_stable = self._needs_stable_context(chat)
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
