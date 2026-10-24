@@ -85,7 +85,9 @@ web/
                            `kindLabel`, and is cross-checked against the nightly and memory-pass prompts
                            in `ciao/stock/skills/ciao-memory/references/`
     stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer, itemPeek), and store
-                          modules (chatAnnotations) — see the ownership boundary below
+                           modules (chatAnnotations) — see the ownership boundary below
+                            `onboarding` owns lifecycle progress reads and revision-checked writes; onboarding
+                            stages report their state to the presentation shell and never mutate progress directly.
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
                           useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices,
