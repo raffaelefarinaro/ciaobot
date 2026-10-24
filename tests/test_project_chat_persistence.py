@@ -41,6 +41,10 @@ def _make_manager(tmp_path: Path, *, vault_mode: str | None = None) -> ProjectCh
         transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
         path=runtime / "web_projects.json",
     )
+    # The journey asks for the interview explicitly; these tests inspect its
+    # content, so they take the same action the finish screen will.
+    general = next(p for p in manager._projects.values() if p.name == "General")
+    manager.start_onboarding_interview(general.project_id)
     # The MCP control plane is mandatory for a turn, so every manager that
     # builds one needs a service; the one test that asserts the missing-server
     # failure clears it explicitly.

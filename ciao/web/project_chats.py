@@ -1693,26 +1693,15 @@ class ProjectChatManager:
                 )
                 self._events.publish({"type": "project_deleted", "project_id": pid})
 
-        if not self._chats:
-            # The onboarding chat lands in the first configured workspace —
-            # single-workspace registries from the wizard carry the name the
-            # user chose; the legacy fallback keeps this on "personal".
-            ws_names = self._workspace_names()
-            first_ws = ws_names[0] if ws_names else "personal"
-            general = next(
-                (
-                    p
-                    for p in self._projects.values()
-                    if p.workspace == first_ws and p.name == "General"
-                ),
-                None,
-            )
-            if general is not None:
-                self._create_onboarding_chat(general.project_id)
-
         self._save()
 
-    def _create_onboarding_chat(self, project_id: str) -> None:
+    def start_onboarding_interview(self, project_id: str) -> str | None:
+        """Open the guided first-run interview on request, never on install.
+
+        The journey is the only automatic first-run surface; this is the explicit
+        action behind it, so the interview and knowledge-seeding prompts stay
+        available without a chat appearing for someone who never asked.
+        """
         from ciao.setup_marker import read_setup_vault_mode
 
         vault_mode = read_setup_vault_mode(self._config.state_path.parent)
@@ -1898,6 +1887,10 @@ class ProjectChatManager:
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_msg},
         ]
+        # `create_chat()` already saved; the interview context was assigned after
+        # that, so persist it here or the messages vanish on the next reload.
+        self._save()
+        return chat.chat_id
 
     def _onboarding_memory_categories(self, workspace: str) -> tuple[str, str]:
         """The workspace's enabled, non-hidden category labels, in registry order.
