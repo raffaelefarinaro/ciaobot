@@ -10,6 +10,30 @@ import pytest
 from ciao.app_settings import AppSettings, AppSettingsStore
 
 
+def test_new_install_backup_seed_preserves_explicit_flags(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text('{"backup_enabled": true, "backup_paused": true}\n')
+    store = AppSettingsStore(path)
+    assert store.seed_new_install_backup_default() is False
+    assert path.read_text() == '{"backup_enabled": true, "backup_paused": true}\n'
+
+
+def test_backup_seed_is_byte_identical_when_already_explicit(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_bytes(b'{ "backup_enabled": false }\n')
+    store = AppSettingsStore(path)
+    assert store.seed_new_install_backup_default() is False
+    assert path.read_bytes() == b'{ "backup_enabled": false }\n'
+
+
+def test_backup_seed_does_not_overwrite_unreadable_settings(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_bytes(b'{invalid')
+    store = AppSettingsStore(path)
+    assert store.seed_new_install_backup_default() is False
+    assert path.read_bytes() == b'{invalid'
+
+
 class FakeConfig:
     """Just the fields apply_to_config touches."""
 

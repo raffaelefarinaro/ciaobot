@@ -563,6 +563,26 @@ class AppSettingsStore:
         self._save()
         return self.settings
 
+    def seed_new_install_backup_default(self) -> bool:
+        """Persist the opt-out default for a new install without overriding choice.
+
+        Only a genuinely new installation reaches this: the caller has already
+        checked the lifecycle receipt and the first-setup classification, and
+        an operator's explicit value wins here. A settings file that exists but
+        cannot be parsed is left alone rather than replaced with defaults.
+        """
+        if "backup_enabled" in self._explicit_fields:
+            return False
+        if self._path.exists():
+            try:
+                raw = json.loads(self._path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            if not isinstance(raw, dict):
+                return False
+        self.update({"backup_enabled": False})
+        return True
+
     def appearance_payload(self) -> dict[str, object]:
         """The engine-wide appearance preferences plus a content revision.
 
