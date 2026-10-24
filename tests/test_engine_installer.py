@@ -478,6 +478,7 @@ PLIST
         proposed=$HOME/Ciaobot
         previous=
         for argument in "$@"; do
+            case "$argument" in --installer-suggest-workspace=*) proposed=${argument#*=} ;; esac
             if [ "$previous" = "--installer-suggest-workspace" ]; then proposed=$argument; fi
             previous=$argument
         done
@@ -788,12 +789,30 @@ def test_fresh_install_cancel_leaves_a_resumable_install(
     )
 
     assert result.returncode == code
-    assert "Resume setup with: ciao run --installer-bootstrap" in result.stderr
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert f"Resume setup with: '{ciao}' run --installer-bootstrap" in result.stderr
     calls = _log(harness, "ciao-calls.log")
     assert "installer activate" not in calls
     assert "setup " not in calls
     assert not workspace.exists()
     assert _install_receipt(harness)["version"] == VERSION
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_absolutizes_a_relative_suggestion(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--workspace", "Fresh", cwd=home
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = _log(harness, "ciao-calls.log").splitlines()
+    bootstrap = next(line for line in calls if line.startswith("run --installer-bootstrap"))
+    assert f"--installer-suggest-workspace={home}/Fresh" in bootstrap
+    assert f"bootstrap {home}/Fresh existed=0" in _log(harness, "bootstrap.log")
 
 
 @runs_the_sh_installer
@@ -807,7 +826,8 @@ def test_fresh_install_guard_refusal_is_reported(tmp_path: Path) -> None:
     assert result.returncode == 64
     assert "not fresh" in result.stderr
     assert "installer activate" not in _log(harness, "ciao-calls.log")
-    assert "Resume setup with: ciao run --installer-bootstrap" in result.stderr
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert f"Resume setup with: '{ciao}' run --installer-bootstrap" in result.stderr
 
 
 @runs_the_sh_installer
@@ -821,7 +841,8 @@ def test_fresh_install_no_start_provisions_nothing(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Setup was not started. Resume with: ciao run --installer-bootstrap" in result.stdout
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert f"Setup was not started. Resume with: '{ciao}' run --installer-bootstrap" in result.stdout
     calls = _log(harness, "ciao-calls.log")
     assert "run --installer-bootstrap" not in calls
     assert "installer activate" not in calls
@@ -839,7 +860,11 @@ def test_fresh_install_activation_failure_is_reported(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "the background service did not start" in result.stderr
-    assert "Resume with: ciao installer activate --run-id 11111111-2222-3333-4444-555555555555" in result.stderr
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert (
+        f"Resume with: '{ciao}' installer activate --run-id "
+        "11111111-2222-3333-4444-555555555555"
+    ) in result.stderr
     assert _install_receipt(harness)["version"] == VERSION
 
 
@@ -3900,7 +3925,7 @@ def test_ordinary_install_runs_the_browser_bootstrap(tmp_path: Path) -> None:
     bootstrap = [line for line in calls if line.startswith("run --installer-bootstrap")]
     assert len(bootstrap) == 1
     run_id = bootstrap[0].split("--installer-run-id ")[1].split()[0]
-    assert f"--installer-suggest-workspace {workspace}" in bootstrap[0]
+    assert f"--installer-suggest-workspace={workspace}" in bootstrap[0]
     assert f"installer activate --run-id {run_id}" in calls
     assert not any(line.startswith("setup") for line in calls)
     # The folder did not exist when the wizard started: the installer had not
