@@ -6303,6 +6303,17 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "json object is required"}, status_code=400)
 
+    # Decided before anything is written: the installer bootstrap completes by
+    # exiting, so a request that would leave it running must not provision the
+    # destination or the service first.
+    restart = bool(body.get("restart", True))
+    installer_mode = bool(request.app.state.installer_bootstrap)
+    if installer_mode and not restart:
+        return JSONResponse(
+            {"error": "the installer bootstrap completes by exiting"},
+            status_code=400,
+        )
+
     # The wizard's primary question is the workspace: one root folder holding
     # the vault (memory-vault/ by default) plus app data, all one git repo.
     # vault_root is optional and only set when the second brain lives
@@ -6398,13 +6409,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         and not str(body.get("launch_agents_dir", "")).strip()
     )
 
-    restart = bool(body.get("restart", True))
-    installer_mode = bool(request.app.state.installer_bootstrap)
-    if installer_mode and not restart:
-        return JSONResponse(
-            {"error": "the installer bootstrap completes by exiting"},
-            status_code=400,
-        )
     if installer_mode:
         # The installer parent owns the service: this child records what setup
         # wrote, exits 0, and the parent verifies and activates.
