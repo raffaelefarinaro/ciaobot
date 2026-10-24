@@ -1,36 +1,85 @@
 // @vitest-environment jsdom
-import { mount, flushPromises } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { mount } from '@vue/test-utils'
 import OnboardingRuntimeStage from '../onboarding/OnboardingRuntimeStage.vue'
+import { api } from '../../lib/api'
 
-const { get, post } = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }))
-vi.mock('../../lib/api', () => ({ api: { get, post } }))
-vi.mock('../../composables/useHostTerminal', () => ({ useHostTerminal: () => ({ available: { value: false }, canRun: () => false, ensureCapabilities: vi.fn(), runAction: vi.fn() }) }))
+vi.mock('../../lib/api', () => ({ api: { get: vi.fn(), patch: vi.fn(), post: vi.fn() } }))
 
-const context = { target: { kind: 'installation' as const }, workspace: 'personal', revision: 0, provisioned: false }
-const evidence = (status: 'observed' | 'unknown', models: {id:string;label:string}[] = []) => ({ status, source: null, models, reason: null })
+const context = {
+  target: { kind: 'installation' as const },
+  workspace: 'personal',
+  revision: 1,
+  provisioned: true,
+}
+const ready = { connections: { claude: { ok: true, auth: 'signed in as owner', label: 'Claude Code', terminal_action: 'claude-login' } } }
+const missing = { connections: { claude: { ok: false, auth: 'not installed', label: 'Claude Code', command: 'brew install claude', terminal_action: 'claude-install' } } }
+const observed = {
+  provider_models: { claude: ['configured-alias'] },
+  provider_catalog_evidence: {
+    claude: { status: 'observed', source: 'claude_initialize', models: [{ id: 'claude-x', label: 'Claude X' }], reason: null },
+  },
+}
+const unknown = {
+  provider_models: { claude: ['alias'] },
+  provider_catalog_evidence: {
+    claude: { status: 'unknown', source: null, models: [], reason: 'not_observed' },
+  },
+}
+
+async function mountWithStatus(payload: unknown) {
+  vi.mocked(api.get).mockResolvedValueOnce(payload)
+  const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })
+  await vi.waitFor(() => expect(api.get).toHaveBeenCalledTimes(1))
+  return wrapper
+}
+
+beforeEach(() => { vi.clearAllMocks() })
 
 describe('OnboardingRuntimeStage', () => {
-  beforeEach(() => { get.mockReset(); post.mockReset() })
-
-  it('keeps configured aliases separate from observed runtime models', async () => {
-    get.mockResolvedValue({ provider_models: { claude: ['alias'] }, provider_catalog_evidence: { claude: evidence('observed', [{ id: 'claude-sonnet', label: 'Sonnet' }]) } })
-    const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })
-    await flushPromises()
-    await wrapper.get('input[value="claude"]').setValue()
-    expect(wrapper.text()).toContain('reported by this runtime')
-    expect(wrapper.text()).not.toContain('alias')
-    expect(wrapper.text()).toContain('A successful reply has not been verified')
+  it('reads provider status on mount and never loads models or opens a terminal', async () => {
+    const wrapper = await mountWithStatus(ready)
+    expect(vi.mocked(api.get).mock.calls.map(call => String(call[0]))).toEqual(['/api/settings/providers'])
+    expect(wrapper.findComponent({ name: 'HostTerminalButton' }).exists()).toBe(false)
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
   })
 
-  it('requires explicit choice or deliberate deferral and labels unverified aliases', async () => {
-    get.mockResolvedValue({ provider_models: { claude: ['alias'] }, provider_catalog_evidence: { claude: evidence('unknown') } })
-    const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })
-    await flushPromises()
-    expect(wrapper.text()).toContain('Configured choices; availability not checked')
-    expect(wrapper.text()).toContain('alias')
+  it('requires an explicit model choice or a deliberate deferral', async () => {
+    const wrapper = await mountWithStatus(ready)
+    vi.mocked(api.get).mockResolvedValueOnce(observed)
+    await wrapper.get('.models-empty button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Models reported by this runtime'))
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
-    await wrapper.get('button[aria-pressed]').trigger('click')
+
+    await wrapper.findAll('input[name="model"]')[0].setValue()
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true })
+  })
+
+  it('labels configured aliases as unverified and keeps reported models separate', async () => {
+    const wrapper = await mountWithStatus(ready)
+    vi.mocked(api.get).mockResolvedValueOnce(unknown)
+    await wrapper.get('.models-empty button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Configured choices; availability not checked'))
+    expect(wrapper.text()).toContain('alias')
+    expect(wrapper.text()).not.toContain('Models reported by this runtime')
+  })
+
+  it('blocks Continue after a failed status read and offers a retry', async () => {
+    vi.mocked(api.get).mockRejectedValue(new Error('offline'))
+    const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Could not read the provider status'))
+    expect(wrapper.find('button.retry').exists()).toBe(true)
+    expect(wrapper.find('button.defer').exists()).toBe(false)
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
+  })
+
+  it('offers install or sign-in with the provider command when the runtime is missing', async () => {
+    const wrapper = await mountWithStatus(missing)
+    await vi.waitFor(() => expect(wrapper.text()).toContain('not ready on this computer'))
+    expect(wrapper.text()).toContain('brew install claude')
+    const terminal = wrapper.findComponent({ name: 'HostTerminalButton' })
+    expect(terminal.exists()).toBe(true)
+    expect(terminal.props('action')).toBe('claude-install')
+    expect(wrapper.find('button.defer').exists()).toBe(true)
   })
 })

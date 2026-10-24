@@ -1,78 +1,171 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../lib/api'
-import type { ModelsResponse, RuntimeProvider } from '../../lib/types'
+import type { HostTerminalAction, ModelsResponse, RuntimeProvider } from '../../lib/types'
 import type { OnboardingStageProps, StageState } from '../../lib/onboarding'
 import HostTerminalButton from '../HostTerminalButton.vue'
 
+interface ProviderStatus {
+  ok?: boolean
+  auth?: string
+  command?: string
+  terminal_action?: HostTerminalAction
+  label?: string
+}
+
 const props = defineProps<OnboardingStageProps>()
 const emit = defineEmits<{ state: [state: StageState]; continue: []; back: []; refresh: [] }>()
-const response = ref<ModelsResponse | null>(null)
-const loading = ref(false)
+
+const connections = ref<Record<string, ProviderStatus> | null>(null)
+const models = ref<ModelsResponse | null>(null)
+const loadingStatus = ref(false)
+const loadingModels = ref(false)
 const error = ref('')
 const provider = ref<RuntimeProvider>('claude')
 const selection = ref('')
 const deferred = ref(false)
-const evidence = computed(() => response.value?.provider_catalog_evidence?.[provider.value])
-const reported = computed(() => evidence.value?.status === 'observed' ? evidence.value.models : [])
-const configured = computed(() => response.value?.provider_models?.[provider.value] ?? [])
-const state = computed(() => ({ dirty: false, pending: loading.value, canContinue: !!selection.value || deferred.value, error: error.value || null }))
-watch(state, value => emit('state', value), { immediate: true })
-watch(provider, () => { selection.value = ''; deferred.value = false })
 
-async function load() {
-  loading.value = true; error.value = ''
-  try { response.value = await api.get<ModelsResponse>(`/api/models?workspace=${encodeURIComponent(props.context.workspace)}`) }
-  catch { error.value = 'Could not load model information. Check again or defer this choice.' }
-  finally { loading.value = false }
+const connection = computed<ProviderStatus | undefined>(() => connections.value?.[provider.value])
+const evidence = computed(() => models.value?.provider_catalog_evidence?.[provider.value])
+const reported = computed(() => (evidence.value?.status === 'observed' ? evidence.value.models : []))
+const configured = computed(() => models.value?.provider_models?.[provider.value] ?? [])
+// `auth` is the provider's own sentence ("signed in as …", "not signed in",
+// "not installed"). Only a clearly signed-in provider may skip repair.
+const signedIn = computed(() => !!connection.value?.ok && !/not|missing|no account|signed out|error/i.test(connection.value?.auth ?? ''))
+const ready = computed(() => !!connections.value && !error.value)
+const terminalAction = computed<HostTerminalAction | undefined>(() => connection.value?.terminal_action)
+const state = computed<StageState>(() => ({
+  dirty: false,
+  pending: loadingStatus.value || loadingModels.value,
+  canContinue: ready.value && (!!selection.value || deferred.value),
+  error: error.value || null,
+}))
+
+watch(state, value => emit('state', value), { immediate: true })
+
+function resetChoice(): void {
+  selection.value = ''
+  deferred.value = false
 }
-async function checkAgain() {
-  try { await api.post(`/api/providers/${provider.value}/verify`, {}) } catch { /* evidence refresh below remains the source of truth */ }
-  await load()
+
+async function loadStatus(): Promise<void> {
+  loadingStatus.value = true
+  error.value = ''
+  try {
+    const payload = await api.get<{ connections: Record<string, ProviderStatus> }>('/api/settings/providers')
+    connections.value = payload.connections ?? {}
+  } catch {
+    error.value = 'Could not read the provider status. Retry, or continue later with a deferred choice.'
+  } finally {
+    loadingStatus.value = false
+  }
 }
-function choose(id: string) { selection.value = id; deferred.value = false }
-function defer() { selection.value = ''; deferred.value = true }
-onMounted(load)
+
+// Models load only on an explicit action: on a cache miss the engine may start
+// an ephemeral provider process, which a page mount must never do.
+async function loadModels(): Promise<void> {
+  loadingModels.value = true
+  error.value = ''
+  try {
+    models.value = await api.get<ModelsResponse>(`/api/models?workspace=${encodeURIComponent(props.context.workspace)}`)
+  } catch {
+    error.value = 'Could not load model information. Retry, or continue later with a deferred choice.'
+  } finally {
+    loadingModels.value = false
+  }
+}
+
+async function checkAgain(): Promise<void> {
+  await loadStatus()
+  if (models.value !== null) await loadModels()
+  emit('refresh')
+}
+
+function choose(id: string): void {
+  selection.value = id
+  deferred.value = false
+}
+
+function defer(): void {
+  selection.value = ''
+  deferred.value = true
+}
+
+watch(provider, resetChoice)
+onMounted(loadStatus)
+defineExpose({ refresh: checkAgain })
 </script>
 
 <template>
   <section class="runtime-stage" aria-labelledby="runtime-title">
     <h2 id="runtime-title">Choose a runtime and model</h2>
     <p>Select the runtime first, then choose an explicit model. Nothing connects or sends a model request here.</p>
-    <fieldset><legend>Runtime</legend>
+
+    <fieldset>
+      <legend>Runtime</legend>
       <label><input v-model="provider" type="radio" value="claude"> Claude Code</label>
       <label><input v-model="provider" type="radio" value="opencode"> OpenCode</label>
     </fieldset>
-    <p v-if="loading" role="status">Loading model information…</p>
-    <p v-if="error" role="alert">{{ error }}</p>
-    <template v-if="response">
-      <fieldset v-if="reported.length"><legend>Models reported by this runtime</legend>
-        <label v-for="model in reported" :key="model.id" class="choice"><input type="radio" name="model" :checked="selection === model.id" @change="choose(model.id)"> {{ model.label }} <code :title="model.id">{{ model.id }}</code></label>
-        <p>A successful reply has not been verified.</p>
-      </fieldset>
-      <fieldset v-else-if="configured.length"><legend>Configured choices; availability not checked</legend>
-        <label v-for="model in configured" :key="model" class="choice"><input type="radio" name="model" :checked="selection === model" @change="choose(model)"> <code>{{ model }}</code></label>
-        <p>These configured aliases are not evidence that the account can use them.</p>
-      </fieldset>
-      <div v-else>
-        <p>There are no model choices reported or configured for this runtime.</p>
-        <p>Install or sign in on the engine computer, then check again.</p>
-        <HostTerminalButton :action="provider === 'claude' ? 'claude-login' : 'opencode-login'" label="Sign in in Terminal" />
-        <code class="command">{{ provider === 'claude' ? 'claude' : 'opencode auth login' }}</code>
-        <button type="button" class="btn-small" @click="checkAgain">Check again</button>
+
+    <p v-if="loadingStatus" role="status">Checking the runtime on this computer…</p>
+    <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <button v-if="error && !loadingStatus" type="button" class="retry" @click="checkAgain">Retry</button>
+
+    <template v-if="connections">
+      <div v-if="!signedIn" class="repair">
+        <p>{{ connection?.label ?? provider }} is not ready on this computer. Install or sign in, then check again.</p>
+        <p v-if="connection?.command"><code>{{ connection.command }}</code></p>
+        <HostTerminalButton v-if="terminalAction" :action="terminalAction" label="Open Terminal" />
+        <button type="button" :disabled="loadingStatus" @click="checkAgain">Check again</button>
       </div>
+      <div v-else-if="models === null" class="models-empty">
+        <p>Model choices are not loaded yet. Loading them may start the runtime briefly.</p>
+        <button type="button" :disabled="loadingModels" @click="loadModels">
+          {{ loadingModels ? 'Loading…' : 'Load available models' }}
+        </button>
+      </div>
+      <template v-else>
+        <fieldset v-if="reported.length">
+          <legend>Models reported by this runtime</legend>
+          <label v-for="model in reported" :key="model.id" class="choice">
+            <input type="radio" name="model" :checked="selection === model.id" @change="choose(model.id)">
+            {{ model.label }} <code :title="model.id">{{ model.id }}</code>
+          </label>
+          <p>A successful reply has not been verified.</p>
+        </fieldset>
+        <fieldset v-else-if="configured.length">
+          <legend>Configured choices; availability not checked</legend>
+          <label v-for="model in configured" :key="model" class="choice">
+            <input type="radio" name="model" :checked="selection === model" @change="choose(model)">
+            <code>{{ model }}</code>
+          </label>
+          <p>These configured aliases are not evidence that the account can use them.</p>
+        </fieldset>
+        <div v-else>
+          <p>There are no model choices reported or configured for this runtime.</p>
+        </div>
+        <p>
+          <a href="https://artificialanalysis.ai/" target="_blank" rel="noopener noreferrer">Artificial Analysis</a> ·
+          <a href="https://arena.ai/leaderboard" target="_blank" rel="noopener noreferrer">Arena leaderboard</a> compare
+          models, not account access or suitability.
+        </p>
+      </template>
+
+      <button type="button" class="defer" :aria-pressed="deferred" @click="defer">Decide later</button>
+      <p v-if="deferred" role="status">Deferred: this choice is recorded as not ready, not as connected.</p>
     </template>
-    <button type="button" class="btn-small" :aria-pressed="deferred" @click="defer">{{ deferred ? 'Deferred for now' : 'Decide later' }}</button>
-    <nav aria-label="Model comparison"><a href="https://artificialanalysis.ai/" target="_blank" rel="noopener noreferrer">Artificial Analysis</a> · <a href="https://arena.ai/leaderboard" target="_blank" rel="noopener noreferrer">Arena leaderboard</a><p>These compare models, not account access or suitability.</p></nav>
   </section>
 </template>
 
 <style scoped>
-.runtime-stage { display: grid; gap: var(--space-3); max-width: 680px; }
-fieldset { display: grid; gap: var(--space-2); border: 0; border-top: 1px solid var(--border); padding: var(--space-3) 0 0; }
-legend { font-weight: 600; padding: 0 var(--space-1) 0 0; }
-label { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; }
-.choice code, .command { overflow-wrap: anywhere; }
-nav p, fieldset p { color: var(--fg2); margin: 0; }
-@media (pointer: coarse) { .runtime-stage button { min-height: var(--touch); } }
+.runtime-stage { display: grid; gap: 12px; }
+fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); padding: 8px 12px; }
+legend { padding: 0 4px; color: var(--fg2); }
+.choice { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+button { min-height: 44px; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { opacity: .55; cursor: not-allowed; }
+code { font: 12px var(--font-mono); color: var(--fg2); overflow-wrap: anywhere; }
+.error { color: var(--warning); }
+.repair, .models-empty { display: grid; gap: 8px; }
 </style>
