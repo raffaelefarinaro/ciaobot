@@ -67,18 +67,41 @@ function measure(): void {
   // heuristic always returns false. Detect keyboard open by comparing
   // against the tallest viewport height we've seen for this orientation.
   const keyboardOpen = h < maxViewportHeight * KEYBOARD_OPEN_RATIO
+  const wasOpen = document.documentElement.classList.contains('keyboard-open')
   document.documentElement.classList.toggle('keyboard-open', keyboardOpen)
   for (const cb of subscribers) cb(h)
+  if (wasOpen && !keyboardOpen) releaseDismissedKeyboard()
+}
+
+/**
+ * The keyboard closed. If a text field still holds focus, the user swiped the
+ * keyboard away rather than leaving the field, and iOS keeps the page shifted
+ * for the focused field: the whole pane sits a status bar's height lower, with
+ * a gap above the header, until focus moves elsewhere. Blur the field, as a
+ * native app does when its keyboard is dismissed, and re-measure once the
+ * viewport has settled.
+ */
+function releaseDismissedKeyboard(): void {
+  const el = document.activeElement
+  if (el instanceof HTMLElement && el.matches('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) {
+    el.blur()
+  }
+  if (window.scrollY !== 0) window.scrollTo(0, 0)
+  scheduleSettling()
 }
 
 // Tracked so repeated calls (every resume, orientation change, pageshow, and
 // every lazy onViewportChange caller) cannot pile up overlapping timer sets.
 let settlingTimers: ReturnType<typeof setTimeout>[] = []
 
-function remeasureWhileSettling(): void {
-  measure()
+function scheduleSettling(): void {
   for (const timer of settlingTimers) clearTimeout(timer)
   settlingTimers = RESETTLE_DELAYS_MS.map(delay => setTimeout(measure, delay))
+}
+
+function remeasureWhileSettling(): void {
+  measure()
+  scheduleSettling()
 }
 
 /** Cancel pending settling timers. Exported for test teardown. */
