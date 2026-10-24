@@ -1071,39 +1071,45 @@ async def provider_connection_action(request: Request) -> JSONResponse:
             )
         return JSONResponse({"ok": True, "launched": launched, "command": command}, status_code=202)
     if action == "verify":
-        if provider == "claude":
-            from ciao.setup_status import clear_claude_discovery_cache
+        try:
+            if provider == "claude":
+                from ciao.setup_status import clear_claude_discovery_cache
 
-            await asyncio.to_thread(clear_claude_discovery_cache)
-        payload = await asyncio.to_thread(_provider_config_payload, config)
-        if drop_account_evidence is not None:
-            drop_account_evidence()
-        return JSONResponse(payload["connections"].get(provider, {}))
+                await asyncio.to_thread(clear_claude_discovery_cache)
+            payload = await asyncio.to_thread(_provider_config_payload, config)
+            return JSONResponse(payload["connections"].get(provider, {}))
+        finally:
+            # Cancellation or an error can leave a threaded sign-in probe
+            # running; drop evidence on every exit, not only on success.
+            if drop_account_evidence is not None:
+                drop_account_evidence()
     if action == "logout":
         try:
-            # auth_command is `[binary, "auth", "login"]`, so dropping the last
-            # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
-            # would run the obsolete top-level `claude logout`, which prints a
-            # "did you mean" hint and exits 0 without signing out.
-            logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
-            run = await asyncio.to_thread(
-                subprocess.run,
-                logout_command,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        if run.returncode != 0:
-            return JSONResponse(
-                {"error": (run.stderr or run.stdout or "logout failed").strip()},
-                status_code=400,
-            )
-        if drop_account_evidence is not None:
-            drop_account_evidence()
-        return JSONResponse({"ok": True})
+            try:
+                # auth_command is `[binary, "auth", "login"]`, so dropping the last
+                # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
+                # would run the obsolete top-level `claude logout`, which prints a
+                # "did you mean" hint and exits 0 without signing out.
+                logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
+                run = await asyncio.to_thread(
+                    subprocess.run,
+                    logout_command,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if run.returncode != 0:
+                return JSONResponse(
+                    {"error": (run.stderr or run.stdout or "logout failed").strip()},
+                    status_code=400,
+                )
+            return JSONResponse({"ok": True})
+        finally:
+            if drop_account_evidence is not None:
+                drop_account_evidence()
     return JSONResponse({"error": "unsupported action"}, status_code=404)
 
 

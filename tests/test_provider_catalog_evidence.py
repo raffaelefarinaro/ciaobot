@@ -362,3 +362,60 @@ async def test_authorized_turn_captures_from_the_same_connection(tmp_path: Path,
     # One connect for the turn, then query; capture reuses that client.
     connect_with_deadline.assert_awaited_once_with(fake)
     assert FakeClient.queries == 1
+
+
+def test_cancelled_sign_out_still_drops_evidence(tmp_path: Path, monkeypatch) -> None:
+    """Cancellation must not leave the previous account's models behind.
+
+    The CLI runs in a worker thread; cancelling the request can leave it
+    running, so the route clears evidence on every exit rather than only when
+    it returns a success payload.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    from ciao.web import routes_api
+
+    async def _cancelled(_function, *_args, **_kwargs):
+        # A connection authorized just before the sign-out can record its
+        # metadata while the logout work is still running, then the request is
+        # cancelled.
+        record_claude_models(tmp_path, {"models": [{"value": "late", "displayName": "Late"}]})
+        assert claude_catalog_evidence(tmp_path).status == "observed"
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(routes_api.asyncio, "to_thread", _cancelled)
+    record_claude_models(tmp_path, {"models": [{"value": "m", "displayName": "M"}]})
+    request = SimpleNamespace(
+        path_params={"provider": "claude", "action": "logout"},
+        app=SimpleNamespace(state=SimpleNamespace(config=_route_config(tmp_path))),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(routes_api.provider_connection_action(request))
+    assert claude_catalog_evidence(tmp_path).status == "unknown"
+
+
+def test_failed_sign_out_still_drops_evidence(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from ciao.web import routes_api
+
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "not signed in"
+
+    monkeypatch.setattr(routes_api.subprocess, "run", lambda *_a, **_k: _Failed())
+    record_claude_models(tmp_path, {"models": [{"value": "m", "displayName": "M"}]})
+    request = SimpleNamespace(
+        path_params={"provider": "claude", "action": "logout"},
+        app=SimpleNamespace(state=SimpleNamespace(config=_route_config(tmp_path))),
+    )
+
+    response = asyncio.run(routes_api.provider_connection_action(request))
+    assert response.status_code == 400
+    assert claude_catalog_evidence(tmp_path).status == "unknown"
