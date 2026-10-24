@@ -43,20 +43,32 @@ watch(
   }),
   { immediate: true },
 )
-// Editing the path invalidates the previous inspection.
-watch(folder, () => { inspected.value = false; existingNotes.value = false; folderError.value = '' })
+// Editing an editable path invalidates the previous inspection. A provisioned
+// install sets `folder` from the authoritative path, which is not an edit.
+watch(folder, () => {
+  if (props.context.provisioned) return
+  inspected.value = false
+  existingNotes.value = false
+  folderError.value = ''
+})
 watch(() => props.context.workspace, value => { folder.value = value })
 
+let inspectorId = 0
 async function inspect() {
   folderError.value = ''
   inspected.value = false
   if (props.context.provisioned) return
-  if (!folder.value.trim()) { existingNotes.value = false; return }
+  const requested = folder.value.trim()
+  if (!requested) { existingNotes.value = false; return }
+  const id = ++inspectorId
   inspecting.value = true
   try {
     const result = await api.get<{ mode?: string; ok?: boolean; error?: string }>(
-      `/api/setup/inspect-folder?path=${encodeURIComponent(folder.value.trim())}`,
+      `/api/setup/inspect-folder?path=${encodeURIComponent(requested)}`,
     )
+    // The path may have changed while the request was out; a stale answer must
+    // not validate the newer value.
+    if (id !== inspectorId || folder.value.trim() !== requested) return
     if (result?.ok === false) {
       folderError.value = result.error || 'That folder cannot be used. Check the path and try again.'
       existingNotes.value = false
@@ -65,9 +77,10 @@ async function inspect() {
     existingNotes.value = result.mode === 'existing' || result.mode === 'notes'
     inspected.value = true
   } catch {
+    if (id !== inspectorId || folder.value.trim() !== requested) return
     folderError.value = 'Could not inspect this folder. Check the path and try again.'
   } finally {
-    inspecting.value = false
+    if (id === inspectorId) inspecting.value = false
   }
 }
 onMounted(async () => {
@@ -76,6 +89,8 @@ onMounted(async () => {
       const status = await api.get<SetupStatus>('/api/setup-status')
       provisionedPath.value = status.workspace_root
       folder.value = status.workspace_root
+      // The engine reported this path: it needs no inspection, and the watcher
+      // deliberately leaves provisioned installs alone.
       inspected.value = true
     } catch { folderError.value = 'Could not load the current Ciaobot folder.' }
   }
