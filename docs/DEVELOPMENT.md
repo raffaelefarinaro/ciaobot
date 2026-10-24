@@ -199,6 +199,20 @@ run `ciao`. The zsh/bash block checks membership when each shell starts. Use
 the installer prints a quoted command for the current terminal either way. The
 installer process cannot change the PATH of the terminal that launched it. The
 managed block can be removed from the named startup file to undo the change.
+`ciao run --installer-bootstrap [--installer-run-id <uuid>]` is the installer's
+foreground browser bootstrap and is not an operator command: it refuses to start
+when it cannot prove the machine is fresh (an installed service definition or
+job, an inherited workspace redirect, or an existing workspace), runs from
+`~/.ciao/installer-bootstrap/launcher` with a scratch configuration that ignores
+`.env` and discovery, and never re-execs. When the wizard completes it writes one
+owner-only handoff result (run id, startup id, destination, service backend and
+definition, port) and exits 0 instead of handing the server to the service
+manager. The installer parent then runs `ciao installer activate --run-id
+<uuid>`, which starts the service only when the result belongs to that run, the
+recorded definition is the live one, that definition names the same destination,
+and the destination is a completed workspace; otherwise it reports what is
+uncertain and starts nothing.
+
 `--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool
