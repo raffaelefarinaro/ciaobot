@@ -170,6 +170,52 @@ async def test_try_retry_now_refuses_active_chat(tmp_path: Path) -> None:
     await asyncio.wait_for(consumer, timeout=2.0)
 
 
+async def test_retry_due_on_busy_chat_defers_minutes_not_interval(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-busy")
+
+    release = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        await release.wait()
+        yield ResultEvent(
+            type="result",
+            result="done",
+            session_id="sess-busy",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    active_stream = pcm.start_stream(chat.chat_id, "already running")
+    consumer = asyncio.create_task(_consume(active_stream))
+    await asyncio.sleep(0.01)
+    # Armed after the turn started: starting a turn clears a pending retry.
+    pcm.set_chat_retry(
+        chat.chat_id,
+        "run later",
+        reason="quota",
+        next_at=chat_service._iso_after(0),
+        interval_seconds=8 * 60 * 60,
+    )
+    loop_task = asyncio.create_task(pcm._retry_loop(chat.chat_id))
+    await asyncio.sleep(0.05)
+
+    due = chat_service._parse_iso(pcm.get_chat(chat.chat_id).retry_next_at)
+    assert due is not None
+    remaining = (due - chat_service._parse_iso(chat_service._iso_after(0))).total_seconds()
+    assert 0 < remaining <= 5 * 60
+
+    loop_task.cancel()
+    release.set()
+    await asyncio.wait_for(consumer, timeout=2.0)
+
+
 # ── Auto tier-fallback on capability errors (ciao/web/project_chats.py) ──
 
 

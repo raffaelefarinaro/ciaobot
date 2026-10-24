@@ -272,6 +272,9 @@ _MAX_CONNECTION_DROP_RETRIES = 6
 # capped by _MAX_TERMINAL_QUOTA_RETRIES, and never by this cap.
 _MAX_QUOTA_RETRIES = 6
 _MAX_QUOTA_RETRY_INTERVAL_SECONDS = 8 * 60 * 60
+# A retry that comes due while the chat is running a turn waits this long and
+# checks again, not a whole retry interval (which backs off to hours).
+_RETRY_BUSY_DEFER_SECONDS = 5 * 60
 # Weekly and monthly usage limits reset on a days-long window, so an hourly
 # retry would only burn attempts. One attempt a day for a week covers a weekly
 # limit that clears on schedule.
@@ -7660,7 +7663,7 @@ class ProjectChatManager:
                 if chat is None or chat.archived or chat.retry_status != "pending":
                     return
                 if self._broker.get(chat_id) is not None:
-                    chat.retry_next_at = chat_service._iso_after(chat.retry_interval_seconds)
+                    chat.retry_next_at = chat_service._iso_after(_RETRY_BUSY_DEFER_SECONDS)
                     self._save()
                     self._publish_retry(chat)
                     continue
