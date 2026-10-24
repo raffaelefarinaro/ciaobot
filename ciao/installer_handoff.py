@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,44 @@ def _strict_regular_file(path: Path, *, label: str) -> None:
         raise HandoffError(f"{label} is not a regular file: {path}")
 
 
+def _require_private_result(path: Path) -> None:
+    """The result must sit in the scratch directory and be owner-only."""
+    directory = scratch_root()
+    if directory.is_symlink():
+        raise HandoffError(f"installer scratch directory is a symlink: {directory}")
+    try:
+        parent_is_scratch = path.parent.resolve() == directory.expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        raise HandoffError(f"Could not resolve the installer scratch directory: {exc}") from exc
+    if not parent_is_scratch:
+        raise HandoffError(
+            f"installer handoff result is not in the scratch directory: {path}"
+        )
+    if sys.platform != "win32":
+        try:
+            mode = stat.S_IMODE(os.lstat(path).st_mode)
+        except OSError as exc:
+            raise HandoffError(f"Could not inspect the installer handoff result: {exc}") from exc
+        if mode & 0o077:
+            raise HandoffError("installer handoff result is readable by other users")
+
+
+def _resolved(value: str, *, label: str) -> Path:
+    try:
+        return Path(value).expanduser().resolve()
+    except (OSError, ValueError) as exc:
+        raise HandoffError(f"Could not resolve {label}: {exc}") from exc
+
+
+def _no_duplicate_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise HandoffError(f"installer handoff result repeats the field {key!r}")
+        payload[key] = value
+    return payload
+
+
 def _current_backend_name() -> str:
     from ciao import service_backend
 
@@ -141,6 +180,8 @@ def record_setup_completion(
         "port": port,
     }
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if len(text.encode("utf-8")) > MAX_RESULT_BYTES:
+        raise HandoffError("the installer handoff result would exceed its size limit")
 
     directory = scratch_root()
     if directory.is_symlink():
@@ -176,6 +217,7 @@ def read_result(
     """Read and validate the result; anything unexpected is a refusal."""
     target = result_path() if path is None else path
     _strict_regular_file(target, label="installer handoff result")
+    _require_private_result(target)
     try:
         size = target.stat().st_size
     except OSError as exc:
@@ -187,7 +229,7 @@ def read_result(
     except (OSError, UnicodeDecodeError) as exc:
         raise HandoffError(f"Could not read the installer handoff result: {exc}") from exc
     try:
-        payload = json.loads(text)
+        payload = json.loads(text, object_pairs_hook=_no_duplicate_fields)
     except ValueError as exc:
         raise HandoffError("installer handoff result is not valid json") from exc
     if not isinstance(payload, dict):
@@ -224,7 +266,7 @@ def read_result(
     return HandoffResult(
         run_id=run_id,
         startup_id=startup_id,
-        workspace=workspace.expanduser().resolve(),
+        workspace=_resolved(str(workspace), label="the handoff workspace"),
         service_backend=backend_name,
         definition_path=definition.expanduser(),
         port=port,
@@ -250,10 +292,10 @@ def _definition_workspace(backend_name: str, definition: Path) -> Path:
         raise HandoffError(f"Could not read the service definition: {exc}") from exc
     if workspace is None:
         raise HandoffError("the service definition does not name a workspace")
-    try:
-        return Path(workspace).expanduser().resolve()
-    except OSError as exc:
-        raise HandoffError(f"Could not resolve the definition's workspace: {exc}") from exc
+    named = Path(workspace).expanduser()
+    if not named.is_absolute():
+        raise HandoffError("the service definition names a relative workspace")
+    return _resolved(str(named), label="the definition's workspace")
 
 
 def activate(
@@ -283,10 +325,10 @@ def activate(
             f"the handoff result was written for {result.service_backend}, "
             f"not {backend.name}"
         )
-    expected = backend.live_agents_dir() / _definition_name(backend.name)
     try:
+        expected = backend.live_agents_dir() / _definition_name(backend.name)
         recorded_is_live = result.definition_path.resolve() == expected.resolve()
-    except OSError:
+    except (OSError, ValueError):
         recorded_is_live = False
     if not recorded_is_live:
         raise HandoffError(
@@ -301,7 +343,10 @@ def activate(
         raise HandoffError(
             f"the service definition serves {served}, not {result.workspace}"
         )
-    status = backend.load_agent(expected)
+    try:
+        status = backend.load_agent(expected)
+    except (OSError, RuntimeError) as exc:
+        raise HandoffError(f"Could not start the engine: {exc}") from exc
     if status != 0:
         raise HandoffError(
             f"the service manager refused to start the engine (status {status})"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import stat
 import sys
@@ -370,6 +371,11 @@ def test_installer_finish_records_the_result_and_exits_zero(
 def test_installer_finish_refuses_to_stay_running(monkeypatch, tmp_path) -> None:
     run_id = str(uuid.uuid4())
     _home(monkeypatch, tmp_path)
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("a refused finish must not provision anything")
+
+    monkeypatch.setattr("ciao.cli.setup_workspace", explode)
     client, restarts = _finish_client(tmp_path, run_id=run_id)
 
     resp = client.post(
@@ -384,3 +390,86 @@ def test_installer_finish_refuses_to_stay_running(monkeypatch, tmp_path) -> None
     assert resp.status_code == 400
     assert restarts == []
     assert not installer_handoff.result_path().exists()
+
+
+@SUPPORTED
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits only")
+def test_world_readable_result_never_activates(monkeypatch, tmp_path) -> None:
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    path = _record(backend, workspace, definition, run_id)
+    path.chmod(0o644)
+    monkeypatch.setattr(service_backend, "current_backend", lambda: backend)
+    with pytest.raises(installer_handoff.HandoffError, match="readable by other users"):
+        installer_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
+    assert backend.loaded == []
+
+
+@SUPPORTED
+def test_symlinked_scratch_directory_never_activates(monkeypatch, tmp_path) -> None:
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    path = _record(backend, workspace, definition, run_id)
+    real = tmp_path / "real-scratch"
+    path.parent.rename(real)
+    path.parent.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(service_backend, "current_backend", lambda: backend)
+    with pytest.raises(installer_handoff.HandoffError, match="symlink"):
+        installer_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
+    assert backend.loaded == []
+
+
+@SUPPORTED
+def test_duplicate_fields_never_activate(monkeypatch, tmp_path) -> None:
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    path = _record(backend, workspace, definition, run_id)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace('"port": 8443', '"port": 9443,\n  "port": 8443'),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    monkeypatch.setattr(service_backend, "current_backend", lambda: backend)
+    with pytest.raises(installer_handoff.HandoffError, match="repeats the field"):
+        installer_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
+    assert backend.loaded == []
+
+
+@SUPPORTED
+@pytest.mark.skipif(sys.platform == "win32", reason="the plist is the POSIX definition")
+def test_relative_definition_workspace_never_activates(monkeypatch, tmp_path) -> None:
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    _record(backend, workspace, definition, run_id)
+    definition.write_bytes(
+        plistlib.dumps({
+            "EnvironmentVariables": {
+                "CIAO_WORKSPACE": os.path.relpath(workspace, Path.cwd())
+            }
+        })
+    )
+    with pytest.raises(installer_handoff.HandoffError, match="relative workspace"):
+        _activate(monkeypatch, backend)
+
+
+@SUPPORTED
+def test_service_manager_oserror_becomes_a_handoff_error(monkeypatch, tmp_path) -> None:
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    _record(backend, workspace, definition, run_id)
+
+    def fail(_definition):
+        raise OSError("launchctl disappeared")
+
+    backend.load_agent = fail  # type: ignore[method-assign]
+    with pytest.raises(installer_handoff.HandoffError, match="launchctl disappeared"):
+        _activate(monkeypatch, backend)
+
+
+@SUPPORTED
+def test_unbounded_startup_id_is_refused(monkeypatch, tmp_path) -> None:
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    with pytest.raises(installer_handoff.HandoffError, match="size limit"):
+        installer_handoff.record_setup_completion(
+            run_id=run_id,
+            startup_id="x" * installer_handoff.MAX_RESULT_BYTES,
+            workspace=workspace,
+            written=[definition],
+            port=8443,
+        )
