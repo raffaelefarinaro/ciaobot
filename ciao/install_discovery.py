@@ -142,3 +142,45 @@ def trusted_registry(name: str | None, vault: Path) -> CiaoConfig | None:
     except (OSError, ValueError):
         return None
     return config if registered_vault == vault.resolve() else None
+
+
+class InstallerEntryRefused(RuntimeError):
+    """Installer bootstrap cannot prove that this is a fresh installation."""
+
+
+def require_fresh_installer_entry(*, environ: Mapping[str, str], cwd: Path) -> None:
+    """Raise unless installer bootstrap is demonstrably safe. Read-only."""
+    platform = _platform()
+    if platform not in ("darwin", "win32"):
+        raise InstallerEntryRefused(f"Installer bootstrap is unsupported on {platform}")
+    if any(environ.get(key, "").strip() for key in (
+        "CIAO_WORKSPACE", "CIAO_WORKSPACES", "CIAO_RUNTIME_ROOT", "CIAO_MEMORY_DIR",
+        "CIAO_VAULT_DIR", "CIAO_VAULT_ROOT",
+    )):
+        raise InstallerEntryRefused("Inherited workspace or storage redirect is present")
+    from ciao.setup_marker import is_set_up_workspace
+    if is_set_up_workspace(cwd):
+        raise InstallerEntryRefused("Current directory is an existing Ciaobot workspace")
+    home_root = Path.home() / "Ciaobot"
+    if is_set_up_workspace(home_root):
+        raise InstallerEntryRefused("Default Ciaobot workspace already exists")
+    try:
+        if platform == "darwin":
+            from ciao import macos_service
+            definition = macos_service.live_launch_agents_dir() / f"{macos_service.SERVER_LABEL}.plist"
+            # `lexists` so a dangling symlink is still evidence of an install.
+            if os.path.lexists(definition):
+                raise InstallerEntryRefused("Live LaunchAgent definition already exists")
+            registered = macos_service.server_job_registered()
+        else:
+            from ciao import windows_service
+            definition = windows_service.live_task_dir() / windows_service.TASK_FILE_NAME
+            if os.path.lexists(definition):
+                raise InstallerEntryRefused("Live scheduled-task definition already exists")
+            registered = windows_service.engine_task_registered()
+        if registered:
+            raise InstallerEntryRefused("Engine service is already registered")
+    except InstallerEntryRefused:
+        raise
+    except Exception as exc:
+        raise InstallerEntryRefused(f"Could not verify fresh installation state: {exc}") from exc

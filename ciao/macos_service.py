@@ -318,6 +318,24 @@ def _loaded_definition(uid: int, runner: Runner) -> tuple[bool, list[str] | None
     return loaded, arguments
 
 
+def server_job_registered() -> bool:
+    """Strictly query launchd for the engine label; uncertainty is an error."""
+    try:
+        completed = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False, timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Could not query launchd: {exc}") from exc
+    if completed.returncode != 0:
+        raise RuntimeError(f"launchctl list failed: {(completed.stderr or '').strip()}")
+    for line in (completed.stdout or "").splitlines():
+        fields = line.split()
+        if fields and fields[-1] == SERVER_LABEL:
+            return True
+    return False
+
+
 def _loaded_job(
     uid: int, runner: Runner
 ) -> tuple[bool, list[str] | None, int | None]:

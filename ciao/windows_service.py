@@ -332,6 +332,27 @@ def _failure(action: str, completed: subprocess.CompletedProcess[str]) -> Window
     return WindowsServiceError(f"schtasks {action} failed: {detail}")
 
 
+def engine_task_registered() -> bool:
+    """Strictly query Task Scheduler; malformed or failed output is unknown."""
+    import csv
+    import io
+
+    try:
+        completed = _schtasks("/Query", "/FO", "CSV", "/NH")
+    except Exception as exc:
+        raise WindowsServiceError(f"Could not query scheduled tasks: {exc}") from exc
+    if completed.returncode != 0:
+        raise _failure("/Query", completed)
+    try:
+        rows = list(csv.reader(io.StringIO(completed.stdout or ""), strict=True))
+    except csv.Error as exc:
+        raise WindowsServiceError("Could not parse scheduled task query") from exc
+    for row in rows:
+        if row and row[0].strip().casefold() == TASK_NAME.casefold():
+            return True
+    return False
+
+
 def task_exists(name: str = TASK_NAME) -> bool:
     return _schtasks("/Query", "/TN", name).returncode == 0
 
