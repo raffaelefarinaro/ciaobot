@@ -639,3 +639,11 @@ and an unobserved runtime is never described as available.
 ## Onboarding memory
 
 The Access & memory onboarding stage asks workspace operators to acknowledge a handover choice before continuing. Its suggested “Accept and dismiss” choice applies only while that workspace's onboarding receipt is `in_progress`; it is never written until Continue, and is saved only through the workspace's existing `memory_handover` setting. A missing trusted handover service is reported plainly and does not imply acceptance can act.
+
+### Onboarding entry
+
+`/onboarding` composes the stage components by the receipt's recorded step and advances progress only
+through the onboarding store; `OnboardingView` never writes progress itself, and the access/memory
+screen advances only when both components report ready. `HomeOnboardingResume` reads the current
+receipt on Home entry and window focus and links into the journey while a target is pending — it is
+not a dismissal, and it shows nothing when the receipt cannot be read.

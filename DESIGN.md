@@ -290,3 +290,10 @@ The runtime stage asks for a runtime, then an explicit model. Reported models an
 aliases never share a list: the first is evidence from a connected runtime, the second is a set
 of choices whose availability is unknown. Deferring is a first-class choice, not an error, and
 the stage never starts a provider or a model turn on its own.
+
+## Onboarding entry
+
+The journey is a route, not a modal: `/onboarding` resumes at the recorded step, validates any
+return path as an internal route, and leaves completed or legacy installs alone. Home carries a
+quiet resume row while setup is unfinished, because a new operator should never have to remember
+a URL.

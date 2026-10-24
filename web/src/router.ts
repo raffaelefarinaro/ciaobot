@@ -2,6 +2,12 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 export const routes: RouteRecordRaw[] = [
   {
+    path: '/onboarding',
+    name: 'onboarding',
+    component: () => import('./components/onboarding/OnboardingView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/login',
     name: 'login',
     component: () => import('./components/LoginView.vue'),
@@ -113,7 +119,7 @@ router.beforeEach(async (to) => {
       await auth.check()
     }
     if (!auth.authenticated) {
-      return { name: 'login', query: to.query.shared ? { shared: to.query.shared } : {} }
+      return { name: 'login', query: { ...to.query, returnTo: to.fullPath } }
     }
   }
 })

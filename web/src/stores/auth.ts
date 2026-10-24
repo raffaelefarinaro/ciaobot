@@ -12,8 +12,11 @@ export const useAuthStore = defineStore('auth', () => {
     // result, so the app is a reload away from signed-in.
     await api.post<ActionResult>('/api/auth', { token })
     authenticated.value = true
-    const shared = new URLSearchParams(window.location.search).get('shared')
-    window.location.replace(shared ? `/?shared=${encodeURIComponent(shared)}` : '/')
+    const params = new URLSearchParams(window.location.search)
+    const shared = params.get('shared')
+    const requested = params.get('returnTo')
+    const safe = requested && requested.startsWith('/') && !requested.startsWith('//') && !requested.includes('\\') && !/^\/(login|onboarding)(?:[/?#]|$)/.test(requested) && !/[?&](?:setup_token|token)=/i.test(requested)
+    window.location.replace(safe ? requested! : shared ? `/?shared=${encodeURIComponent(shared)}` : '/')
   }
 
   async function logout() {
