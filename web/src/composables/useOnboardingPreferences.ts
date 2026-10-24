@@ -25,7 +25,9 @@ export function useOnboardingPreferences(target: OnboardingTarget, workspace: st
       ])
       savedHandover.value = handover.handover
       actingAvailable.value = handover.acting_available
-      eligible = target.kind === 'workspace' && onboardingProgress(receipt, target)?.status === 'in_progress'
+      // Any target whose own journey is still running may be offered the draft:
+      // an installation acting on its primary workspace as well as a new workspace.
+      eligible = onboardingProgress(receipt, target)?.status === 'in_progress'
       draft.memoryHandover = eligible && handover.handover === 'off' ? 'all' : handover.handover
       draft.acknowledged = false
       loaded = true

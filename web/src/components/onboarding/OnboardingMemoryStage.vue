@@ -25,7 +25,7 @@ function select(value: MemoryHandover) { prefs.draft.memoryHandover = value }
 <template>
   <section aria-labelledby="memory-stage-title">
     <h2 id="memory-stage-title">Memory handover</h2>
-    <p>Choose whether Workspace care may act on memory suggestions. It can file accepted facts into the archive, or queue them for review; it never skips the review queue. History shows what changed and offers Undo. You can change this later in Settings.</p>
+    <p>Choose whether Workspace care may act on memory suggestions. Accept-and-dismiss files accepted facts into the archive and lets some accepted text enter always-loaded memory; anything uncertain is queued for review instead. History shows what changed and offers Undo, and you can change this later in Settings.</p>
     <p v-if="!prefs.actingAvailable.value && prefs.draft.memoryHandover !== 'off'" role="status" class="hint">
       The trusted service is unavailable, so acceptance is not acting now. Enforcement is unchanged; this choice does not make the service available.
     </p>
@@ -33,9 +33,9 @@ function select(value: MemoryHandover) { prefs.draft.memoryHandover = value }
       <legend>Memory handover choice</legend>
       <label><input type="radio" name="memory-handover" value="off" :checked="prefs.draft.memoryHandover === 'off'" @change="select('off')"> Off — predict only</label>
       <label><input type="radio" name="memory-handover" value="dismiss" :checked="prefs.draft.memoryHandover === 'dismiss'" @change="select('dismiss')"> Dismiss — dismiss suggestions predicted to be dismissed</label>
-      <label><input type="radio" name="memory-handover" value="all" :checked="prefs.draft.memoryHandover === 'all'" @change="select('all')"> Accept and dismiss — may file accepted facts or queue them for review</label>
+      <label><input type="radio" name="memory-handover" value="all" :checked="prefs.draft.memoryHandover === 'all'" @change="select('all')"> Accept and dismiss — files accepted facts and lets accepted text into always-loaded memory, with uncertain facts queued for review</label>
     </fieldset>
-    <label class="ack"><input v-model="prefs.draft.acknowledged" type="checkbox"> I understand this choice, including that accepted facts may be filed or queued for review.</label>
+    <label class="ack"><input v-model="prefs.draft.acknowledged" type="checkbox"> I understand this choice, including that accepted facts may be filed, that some text may enter always-loaded memory, and that anything uncertain is queued for review.</label>
     <p v-if="prefs.error.value" role="alert">{{ prefs.error.value }}</p>
     <p v-if="prefs.draft.memoryHandover === prefs.savedHandover.value" class="hint">Saved choice: {{ prefs.savedHandover.value }}.</p>
     <div class="stage-actions"><button type="button" class="onboarding-button back" :disabled="props.busy || prefs.pending.value" @click="emit('back')">Back</button><button type="button" class="onboarding-button onboarding-primary" :disabled="props.busy || !canContinue" @click="continueStage">Continue</button><button type="button" class="onboarding-button" @click="emit('refresh')">Refresh</button></div>

@@ -32,3 +32,47 @@ describe('useOnboardingPreferences', () => {
   })
 })
 // @vitest-environment jsdom
+
+describe('onboarding memory preferences consent', () => {
+  it('cannot save without the acknowledgement', async () => {
+    const store = useProjectStore()
+    const update = vi.spyOn(store, 'updateWorkspace').mockResolvedValue(undefined as never)
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'off', acting_available: true }
+        : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
+    ) as never)
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    await prefs.load()
+    // An installation whose own journey is running is eligible too.
+    expect(prefs.draft.memoryHandover).toBe('all')
+    expect(await prefs.saveMemoryHandover()).toBe(false)
+    expect(update).not.toHaveBeenCalled()
+
+    prefs.draft.acknowledged = true
+    expect(await prefs.saveMemoryHandover()).toBe(true)
+    expect(update).toHaveBeenCalledWith('personal', { memory_handover: 'all' })
+  })
+
+  it('keeps a saved non-off choice instead of proposing again', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'dismiss', acting_available: true }
+        : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
+    ) as never)
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    await prefs.load()
+    expect(prefs.draft.memoryHandover).toBe('dismiss')
+  })
+
+  it('does not propose for a completed journey', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'off', acting_available: true }
+        : { schema: 1, revision: 1, installation: { status: 'completed', step: 'finish' }, workspaces: {} },
+    ) as never)
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    await prefs.load()
+    expect(prefs.draft.memoryHandover).toBe('off')
+  })
+})
