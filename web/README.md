@@ -49,6 +49,8 @@ After changes that touch running static assets (anything that lands in `ciao/web
 
 ## Layout
 
+Onboarding's Access & memory stage treats filesystem scope and runtime approval mode as separate choices. It writes only explicit changes through workspace settings; an unset permission mode remains unknown/engine default and is never presented as a known guarantee.
+
 ```
 web/
   index.html              entry HTML, viewport meta, PWA manifest link

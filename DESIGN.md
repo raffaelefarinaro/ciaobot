@@ -175,6 +175,8 @@ the user to reload, never replayed automatically.
 
 ## Colors
 
+The Access & memory onboarding stage keeps filesystem scope separate from approval mode, states that Claude Auto is not a safety guarantee, and never treats OpenCode model instructions as enforced safeguards. Windows has no filesystem sandbox.
+
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
 
 - **Primary orange (`#fb923c`, the `amber` preset):** The brand accent and primary-action color. Use it for the current location, focus, progress, and the single most important action in a region. It replaced the earlier pink `#ff4d6d`, which sat about 15° of hue from the error red and made a primary action read as a failure. Workspaces may override it with a saved accent preset (`amber`, `pink`, `cyan`, `emerald`, `violet`, `blue`, `teal`, `lime`, `fuchsia`); a workspace that saved pink keeps it, and only an unset colour follows the default. Canvas and surface tokens stay fixed.
