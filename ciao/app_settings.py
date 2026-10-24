@@ -184,9 +184,10 @@ class AppSettings:
     """
 
     # The unattended backup service (ciao/backup_service.py). `backup_enabled`
-    # is the owner's standing decision and defaults on, so an existing install
-    # keeps the branch push it has always had, and a fresh one is backed up
-    # without anybody configuring anything; `backup_paused` is a hold they can
+    # is the owner's standing decision and defaults on for existing installs,
+    # so they keep the branch push they have always had; a genuinely new
+    # install is seeded to false at setup and enables backup explicitly (the
+    # backup settings and the guided setup). `backup_paused` is a hold they can
     # lift. The three timestamps/commit below are the service's own record of
     # what it has already done.
     #
@@ -402,6 +403,23 @@ def _migrate_global_insights_model(raw: dict, settings: AppSettings) -> bool:
     return True
 
 
+def needs_new_install_backup_seed(path: Path) -> bool:
+    """Whether ``path`` still has no explicit backup decision.
+
+    Checked before constructing :class:`AppSettingsStore`, because loading it
+    runs schema migrations that rewrite the file: asking "may I seed?" must not
+    change the bytes of a settings file that already carries the owner's
+    choice. An unreadable or non-object file is not eligible either.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return isinstance(raw, dict) and not isinstance(raw.get("backup_enabled"), bool)
+
+
 class AppSettingsStore:
     """JSON-file-backed store for :class:`AppSettings`."""
 
@@ -562,6 +580,26 @@ class AppSettingsStore:
         self._explicit_fields.update(explicit)
         self._save()
         return self.settings
+
+    def seed_new_install_backup_default(self) -> bool:
+        """Persist the opt-out default for a new install without overriding choice.
+
+        Only a genuinely new installation reaches this: the caller has already
+        checked the lifecycle receipt and the first-setup classification, and
+        an operator's explicit value wins here. A settings file that exists but
+        cannot be parsed is left alone rather than replaced with defaults.
+        """
+        if "backup_enabled" in self._explicit_fields:
+            return False
+        if self._path.exists():
+            try:
+                raw = json.loads(self._path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            if not isinstance(raw, dict):
+                return False
+        self.update({"backup_enabled": False})
+        return True
 
     def appearance_payload(self) -> dict[str, object]:
         """The engine-wide appearance preferences plus a content revision.
