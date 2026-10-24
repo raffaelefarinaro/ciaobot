@@ -20,11 +20,12 @@ from __future__ import annotations
 import json
 import os
 import stat
-import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
+
+from ciao.os_support.private import is_private, open_private
 
 SCHEMA_VERSION = 1
 FILENAME = "handoff.json"
@@ -98,13 +99,12 @@ def _require_private_result(path: Path) -> None:
         raise HandoffError(
             f"installer handoff result is not in the scratch directory: {path}"
         )
-    if sys.platform != "win32":
-        try:
-            mode = stat.S_IMODE(os.lstat(path).st_mode)
-        except OSError as exc:
-            raise HandoffError(f"Could not inspect the installer handoff result: {exc}") from exc
-        if mode & 0o077:
-            raise HandoffError("installer handoff result is readable by other users")
+    try:
+        private = is_private(path)
+    except OSError as exc:
+        raise HandoffError(f"Could not inspect the installer handoff result: {exc}") from exc
+    if not private:
+        raise HandoffError("installer handoff result is not owner-only")
 
 
 def _resolved(value: str, *, label: str) -> Path:
@@ -155,8 +155,6 @@ def record_setup_completion(
     port: int,
 ) -> Path:
     """Write the installer handoff result after a successful guarded setup."""
-    from ciao.jsonio import write_private_text
-
     if not _is_uuid(run_id):
         raise HandoffError("installer run id is not a valid uuid")
     if not isinstance(startup_id, str) or not startup_id.strip():
@@ -193,13 +191,19 @@ def record_setup_completion(
     target = result_path()
     if target.is_symlink():
         raise HandoffError(f"installer handoff result is a symlink: {target}")
-    temporary = target.with_name(target.name + ".tmp")
-    if temporary.is_symlink():
-        raise HandoffError(f"installer handoff temporary file is a symlink: {temporary}")
+    # One freshly created, owner-only name per write: a predictable temporary
+    # path could already be a hardlink to a file outside the scratch directory.
+    temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
     try:
-        write_private_text(temporary, text)
+        descriptor = open_private(temporary, os.O_WRONLY | os.O_EXCL)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
         os.replace(temporary, target)
     except OSError as exc:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
         raise HandoffError(f"Could not write the installer handoff result: {exc}") from exc
     return target
 
@@ -275,20 +279,27 @@ def read_result(
 
 def _definition_workspace(backend_name: str, definition: Path) -> Path:
     """The destination a service definition names; unreadable is an error."""
+    import plistlib
+    from xml.parsers.expat import ExpatError
+
+    from ciao import windows_service
+
     try:
         if backend_name == "windows":
-            from ciao import windows_service
-
             workspace = windows_service.task_workspace(definition)
         else:
-            import plistlib
-
             with definition.open("rb") as handle:
                 data = plistlib.load(handle)
             environment = data.get("EnvironmentVariables") if isinstance(data, dict) else None
             raw = environment.get("CIAO_WORKSPACE") if isinstance(environment, dict) else None
             workspace = Path(str(raw)) if raw else None
-    except Exception as exc:  # noqa: BLE001 — every parse failure is a refusal
+    except (
+        OSError,
+        ValueError,
+        UnicodeDecodeError,
+        plistlib.InvalidFileException,
+        ExpatError,
+    ) as exc:
         raise HandoffError(f"Could not read the service definition: {exc}") from exc
     if workspace is None:
         raise HandoffError("the service definition does not name a workspace")
@@ -326,7 +337,11 @@ def activate(
             f"not {backend.name}"
         )
     try:
-        expected = backend.live_agents_dir() / _definition_name(backend.name)
+        live_directory = backend.live_agents_dir()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HandoffError(f"Could not locate the live service definitions: {exc}") from exc
+    expected = live_directory / _definition_name(backend.name)
+    try:
         recorded_is_live = result.definition_path.resolve() == expected.resolve()
     except (OSError, ValueError):
         recorded_is_live = False
@@ -345,7 +360,7 @@ def activate(
         )
     try:
         status = backend.load_agent(expected)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise HandoffError(f"Could not start the engine: {exc}") from exc
     if status != 0:
         raise HandoffError(
