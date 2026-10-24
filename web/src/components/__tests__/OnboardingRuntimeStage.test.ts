@@ -88,3 +88,19 @@ describe('OnboardingRuntimeStage', () => {
     expect(wrapper.find('button.defer').exists()).toBe(true)
   })
 })
+
+describe('OnboardingRuntimeStage missing status', () => {
+  it('announces a runtime with no reported status and offers a re-check', async () => {
+    vi.mocked(api.get).mockResolvedValueOnce({ connections: {} })
+    const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })
+    await wrapper.get('.models-empty button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('No status was reported for this runtime'))
+    expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+    expect(wrapper.find('button.defer').exists()).toBe(false)
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
+    vi.mocked(api.get).mockResolvedValueOnce(ready)
+    await wrapper.get('.models-empty button').trigger('click')
+    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false }))
+    expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThan(1)
+  })
+})

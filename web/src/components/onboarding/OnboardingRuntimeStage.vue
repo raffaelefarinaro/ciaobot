@@ -83,6 +83,13 @@ async function loadModels(): Promise<void> {
   }
 }
 
+// Retry the operation that actually failed: a model read is not retried by a
+// status check, and vice versa.
+async function retry(): Promise<void> {
+  if (statusError.value) await checkAgain()
+  else if (modelsError.value) await loadModels()
+}
+
 async function checkAgain(): Promise<void> {
   const ok = await loadStatus()
   if (!ok) return
@@ -117,7 +124,7 @@ defineExpose({ refresh: checkAgain })
 
     <p v-if="loadingStatus" role="status">Checking the runtime on this computer…</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
-    <button v-if="error && !loadingStatus" type="button" class="retry" @click="checkAgain">Retry</button>
+    <button v-if="error && !loadingStatus" type="button" class="retry" @click="retry">Retry</button>
 
     <div v-if="!connections" class="models-empty">
       <p>Checking a runtime reads its status on this computer; it may also list its connectors.</p>
@@ -169,6 +176,10 @@ defineExpose({ refresh: checkAgain })
       <button type="button" class="defer" :aria-pressed="deferred" @click="defer">Decide later</button>
       <p v-if="deferred" role="status">Deferred: this choice is recorded as not ready, not as connected.</p>
     </template>
+    <div v-else class="models-empty">
+      <p role="alert">No status was reported for this runtime, so it cannot be confirmed ready.</p>
+      <button type="button" :disabled="loadingStatus" @click="checkAgain">Check again</button>
+    </div>
   </section>
 </template>
 
