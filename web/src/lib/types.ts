@@ -1310,6 +1310,8 @@ export interface SetupStatus {
   mode: string
   workspace_root: string
   vault_root: string
+  /** The installer's folder suggestion on a fresh install; absent otherwise. */
+  suggested_workspace?: string | null
   checks: SetupCheck[]
   providers: Record<string, SetupProviderStatus>
   provider_ready: boolean

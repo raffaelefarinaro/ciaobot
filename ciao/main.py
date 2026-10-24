@@ -523,6 +523,7 @@ async def _async_main(
     supervised: bool = False,
     installer_bootstrap: bool = False,
     installer_run_id: str | None = None,
+    installer_suggest_workspace: str | None = None,
 ) -> int:
     if installer_bootstrap:
         # Before anything is created: refuse to bootstrap over an install, then
@@ -540,7 +541,7 @@ async def _async_main(
     # Ordinary startup keeps its exact call shape; only the installer mode asks
     # for the scratch branch.
     config = (
-        CiaoConfig.from_env(installer_bootstrap=True)
+        CiaoConfig.from_env(installer_bootstrap=True, installer_suggest_workspace=installer_suggest_workspace)
         if installer_bootstrap
         else CiaoConfig.from_env()
     )
@@ -1644,6 +1645,7 @@ def main(
     supervised: bool = False,
     installer_bootstrap: bool = False,
     installer_run_id: str | None = None,
+    installer_suggest_workspace: str | None = None,
 ) -> None:
     """CLI entrypoint."""
     # INFO until the workspace's own log level (Settings) is known, which
@@ -1656,6 +1658,7 @@ def main(
             supervised=supervised,
             installer_bootstrap=installer_bootstrap,
             installer_run_id=installer_run_id,
+            installer_suggest_workspace=installer_suggest_workspace,
         ))
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)

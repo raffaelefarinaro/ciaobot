@@ -464,6 +464,11 @@ const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
 const setupStatus = ref<SetupStatus | null>(null)
 const workspace = ref('~/ciaobot')
+const workspaceEdited = ref(false)
+watch(workspace, () => { workspaceEdited.value = true })
+watch(setupStatus, (status) => {
+  if (status?.suggested_workspace && !workspaceEdited.value) workspace.value = status.suggested_workspace
+}, { immediate: true })
 const port = ref(8443)
 const python = ref('')
 const provider = ref('claude')
