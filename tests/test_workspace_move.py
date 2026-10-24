@@ -90,14 +90,15 @@ def test_plan_warns_and_allows_a_protected_folder_through_the_host(
     result = _plan(plain, home / "Documents" / "new", host=_verified_host())
     assert result.ok, result.refusals
     assert any(
-        "Documents" in w and "Allow" in w for w in result.warnings
+        "Documents" in w and "if access is denied" in w for w in result.warnings
     ), result.warnings
+    assert not any("asks once" in w for w in result.warnings)
 
     protected = _workspace(home / "Desktop" / "old")
     result = _plan(protected, home / "new", host=_verified_host())
     assert result.ok, result.refusals
     assert any(
-        "Desktop" in w and "Allow" in w for w in result.warnings
+        "Desktop" in w and "if access is denied" in w for w in result.warnings
     ), result.warnings
 
 
@@ -442,6 +443,7 @@ def _run(
     service_type: type[_Service] = _Service,
     prepare: Any = None,
     post_override: Callable[[str], dict[str, Any]] | None = None,
+    get_override: Callable[[str], dict[str, Any] | None] | None = None,
     platform: str | None = None,
 ) -> tuple[workspace_move.MoveOperation, _Service, list[str]]:
     source = _workspace(tmp_path / "old")
@@ -462,6 +464,8 @@ def _run(
         return {"active_chat_ids": [] if drained else ["busy"]}
 
     def get(url: str) -> dict[str, Any] | None:
+        if get_override is not None:
+            return get_override(url)
         return {"overall_ready": True} if host.up else None
 
     result = workspace_move.run_move(
@@ -490,6 +494,85 @@ def test_run_move_moves_repoints_and_restarts(tmp_path: Path) -> None:
     assert workspace_move.read_operation(tmp_path / "state").phase == "done"
 
 
+def test_protected_destination_probe_denial_does_not_drain_or_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import workspace_access
+
+    denial = tmp_path / "denied.txt"
+    monkeypatch.setattr(workspace_access, "denial_path", lambda: denial)
+    source = _workspace(tmp_path / "old")
+    target = tmp_path / "new"
+    target.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    service = _Service(tmp_path / "definition", source)
+    host = _Host()
+
+    def deny_probe(_directory: Path) -> None:
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(workspace_move, "_probe_destination_access", deny_probe)
+    op = workspace_move.MoveOperation("op1", "queued", str(source), str(target), "", "", port=8443)
+    result = workspace_move.run_move(
+        op,
+        state_dir=state,
+        host=host,
+        service=service,
+        get=lambda _url: {"overall_ready": True},
+        post=lambda _url: {"active_chat_ids": []},
+        sleep=lambda _seconds: None,
+        clock=lambda: 0.0,
+        platform="darwin",
+    )
+
+    assert result.phase == "failed"
+    assert result.denied is True
+    assert "System Settings" in result.error
+    assert host.calls == []
+    assert source.is_dir()
+    assert service.workspace() == source
+
+
+def test_destination_probe_eacces_is_not_recorded_as_privacy_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import workspace_access
+
+    denial = tmp_path / "denied.txt"
+    monkeypatch.setattr(workspace_access, "denial_path", lambda: denial)
+
+    def deny_probe(_directory: Path) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(workspace_move, "_probe_destination_access", deny_probe)
+    source = _workspace(tmp_path / "old")
+    state = tmp_path / "state"
+    state.mkdir()
+    service = _Service(tmp_path / "definition", source)
+    host = _Host()
+    result = workspace_move.run_move(
+        workspace_move.MoveOperation(
+            "op1", "queued", str(source), str(tmp_path / "new"), "", "", port=8443
+        ),
+        state_dir=state,
+        host=host,
+        service=service,
+        get=lambda _url: {"overall_ready": True},
+        post=lambda _url: {"active_chat_ids": []},
+        sleep=lambda _seconds: None,
+        clock=lambda: 0.0,
+        platform="darwin",
+    )
+
+    assert result.phase == "failed"
+    assert result.denied is False
+    assert "Permission denied" in result.error
+    assert not denial.exists()
+    assert host.calls == []
+    assert service.workspace() == source
+
+
 def test_run_move_rolls_back_when_the_engine_does_not_start(tmp_path: Path) -> None:
     host = _Host(start_ok=False)
     result, service, _posts = _run(tmp_path, host)
@@ -499,6 +582,139 @@ def test_run_move_rolls_back_when_the_engine_does_not_start(tmp_path: Path) -> N
     assert not (tmp_path / "new").exists()
     assert service.workspace() == tmp_path / "old"
     assert host.calls == ["stop", "start", "stop", "start"]
+
+
+def test_engine_exit_78_aborts_readiness_wait_and_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import macos_service
+
+    exit_codes = iter([0, 78])
+    monkeypatch.setattr(macos_service, "server_last_exit_code", lambda: next(exit_codes))
+    host = _Host()
+    starts = 0
+
+    def status(_url: str) -> dict[str, Any] | None:
+        nonlocal starts
+        if not host.up:
+            return None
+        starts = host.calls.count("start")
+        return {"overall_ready": starts > 1}
+
+    result, service, _posts = _run(
+        tmp_path, host, get_override=status, platform="darwin"
+    )
+
+    assert result.phase == "rolled_back", result.error
+    assert result.denied is True
+    assert result.startup_exit_code == 78
+    assert "System Settings" in result.error
+    assert service.workspace() == tmp_path / "old"
+    assert host.calls == ["stop", "start", "stop", "start"]
+    persisted = workspace_move.read_operation(tmp_path / "state")
+    assert persisted is not None
+    assert persisted.startup_exit_code == 78
+    assert persisted.denied is True
+
+
+def test_stale_denial_does_not_fail_a_new_successful_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import workspace_access
+
+    denial = tmp_path / "denied.txt"
+    monkeypatch.setattr(workspace_access, "denial_path", lambda: denial)
+    workspace_access.record_denial("previous attempt", denial)
+
+    result, _service, _posts = _run(tmp_path, _Host(), platform="darwin")
+
+    assert result.phase == "done", result.error
+    assert result.denied is False
+
+
+def test_recorded_startup_denial_survives_rollback_and_access_record_clearing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import workspace_access
+
+    denial = tmp_path / "denied.txt"
+    monkeypatch.setattr(workspace_access, "denial_path", lambda: denial)
+    host = _Host()
+    starts = 0
+
+    def status(_url: str) -> dict[str, Any] | None:
+        nonlocal starts
+        if not host.up:
+            return None
+        starts = host.calls.count("start")
+        if starts == 1:
+            workspace_access.record_denial("macOS denied destination", denial)
+            return {"overall_ready": False}
+        workspace_access.clear_denial(denial)
+        return {"overall_ready": True}
+
+    monkeypatch.setattr(
+        "ciao.macos_service.server_last_exit_code",
+        lambda: 0,
+    )
+    result, _service, _posts = _run(
+        tmp_path, host, get_override=status, platform="darwin"
+    )
+    persisted = workspace_move.read_operation(tmp_path / "state")
+
+    assert result.phase == "rolled_back"
+    assert result.denied is True
+    assert "macOS denied destination" in result.error
+    assert not denial.exists()
+    assert persisted is not None
+    assert persisted.denied is True
+    assert "macOS denied destination" in persisted.error
+
+
+def test_rollback_wait_ignores_forward_denial_until_source_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import macos_service, workspace_access
+
+    denial = tmp_path / "denied.txt"
+    monkeypatch.setattr(workspace_access, "denial_path", lambda: denial)
+    exit_codes = iter([0, 78])
+    monkeypatch.setattr(
+        macos_service, "server_last_exit_code", lambda: next(exit_codes)
+    )
+    host = _Host()
+    rollback_polls = 0
+
+    def status(_url: str) -> dict[str, Any] | None:
+        nonlocal rollback_polls
+        if not host.up:
+            return None
+        starts = host.calls.count("start")
+        if starts == 1:
+            return {"overall_ready": False}
+        rollback_polls += 1
+        if rollback_polls < 3:
+            return {"overall_ready": False}
+        workspace_access.clear_denial(denial)
+        return {"overall_ready": True}
+
+    result, service, _posts = _run(
+        tmp_path, host, get_override=status, platform="darwin"
+    )
+    persisted = workspace_move.read_operation(tmp_path / "state")
+
+    assert result.phase == "rolled_back", result.error
+    assert result.denied is True
+    assert result.startup_exit_code == 78
+    assert "System Settings" in result.error
+    assert service.workspace() == tmp_path / "old"
+    assert rollback_polls == 3
+    assert not denial.exists()
+    assert persisted is not None
+    assert persisted.phase == "rolled_back"
+    assert persisted.denied is True
+    assert persisted.startup_exit_code == 78
+    assert result.error == persisted.error
 
 
 def test_run_move_leaves_everything_when_chats_never_drain(tmp_path: Path) -> None:

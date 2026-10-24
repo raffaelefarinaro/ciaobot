@@ -36,6 +36,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -191,6 +192,7 @@ class MoveOperation:
     #: A macOS privacy denial, not a failure of the move itself: the folder is
     #: named in ``error`` and the job exits with ``ACCESS_DENIED_EXIT``.
     denied: bool = False
+    startup_exit_code: int | None = None
 
 
 def _now() -> str:
@@ -218,6 +220,11 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
             port=int(parsed.get("port", 0) or 0),
             python=str(parsed.get("python", "")),
             denied=parsed.get("denied") is True,
+            startup_exit_code=(
+                int(parsed["startup_exit_code"])
+                if parsed.get("startup_exit_code") is not None
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -462,9 +469,9 @@ def plan(
             if through_host:
                 result.warnings.append(
                     f"The {label} is inside ~/{protected}. The move runs as the Ciaobot "
-                    f"Server app, and macOS asks once for access to your {protected} "
-                    "folder: choose Allow, or the move cannot finish. You can change it "
-                    "later in System Settings → Privacy & Security → Files and Folders."
+                    f"Server app. macOS may require access to your {protected} folder; "
+                    "if access is denied, allow it in System Settings → Privacy & Security "
+                    "→ Files and Folders (Ciaobot Server)."
                 )
             else:
                 result.refusals.append(
@@ -1418,6 +1425,19 @@ def _denied_folder(source: Path, target: Path) -> Path:
     return target
 
 
+def _probe_destination_access(target: Path) -> None:
+    """Verify write access without creating any part of the destination tree."""
+    directory = target if target.is_dir() else target.parent
+    while not directory.is_dir():
+        parent = directory.parent
+        if parent == directory:
+            raise OSError(f"no existing parent directory for {target}")
+        directory = parent
+    fd, name = tempfile.mkstemp(prefix=".ciao-workspace-move-probe-", dir=directory)
+    os.close(fd)
+    Path(name).unlink()
+
+
 def run_move(
     op: MoveOperation,
     *,
@@ -1444,6 +1464,8 @@ def run_move(
 
     # The folder the engine is running from: where to look for its lock.
     engine_root = source
+    forward_denial_before_start = ""
+    forward_exit_before_start: int | None = None
 
     def wait_until_unreachable() -> bool:
         # The port closes before the process has finished shutting down; its
@@ -1456,12 +1478,27 @@ def run_move(
             sleep(_POLL_INTERVAL)
         return True
 
-    def wait_until_ready() -> bool:
+    def wait_until_ready(*, monitor_startup_denial: bool = False) -> bool:
         deadline = clock() + _READY_TIMEOUT
         while True:
             body = get(f"{base}/api/startup-status") or {}
             if body.get("overall_ready") is True:
                 return True
+            if monitor_startup_denial and (platform or sys.platform) == "darwin":
+                from ciao import macos_service, workspace_access
+
+                denial = workspace_access.read_denial()
+                if denial and denial != forward_denial_before_start:
+                    op.denied = True
+                    op.error = denial
+                    return False
+                exit_code = macos_service.server_last_exit_code()
+                if exit_code is not None:
+                    op.startup_exit_code = exit_code
+                if exit_code == 78 and forward_exit_before_start != 78:
+                    op.denied = True
+                    op.error = _record_denied_folder(_denied_folder(source, target))
+                    return False
             if clock() >= deadline:
                 return False
             sleep(_POLL_INTERVAL)
@@ -1473,6 +1510,16 @@ def run_move(
         except Exception as exc:  # noqa: BLE001 — best effort; never raises
             return str(exc) or exc.__class__.__name__
         return ""
+
+    try:
+        _probe_destination_access(target)
+    except Exception as exc:  # noqa: BLE001 — fail before touching the source engine
+        reason = str(exc) or exc.__class__.__name__
+        if _is_privacy_denial(exc, platform):
+            reason = _record_denied_folder(target)
+            op.denied = True
+        advance("failed", reason)
+        return op
 
     # Drain, then stop. Nothing has changed on disk yet, so a failure here
     # leaves the engine where it was, admitting turns again.
@@ -1537,11 +1584,18 @@ def run_move(
         backed_up = True
         service.repoint(source, target)
         advance("starting")
+        if (platform or sys.platform) == "darwin":
+            from ciao import macos_service, workspace_access
+
+            forward_denial_before_start = workspace_access.read_denial()
+            forward_exit_before_start = macos_service.server_last_exit_code()
         started = host.start_engine()
         if not bool(getattr(started, "ok", True)):
             raise MoveError(str(getattr(started, "message", "") or "the engine did not start"))
         advance("verifying")
-        if not wait_until_ready():
+        if not wait_until_ready(monitor_startup_denial=True):
+            if op.denied:
+                raise MoveError(op.error)
             raise MoveError(f"the engine did not become ready within {int(_READY_TIMEOUT)}s")
     except Exception as exc:  # noqa: BLE001 — every failure rolls back
         reason = str(exc) or exc.__class__.__name__

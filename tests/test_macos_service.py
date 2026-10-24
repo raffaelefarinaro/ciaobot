@@ -1334,6 +1334,27 @@ def test_the_last_exit_code_is_read_out_of_the_launchd_print(
     assert result.details["last_exit_code"] == 0
 
 
+def test_launchd_exit_observation_reports_access_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
+    monkeypatch.setattr(macos_service.os, "getuid", lambda: 502, raising=False)
+    commands: list[list[str]] = []
+
+    def launchctl(args, runner):
+        commands.append(list(args))
+        return subprocess.CompletedProcess(
+            [], 0, stdout=_launchd_print_with_exit_code(78), stderr=""
+        )
+
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        launchctl,
+    )
+
+    assert macos_service.server_last_exit_code() == 78
+    assert commands == [["print", "gui/501/com.ciao.server"]]
+
+
 def test_status_names_the_port_when_the_engine_could_not_bind(
     tmp_path: Path, monkeypatch
 ) -> None:
