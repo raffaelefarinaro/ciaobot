@@ -620,11 +620,14 @@ def test_engine_exit_78_aborts_readiness_wait_and_rolls_back(
 def test_stale_denial_does_not_fail_a_new_successful_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ciao import workspace_access
+    from ciao import macos_service, workspace_access
 
     denial = tmp_path / "denied.txt"
     monkeypatch.setattr(workspace_access, "denial_path", lambda: denial)
     workspace_access.record_denial("previous attempt", denial)
+    # The forward wait reads launchd's last exit code, and that read has no
+    # uid to build the domain from on Windows. The stale denial is the subject.
+    monkeypatch.setattr(macos_service, "server_last_exit_code", lambda: 0)
 
     result, _service, _posts = _run(tmp_path, _Host(), platform="darwin")
 
