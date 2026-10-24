@@ -955,7 +955,9 @@ kept in the macOS keychain works (#1961). A project's
 linked repository is added to a chat's roots (workspace scope) only when the chat is in code mode. It is passed to
 Claude as an add-dir and to opencode as `skills.paths` in `OPENCODE_CONFIG_CONTENT`
 in every scope, fixed when the provider process starts; a change applies from the
-next turn. The file viewer is not covered. Credential and storage-isolation work tracked by #546 is still open.
+next turn. The same `OPENCODE_CONFIG_CONTENT` caps OpenCode tool output
+(`tool_output`: 1000 lines / 20,000 bytes, `TOOL_OUTPUT_MAX_*` in
+`ciao/providers/opencode.py`) below OpenCode's 2000-line / 51,200-byte default. The file viewer is not covered. Credential and storage-isolation work tracked by #546 is still open.
 
 Write/Edit/MultiEdit/NotebookEdit tool calls are tagged with `file_touch` by
 `ciao/web/chat_broker.py` and surface as standalone `_filecard` entries on

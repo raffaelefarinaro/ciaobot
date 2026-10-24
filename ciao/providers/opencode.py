@@ -14,8 +14,9 @@ reads it from ``.mcp.json``. What ties a server to one chat is process-scoped,
 not session-scoped: the chat's bearer capability (``CIAO_AGENT_TOKEN``, minted
 per chat) travels in the server's environment, ``OPENCODE_SERVER_PASSWORD`` is
 per server, the filesystem sandbox wraps the server process, and
-``OPENCODE_CONFIG_CONTENT`` (linked-repo skills) is read at startup. A token
-rotation or scope change therefore restarts this chat's server. Per-session
+``OPENCODE_CONFIG_CONTENT`` (tool output limits, linked-repo skills) is read at
+startup. A token rotation or scope change therefore restarts this chat's
+server. Per-session
 agent, model, and permission rules are OpenCode's own and keep chat behavior
 isolated.
 
@@ -49,7 +50,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -774,6 +775,18 @@ def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
         if total:
             usage["totalTokens"] = str(total)
     return usage
+
+
+def _summed_usage(steps: Iterable[Mapping[str, str]]) -> dict[str, str]:
+    """Per-key sum of several ``usage_payload`` dicts."""
+    totals: dict[str, int] = {}
+    for step in steps:
+        for key, value in step.items():
+            try:
+                totals[key] = totals.get(key, 0) + int(value)
+            except (TypeError, ValueError):
+                continue
+    return {key: str(value) for key, value in totals.items()}
 
 
 def _token_usage_events(tokens: object) -> list[StreamEvent]:
@@ -1534,38 +1547,53 @@ def _sandboxed_server_dirs(binary: str, *, path: str | None = None) -> tuple[lis
 LINKED_REPO_SKILL_DIRS: tuple[str, ...] = (".claude/skills", ".agents/skills", ".opencode/skills")
 
 
-def linked_repo_config_content(repo: str, existing: str = "") -> str:
-    """OPENCODE_CONFIG_CONTENT that adds the linked repo's skill folders.
+#: OpenCode's ``tool_output`` truncation thresholds for shell, webfetch, grep and
+#: the other output-producing tools. OpenCode's own default (2000 lines /
+#: 51,200 bytes) let one tool result take ~13K tokens of context; the full
+#: output is still saved to a file the agent can read on demand.
+TOOL_OUTPUT_MAX_LINES = 1000
+TOOL_OUTPUT_MAX_BYTES = 20_000
 
-    Returns "" when there is nothing to add (no repo, or no skill folder in
-    it): the caller then leaves the environment alone. ``existing`` is the
-    value already in the environment; its JSON object is kept and the repo
-    folders are appended to its ``skills.paths``. A value that is not a JSON
-    object is left untouched (logged) rather than replaced.
+
+def server_config_content(repo: str, existing: str = "") -> str:
+    """OPENCODE_CONFIG_CONTENT for a chat's server.
+
+    Sets the ``tool_output`` truncation thresholds and adds the linked repo's
+    skill folders to ``skills.paths``. ``existing`` is the value already in the
+    environment; its JSON object is kept, a ``tool_output`` it already sets
+    wins, and the repo folders are appended to its ``skills.paths``. A value
+    that is not a JSON object is left untouched (logged) and "" is returned:
+    the caller then leaves the environment alone.
     """
-    if not repo:
-        return ""
-    paths = [str(Path(repo) / d) for d in LINKED_REPO_SKILL_DIRS if (Path(repo) / d).is_dir()]
-    if not paths:
-        return ""
     try:
         config = json.loads(existing) if existing.strip() else {}
     except ValueError:
         config = None
     if not isinstance(config, dict):
         logger.warning(
-            "opencode: OPENCODE_CONFIG_CONTENT is not a JSON object; linked repo skills not added"
+            "opencode: OPENCODE_CONFIG_CONTENT is not a JSON object; "
+            "tool output limits and linked repo skills not added"
         )
         return ""
-    skills = config.setdefault("skills", {})
-    existing_paths = skills.get("paths", []) if isinstance(skills, dict) else None
-    if not isinstance(existing_paths, list):
-        logger.warning(
-            "opencode: OPENCODE_CONFIG_CONTENT has a non-standard skills block; "
-            "linked repo skills not added"
-        )
-        return ""
-    skills["paths"] = list(dict.fromkeys([*existing_paths, *paths]))
+    config.setdefault(
+        "tool_output",
+        {"max_lines": TOOL_OUTPUT_MAX_LINES, "max_bytes": TOOL_OUTPUT_MAX_BYTES},
+    )
+    paths = (
+        [str(Path(repo) / d) for d in LINKED_REPO_SKILL_DIRS if (Path(repo) / d).is_dir()]
+        if repo
+        else []
+    )
+    if paths:
+        skills = config.setdefault("skills", {})
+        existing_paths = skills.get("paths", []) if isinstance(skills, dict) else None
+        if isinstance(existing_paths, list):
+            skills["paths"] = list(dict.fromkeys([*existing_paths, *paths]))
+        else:
+            logger.warning(
+                "opencode: OPENCODE_CONFIG_CONTENT has a non-standard skills block; "
+                "linked repo skills not added"
+            )
     return json.dumps(config)
 
 
@@ -1681,10 +1709,16 @@ class OpencodeProvider(BaseSDKProvider):
         # Set whenever `_steer_ids_pending` empties, so a pump that skipped its
         # terminal for a steer that was then refused stops waiting.
         self._steer_pending_emptied = asyncio.Event()
+        # The turn's own usage and cost: the sum of this turn's
+        # ``session.step.ended`` events, one per model call, keyed by assistant
+        # message so a repeated event cannot count twice. ``session.usage.updated``
+        # is a running total for the whole session (every earlier turn, title
+        # generation, a pre-rotation history), so recording it per turn counted
+        # the same tokens again on every turn. The latest step alone is the
+        # context-window occupancy.
         self._usage: dict[str, str] = {}
-        # ``session.usage.updated`` is a cumulative session snapshot, while
-        # ``session.step.ended`` describes the latest model call. Keep the
-        # latter separately for context-window occupancy.
+        self._step_usage: dict[str, dict[str, str]] = {}
+        self._step_cost: dict[str, float] = {}
         self._context_usage: dict[str, str] = {}
         self._cost: float | None = None
         # Visible assistant text, accumulated per part so the terminal
@@ -1725,6 +1759,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._steer_ids_owned.clear()
         self._steer_ids_delivered.clear()
         self._usage = {}
+        self._step_usage.clear()
+        self._step_cost.clear()
         self._context_usage = {}
         self._cost = None
         self._answer_parts.clear()
@@ -2350,7 +2386,7 @@ class OpencodeProvider(BaseSDKProvider):
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
         self._linked_repo = linked_repo_of(request)
-        config_content = linked_repo_config_content(
+        config_content = server_config_content(
             self._linked_repo, env.get("OPENCODE_CONFIG_CONTENT", "")
         )
         if config_content:
@@ -3594,18 +3630,23 @@ class OpencodeProvider(BaseSDKProvider):
                         f"{provider_id}/{model_id}" if provider_id else model_id
                     )
             return []
-        if kind in {"session.step.ended", "session.usage.updated"}:
+        if kind == "session.step.ended":
+            step = str(props.get("assistantMessageID") or f"step-{len(self._step_usage)}")
             cost = props.get("cost")
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-                self._cost = float(cost)
-            tokens = props.get("tokens")
-            if isinstance(tokens, Mapping):
-                event_usage = usage_payload(tokens)
-                if event_usage:
-                    if kind == "session.step.ended":
-                        self._context_usage = event_usage
-                    self._usage = event_usage or self._usage
-            return _token_usage_events(tokens)
+                self._step_cost[step] = float(cost)
+                self._cost = sum(self._step_cost.values())
+            event_usage = usage_payload(props.get("tokens"))
+            if not event_usage:
+                return []
+            self._context_usage = event_usage
+            self._step_usage[step] = event_usage
+            self._usage = _summed_usage(self._step_usage.values())
+            # The live counter shows the turn so far, not this one call.
+            return _token_usage_events({
+                "input": int(self._usage.get("inputTokens", 0)),
+                "output": int(self._usage.get("outputTokens", 0)),
+            })
 
         if kind == "permission.asked":
             return self._permission_event(props)
@@ -4272,8 +4313,8 @@ class OpencodeProvider(BaseSDKProvider):
             session_id=session_id,
             is_error=bool(error),
             effective_model=self._effective_model or request.model,
-            # Accumulated from the assistant message's own totals rather than
-            # summed per step, so a retried step cannot double-count.
+            # This turn's own model calls, summed per assistant message (a
+            # repeated step event replaces its entry rather than adding).
             usage=self._usage,
             cost_usd=self._cost,
             fallback_final=(bool(error) and saw_output) or degraded_final,
