@@ -2705,6 +2705,11 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
     if read_receipt(runtime_root) is not None:
         return {"status": "already_migrated"}
 
+    # A first-run launcher is not an installed workspace. Its temporary
+    # scaffolding must never trigger an upgrade migration or restart.
+    if getattr(config, "bootstrap_mode", False):
+        return outcome
+
     try:
         vault_root = Path(config.vault_root)
         names = sorted(n for n in config.workspace_names() if n)
