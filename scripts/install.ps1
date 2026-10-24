@@ -840,6 +840,63 @@ print(name, digest, size)
             $env:Path = Add-UserPathEntry $env:Path $binDir
         }
 
+        $workspaceWasSuggested = [bool]$Workspace
+        if (-not $Workspace) { $Workspace = Join-Path $env:USERPROFILE $DefaultWorkspaceName }
+        $Workspace = [Environment]::ExpandEnvironmentVariables($Workspace)
+        $workspace = [System.IO.Path]::GetFullPath($Workspace)
+        $defaultWorkspace = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE $DefaultWorkspaceName))
+        $taskFile = Join-Path $TaskDir $TaskFileName
+        $freshInstall = (-not (Test-Path -LiteralPath $taskFile)) -and (-not (Test-TaskRegistered)) -and
+            (-not (Test-Path -LiteralPath (Join-Path $workspace '.runtime\workspaces.json'))) -and
+            (-not (Test-Path -LiteralPath (Join-Path $defaultWorkspace '.runtime\workspaces.json')))
+        if ($freshInstall) {
+            if ($NoStart) {
+                Write-Host 'Setup was not started. Resume with: ciao run --installer-bootstrap'
+            } else {
+                $runId = [guid]::NewGuid().ToString().ToLowerInvariant()
+                if (-not $runId) { Fail 'could not generate an installer run id' }
+                $bootstrapArgs = @('run', '--installer-bootstrap', '--installer-run-id', $runId)
+                if ($workspaceWasSuggested) { $bootstrapArgs += @('--installer-suggest-workspace', $workspace) }
+                $bootstrap = Invoke-Native $ciao $bootstrapArgs $false
+                foreach ($line in @($bootstrap.Output)) { Write-Host $line }
+                if ($bootstrap.ExitCode -ne 0) {
+                    Write-Host 'Setup did not finish. Nothing in a workspace was created or changed by this installer.'
+                    Write-Host 'Resume with: ciao run --installer-bootstrap'
+                    $mutated = $false
+                    throw "Ciaobot bootstrap exited with code $($bootstrap.ExitCode)"
+                }
+                $activation = Invoke-Native $ciao @('installer', 'activate', '--run-id', $runId, '--json') $false
+                $activationText = @($activation.Output) -join "`n"
+                try {
+                    if ($activation.ExitCode -ne 0) { throw 'activation command failed' }
+                    $activated = $activationText | ConvertFrom-Json -ErrorAction Stop
+                    if (-not $activated.workspace) { throw 'activation JSON did not contain workspace' }
+                    $workspace = [System.IO.Path]::GetFullPath([string]$activated.workspace)
+                } catch {
+                    Write-Host $activationText
+                    Write-Host "Resume with: ciao installer activate --run-id $runId"
+                    $mutated = $false
+                    throw 'Ciaobot activation failed'
+                }
+                $stateWasThere = Test-Path -LiteralPath $StateFile
+                $previousState = Read-InstallState
+                if ((-not $pathEntryAdded) -and $previousState -and $previousState.path_entry) {
+                    $pathEntry = [string]$previousState.path_entry
+                }
+                $state = [ordered]@{ path_entry = $pathEntry; workspace = $workspace; version = $Version }
+                New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+                $json = New-Object System.Text.UTF8Encoding($false)
+                [System.IO.File]::WriteAllText($StateFile, (ConvertTo-Json -InputObject $state), $json)
+                if (-not $stateWasThere) { $done += 'state' }
+                Write-Host "Ciaobot $Version is installed: $ciao"
+                Write-Host "Workspace: $workspace"
+                if ($pathEntry) { Write-Host "Added to your PATH for new terminals (and to this one): $pathEntry" }
+                Write-Host 'Return to the browser tab to finish onboarding, or open http://localhost:8443 if it is closed.'
+                if (-not [Console]::IsOutputRedirected) {
+                    try { Start-Process 'http://localhost:8443' | Out-Null } catch { }
+                }
+            }
+        } else {
         # The workspace is never removed by this script, not even on a rollback:
         # it is the user's notes and memory, and an install that failed is the
         # last thing that should decide what happens to them. It is created
@@ -997,6 +1054,7 @@ print(name, digest, size)
             }
         }
         if ($welcomePending) { Write-Host 'Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager.' }
+        }
     } catch {
         $message = $_.Exception.Message
         if ($mutated) {
