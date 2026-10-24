@@ -45,7 +45,7 @@
             <a :href="`/chat/${encodeURIComponent(connection.chat_id)}`" :aria-label="`Open ${providerLabel(current.provider)} chat ${connection.chat_id}`">Open chat</a>
             <p v-if="connection.error" class="hint">{{ connection.error }}</p>
           </div>
-          <p v-if="!server.connections.length" class="hint">Connection not checked. Start a {{ providerLabel(current.provider) }} chat in this workspace to check it.</p>
+          <p v-if="!server.connections.length" class="hint">Connection not checked. Start a chat with {{ providerLabel(current.provider) }} in this workspace to check it.</p>
           <p v-if="!manageable(server)" class="hint">This server can’t be managed with a command here; use {{ providerLabel(current.provider) }} directly.</p>
           <template v-else>
             <div class="mcp-actions">

@@ -50,6 +50,13 @@ describe('Settings MCP native inventory', () => {
     expect(wrapper.findAll('.mcp-connection a').map(link => link.attributes('href'))).toEqual(['/chat/chat-one', '/chat/chat-two'])
     wrapper.unmount()
   })
+  it('uses grammatical provider chat instructions', async () => {
+    const { wrapper } = panel(status => { status.providers[1]!.servers[0]!.connections = [] })
+    expect(wrapper.text()).toContain('Start a chat with Claude Code in this workspace')
+    await tab(wrapper, 'OpenCode').trigger('click')
+    expect(wrapper.text()).toContain('Start a chat with OpenCode in this workspace')
+    wrapper.unmount()
+  })
   it('distinguishes unreadable configuration from empty inventory', async () => {
     const { wrapper } = panel(status => {
       status.providers[0]!.inventory_state = 'unknown'

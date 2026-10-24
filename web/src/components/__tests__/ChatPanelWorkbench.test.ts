@@ -266,8 +266,8 @@ describe('ChatPanel aligned layout', () => {
     expect(hide.attributes('aria-controls')).toBe('chat-work-rail')
     await hide.trigger('click')
     expect(wrapper.find('#chat-work-rail').exists()).toBe(false)
-    // With the rail hidden the header names the project again.
-    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(true)
+    // Hiding Chat details does not put the project name into the title header.
+    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
 
     const reopen = wrapper.get('.work-inspector-trigger')
     expect(reopen.attributes('aria-controls')).toBe('chat-work-rail')

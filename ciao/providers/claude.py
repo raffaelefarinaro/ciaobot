@@ -255,6 +255,13 @@ def _is_initialize_timeout(exc: BaseException) -> bool:
     return isinstance(exc, Exception) and str(exc).startswith(_INITIALIZE_TIMEOUT_MESSAGE)
 
 
+def _catalog_account_generation() -> int:
+    """Account generation to tag a capture with, read before connecting."""
+    from ciao.providers.catalog_evidence import account_generation
+
+    return account_generation()
+
+
 async def _connect_with_deadline(client: ClaudeSDKClient) -> None:
     """Connect to the CLI, naming a missed initialize as a retryable miss."""
     try:
@@ -660,7 +667,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._permission_gate = PermissionGate()
         self._mcp_token = ""
         # Filesystem scope and roots the live CLI process was started with.
-        self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        self._fs_scope_key: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]] = ("machine", (), (), ())
         # Spawn-only options the live CLI process was started with.
         self._spawn_key: tuple[object, ...] = ()
         # Fire-and-forget closes of dead clients, held so they are not collected.
@@ -746,7 +753,7 @@ class ClaudeProvider(BaseSDKProvider):
             and self._connected
             and (
                 provider_reuse_key(request) != self._mcp_token
-                or (request.agent_fs_scope, request.agent_roots) != self._fs_scope_key
+                or (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except) != self._fs_scope_key
             )
         ):
             # MCP configuration, the shell environment and the filesystem
@@ -824,7 +831,12 @@ class ClaudeProvider(BaseSDKProvider):
                 )
             roots = [Path(root) for root in request.agent_roots]
             sandbox_dict: dict[str, Any] | None = claude_sandbox_settings(
-                scope=request.agent_fs_scope, mode=request.mode, roots=roots
+                scope=request.agent_fs_scope,
+                mode=request.mode,
+                roots=roots,
+                read_only=[Path(p) for p in request.agent_read_only],
+                denied=[Path(p) for p in request.agent_denied],
+                regrant=[Path(p) for p in request.agent_denied_except],
             )
             sandbox = cast(SandboxSettings, sandbox_dict)
             agent_root, *other_roots = request.agent_roots
@@ -844,7 +856,7 @@ class ClaudeProvider(BaseSDKProvider):
         linked_repo = linked_repo_of(request)
         if linked_repo and linked_repo not in {str(d) for d in add_dirs}:
             add_dirs.append(linked_repo)
-        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
 
         # The SDK reads the initialize deadline from os.environ when it builds
         # the client, so it has to be set before ClaudeSDKClient() below.
@@ -1190,6 +1202,21 @@ class ClaudeProvider(BaseSDKProvider):
             except Exception:
                 logger.debug("Between-turns drain task ended with error", exc_info=True)
 
+    async def _capture_catalog_evidence(
+        self, client: ClaudeSDKClient, *, generation: int | None = None
+    ) -> None:
+        from ciao.providers.catalog_evidence import invalidate_claude_catalog, record_claude_models
+
+        root = Path(self.workspace_root)
+        try:
+            record_claude_models(
+                root, await client.get_server_info(), expected_generation=generation
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            invalidate_claude_catalog(root)
+
     async def run_streaming(
         self,
         request: AgentRequest,
@@ -1330,8 +1357,10 @@ class ClaudeProvider(BaseSDKProvider):
                     # Only an initialize handshake that missed its deadline is
                     # worth a fresh spawn; every other control-request failure
                     # is a real error for this turn.
+                    catalog_generation = _catalog_account_generation()
                     await _connect_with_deadline(client)
                     self._connected = True
+                    await self._capture_catalog_evidence(client, generation=catalog_generation)
                 await asyncio.wait_for(client.query(payload), timeout=120)
 
                 pending_result: ResultEvent | None = None

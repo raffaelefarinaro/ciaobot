@@ -1085,8 +1085,8 @@ def test_setup_finish_requires_workspace(tmp_path) -> None:
 
 
 def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
-    """Without an explicit vault_root the vault is created inside the
-    workspace as memory-vault/ and everything is one git repo at the root."""
+    """Without an explicit vault_root the vault is created inside memory-vault/;
+    setup does not initialize Git history without explicit consent."""
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -1113,9 +1113,19 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_ROOT=memory-vault" in env_text
     assert (workspace / "personal" / "memory-vault" / "MEMORY.md").is_file()
-    # One repo at the install root; the nested vault is never double-inited.
-    assert (workspace / ".git").is_dir()
+    assert not (workspace / ".git").exists()
     assert not (workspace / "personal" / "memory-vault" / ".git").exists()
+
+
+def test_setup_finish_existing_notes_does_not_create_initial_commit(tmp_path) -> None:
+    from ciao import cli
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "ideas.md").write_text("private\n", encoding="utf-8")
+    cli.setup_workspace(notes, vault_mode="existing", confirm_repoint=True)
+    assert not (notes / ".git").exists()
+    assert (notes / "ideas.md").read_text(encoding="utf-8") == "private\n"
 
 
 def test_setup_finish_accepts_0000_host(tmp_path) -> None:

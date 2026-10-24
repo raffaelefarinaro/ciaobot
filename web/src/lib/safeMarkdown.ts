@@ -212,6 +212,22 @@ chatMarkdownRenderer.link = function link(this: Renderer, token: Tokens.Link): s
   return `<a class="file-link" href="#" data-file-path="${escapeAttr(target)}">${label}</a>`
 }
 
+// A code span that is nothing but one URL is a link the agent wrapped in
+// backticks (`https://github.com/foo`). Marked autolinks a bare URL in prose
+// but a code span is literal text, so it rendered as dead monospace. It keeps
+// its code styling and gains the same external-link treatment as any other
+// anchor (`withExternalLinkAttrs`). A fenced block is a different token
+// (`code`), so URLs inside one stay plain text; so does a span that holds
+// anything besides the URL.
+const CODE_SPAN_URL = /^https?:\/\/[^\s<>`]+$/i
+
+chatMarkdownRenderer.codespan = function codespan(this: Renderer, token: Tokens.Codespan): string {
+  const code = Renderer.prototype.codespan.call(this, token)
+  const url = token.text.trim()
+  if (!CODE_SPAN_URL.test(url) || !isUsableHref(url)) return code
+  return `<a href="${escapeAttr(url)}">${code}</a>`
+}
+
 const chatMarkdownParser = new Marked({
   ...MARKDOWN_OPTIONS,
   renderer: chatMarkdownRenderer,
@@ -346,6 +362,7 @@ const userMarkdownRenderer = new Renderer()
 Object.assign(userMarkdownRenderer, {
   table: chatMarkdownRenderer.table,
   code: chatMarkdownRenderer.code,
+  codespan: chatMarkdownRenderer.codespan,
   link: chatMarkdownRenderer.link,
 })
 userMarkdownRenderer.html = function html(token: Tokens.HTML | Tokens.Tag): string {

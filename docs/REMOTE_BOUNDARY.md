@@ -39,6 +39,15 @@ carried by the session.
   engine while the browser's origin is https, and the port may differ across
   the hop too. A browser cannot set `X-Forwarded-Host`, so only a fronting
   proxy declares it.
+- `ApiRequestBodyLimitMiddleware` (`ciao/web/request_limits.py`) is inside
+  `AuthMiddleware`, so session, origin and loopback-peer refusals never consume
+  the body. HTTP `/api/*` gets a 1 MiB default; only exact upload/write
+  method-and-route pairs receive finite exceptions. It rejects both oversized
+  declared lengths and actual streamed bytes, spools admitted bodies with a
+  1 MiB in-memory threshold and replays them unchanged. `/ws/*`, `/hooks/*` and
+  `/share-target` do not pass through it. Malformed or excessively nested JSON
+  is refused as 400 before handler dispatch; application errors are not
+  translated as parse failures.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
@@ -187,6 +196,14 @@ this one. There is nothing to unpair and no session to bridge.
 
 An agent with vault write access can forge the `via=pwa` memory rows and `actor=user` task rows the weekly rules pass reads as operator decisions. This is bounded: the resulting `Memory-Review-Rules.md` and `Task-Rules.md` only shape what memory review proposes and how tasks are filed, are linted on write and again on read, and are fenced as evidence. They never accept, promote or change permissions.
 
+### Residual: writable Google credential directory (#1959)
+
+A workspace-only chat's sandbox makes the linked Google account's credential directory (`<workspace>/secrets/gws-<profile>`) writable, because `gws` must write its token cache there. `client_secret.json` and `credentials.json` are write-denied by name, but `gws` ranks `credentials.enc`, per-account `credentials.*.enc`, `accounts.json` and `.encryption_key` above them, and those stay writable. A prompt-injected agent can therefore plant credentials for an account it controls. A later unsandboxed `gws` (the operator's terminal, a schedule, a whole-machine chat) would then act as that account, for example writing the operator's files to it. The agent can also read the linked account's refresh token, as it can with whole-machine access. The maintainer accepted this risk. The alternative was a per-chat copy of the directory under `.runtime`, refreshed at each chat start.
+
+### Residual: readable gh token (#1961)
+
+A workspace-only chat's sandbox grants the `gh` config directory (`GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`) read-only. `hosts.yml` there may hold the operator's GitHub OAuth token, so the agent can read it, as it can with whole-machine access. The maintainer accepted this. Because the keychain is outside the sandbox, the engine also reads gh's token and passes it as `GH_TOKEN` in the chat's environment, where the agent can read it. An OpenCode server keeps the `GH_TOKEN` it started with until it restarts, while a Claude chat respawns on a changed token. A token the agent prints, for example via `env`, is stored in the chat transcript.
+
 ## Verification
 
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`
@@ -196,6 +213,8 @@ An agent with vault write access can forge the `via=pwa` memory rows and `actor=
   gone and the release is the engine (`#655`, `#656`).
 
 ## Remaining work (not claimed resolved)
+
+Onboarding lifecycle progress (`/api/onboarding`) is browser-session authority only: every request requires the signed session, and mutations use the normal same-origin policy. It records only installation/registered-workspace journey step and completion; it cannot verify readiness or perform host actions. An agent bearer token does not authorize this browser surface.
 
 1. Replace the dashboard password with named, revocable per-device credentials
    bound to a stable engine identity, and require verified TLS by default.

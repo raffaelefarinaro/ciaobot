@@ -79,7 +79,7 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
 
   // The chat's own Terminal section is the way into the browser terminal: it
   // is outside the repository's, so a chat without one has it as well.
-  const open = page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' })
+  const open = page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' })
   await expect(open).toBeVisible()
   await open.click()
 
@@ -114,6 +114,10 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   await page.keyboard.press('Escape')
   await expect(page.locator(COMPOSER)).toBeVisible()
   await expect(page).toHaveURL(new RegExp(CHAT_PATH))
+
+  // A pointer with a keyboard behind it has no use for on-screen keys: the
+  // row is rendered for the layout but hidden until a coarse pointer.
+  await expect(pane.locator('.tp-keys')).toBeHidden()
 
   // The documented way out: Shift+Tab hands the keyboard to the panel's own
   // controls, and the shell never sees the key.
@@ -161,7 +165,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   await page.locator('.work-inspector-trigger').click()
   const details = page.locator('#chat-work-rail')
   await expect(details).toBeVisible()
-  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
   const pane = page.locator('.terminal-pane')
   await expect(pane).toBeVisible()
@@ -259,7 +263,7 @@ test('a pane too narrow for both columns gets the drawer, not a squeezed chat', 
   await page.locator('.work-inspector-trigger').click()
   const details = page.locator('#chat-work-rail')
   await expect(details).toBeVisible()
-  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
   const pane = page.locator('.terminal-pane')
   await expect(pane).toBeVisible()
@@ -303,7 +307,7 @@ test('a pinned file keeps the slot and the terminal falls back to the drawer', a
   await page.locator('.work-inspector-trigger').click()
   const details = page.locator('#chat-work-rail')
   await expect(details).toBeVisible()
-  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
   // The terminal cannot have the slot — the file has it — so it is the
   // drawer over the pane, and the file keeps the tile.
@@ -330,7 +334,7 @@ test('a chat with no repository opens the terminal too', async ({ page }) => {
   await expect(page.locator('.chat-repo-section')).toHaveCount(0)
   const section = page.locator('.chat-rail-terminal')
   await expect(section).toBeVisible()
-  const open = section.getByRole('button', { name: 'Open in Terminal' })
+  const open = section.getByRole('button', { name: 'Open terminal' })
   await expect(open).toBeVisible()
   await open.click()
 
@@ -358,7 +362,7 @@ test.describe('on a phone', () => {
     await page.locator('.work-inspector-trigger').click()
     const details = page.locator('#chat-work-rail')
     await expect(details).toBeVisible()
-    await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+    await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
 
     const pane = page.locator('.terminal-pane')
     await expect(pane).toBeVisible()
@@ -375,7 +379,31 @@ test.describe('on a phone', () => {
     expect(box.height).toBeGreaterThanOrEqual(600)
     expect(box.width).toBeGreaterThanOrEqual(360)
 
-    // Every control in it is a 44px target.
+    // A shell is started, and with it the keys a soft keyboard cannot
+    // produce appear under the screen. Enter is tapped rather than typed, so
+    // the byte provably came from the row.
+    await pane.getByRole('button', { name: 'New terminal session' }).click()
+    const keys = pane.getByRole('toolbar', { name: 'Terminal keys' })
+    await expect(keys).toBeVisible()
+    const field = pane.locator('.tp-surface textarea')
+    await expect(field).toBeEditable()
+    await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()
+    await pane.locator('.tp-surface').click()
+    await page.keyboard.type(`echo ${OUTPUT}-keys`)
+    await keys.getByRole('button', { name: 'Enter' }).click()
+    await expect(pane.locator('.tp-surface')).toContainText(`${OUTPUT}-keys`)
+    // The tap left the keyboard on the shell.
+    await expect(field).toBeFocused()
+    // A hung command is interruptible from the row: Ctrl+C ends `sleep` and
+    // the prompt answers again.
+    await page.keyboard.type('sleep 30')
+    await keys.getByRole('button', { name: 'Enter' }).click()
+    await keys.getByRole('button', { name: 'Control C' }).click()
+    await page.keyboard.type(`echo ${OUTPUT}-after`)
+    await keys.getByRole('button', { name: 'Enter' }).click()
+    await expect(pane.locator('.tp-surface')).toContainText(`${OUTPUT}-after`)
+
+    // Every control in it is a 44px target, the key row included.
     const controls = pane.locator('button')
     const count = await controls.count()
     expect(count).toBeGreaterThan(0)

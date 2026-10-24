@@ -18,6 +18,7 @@ from ciao import provider_registry
 from ciao.config import (
     CLAUDE_MODELS,
     DEFAULT_MEMORY_HANDOVER,
+    DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER,
     DEFAULT_WORKSPACE_COLOR,
     WorkspaceConfig,
     coerce_agent_fs_scope,
@@ -240,7 +241,7 @@ def workspace_from_request(
     elif existing is not None:
         memory_handover = existing.memory_handover
     else:
-        memory_handover = DEFAULT_MEMORY_HANDOVER
+        memory_handover = DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER
     if "provider_overrides" in data:
         provider_overrides = coerce_provider_overrides(data.get("provider_overrides"))
         _check_override_models(provider_overrides)

@@ -63,7 +63,7 @@ MIN_INTERVAL_MINUTES = 1
 DEFAULT_INTERVAL_MINUTES = 10
 
 # Exactly what ``compute_next_run`` can parse out of ``daily_time_utc``.
-_VALID_DAILY_TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_VALID_DAILY_TIME = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 
 
 def wall_clock_time_error(entry: "ScheduleEntry") -> str:
@@ -112,7 +112,50 @@ SYSTEM_STATE_FIELDS = {
     "model",
     "provider",
     "archive_policy",
+    "daily_time_utc",
+    "timezone_name",
 }
+SYSTEM_TIMING_FIELDS = {"daily_time_utc", "timezone_name"}
+
+
+def validate_system_timing(time_value: object, timezone_value: object) -> tuple[str, str]:
+    """Validate local system-routine time and IANA timezone supplied by an operator."""
+    if not isinstance(time_value, str) or not _VALID_DAILY_TIME.fullmatch(time_value):
+        raise ValueError("time must be a canonical HH:MM value")
+    if not isinstance(timezone_value, str) or not timezone_value.strip() or timezone_value != timezone_value.strip():
+        raise ValueError("timezone must be a non-empty IANA timezone name")
+    try:
+        ZoneInfo(timezone_value)
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"unknown timezone '{timezone_value}'") from exc
+    return time_value, timezone_value
+
+
+def normalize_system_schedule_update(
+    changes: dict[str, object], entry: "ScheduleEntry"
+) -> tuple[dict[str, object], frozenset[str]]:
+    """Apply the shared HTTP/MCP allowlist and validation for system rows."""
+    aliases = {
+        "time": "daily_time_utc", "daily_time": "daily_time_utc",
+        "timezone": "timezone_name", "provider_model": "model",
+        "archivePolicy": "archive_policy",
+    }
+    normalized: dict[str, object] = {}
+    for key, value in changes.items():
+        field = aliases.get(key, key)
+        if field not in {"enabled", "workspace", "model", "provider", "archive_policy", "daily_time_utc", "timezone_name"}:
+            raise ValueError("system routine package-owned fields are read-only")
+        if field in normalized:
+            raise ValueError(f"conflicting aliases for system field '{field}'")
+        normalized[field] = value
+    if "enabled" in normalized and type(normalized["enabled"]) is not bool:
+        raise ValueError("enabled must be a boolean")
+    validate_system_timing(
+        normalized.get("daily_time_utc", entry.daily_time_utc),
+        normalized.get("timezone_name", entry.timezone_name),
+    )
+    timing_fields = frozenset(SYSTEM_TIMING_FIELDS.intersection(normalized))
+    return normalized, timing_fields
 # Overlay key recording when this install first materialized a system row.
 # Not in SYSTEM_STATE_FIELDS: it is not an entry attribute, it becomes the
 # row's `created_at`, the floor `compute_last_expected_run` uses so a slot
@@ -1186,6 +1229,9 @@ class ScheduleStore:
         description: str = "",
         command: str = "",
     ) -> ScheduleEntry:
+        time_error = wall_clock_time_value_error(frequency, daily_time_utc)
+        if time_error:
+            raise ValueError(time_error)
         entry = ScheduleEntry(
             schedule_id=f"sched-{uuid.uuid4().hex[:8]}",
             daily_time_utc=daily_time_utc,
@@ -1222,14 +1268,18 @@ class ScheduleStore:
             self._save(data)
         return entry
 
-    def replace(self, entry: ScheduleEntry) -> None:
+    def replace(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
         # Both write doors normalise, so no caller can persist an auto-archive
         # policy the dispatcher will refuse to honour.
         normalize_auto_archive(entry)
         entry.command = normalize_schedule_command(entry.command)
+        if entry.scope != "system":
+            time_error = wall_clock_time_error(entry)
+            if time_error:
+                raise ValueError(time_error)
         with self._lock:
             if entry.scope == "system":
-                self._replace_system_state(entry)
+                self._replace_system_state(entry, timing_fields=timing_fields)
                 return
             data = self._load()
             items = data.setdefault("schedules", [])
@@ -1450,7 +1500,6 @@ class ScheduleStore:
                     entry.workspace = workspace
                     # Fanned-out rows share one packaged time; stagger them so N
                     # workspaces don't all dispatch in the same minute.
-                    entry.daily_time_utc = _stagger_time(entry.daily_time_utc, offset)
                     if entry.title:
                         entry.title = f"{entry.title} ({workspace})"
                     # The workspace is part of this row's identity, so a stored
@@ -1460,6 +1509,12 @@ class ScheduleStore:
                 for key, value in overlay.items():
                     if key in allowed and hasattr(entry, key):
                         setattr(entry, key, value)
+                # Timing overrides are explicit operator state. Do not let
+                # dispatch/enable bookkeeping freeze today's packaged defaults.
+                if "daily_time_utc" not in overlay:
+                    entry.daily_time_utc = _stagger_time(entry.daily_time_utc, offset) if workspace is not None else entry.daily_time_utc
+                if "timezone_name" not in overlay:
+                    entry.timezone_name = str(item.get("timezone_name") or DEFAULT_TIMEZONE)
                 first_seen = overlay.get(SYSTEM_FIRST_SEEN_KEY)
                 if isinstance(first_seen, str) and first_seen.strip():
                     entry.created_at = first_seen.strip()
@@ -1651,11 +1706,30 @@ class ScheduleStore:
             f"'{requested or '(none)'}'.{hint}"
         )
 
-    def _replace_system_state(self, entry: ScheduleEntry) -> None:
+    def _replace_system_state(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
+        unknown_timing = timing_fields - SYSTEM_TIMING_FIELDS
+        if unknown_timing:
+            raise ValueError(f"unknown system timing fields: {', '.join(sorted(unknown_timing))}")
         self._reject_cross_workspace_move(entry)
+        previous = self.get(entry.schedule_id)
+        if previous is None:
+            raise ValueError(f"unknown system schedule '{entry.schedule_id}'")
+        # Validate before changing state; empty or malformed system defaults are
+        # not accepted as an operator update either.
+        validate_system_timing(entry.daily_time_utc, entry.timezone_name)
         state = self._load_system_state()
+        was_direct = entry.schedule_id in state
         current = state.setdefault(entry.schedule_id, {})
+        if not was_direct:
+            inherited = state.get(system_base_id(entry.schedule_id), {})
+            for field in SYSTEM_TIMING_FIELDS:
+                if field in inherited:
+                    current[field] = inherited[field]
         for field in SYSTEM_STATE_FIELDS:
+            if field in SYSTEM_TIMING_FIELDS:
+                if field in timing_fields or getattr(entry, field) != getattr(previous, field):
+                    current[field] = getattr(entry, field)
+                continue
             current[field] = getattr(entry, field)
         current.setdefault(SYSTEM_FIRST_SEEN_KEY, entry.created_at)
         self._save_system_state(state)
@@ -1887,9 +1961,9 @@ class ScheduleManager:
         """See :meth:`ScheduleStore.put_back_user_items`."""
         return self._store.put_back_user_items(items)
 
-    def replace(self, entry: ScheduleEntry) -> None:
+    def replace(self, entry: ScheduleEntry, *, timing_fields: frozenset[str] = frozenset()) -> None:
         """Persist a validated schedule update through the public manager API."""
-        self._store.replace(entry)
+        self._store.replace(entry, timing_fields=timing_fields)
 
     def _prepare_run_chat(
         self, entry: ScheduleEntry, model: str, mode: BridgeMode, provider: str

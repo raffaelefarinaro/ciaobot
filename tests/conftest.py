@@ -283,6 +283,24 @@ def _isolate_job_runs(tmp_path: Path) -> None:
     jr._runtime_dir_override = None
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the host's gh login out of every test (#1961).
+
+    A workspace-scoped request would otherwise read ``~/.config/gh`` and run
+    ``gh auth token`` on the machine running the suite. Tests of the real
+    functions import them directly from ``ciao.fs_sandbox``, which this patch
+    does not touch.
+    """
+    from ciao import fs_sandbox
+
+    fs_sandbox.clear_gh_token_cache()
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda *a, **k: None)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: None)
+    yield
+    fs_sandbox.clear_gh_token_cache()
+
+
 def attach_stub_mcp(manager):
     """Give a test-built ``ProjectChatManager`` a stub agent control plane.
 

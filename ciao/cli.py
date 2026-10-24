@@ -784,7 +784,7 @@ def _ensure_exact_bytes(root: Path) -> None:
     )
 
 
-def ensure_workspace_git(root: Path) -> None:
+def ensure_workspace_git(root: Path, *, initialize_if_missing: bool = True) -> None:
     """Make sure the workspace is a git repository with a protective .gitignore.
 
     Snapshots and sync rely on git; a fresh workspace gets `git init` plus an
@@ -795,14 +795,17 @@ def ensure_workspace_git(root: Path) -> None:
     if shutil.which("git") is None:
         print("git not found; skipping workspace git init", file=sys.stderr)
         return
-    _ensure_workspace_gitignore(root)
     probe = subprocess.run(
         ["git", *EXACT_BYTES, "-C", str(root), "rev-parse", "--is-inside-work-tree"],
         capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0 and probe.stdout.strip() == "true":
+        _ensure_workspace_gitignore(root)
         _ensure_exact_bytes(root)
         return
+    if not initialize_if_missing:
+        return
+    _ensure_workspace_gitignore(root)
     init = subprocess.run(
         ["git", *EXACT_BYTES, "init", "-b", "main", str(root)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -848,7 +851,7 @@ def _ensure_vault_gitignore(root: Path) -> None:
     gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8", newline="")
 
 
-def ensure_vault_git(root: Path) -> None:
+def ensure_vault_git(root: Path, *, initialize_if_missing: bool = True) -> None:
     """Make sure the vault is (in) a git repository.
 
     Matters when the vault lives outside the workspace (an existing notes
@@ -880,6 +883,8 @@ def ensure_vault_git(root: Path) -> None:
         if toplevel == root:
             _ensure_vault_gitignore(root)
             _ensure_exact_bytes(root)
+        return
+    if not initialize_if_missing:
         return
     _ensure_vault_gitignore(root)
     init = subprocess.run(
@@ -1010,6 +1015,7 @@ def setup_workspace(
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
     confirm_repoint: bool = False,
+    initialize_git: bool = False,
     sync_failures: list[str] | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
@@ -1078,8 +1084,16 @@ def setup_workspace(
                     "choose a folder outside ~/Desktop, ~/Documents and ~/Downloads, such as "
                     "~/Ciaobot."
                 )
+    from ciao.onboarding import ensure_receipt, read_receipt
+    from ciao.setup_marker import is_set_up_workspace
+
+    runtime_root = root / ".runtime"
+    receipt_created = read_receipt(runtime_root) is None
+    receipt = ensure_receipt(runtime_root, established_install=is_set_up_workspace(root))
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    if receipt_created:
+        written.append(runtime_root / "onboarding.json")
     setup_selected_vault = vault_root is not None
     vault_value = str(vault_root) if vault_root is not None else "memory-vault"
     if vault_root is None and vault_mode == "existing":
@@ -1130,6 +1144,12 @@ def setup_workspace(
     # No registry yet means this folder has never been set up, even when it
     # already holds a `.env` of its own (a notes folder or a project checkout).
     first_setup = not workspaces_registry.exists()
+    if first_setup and receipt.installation.status == "in_progress":
+        from ciao.app_settings import AppSettingsStore, needs_new_install_backup_seed
+
+        settings_path = runtime_root / "app_settings.json"
+        if needs_new_install_backup_seed(settings_path):
+            AppSettingsStore(settings_path).seed_new_install_backup_default()
     registered_vaults = _setup_registry_vaults(
         workspaces_registry,
         workspace_root=root,
@@ -1502,11 +1522,11 @@ def setup_workspace(
             _remove_legacy_app_shortcuts(app_root_dir)
             _disable_legacy_menubar_agent(launch_dir)
 
-    ensure_workspace_git(root)
+    ensure_workspace_git(root, initialize_if_missing=initialize_git)
     # A vault outside the workspace (existing notes folder) gets its own
     # repo. Runs after the workspace init so the default nested vault is
     # never double-initialized.
-    ensure_vault_git(vault_path)
+    ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 
     return written
 
@@ -1657,6 +1677,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             launch_agents_dir=args.launch_agents_dir,
             app_dir=args.app_dir,
             confirm_repoint=args.yes,
+            initialize_git=args.initialize_git,
             sync_failures=sync_failures,
         )
     except RuntimeError as exc:
@@ -7033,20 +7054,51 @@ def _service_command(args: argparse.Namespace) -> int:
                     as_json=as_json,
                 )
             runtime = macos_service.discover_runtime()
+        # The run that is there before the kickstart (if any) must not pass
+        # for the one the kickstart starts, so its identity is read first.
+        previous = macos_service.read_lock_owner(runtime)
+        started_at = time.time()
         result = macos_service.start_service(runtime=runtime)
         if result.ok:
-            # The engine has to boot before it can fail, so a start that
-            # reports "started" before the engine has had the time to fail
-            # reports a hope. The wait ends as soon as the engine serves its
-            # port or records that it could not bind it (#1654).
-            macos_service.wait_for_engine(runtime)
-            reason = macos_service.port_in_use_reason(runtime)
-            if reason is not None:
+            # `start_service` submits the start; it does not confirm it. The
+            # engine has to boot before it can fail, so a start reported
+            # before the engine answered as itself reports a hope (#1654).
+            # The wait ends when the new engine answers with the identity its
+            # lock carries, when it records a bind failure or a denial, or at
+            # the deadline, which is a failure, not a start (#1938).
+            outcome = macos_service.wait_for_engine(
+                runtime, previous=previous, started_at=started_at,
+            )
+            if outcome.state == "timeout":
+                # The weaker bind-failure signal, launchd's last exit code,
+                # is read once the deadline passed: an unsupervised engine
+                # that exited on a taken port leaves no record of its own.
+                reason = macos_service.port_in_use_reason(runtime)
+                if reason is not None:
+                    outcome = macos_service.StartOutcome("port_in_use", reason)
+            if outcome.ok:
+                result = macos_service.ServiceResult(
+                    True,
+                    "start",
+                    outcome.message,
+                    {
+                        **result.details,
+                        "verified": True,
+                        "startup_id": outcome.startup_id,
+                        "pid": outcome.pid,
+                    },
+                )
+            else:
                 result = macos_service.ServiceResult(
                     False,
                     "start",
-                    reason,
-                    {**result.details, "port_in_use": True},
+                    outcome.message,
+                    {
+                        **result.details,
+                        "verified": False,
+                        "start_outcome": outcome.state,
+                        "port_in_use": outcome.state == "port_in_use",
+                    },
                 )
     elif action == "restart":
         result = macos_service.restart_service(force=bool(args.force))
@@ -7406,6 +7458,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("."),
         help="Workspace directory to initialize.",
+    )
+    setup_parser.add_argument(
+        "--initialize-git",
+        action="store_true",
+        default=False,
+        help=("Create local history and an initial commit of nonignored workspace "
+              "and external-vault contents; local only, no remote or upload."),
     )
     setup_parser.add_argument(
         "--workspace-name",
@@ -9399,11 +9458,28 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
     return gws_auth_helper.main_entry(argv)
 
 
+# EX_NOPERM. Hardcoded: ``os.EX_NOPERM`` does not exist on Windows.
+RUNTIME_STATE_UNREADABLE_EXIT = 77
+
+
 def main(argv: list[str] | None = None) -> int:
     use_utf8_stdio()
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return _dispatch(argv_list)
+    except Exception as exc:
+        # The import lives in the handler so the agent fast path never pays for it.
+        from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
+
+        if not isinstance(exc, RuntimeStateUnreadable):
+            raise
+        print(f"ciao: {exc}", file=sys.stderr)
+        return RUNTIME_STATE_UNREADABLE_EXIT
+
+
+def _dispatch(argv_list: list[str]) -> int:
     # The agent surface (`ciao memory …`, `ciao vault search …`): dispatch
     # before building the operator parser so a call from a chat costs
     # interpreter start-up, not this module's import graph. ``ciao.agent_cli``

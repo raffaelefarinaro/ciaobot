@@ -978,7 +978,7 @@ def _align_user_turns(
     session_user_rows: list[tuple[int, str, Any]],
     current_rows: list[dict],
     chat: Any,
-) -> list[dict]:
+) -> tuple[list[dict], list[tuple[dict, int]]]:
     """Align rendered session user rows with the durable transcript's turns.
 
     This module numbers user rows by their position in the provider session,
@@ -1005,6 +1005,9 @@ def _align_user_turns(
 
     Only an *error* durable turn with no session counterpart is rendered as a
     lost turn.
+
+    It also returns the text pairing, as ``(rendered user row, durable user
+    row index)``, so the metadata overlay can follow it.
     """
     durable = [
         (index, row)
@@ -1019,7 +1022,7 @@ def _align_user_turns(
         if not cli_envelopes.is_hidden_continuation(str(row.get("content") or ""))
     ]
     if not durable or not session_user_rows:
-        return result
+        return result, []
     base = chat.turn_index_base
     # The durable file belongs to a provider stint: a handover leaves the
     # previous provider's file on disk, so it can hold turns this chat no
@@ -1038,7 +1041,7 @@ def _align_user_turns(
         expected = (count - base) - steered
         if expected <= 0:
             # Nothing this stint can be aligned against.
-            return result
+            return result, []
         if expected < len(durable):
             durable = durable[-expected:]
     durable_texts = [
@@ -1122,6 +1125,17 @@ def _align_user_turns(
                 missing -= 1
                 shifts.append((len(session_user_rows), "skipped", index, row))
             continue
+        if (
+            text != session_texts[session_pos]
+            and not failed_turn(index)
+            and has_session_counterpart(text, session_pos)
+        ):
+            # The session holds sends the durable store never recorded (a send
+            # that never reached record_turn). They own no durable turn, so
+            # move past them to this turn's own row before pairing it. A failed
+            # turn keeps the fall-through so the run-length and lost-turn logic
+            # decide.
+            session_pos = session_texts.index(text, session_pos)
         if text == session_texts[session_pos]:
             # `retryFromError` re-sends the same text after a failure, so a run
             # of identical texts has to align from the RIGHT: the failed send
@@ -1172,6 +1186,9 @@ def _align_user_turns(
             raw_message=message,
             fallback_sent_at=str((paired or {}).get("sent_at") or ""),
         )
+    paired_rows = [
+        (result[session_user_rows[position][0]], index) for position, index, _row in pairs
+    ]
     insertions: list[tuple[int, list[dict]]] = []
     for ordinal, (anchor, kind, index, row) in enumerate(shifts):
         if kind != "lost":
@@ -1191,7 +1208,7 @@ def _align_user_turns(
     # lost entry goes in first to keep the durable order.
     for target, rows in reversed(insertions):
         result[target:target] = rows
-    return result
+    return result, paired_rows
 
 
 def _overlay_transcript_metadata(
@@ -1242,6 +1259,44 @@ def _overlay_transcript_metadata(
         for key in ("usage", "quota", "effective_model"):
             if source.get(key):
                 entries[index][key] = source[key]
+
+
+def _overlay_paired_metadata(
+    entries: list[dict],
+    transcript_rows: list[dict],
+    paired: list[tuple[dict, int]],
+) -> None:
+    """Copy each paired durable turn's reply metadata onto its session turn.
+
+    ``paired`` is ``_align_user_turns``' text pairing: a rendered user row and
+    the index of the durable user row it matched. The durable reply is the row
+    after it; the target is the last assistant row before the next user row,
+    which is where the turn footer reads its usage.
+    """
+    durable_for = {id(row): index for row, index in paired}
+    current: int | None = None
+    last_assistant: dict | None = None
+
+    def flush() -> None:
+        if current is None or last_assistant is None:
+            return
+        if current + 1 >= len(transcript_rows):
+            return
+        source = transcript_rows[current + 1]
+        if source.get("role") != "assistant":
+            return
+        for key in ("usage", "quota", "effective_model"):
+            if source.get(key):
+                last_assistant[key] = source[key]
+
+    for row in entries:
+        if row.get("role") == "user":
+            flush()
+            current = durable_for.get(id(row))
+            last_assistant = None
+        elif row.get("role") == "assistant":
+            last_assistant = row
+    flush()
 
 
 def _messages_from_archived_transcript(
@@ -1689,11 +1744,14 @@ async def _assemble_chat_messages(
         ChatContext.for_web(chat_id), provider
     )
     # Number the session rows from the durable turns they pair with, and
-    # render the failed turns the session cannot contain, before the metadata
-    # overlay — which pairs the transcript's assistant rows to the entry rows
-    # positionally — runs.
-    result = _align_user_turns(result, session_user_rows, current, chat)
+    # render the failed turns the session cannot contain. Metadata follows the
+    # same text pairing; the positional overlay is only for chats the alignment
+    # could not pair.
+    result, paired = _align_user_turns(result, session_user_rows, current, chat)
     if current and result:
-        _overlay_transcript_metadata(result, current)
+        if paired:
+            _overlay_paired_metadata(result, current, paired)
+        else:
+            _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
     return [*handover_messages, *result]

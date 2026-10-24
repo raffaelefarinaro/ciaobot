@@ -709,12 +709,13 @@
                 <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
-                    <span class="ws-label set-subrow-label">Default model</span>
+                    <span :id="`default-model-label-${connKey}`" class="ws-label set-subrow-label">Default model</span>
                     <div class="set-subrow-control">
                       <ModelSelector
                         v-if="getProviderSection(String(connKey))?.configurable"
                         :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
                         :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :labelled-by="`default-model-label-${connKey}`"
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
                       />
@@ -723,6 +724,7 @@
                   </div>
                   <div class="set-subrow">
                     <span
+                      :id="`insights-model-label-${connKey}`"
                       class="ws-label set-subrow-label"
                       title="Reads archived chats, closed projects and task resolutions into memory, names new chats, and checks schedule results for this provider. Automatic uses the chat's own model; Claude schedule checks use Haiku."
                     >Session insights</span>
@@ -731,6 +733,7 @@
                         v-if="getProviderSection(String(connKey))?.configurable"
                         :model-value="providerInsightsModelSelectorValue(String(connKey) as AliasProviderKey)"
                         :sections="providerInsightsModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :labelled-by="`insights-model-label-${connKey}`"
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderInsightsModel(String(connKey) as AliasProviderKey, $event)"
                       />
@@ -1294,6 +1297,8 @@
           <div class="rail-kvs">
             <div class="rail-kv"><span>Custom</span><strong>{{ assetRail.custom }}</strong></div>
             <div class="rail-kv"><span>Built in</span><strong>{{ assetRail.builtin }}</strong></div>
+            <div v-if="assetRail.global" class="rail-kv"><span>Global</span><strong>{{ assetRail.global }}</strong></div>
+            <div v-if="assetRail.installed" class="rail-kv"><span>Installed</span><strong>{{ assetRail.installed }}</strong></div>
             <div v-if="assetRail.other" class="rail-kv"><span>Other</span><strong>{{ assetRail.other }}</strong></div>
           </div>
           <p class="rail-note">
@@ -2041,14 +2046,20 @@ const customSkills = computed(() => {
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
 
-type AssetRail = { title: string; custom: number; builtin: number; other: number; folder: string }
+type AssetRail = { title: string; custom: number; builtin: number; global: number; installed: number; other: number; folder: string }
 
-function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<AssetRail, 'custom' | 'builtin' | 'other'> {
-  const counts = { custom: 0, builtin: 0, other: 0 }
+function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<AssetRail, 'custom' | 'builtin' | 'global' | 'installed' | 'other'> {
+  const counts = { custom: 0, builtin: 0, global: 0, installed: 0, other: 0 }
   for (const item of items) {
+    if (item.scope && !['custom', 'built-in', 'global', 'installed'].includes(item.scope)) {
+      counts.other += 1
+      continue
+    }
     const origin = commandOrigin(item)
     if (origin === 'custom') counts.custom += 1
     else if (origin === 'builtin') counts.builtin += 1
+    else if (origin === 'global') counts.global += 1
+    else if (origin === 'installed' && (item.scope === undefined || item.scope === 'installed')) counts.installed += 1
     else counts.other += 1
   }
   return counts
@@ -2057,7 +2068,7 @@ function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<Ass
 // Rail content for the asset list tabs; null elsewhere or while loading.
 const assetRail = computed<AssetRail | null>(() => {
   if (currentTab.value === 'skills' && skillsLoaded.value && !skillsError.value) {
-    return { title: 'Skills', custom: customSkills.value.length, builtin: stockSkills.value.length, other: 0, folder: 'skills/' }
+    return { title: 'Skills', custom: customSkills.value.length, builtin: stockSkills.value.length, global: 0, installed: 0, other: 0, folder: 'skills/' }
   }
   if (!agentAssetsLoaded.value || agentAssetsError.value) return null
   if (currentTab.value === 'subagents') {

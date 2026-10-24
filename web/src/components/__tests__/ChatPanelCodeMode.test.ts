@@ -93,10 +93,9 @@ class MemoryStorage {
 
 // Every panel this file mounts is torn down when its test ends. A panel that
 // outlives its test keeps its scroll-settle loop alive, and that loop calls
-// `store.canLoadOlder()` on a requestAnimationFrame: Pinia treats a setup
-// store's plain function as an action, and an action resets the one global
-// "active pinia" the next `useProjectStore()` reads. A leftover panel could
-// therefore hand the next test the previous test's store.
+// `store.loadOlderMessages()` on a requestAnimationFrame. Store actions reset
+// the one global "active pinia" the next `useProjectStore()` reads. A leftover
+// panel could therefore hand the next test the previous test's store.
 enableAutoUnmount(afterEach)
 
 /**
@@ -229,7 +228,7 @@ describe('ChatPanel code badge', () => {
     store.projects[0].repo = REPO
     store.chats[0].code_mode = true
     await flushPromises()
-    expect(wrapper.get('.chat-title-row .chat-code-badge').text()).toBe('code')
+    expect(wrapper.get('.chat-title-row .chat-code-badge').text()).toBe('›_')
     expect(wrapper.find('.header-actions .repo-chip').exists()).toBe(false)
 
     store.chats[0].code_mode = false
@@ -326,11 +325,9 @@ describe('ChatPanel naming placeholder', () => {
     // Close, then title, then badge: the order the header documents.
     const order = Array.from(row.element.children).map(el => el.className)
     expect(order).toEqual(['btn-icon close-btn', 'pane-title chat-title', 'chat-code-badge'])
-    // The project sits beside the row, never inside it, so a second line
-    // under the title cannot drag the close control off the title's centre.
-    // A named project is required here: General renders no crumb at all, and
-    // the assertion would then pass wherever the crumb lived.
-    expect(wrapper.find('.header-breadcrumb > .breadcrumb-scope').exists()).toBe(true)
+    // Project context is available elsewhere and does not become another
+    // line in the chat title header.
+    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(row.find('.breadcrumb-scope').exists()).toBe(false)
 
     store.chats[0].code_mode = false

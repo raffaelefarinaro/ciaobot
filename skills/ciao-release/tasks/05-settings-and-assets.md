@@ -23,7 +23,7 @@ load state to resolve** — do not sleep a fixed interval and call it loaded.
 its own. The sidebar rail has two groups: Ciaobot (General, Appearance,
 Access & devices, Providers, Advanced, Workspaces) and the active workspace (Overview, Skills, Subagents, Commands, MCP servers).
 
-`/settings` (General) carries What can Ciaobot do?, Updates, app install,
+`/settings` (General) carries Updates, What can Ciaobot do?, app install,
 notifications, keyboard shortcuts, start at sign-in, insights and open
 source. `/settings/workspace` (Overview) is the active workspace's page: the
 Workspace and Google account cards, memory handover, update task history and,
@@ -36,7 +36,7 @@ alone. Watch for:
 - Google account card on `/settings/workspace`: one row (Connect Google account when none; Connected with a ··· menu when linked); open Connect and confirm Escape closes it and focus returns.
 - The online backup card shows state and last successful upload; scope,
   repository and raw diagnostics sit behind a native `<details>` disclosure.
-- The "What can Ciaobot do?" card at the top links out to the public
+- The "What can Ciaobot do?" card links out to the public
   feature guide.
 
 The **"On this page" rail is route-specific**: it is built from the cards the
@@ -62,22 +62,22 @@ File access (*Workspace only* or *Whole machine*). Follow
 
 ## Step 2 — the four asset lists are scoped to one workspace
 
-This is the point of the task. **Skills, Subagents, Commands and MCP servers all
-belong to the workspace selected in the sidebar.** Only one workspace is
-selected at a time, so: record the four lists on the current workspace, switch
-the sidebar to another workspace, let the active-workspace watcher refetch, and
-record them again. On a single-workspace install there is nothing to switch to:
-report the before/after checkpoint **BLOCKED** rather than inventing a second
-workspace.
+This is the point of the task. **Skills, Subagents, Commands and MCP servers
+belong to the selected workspace, but each list loads on its own Settings tab.**
+For each list, open its tab in the first workspace and record the visible rows;
+switch workspaces, return to that tab, and record its rows again. Only the
+currently visible scoped tab refetches immediately on a workspace switch; the
+others reload when opened. On a single-workspace install there is nothing to
+switch to: report the before/after checkpoint **BLOCKED** rather than inventing
+a second workspace.
 
 Record the names visible in the four lists (for example by reading the text of
 the skill-name and row elements in the page).
 
 **Watch for, precisely:**
 
-- All four refetch together on the switch. Scoping only the reads would be worse
-  than the original bug: a create would file an asset in a root the list never
-  shows.
+- The currently visible scoped tab refetches on the switch; do not expect
+  off-screen tabs to fetch until visited. Check each tab in each workspace.
 - **Stock skills stay in every list.** `sync-skills` installs them into every
   agent root, so a scoped list still shows the built-ins. Their absence is a bug,
   not the scoping working.
@@ -96,7 +96,7 @@ actually calls (`web/src/components/SettingsView.vue`, `useMcpServers.ts`):
 
 - Skills — `/api/admin/skills?workspace=<name>`
 - Subagents — `/api/agent-assets?workspace=<name>` (`subagents`)
-- Commands — `/api/agent-assets?workspace=<name>` (`commands`)
+- Commands — `/api/commands?workspace=<name>`
 - MCP servers — `/api/mcp/status?workspace=<name>`
 
 Run the fetch inside the authenticated browser tab, where the session cookie
@@ -107,6 +107,7 @@ const ws = '<workspace>';
 for (const path of [
   `/api/admin/skills?workspace=${encodeURIComponent(ws)}`,
   `/api/agent-assets?workspace=${encodeURIComponent(ws)}`,
+  `/api/commands?workspace=${encodeURIComponent(ws)}`,
   `/api/mcp/status?workspace=${encodeURIComponent(ws)}`,
 ]) {
   const res = await fetch(path, { credentials: 'same-origin' });
@@ -135,7 +136,7 @@ Do not create, edit or delete anything in Settings.
   workspace. Look for: stock skills present, lists populated or a sensible
   empty state.
 - `05-settings-04-assets-after.png` — the same lists after the workspace switch.
-  Look for: all four refetched together, stock skills still present, Global rows
+  Look for: each list refreshed when its tab was visited, stock skills still present, Global rows
   allowed to be unchanged, no stale rows, no stray toast.
 
 Redact credentials and account details from any screenshot.
@@ -148,8 +149,8 @@ Record:
 
 - Which Settings routes loaded, which hung.
 - Whether the "On this page" rail matched the route it was on.
-- Before/after asset lists across a workspace switch, and whether all four moved
-  together (Global rows explicitly allowed to stay the same).
+- Before/after asset lists across a workspace switch, verifying each tab after
+  visiting it (Global rows explicitly allowed to stay the same).
 - Whether stock skills were still present in the scoped list.
 - Any copy that describes a whole-install inventory when the page is scoped.
 

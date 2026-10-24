@@ -49,6 +49,8 @@ After changes that touch running static assets (anything that lands in `ciao/web
 
 ## Layout
 
+Onboarding's Access & memory stage treats filesystem scope and runtime approval mode as separate choices. It writes only explicit changes through workspace settings; an unset permission mode remains unknown/engine default and is never presented as a known guarantee.
+
 ```
 web/
   index.html              entry HTML, viewport meta, PWA manifest link
@@ -85,7 +87,9 @@ web/
                            `kindLabel`, and is cross-checked against the nightly and memory-pass prompts
                            in `ciao/stock/skills/ciao-memory/references/`
     stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer, itemPeek), and store
-                          modules (chatAnnotations) — see the ownership boundary below
+                           modules (chatAnnotations) — see the ownership boundary below
+                            `onboarding` owns lifecycle progress reads and revision-checked writes; onboarding
+                            stages report their state to the presentation shell and never mutate progress directly.
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
                           useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices,
@@ -297,6 +301,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - One Vue SFC per pane. Keep `<script setup lang="ts">`, template, scoped `<style>`.
 - **Webhook triggers live in Automations**, not in a top-level inbox (#1034). `stores/webhooks.ts` owns one workspace's triggers through the same B4 load contract as `taskBoard` (`loadedWorkspace`, `loading`, `loadError`, `error`, a `requestSeq` read ticket and a `writeSeq` write ticket), and every write presents the `revision` the row was read at — a stale write is the server's 409 with the rows intact. **`mode`, `project_id` and `input_policy` are create-only**; `PATCH` accepts `name`, `instructions` and `enabled` and nothing else. **The store never holds a secret**: `create` and `rotate` return the one-time secret to their caller and no field keeps it, because `WebhookTriggers.vue` is the only surface allowed to show it, once. The receiver recipe (`lib/webhooks.ts`) carries the trigger's real id and a `<secret>` placeholder, never a credential — a recipe that outlived the copy button is not a place to keep one. The row, heading and section classes come from `components/overviewSections.css`, which both `SchedulePanel.vue` and the section pull in with `<style scoped src>`.
 - Load states are separate states. A list that fetches (`ProposalReviewPanel`, `ProposalHistoryList`, the Memory Map) must distinguish first-load in flight, first-load failure (inline error + Retry, never an empty-state claim), a failed refresh over existing rows (keep the rows, mark them stale, offer Retry), a filter hiding a non-empty set (offer to clear filters), and a genuinely empty set. Never derive "there is nothing here" from a filtered array alone — a failed or pending GET would then read as a cleared queue. Load errors live in their own store slot (`loadError`), apart from action errors (`error`), so a list refresh cannot clear an unread accept/dismiss failure. `useTaskStore` exposes the same contract for schedules through `scheduleLoading`, `scheduleLoadError`, and `schedulesLoaded`; Home, Project, and Automations consume that shared truth rather than maintaining competing local interpretations. The workspace task board's store is `taskBoard`, deliberately not a second half of `tasks`: schedules are automations the engine runs, task records are the user's own, and every write in the board presents the `revision` it read so a stale edit is the server's 409 with the rows intact rather than a lost update. Its pure half — column bucketing, ordering, the filters, and the `/api/tasks*` error envelope — is in `lib/taskBoard.ts`.
+- Store reads are computed state, not setup-store functions: Pinia exposes returned functions as actions, and invoking one activates that store's Pinia. A scroll or render path that only reads state must use a computed value (for example, per-chat pagination maps), while operations that mutate state or perform I/O remain actions.
 - **A review row's available actions come from the payload, not from a re-derivation.** `VaultReviewPanel.vue` draws **Complete** in place of **Retire** when the candidate carries `completable: true`, and never draws both: a project that finished and a project that is wrong are different findings, and the user has to be able to tell them apart. The flag is computed in `ciao/vault_review.py` from the same helpers `complete_project_note` gates on, so the button that renders is a click the engine will honour. The PWA has no alias table and no view of the `projects/` layouts, so a client-side `evidence.type === 'project'` test is a second definition free to disagree with the first — and the disagreement is a refusal on a row that still looks actionable. The lede and the Discuss seed follow the same flag, so a project row is never asked whether it should be thrown away.
 - The core work model is **request → run → output → durable knowledge**. `HomeIntake.vue` starts an ordinary project chat and preserves unsent text per workspace; `HomeReviewSummary.vue` uses active-workspace counts and labels checking/current/stale/empty/failed state explicitly and, on the Today surface, sits in the `.home-workbench` side rail beside the request column (stacking below it at a 980px container width); `ChatPanel.vue` keeps the transcript dominant and opens a conditional, keyboard-operable Context / Activity / Output inspector. New UI should reinforce those relationships rather than introduce another top-level inbox or artifact silo.
 - **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters it out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Chat details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind.
@@ -472,7 +477,8 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   into four pages. General begins with the Updates section (compact to a title
   and an "Up to date" status when nothing is in progress), then the
   capability-help section linking to the public feature guide, then Use Ciaobot
-  as an app, Notifications, Keyboard shortcuts, Start at sign-in and Open
+  as an app, Notifications, Keyboard shortcuts (the binding list is collapsed
+  by default), Start at sign-in and Open
   source. Appearance is
   the Appearance card alone: Theme and Font size rows in `SettingsView.vue`, and
   `settings/SettingsAppearance.vue` (Text contrast, Body font, Custom colours with `settings/CustomColorsDialog.vue`; `lib/contrast.ts` holds the WCAG maths and refuses unreadable pairs). Appearance is engine-wide:
@@ -607,7 +613,37 @@ above still has to be walked by hand on a real phone before a release.
 
 The MCP Settings panel shows provider-native configuration separately from per-chat connection states returned by `/api/mcp/status`. No running observable session means connection not checked, and unreadable configuration/provider status is unknown.
 
+Onboarding's care stage (`components/onboarding/OnboardingCareStage.vue`) asks when the host is usually available, then lets the operator edit the installed workspace-care routine's local time and IANA timezone. It updates only that existing row through the schedules API; keeping the packaged default writes nothing. No routine is created when the workspace has none.
+
 - The To decide filter chips are by change type, by reason, and *Needs you* (`decideFilter` in the proposals store, separate from `kindFilter` because History shares that one). *Needs you* keeps rows whose `decider` is not `nightly`, so rows with no decider count, and the chip shows only when at least one row is marked `nightly`. A row shows its `decider` and a one-line `decide_reason`, rendered as text.
 - An optional reason is asked for before every individual accept and dismissal in the queue: the row's accept opens the decision card with the reason on it (`Why keep this? (optional)`), and every Dismiss opens an inline confirmation naming the proposal (`Why dismiss this? (optional)`). Picking the workspace for a re-home is the exception — the destination is the answer — and the batch bar never asks. There is no *Why?* disclosure left on a row or a card. The shared `DecisionReason` with the memory chips from `lib/memoryDecisionReasons.ts` holds the answer per row in the panel (`reasonById`), and it is discarded on Cancel, on a switch to another card, and after a successful decision; a failed dismissal keeps it so the retry does not lose the sentence. It is sent as `reason` only when non-empty, with that row's accept (and the retry of a deferred accept) or its dismissal, never on the batch bar; a refused accept clears it, the deferral keeping its own copy for the retry. With no reason typed the confirmation's button reads *Continue without a reason* and the card names the action above it (*This will save to ciao:memory.*, *This will dismiss the proposal.*); with a reason the accept button names the destination again. History renders a row's `reason` as text (`.ph-reason`), never markup.
 - History shows a row's `prediction` under its text as predicted against decided, with a muted *Matched* or *Missed* badge (a miss is information, never an error) and the prediction `reason` as text. A `[memory]`/`[profile]` row the nightly run settled itself (`via: agent`) reads *Filed by Workspace care* (accepted) or *Dismissed by Workspace care* (dismissed), badges *Acted on prediction*, and offers *Undo* from the row when its change is undoable. The To decide queue never shows a prediction on a pending row, so the agreement rate stays unbiased.
-- Settings → Overview → *Memory handover* (`SettingsMemoryHandover.vue`, a three-way segmented control styled like Theme: arrows select) loads `GET /api/proposals/handover?workspace=` for the active workspace and saves only `{ memory_handover }` through `PATCH /api/workspaces/{name}`. It never saves on its own: the suggestion is text. Choosing *Dismiss and accept* asks for confirmation, and the card says that it lets queued text reach always-loaded memory, with Undo in History and a cap of 5 changes per run. When the response's `acting_available` is false (a Linux/systemd install, where the gate trusts no service definition) the card says handover cannot act on this install and disables the options.
+- Settings → Overview → *Memory handover* (`SettingsMemoryHandover.vue`, a three-way segmented control styled like Theme: arrows select) loads `GET /api/proposals/handover?workspace=` for the active workspace and saves only `{ memory_handover }` through `PATCH /api/workspaces/{name}`. New workspaces start at *Dismiss and accept*; existing workspaces without a stored choice remain *Off*. It never saves on its own: the suggestion is text. Choosing *Dismiss and accept* asks for confirmation, and the card says that it lets queued text reach always-loaded memory, with Undo in History and a cap of 5 changes per run. When the response's `acting_available` is false (a Linux/systemd install, where the gate trusts no service definition) the card says handover cannot act on this install and disables the options.
+
+### Onboarding stages
+
+`components/onboarding/` holds presentation stages that the shell composes; each receives
+`OnboardingStageProps` (`context`, `busy`) and emits `state`, `continue`, `back` and `refresh`.
+A stage owns its domain save and reports whether it succeeded; the shell, never the stage, writes
+progress through the onboarding store.
+
+The onboarding location stage owns the folder-first location choice and workspace name validation; it reports readiness to the shared shell and emits `continue` only on the user's action. It never writes onboarding progress. Provisioned installs treat the current folder as read-only and link to the guarded workspace move flow.
+The onboarding finish stage shows a summary built only from observed values and offers an optional
+first task that creates a chat and sends the submitted text; it does not change setup progress
+itself.
+
+`OnboardingRuntimeStage` reads model provenance from
+`/api/models`: runtime-reported models and configured aliases are rendered in separate sections,
+and an unobserved runtime is never described as available.
+
+## Onboarding memory
+
+The Access & memory onboarding stage asks workspace operators to acknowledge a handover choice before continuing. Its suggested “Accept and dismiss” choice applies only while that workspace's onboarding receipt is `in_progress`; it is never written until Continue, and is saved only through the workspace's existing `memory_handover` setting. A missing trusted handover service is reported plainly and does not imply acceptance can act.
+
+### Onboarding entry
+
+`/onboarding` composes the stage components by the receipt's recorded step and advances progress only
+through the onboarding store; `OnboardingView` never writes progress itself, and the access/memory
+screen advances only when both components report ready. `HomeOnboardingResume` reads the current
+receipt on Home entry and window focus and links into the journey while a target is pending — it is
+not a dismissal, and it shows nothing when the receipt cannot be read.

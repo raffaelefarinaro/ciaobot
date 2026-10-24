@@ -374,6 +374,90 @@ describe('TerminalPane', () => {
     wrapper.unmount()
   })
 
+  it('offers on-screen keys once a screen is open, and each sends the bytes a hardware key would', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+    expect(store.phase).toBe('live')
+
+    const row = wrapper.get('[role="toolbar"][aria-label="Terminal keys"]')
+    const expected: Array<[string, string]> = [
+      ['Escape', '\x1b'],
+      ['Tab', '\t'],
+      ['Control C', '\x03'],
+      ['Control D', '\x04'],
+      ['Up arrow', '\x1b[A'],
+      ['Down arrow', '\x1b[B'],
+      ['Left arrow', '\x1b[D'],
+      ['Right arrow', '\x1b[C'],
+      ['Enter', '\r'],
+    ]
+    const keys = row.findAll('button')
+    expect(keys.map((k) => k.attributes('aria-label'))).toEqual(expected.map(([name]) => name))
+    for (const [name, bytes] of expected) {
+      const key = keys.find((k) => k.attributes('aria-label') === name)!
+      expect(key.attributes('disabled')).toBeUndefined()
+      await key.trigger('click')
+      const inputs = sockets[0].ofType('input')
+      expect(inputs.at(-1)?.data, name).toBe(btoa(bytes))
+    }
+    // The same path a keystroke takes: nine keys, nine input frames.
+    expect(sockets[0].ofType('input')).toHaveLength(expected.length)
+    wrapper.unmount()
+  })
+
+  it('renders no key row without a screen, and disables the keys until the session is live', async () => {
+    serve([])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    expect(wrapper.find('.tp-keys').exists()).toBe(false)
+
+    // A session with a screen but no live connection yet: the row is there
+    // for the layout, and the keys wait.
+    await store.createSession()
+    await flushPromises()
+    expect(wrapper.find('.tp-keys').exists()).toBe(true)
+    expect(store.phase).not.toBe('live')
+    const key = wrapper.get('.tp-key')
+    expect(key.attributes('disabled')).toBeDefined()
+    await key.trigger('click')
+    expect(sockets.at(-1)?.ofType('input') ?? []).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('does not take the focus from the shell when a key is tapped', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const key = wrapper.get('.tp-key').element
+    const down = new Event('pointerdown', { bubbles: true, cancelable: true })
+    key.dispatchEvent(down)
+    expect(down.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('shows the key row only under a coarse pointer, with 44px keys', () => {
+    // jsdom has no layout engine, so the rules are asserted from the sheet
+    // the pane ships: hidden by default, shown for a coarse pointer, and each
+    // key at the shared touch size.
+    const source = readFileSync(join(__dirname, '..', 'TerminalPane.vue'), 'utf8')
+    expect(source).toMatch(/\.tp-keys \{[^}]*display:\s*none/)
+    expect(source).toMatch(/@media \(pointer: coarse\) \{\s*\.tp-keys \{ display: flex; \}/)
+    expect(source).toMatch(/\.tp-key \{[^}]*min-width:\s*var\(--touch\)[^}]*min-height:\s*var\(--touch\)/)
+  })
+
   it('closes the pane without ending its sessions', async () => {
     serve([sessionInfo('s1')])
     const store = useTerminalStore()

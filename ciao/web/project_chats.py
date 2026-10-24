@@ -505,6 +505,33 @@ class ProjectInfo:
 # dedup only needs the recent sends. Left unbounded, the map grew with
 # every turn of every chat and was persisted with the chat metadata.
 SEND_ID_HISTORY_TURNS = 64
+MAX_SEND_IDS_PER_TURN = 100
+
+
+def _entry_send_ids(entry: dict) -> list[str]:
+    send_ids = [str(entry["send_id"])] if entry.get("send_id") else []
+    send_ids.extend(str(send_id) for send_id in (entry.get("send_ids") or []))
+    return list(dict.fromkeys(send_ids))
+
+
+def _entries_within_send_id_limit(
+    chat: "ChatInfo", turn_index: int, entries: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    key = str(turn_index)
+    recorded = chat.user_turn_send_ids.get(key)
+    owned = {recorded} if isinstance(recorded, str) else (
+        set(recorded) if isinstance(recorded, list) else set()
+    )
+    accepted: list[dict] = []
+    overflow: list[dict] = []
+    for entry in entries:
+        additions = set(_entry_send_ids(entry)) - owned
+        if len(owned) + len(additions) > MAX_SEND_IDS_PER_TURN:
+            overflow.append(entry)
+            continue
+        accepted.append(entry)
+        owned.update(additions)
+    return accepted, overflow
 
 
 def _prune_send_id_history(send_ids: dict) -> None:
@@ -806,8 +833,43 @@ class ChatInfo:
         for a duplicate resend, so the older ones are dropped instead of
         growing the chat metadata for the life of the chat.
         """
-        self.user_turn_send_ids[str(turn_index)] = send_id
+        self.record_send_ids(turn_index, [send_id])
+
+    def record_send_ids(self, turn_index: int, send_ids: list[str]) -> None:
+        """Record every client send id that contributed to one user turn."""
+        key = str(turn_index)
+        previous = self.user_turn_send_ids.get(key)
+        recorded = [previous] if isinstance(previous, str) else (
+            list(previous) if isinstance(previous, list) else []
+        )
+        additions = list(
+            dict.fromkeys(sid for sid in send_ids if sid and sid not in recorded)
+        )
+        if len(recorded) + len(additions) > MAX_SEND_IDS_PER_TURN:
+            raise ValueError(
+                f"A user turn cannot own more than {MAX_SEND_IDS_PER_TURN} send ids"
+            )
+        for send_id in additions:
+            recorded.append(send_id)
+        if not recorded:
+            return
+        self.user_turn_send_ids[key] = recorded[0] if len(recorded) == 1 else recorded
         _prune_send_id_history(self.user_turn_send_ids)
+
+    def remove_send_ids(self, turn_index: int, send_ids: list[str]) -> None:
+        """Remove selected IDs from a turn without disturbing other owners."""
+        key = str(turn_index)
+        previous = self.user_turn_send_ids.get(key)
+        recorded = [previous] if isinstance(previous, str) else (
+            list(previous) if isinstance(previous, list) else []
+        )
+        remaining = [send_id for send_id in recorded if send_id not in send_ids]
+        if not remaining:
+            self.user_turn_send_ids.pop(key, None)
+        else:
+            self.user_turn_send_ids[key] = (
+                remaining[0] if len(remaining) == 1 else remaining
+            )
 
 
 def chat_pin_payload(chat: ChatInfo) -> dict[str, Any]:
@@ -1631,26 +1693,15 @@ class ProjectChatManager:
                 )
                 self._events.publish({"type": "project_deleted", "project_id": pid})
 
-        if not self._chats:
-            # The onboarding chat lands in the first configured workspace —
-            # single-workspace registries from the wizard carry the name the
-            # user chose; the legacy fallback keeps this on "personal".
-            ws_names = self._workspace_names()
-            first_ws = ws_names[0] if ws_names else "personal"
-            general = next(
-                (
-                    p
-                    for p in self._projects.values()
-                    if p.workspace == first_ws and p.name == "General"
-                ),
-                None,
-            )
-            if general is not None:
-                self._create_onboarding_chat(general.project_id)
-
         self._save()
 
-    def _create_onboarding_chat(self, project_id: str) -> None:
+    def start_onboarding_interview(self, project_id: str) -> str | None:
+        """Open the guided first-run interview on request, never on install.
+
+        The journey is the only automatic first-run surface; this is the explicit
+        action behind it, so the interview and knowledge-seeding prompts stay
+        available without a chat appearing for someone who never asked.
+        """
         from ciao.setup_marker import read_setup_vault_mode
 
         vault_mode = read_setup_vault_mode(self._config.state_path.parent)
@@ -1836,6 +1887,10 @@ class ProjectChatManager:
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_msg},
         ]
+        # `create_chat()` already saved; the interview context was assigned after
+        # that, so persist it here or the messages vanish on the next reload.
+        self._save()
+        return chat.chat_id
 
     def _onboarding_memory_categories(self, workspace: str) -> tuple[str, str]:
         """The workspace's enabled, non-hidden category labels, in registry order.
@@ -5162,12 +5217,100 @@ class ProjectChatManager:
         path = Path(raw).expanduser()
         return str(path.resolve()) if path.is_dir() else ""
 
+    def _gws_config_dir(self, workspace: str | None) -> tuple[Path, bool]:
+        """The workspace's gws credential directory and whether an account is linked.
+
+        An unlinked workspace gets a per-workspace directory that never holds
+        credentials, so credentials an agent logs in to one unlinked workspace
+        never serve another.
+        """
+        from ciao.gws_auth import profile_config_dir  # noqa: PLC0415
+
+        gws_profile = self._workspace_gws_profile(workspace)
+        config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
+        if config_dir is not None:
+            return config_dir, True
+        slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
+        return Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE), False
+
+    def _agent_read_only_for_chat(self, chat: ChatInfo, fs_scope: str) -> tuple[str, ...]:
+        """Runtime files a workspace-scoped chat reads but never writes (#1945).
+
+        Also the ``gws`` CLI with its links, npm package and node, so
+        ``ciao gws`` runs when it is installed under the home folder (#1959),
+        and the ``gh`` config directory so ``gh`` finds its login (#1961).
+        gws gets its credential directory writable for its token cache (see
+        ``_agent_fs_scope_for_chat``), with the account's ``client_secret.json``
+        and ``credentials.json`` pinned here so they stay write-denied: an
+        agent cannot plant a client secret with a hostile ``token_uri``.
+        """
+        if fs_scope != "workspace":
+            return ()
+        from ciao.fs_sandbox import gh_config_read_root, gws_tool_read_roots  # noqa: PLC0415
+        from ciao.tool_path import login_shell_path  # noqa: PLC0415
+        from ciao.workspace_reroot import receipt_path, registry_file  # noqa: PLC0415
+
+        runtime = self._config.state_path.parent
+        gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
+        granted = [str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots]
+        gws_dir = self._granted_gws_dir(chat)
+        if gws_dir is not None:
+            for name in ("client_secret.json", "credentials.json"):
+                pinned = gws_dir / name
+                if pinned.exists():
+                    granted.append(str(pinned))
+        gh_dir = gh_config_read_root(os.environ)
+        if gh_dir is not None:
+            granted.append(str(gh_dir))
+        return tuple(granted)
+
+    def _granted_gws_dir(self, chat: ChatInfo) -> Path | None:
+        """The linked account's resolved credential directory, or None.
+
+        Resolve before granting: an agent that can write secrets/ must not
+        redirect the profile directory (or secrets itself) to another folder.
+        """
+        gws_dir, linked = self._gws_config_dir(self._workspace_for_chat(chat.chat_id))
+        if (
+            linked
+            and gws_dir.is_dir()
+            and gws_dir.resolve() == Path(self._config.workspace_root).resolve() / "secrets" / gws_dir.name
+        ):
+            return gws_dir.resolve()
+        return None
+
+    def _agent_denied_for_chat(
+        self, chat: ChatInfo, fs_scope: str, fs_roots: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The hidden ``secrets`` folder and the linked account re-allowed in it (#1968).
+
+        Set only in workspace scope when ``secrets`` (or, if it is a symlink,
+        its resolved target) is a directory strictly inside a granted root: the agent's shell could then
+        read every account's credentials. The sandbox stays pure; the decision
+        is made here, where the workspace root, roots and linked account are known.
+        """
+        if fs_scope != "workspace":
+            return (), ()
+        secrets = Path(self._config.workspace_root).resolve() / "secrets"
+        if not secrets.is_dir():
+            return (), ()
+        # A symlinked ``secrets`` hides its resolved target. No regrant applies:
+        # ``_granted_gws_dir`` refuses an account directory reached through it.
+        target = secrets.resolve()
+        if not any(target != Path(root) and target.is_relative_to(root) for root in fs_roots):
+            return (), ()
+        gws = None if secrets.is_symlink() else self._granted_gws_dir(chat)
+        return (str(target),), ((str(gws),) if gws else ())
+
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
         Roots are the chat's agent root and that workspace's vault root,
         resolved and de-duplicated, agent root first. A project's linked
-        repository follows the vault root. A chat granted the data
+        repository follows the vault root, then the linked Google account's
+        credential directory, writable for gws's token cache (#1959; its client
+        secret and refresh credentials are write-denied, see
+        ``_agent_read_only_for_chat``). A chat granted the data
         root (the memory-backup setup chat, #1328) also gets that root, last.
         Machine scope never reads them, so they are only computed for the
         workspace case.
@@ -5182,6 +5325,9 @@ class ProjectChatManager:
         linked_repo = self._linked_repo_for_chat(chat)
         if linked_repo:
             roots.append(linked_repo)
+        gws_dir = self._granted_gws_dir(chat)
+        if gws_dir is not None and not any(gws_dir.is_relative_to(root) for root in roots):
+            roots.append(str(gws_dir))
         if chat.grants_data_root:
             roots.append(str(backup_scope.data_root(self._config).resolve()))
         return "workspace", tuple(dict.fromkeys(roots))
@@ -5807,14 +5953,7 @@ class ProjectChatManager:
         # with no linked account must not fall through to that login either (it
         # is the operator's own account), so it gets a directory that never
         # holds credentials and a bare `gws` finds none.
-        from ciao.gws_auth import profile_config_dir
-
-        config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
-        if config_dir is None:
-            # One directory per workspace, so credentials an agent logs in
-            # to one unlinked workspace never serve another.
-            slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
-            config_dir = Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE)
+        config_dir, _linked = self._gws_config_dir(workspace)
         env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
@@ -5851,7 +5990,50 @@ class ProjectChatManager:
             is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
         ):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+        # The macOS keychain is outside a workspace sandbox, so gh cannot read
+        # its own login there: the engine passes the token in (#1961). Only the
+        # cache is read here; ``warm_gh_token`` fills it off the event loop.
+        gh_path = self._gh_path_for_token(chat, project)
+        if gh_path is not None:
+            from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
+
+            gh_token = gh_token_for_sandbox(gh_path, os.environ, cached_only=True)
+            if gh_token:
+                env["GH_TOKEN"] = gh_token
         return env
+
+    def _gh_path_for_token(self, chat: ChatInfo, project: Any) -> str | None:
+        """The ``gh`` executable whose token a chat gets, or None (#1961).
+
+        None outside workspace scope (the chat reaches the keychain itself), in
+        a memory pass (it must not reach an external surface), when gh is not
+        installed or its shim is broken, and when the agent could have written
+        gh: an executable inside a writable root must never run unsandboxed.
+        """
+        fs_scope, roots = self._agent_fs_scope_for_chat(chat)
+        if fs_scope != "workspace" or is_memory_pass_chat(chat, project):
+            return None
+        from ciao.tool_path import resolve_tool  # noqa: PLC0415
+
+        try:
+            gh_path = resolve_tool("gh")
+        except OSError:
+            return None
+        if gh_path is None:
+            return None
+        resolved = Path(gh_path).resolve()
+        if any(resolved.is_relative_to(Path(root).resolve()) for root in roots):
+            return None
+        return gh_path
+
+    async def warm_gh_token(self, chat: ChatInfo) -> None:
+        """Fill the gh token cache off the event loop before a turn starts (#1961)."""
+        gh_path = self._gh_path_for_token(chat, self._projects.get(chat.project_id))
+        if gh_path is None:
+            return
+        from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
+
+        await asyncio.to_thread(gh_token_for_sandbox, gh_path, dict(os.environ))
 
     def _claude_ai_connectors_on(self, workspace: str) -> bool:
         """Whether a Claude chat in ``workspace`` loads the claude.ai connectors.
@@ -6049,6 +6231,7 @@ class ProjectChatManager:
             extra_env[AGENT_TOKEN_ENV] = token
 
         fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
+        denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -6061,6 +6244,9 @@ class ProjectChatManager:
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             agent_fs_scope=fs_scope,
             agent_roots=fs_roots,
+            agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
+            agent_denied=denied,
+            agent_denied_except=denied_except,
             linked_repo=self._linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
@@ -6315,13 +6501,19 @@ class ProjectChatManager:
         return self._broker.get(chat_id)
 
     def has_pending_send(self, chat_id: str, send_id: str) -> bool:
-        """True when the chat's live queue already holds this client send id."""
+        """True when a live or parked queue entry holds this client send id."""
         if not send_id:
             return False
         stream = self._broker.get(chat_id)
-        if stream is None:
+        if stream is not None and stream.has_pending_send(send_id):
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        return stream.has_pending_send(send_id)
+        return any(
+            send_id == entry.get("send_id") or send_id in (entry.get("send_ids") or [])
+            for entry in chat.pending_queue
+        )
 
     def queue_message(
         self,
@@ -6453,6 +6645,16 @@ class ProjectChatManager:
         # turn: texts joined with a blank line and every image, in list order.
         # The turn keeps an origin only when every entry shares it. The rest of
         # the waiting queue stays.
+        turn_index = chat.user_turn_count
+        selected, overflow = _entries_within_send_id_limit(
+            chat, turn_index, selected
+        )
+        if overflow and not selected:
+            raise ValueError(
+                f"This turn can own at most {MAX_SEND_IDS_PER_TURN} send ids; "
+                "the entries remain queued."
+            )
+        overflow_entry_ids = [str(entry["id"]) for entry in overflow]
         text = "\n\n".join(
             t for t in (str(e.get("text", "")).strip() for e in selected) if t
         )
@@ -6465,6 +6667,29 @@ class ProjectChatManager:
         origin = shared_origin(selected)
         if not text and not images:
             return False  # nothing to send (images gone): entries stay waiting
+        send_ids = [
+            str(sid)
+            for e in selected
+            for sid in ([e["send_id"]] if e.get("send_id") else [])
+            + list(e.get("send_ids") or [])
+        ]
+        previous_send_ids = chat.user_turn_send_ids.get(str(turn_index))
+        send_id_history_before = {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in chat.user_turn_send_ids.items()
+        }
+        previously_owned = (
+            {previous_send_ids}
+            if isinstance(previous_send_ids, str)
+            else set(previous_send_ids)
+            if isinstance(previous_send_ids, list)
+            else set()
+        )
+        newly_owned = [sid for sid in send_ids if sid not in previously_owned]
+        # Reserve ownership before removing the parked entries or calling the
+        # synchronous start path, which can re-enter message handling.
+        chat.record_send_ids(turn_index, send_ids)
+        self._save()
         sent_ids = {id(e) for e in selected}
         chat.pending_queue = [e for e in chat.pending_queue if id(e) not in sent_ids]
         self._save()
@@ -6473,10 +6698,18 @@ class ProjectChatManager:
         except BaseException:
             # The turn did not start: the entries are still waiting.
             chat.pending_queue = [*selected, *chat.pending_queue]
+            # Reservation may have pruned old turn slots. Restore any such
+            # pre-existing owners before removing only this dispatch's IDs.
+            for key, value in send_id_history_before.items():
+                chat.user_turn_send_ids.setdefault(key, value)
+            chat.remove_send_ids(turn_index, newly_owned)
+            _prune_send_id_history(chat.user_turn_send_ids)
             self._save()
             raise
         # What still waits stays on the chat; publish it with the new stream.
         stream.publish_pending()
+        if overflow_entry_ids:
+            self._publish_steer_fallback(stream, overflow_entry_ids, "send_id_limit")
         return True
 
     async def steer_queue(self, chat_id: str) -> None:
@@ -6510,6 +6743,16 @@ class ProjectChatManager:
             entries = stream.steer_candidates()
             if not entries:
                 return
+            turn_index = chat.user_turn_count
+            entries, overflow = _entries_within_send_id_limit(
+                chat, turn_index, entries
+            )
+            if overflow:
+                overflow_ids = [str(entry["id"]) for entry in overflow]
+                stream.set_delivery(overflow_ids, "queue")
+                self._publish_steer_fallback(stream, overflow_ids, "send_id_limit")
+            if not entries:
+                return
             entry_ids = [str(e["id"]) for e in entries]
             text = "\n\n".join(
                 t for t in (str(e["text"]).strip() for e in entries) if t
@@ -6525,6 +6768,7 @@ class ProjectChatManager:
                     if attachment:
                         images.append(attachment)
             fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
+            denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
             request = AgentRequest(
                 prompt=text,
                 model=self._runtime_model_for_chat(chat),
@@ -6536,6 +6780,9 @@ class ProjectChatManager:
                 disallowed_tools=self.disallowed_tools_for_chat(chat),
                 agent_fs_scope=fs_scope,
                 agent_roots=fs_roots,
+                agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
+                agent_denied=denied,
+                agent_denied_except=denied_except,
                 linked_repo=self._linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )
@@ -6616,6 +6863,7 @@ class ProjectChatManager:
         if chat is None:
             return
         cancelled_origin = ""
+        cancelled_send_ids: list[str] = []
         if turn_index is not None:
             if chat.user_turn_count == turn_index + 1:
                 chat.user_turn_count = turn_index
@@ -6624,7 +6872,9 @@ class ProjectChatManager:
                 chat.user_turn_images.pop(key, None)
                 chat.user_turn_unattended.pop(key, None)
                 chat.user_turn_steered.pop(key, None)
-                chat.user_turn_send_ids.pop(key, None)
+                cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
+                if isinstance(cancelled_send_ids, str):
+                    cancelled_send_ids = [cancelled_send_ids]
                 cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
                 self._streaming.discard_turn_perf(chat_id, turn_index)
             else:
@@ -6648,6 +6898,8 @@ class ProjectChatManager:
         }
         if cancelled_origin:
             entry["origin"] = cancelled_origin
+        if cancelled_send_ids:
+            entry["send_ids"] = cancelled_send_ids
         chat.pending_queue = [*chat.pending_queue, entry]
         self._save()
         stream.publish_queue_state(chat.pending_queue)
@@ -6697,6 +6949,15 @@ class ProjectChatManager:
                 # whether a person is present. A steer into a scheduled turn
                 # must not make it look attended.
                 chat.user_turn_unattended[str(turn_index)] = True
+            chat.record_send_ids(
+                turn_index,
+                [
+                    str(sid)
+                    for e in entries
+                    for sid in ([e["send_id"]] if e.get("send_id") else [])
+                    + list(e.get("send_ids") or [])
+                ],
+            )
             chat.last_activity_at = sent_at
             chat.last_read_at = sent_at  # user sending = implicitly read
             self._save()
@@ -7751,7 +8012,8 @@ class ProjectChatManager:
         found_key: str | None = None
         found_index = -1
         for key, recorded in send_ids.items():
-            if recorded != send_id:
+            recorded_ids = [recorded] if isinstance(recorded, str) else recorded
+            if not isinstance(recorded_ids, list) or send_id not in recorded_ids:
                 continue
             text = str(key)
             if not text.isdecimal():

@@ -44,7 +44,10 @@ ciao run
 
 `python -m ciao <command>` runs the same CLI as the `ciao` console script, from any interpreter that has the package installed.
 
-`ciao setup` is idempotent. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. On Windows the same flag renders the Task Scheduler XML under `%LOCALAPPDATA%\Ciaobot\service` and registers it, so `--load-launchd` now means macOS **or** Windows. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
+`ciao setup` is idempotent and defers Git history unless explicitly requested with `--initialize-git`. That option creates local history and an initial commit of nonignored workspace and external-vault contents; it configures no remote and uploads nothing. `--yes` is not Git consent. Existing repositories still receive missing ignore guards. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. On Windows the same flag renders the Task Scheduler XML under `%LOCALAPPDATA%\Ciaobot\service` and registers it, so `--load-launchd` now means macOS **or** Windows. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
+
+Onboarding lifecycle is recorded separately in the owner-private `.runtime/onboarding.json` receipt; it is not the provisioning timestamp or welcome-password flag. A fresh supported setup starts `in_progress`; an existing receipt is always preserved. Receipt-less established installs are marked `legacy_exempt`, based on setup registry/legacy workspace evidence or durable runtime state—not notes-folder contents, unrelated `.env` files, or bootstrap auth/lock files. Startup creates a pending receipt for a fresh configured install before importing legacy workspace configuration. Invalid existing receipts fail closed and are never overwritten.
+A genuinely new install also writes `backup_enabled: false` into its app settings before the engine starts: adopting a folder that already sits inside a repository with an `origin` must not begin unattended commits or uploads. Existing installs, explicit choices and unreadable settings files are left untouched, and local history (`--initialize-git`) is not consent to backup. An operator turns backup on later from Settings → Memory (the backup settings route) or by running the guided backup setup, both of which are explicit actions.
 
 `ciao service status|start|stop|restart` drives that background service on both
 platforms: the LaunchAgent on macOS, the per-user logon task on Windows. `start
@@ -54,6 +57,25 @@ repoint one that already serves a different workspace; use `ciao setup --workspa
 desktop-shell actions (`login`, `migrate`, `migration-classify`, `rollback`) and
 `update-engine` are not available on Windows and say so; `stop` and `restart`
 refuse while a chat would be interrupted (working, or holding an open question/approval card) unless `--force` is given.
+
+`ciao service start` on macOS reports two different things, and its exit code
+tells them apart. The launchd submission (`enable`, `bootstrap`, `kickstart`)
+is what `start_service()` does and what the move and update workers consume:
+it returns as soon as launchd accepted the job. The CLI then waits for the
+engine it started to answer *as itself*: the runtime's `server.lock` must name
+a new run (a fresh `startup_id`, this install's port and runtime directory,
+status `running`) and `/api/startup-status` on the port must report that same
+`startup_id`. A bare 2xx from whatever listens on the port, the run that was
+there before the kickstart, or another Ciaobot runtime do not count. The wait
+ends early on a recorded bind failure or a workspace-access denial written
+since the kickstart, and reports those. Reaching the deadline
+(`START_SETTLE_TIMEOUT_S`, 30 s) is `"start_outcome": "timeout"` with exit
+code 1 — an unconfirmed start, never "started". The deadline rests on a
+measurement: a cold `python -m ciao run` from a checkout served its port after
+4.1 s and was ready at 4.7 s (2026-10-23, Apple Silicon), so the previous 2 s
+wait expired before some engines had bound at all; a launchd-spawned install
+adds interpreter start-up and first import on top. A verified start carries
+`"verified": true` with the `startup_id` and `pid` it confirmed.
 
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 
@@ -163,8 +185,15 @@ wheel with `uv tool install`; writes the install receipt with absolute paths;
 then runs `ciao setup` and `ciao service start` and prints the one-time login URL
 to the terminal. It refuses to take over an engine the retired app manages
 unless it is re-run with `--migrate`, and refuses to overwrite a `ciao` it did
-not install. `--migrate`
-is the app→terminal hand-over (#576): after the same manifest and digest
+not install. After a successful install, the installer adds a marked PATH entry
+to the current user's supported shell startup file (zsh, bash or fish), if the
+resolved executable directory is not already on `PATH`, so a new terminal can
+run `ciao`. The zsh/bash block checks membership when each shell starts. Use
+`--no-modify-path` to leave shell files unchanged;
+the installer prints a quoted command for the current terminal either way. The
+installer process cannot change the PATH of the terminal that launched it. The
+managed block can be removed from the named startup file to undo the change.
+`--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool
 environment in `~/.local/state/ciaobot/migration/before/` (an absent file is

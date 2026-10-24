@@ -29,6 +29,7 @@ from ciao.web.routes_mcp import (
     mcp_usage_endpoint,
 )
 from ciao.web.auth import AuthMiddleware, make_serializer
+from ciao.web.request_limits import ApiRequestBodyLimitMiddleware
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
     create_command_endpoint,
@@ -177,6 +178,7 @@ from ciao.web.routes_api import (
     vault_graph,
     vault_review,
     vault_markdown_paths,
+    system_prompt,
     workspace_binary,
     workspace_file,
     workspace_html,
@@ -214,6 +216,8 @@ from ciao.web.routes_welcome import (
     welcome_password,
     welcome_status,
 )
+from ciao.web.routes_onboarding import complete_onboarding, get_onboarding, patch_onboarding
+from ciao.web.routes_api import onboarding_interview
 from ciao.web.routes_import import (
     import_batch_cancel,
     import_batch_delete,
@@ -474,6 +478,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Host file viewer/editor. Absolute paths are intentional; endpoints
         # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
+        Route("/api/system-prompt", system_prompt, methods=["GET"]),
         # Preview side of the same file for artifacts: text/html under a
         # sandboxing CSP, so the panel can embed the rendered page.
         Route("/api/workspace-html", workspace_html, methods=["GET"]),
@@ -627,6 +632,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
         Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
+        Route("/api/onboarding", get_onboarding, methods=["GET"]),
+        Route("/api/onboarding/interview", onboarding_interview, methods=["POST"]),
+        Route("/api/onboarding", patch_onboarding, methods=["PATCH"]),
+        Route("/api/onboarding/complete", complete_onboarding, methods=["POST"]),
         Route("/api/addresses", addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
@@ -793,6 +802,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     middleware = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer),
+        Middleware(ApiRequestBodyLimitMiddleware),
     ]
 
     @asynccontextmanager

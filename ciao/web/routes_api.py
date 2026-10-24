@@ -53,7 +53,14 @@ from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.port_in_use import BIND_PHASE
-from ciao.web.auth import LOOPBACK_HOST_NAMES, _same_origin, is_loopback_client
+from ciao.web.auth import (
+    LOOPBACK_HOST_NAMES,
+    _localhost_request,
+    _same_origin,
+    _setup_finish_origin_allowed,
+    _setup_finish_refusal,
+    is_loopback_client,
+)
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
@@ -76,6 +83,7 @@ from ciao.workspaces import (
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
+from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
@@ -96,6 +104,7 @@ from ciao.schedules import (
     stamp_fallback_project,
     wall_clock_time_error,
     wall_clock_time_value_error,
+    normalize_system_schedule_update,
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
@@ -388,6 +397,18 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         created = workspace.name not in config.workspaces
+        onboarding_target = None
+        if created:
+            # Validate receipt access before mutating the live registry. A
+            # corrupt/unreadable receipt must not leave a half-created
+            # workspace. Installs predating receipt initialization retain the
+            # existing workspace-save behavior until startup initializes it.
+            from ciao.onboarding import read_receipt  # noqa: PLC0415
+            from ciao.onboarding_progress import register_new_workspace  # noqa: PLC0415
+
+            if read_receipt(Path(config.state_path).parent) is not None:
+                register_new_workspace(config, workspace.name)
+                onboarding_target = {"kind": "workspace", "name": workspace.name}
         profile_changed = (
             not created
             and existing is not None
@@ -395,12 +416,19 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
             != str(getattr(workspace, "gws_profile", "") or "")
         )
         config.workspaces[workspace.name] = workspace
-        _persist_workspaces(config)
+        try:
+            _persist_workspaces(config)
+        except Exception:
+            if created:
+                config.workspaces.pop(workspace.name, None)
+            raise
         _refresh_project_manager_workspaces(request)
         payload = _workspaces_payload(config)
         if renamed is not None:
             payload["renamed"] = renamed
         if created:
+            if onboarding_target is not None:
+                payload["onboarding_target"] = onboarding_target
             payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
         elif profile_changed:
             # Linking a workspace to its first account (or unlinking it) changes
@@ -1013,6 +1041,15 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     provider = request.path_params["provider"]
     action = request.path_params["action"]
     config = request.app.state.config
+    drop_account_evidence = None
+    if provider == "claude" and action in {"verify", "logout"}:
+        from ciao.providers.catalog_evidence import invalidate_claude_account_evidence
+
+        # Before the awaited sign-out work, so an in-flight connection cannot
+        # repopulate the previous account's models afterwards, and again on the
+        # way out to drop anything recorded while it ran.
+        invalidate_claude_account_evidence()
+        drop_account_evidence = invalidate_claude_account_evidence
     if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
@@ -1053,35 +1090,45 @@ async def provider_connection_action(request: Request) -> JSONResponse:
             )
         return JSONResponse({"ok": True, "launched": launched, "command": command}, status_code=202)
     if action == "verify":
-        if provider == "claude":
-            from ciao.setup_status import clear_claude_discovery_cache
+        try:
+            if provider == "claude":
+                from ciao.setup_status import clear_claude_discovery_cache
 
-            await asyncio.to_thread(clear_claude_discovery_cache)
-        payload = await asyncio.to_thread(_provider_config_payload, config)
-        return JSONResponse(payload["connections"].get(provider, {}))
+                await asyncio.to_thread(clear_claude_discovery_cache)
+            payload = await asyncio.to_thread(_provider_config_payload, config)
+            return JSONResponse(payload["connections"].get(provider, {}))
+        finally:
+            # Cancellation or an error can leave a threaded sign-in probe
+            # running; drop evidence on every exit, not only on success.
+            if drop_account_evidence is not None:
+                drop_account_evidence()
     if action == "logout":
         try:
-            # auth_command is `[binary, "auth", "login"]`, so dropping the last
-            # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
-            # would run the obsolete top-level `claude logout`, which prints a
-            # "did you mean" hint and exits 0 without signing out.
-            logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
-            run = await asyncio.to_thread(
-                subprocess.run,
-                logout_command,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        if run.returncode != 0:
-            return JSONResponse(
-                {"error": (run.stderr or run.stdout or "logout failed").strip()},
-                status_code=400,
-            )
-        return JSONResponse({"ok": True})
+            try:
+                # auth_command is `[binary, "auth", "login"]`, so dropping the last
+                # element yields `[binary, "auth", "logout"]`. `[:1] + ["logout"]`
+                # would run the obsolete top-level `claude logout`, which prints a
+                # "did you mean" hint and exits 0 without signing out.
+                logout_command = _auth_command_for_provider(provider)[:-1] + ["logout"]
+                run = await asyncio.to_thread(
+                    subprocess.run,
+                    logout_command,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if run.returncode != 0:
+                return JSONResponse(
+                    {"error": (run.stderr or run.stdout or "logout failed").strip()},
+                    status_code=400,
+                )
+            return JSONResponse({"ok": True})
+        finally:
+            if drop_account_evidence is not None:
+                drop_account_evidence()
     return JSONResponse({"error": "unsupported action"}, status_code=404)
 
 
@@ -3633,6 +3680,13 @@ async def chat_file_path(request: Request) -> Response:
     return JSONResponse({"path": result.as_posix()})
 
 
+async def system_prompt(request: Request) -> Response:
+    """The text Ciaobot appends to every provider's system prompt (read-only)."""
+    payload = system_prompt_payload("") or {}
+    text = str(payload.get("append") or "")
+    return JSONResponse({"text": text, "chars": len(text)})
+
+
 async def workspace_file(request: Request) -> Response:
     """Serve a read-only allowlisted text file from the host filesystem.
 
@@ -5571,6 +5625,24 @@ async def run_schedule_now(request: Request) -> JSONResponse:
     return JSONResponse(result, status_code=201)
 
 
+async def onboarding_interview(request: Request) -> JSONResponse:
+    """Open the guided first-run interview on request (never on install)."""
+    workspace = str(request.query_params.get("workspace") or "").strip()
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    pcm = request.app.state.project_chat_manager
+    general = next(
+        (item for item in pcm.list_projects(workspace) if item.name == "General"),
+        None,
+    )
+    if general is None:
+        return JSONResponse({"error": "workspace not found"}, status_code=404)
+    chat_id = pcm.start_onboarding_interview(general.project_id)
+    if not chat_id:
+        return JSONResponse({"error": "could not open the interview"}, status_code=500)
+    return JSONResponse({"chat_id": chat_id})
+
+
 async def schedule_detail(request: Request) -> JSONResponse:
     """Handle PATCH (update) and DELETE for a single schedule."""
     schedule_id = request.path_params["schedule_id"]
@@ -5584,7 +5656,23 @@ async def schedule_detail(request: Request) -> JSONResponse:
     entry = store.get(schedule_id)
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "request body must be valid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "request body must be an object"}, status_code=400)
+    timing_fields: set[str] = set()
+    if entry.scope == "system":
+        try:
+            normalized, fields = normalize_system_schedule_update(body, entry)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        timing_fields = set(fields)
+        body = {
+            ("time" if key == "daily_time_utc" else "timezone" if key == "timezone_name" else key): value
+            for key, value in normalized.items()
+        }
     if "title" in body:
         entry.title = str(body["title"]).strip()
     if "description" in body:
@@ -5674,7 +5762,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
     # project. Also clears it when the entry becomes project-bound.
     stamp_fallback_project(entry, request.app.state.project_chat_manager)
     try:
-        store.replace(entry)
+        if entry.scope == "system":
+            request.app.state.schedule_manager.replace(entry, timing_fields=frozenset(timing_fields))
+        else:
+            request.app.state.schedule_manager.replace(entry)
     except ValueError as exc:
         # A fanned-out system routine's workspace is part of its id, so the
         # store refuses to "move" it. That is a bad request, not a server
@@ -5683,23 +5774,47 @@ async def schedule_detail(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     pcm = request.app.state.project_chat_manager
     publish_automations_changed(pcm)
-    return JSONResponse(_enrich_schedule(entry, pcm))
+    reread = store.get(schedule_id)
+    if reread is None:
+        return JSONResponse({"error": "schedule disappeared after update"}, status_code=500)
+    return JSONResponse(_enrich_schedule(reread, pcm))
 
 
 # ── Models ───────────────────────────────────────────────────────────────
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
+    from ciao.providers.catalog_evidence import claude_catalog_evidence, invalidate_claude_catalog
+
+    workspace_name = request.query_params.get("workspace")
+    if workspace_name:
+        workspace_config = config.workspace(workspace_name)
+        if workspace_config is None:
+            return JSONResponse({"error": "unknown workspace"}, status_code=400)
+        workspace_root = config.agent_root(workspace_name)
+    else:
+        workspace_root = Path(config.workspace_root)
     # `?refresh=1` bypasses the opencode catalog cache. The catalog is served on
     # demand so a provider connected in another window shows up immediately.
     refresh = str(request.query_params.get("refresh", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
     opencode_catalog = await OpencodeProvider.model_catalog(
-        config.workspace_root, force=refresh
+        workspace_root, force=refresh
     )
-    # opencode is bring-your-own-provider: its catalog is whatever backends the
-    # user has connected, so an empty list simply means "not signed in yet".
+    if refresh:
+        invalidate_claude_catalog(workspace_root)
+    claude_evidence = claude_catalog_evidence(workspace_root)
+    opencode_evidence_models = [
+        {"id": str(item.get("model")), "label": str(item.get("label") or item.get("model"))}
+        for item in opencode_catalog if item.get("model")
+    ]
+    opencode_evidence = {
+        "status": "observed" if opencode_evidence_models else "unknown",
+        "source": "opencode_catalog" if opencode_evidence_models else None,
+        "models": opencode_evidence_models,
+        "reason": None if opencode_evidence_models else "no_models_reported",
+    }
     opencode_models = [
         str(item.get("model") or "") for item in opencode_catalog if item.get("model")
     ]
@@ -5749,10 +5864,31 @@ async def list_models(request: Request) -> JSONResponse:
         ],
         "model_reasoning_levels": model_reasoning_levels,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
+        "provider_catalog_evidence": {
+            "claude": {
+                "status": claude_evidence.status,
+                "source": claude_evidence.source,
+                "models": [{"id": model.id, "label": model.label} for model in claude_evidence.models],
+                "reason": claude_evidence.reason,
+            },
+            "opencode": opencode_evidence,
+        },
     })
 
 
 # ── Routine settings (Settings → Providers tab) ────────────────────────────
+
+_ROUTINES_SETTINGS_KEYS = frozenset({
+    "provider_default_models",
+    "provider_default_modes",
+    "provider_default_thinking",
+    "provider_insights_models",
+    "pwa_host",
+    "log_level",
+    "dev_mode",
+    "app_repo",
+})
+
 
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
@@ -5836,6 +5972,12 @@ async def settings_routines(request: Request) -> JSONResponse:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "expected an object"}, status_code=400)
+        unknown = sorted(set(body) - _ROUTINES_SETTINGS_KEYS - {"insights_enabled"})
+        if unknown:
+            return JSONResponse(
+                {"error": f"Unknown routines settings: {', '.join(unknown)}"},
+                status_code=400,
+            )
         try:
             app_settings.update(body)
         except ValueError as exc:
@@ -5871,6 +6013,14 @@ async def settings_keyboard(request: Request) -> JSONResponse:
         if not isinstance(body, dict):
             return JSONResponse({"error": "expected an object"}, status_code=400)
         expected_revision = body.pop("revision", None)
+        unknown = sorted(set(body) - {
+            "keyboard_shortcuts", "keyboard_send_mode", "mid_turn_delivery",
+        })
+        if unknown:
+            return JSONResponse(
+                {"error": f"Unknown keyboard settings: {', '.join(unknown)}"},
+                status_code=400,
+            )
         current = payload()
         if not isinstance(expected_revision, str):
             return JSONResponse({"error": "revision is required"}, status_code=400)
@@ -5961,6 +6111,13 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
 
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
+    if tracker is not None:
+        startup_id = getattr(tracker, "startup_id", None)
+        engine_pid = getattr(tracker, "engine_pid", None)
+        if isinstance(startup_id, str) and startup_id:
+            payload["startup_id"] = startup_id
+        if isinstance(engine_pid, int) and not isinstance(engine_pid, bool):
+            payload["pid"] = engine_pid
     # The port the engine binds is taken (#1654): the engine could not start,
     # and a client has to be able to tell that from "still starting" without
     # reading the phase's prose.
@@ -6099,59 +6256,6 @@ async def setup_status_endpoint(request: Request) -> JSONResponse:
 
 
 
-def _host_name(value: str) -> str:
-    host = value.strip()
-    if host.startswith("["):
-        end = host.find("]")
-        host = host[1:end] if end != -1 else host
-    elif host.count(":") == 1:
-        host = host.rsplit(":", 1)[0]
-    return host.rstrip(".").lower()
-
-
-def _localhost_request(request: Request) -> bool:
-    """True when the TCP peer is this machine AND the Host names a local address.
-
-    The peer check is what makes it local: during first run the server binds
-    0.0.0.0, and a LAN client can send ``Host: localhost`` freely. The Host
-    check stays on top of it so a DNS-rebound page on this machine cannot
-    drive the setup routes either.
-    """
-    if not is_loopback_client(request):
-        return False
-    name = _host_name(request.headers.get("host", ""))
-    if not name:
-        name = (request.url.hostname or "").rstrip(".").lower()
-    # 0.0.0.0 is an accepted local Host spelling, not a loopback network
-    # address: a browser pointed at it can only reach the viewer's own machine
-    # (users copy it from the uvicorn bind-address log). It is accepted only
-    # because the peer above is a real loopback TCP peer.
-    return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
-
-
-def _same_host_header(request: Request, value: str) -> bool:
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return False
-    if not parsed.hostname:
-        return False
-    request_host = _host_name(request.headers.get("host", ""))
-    if not request_host:
-        request_host = (request.url.hostname or "").rstrip(".").lower()
-    return parsed.hostname.rstrip(".").lower() == request_host
-
-
-def _setup_finish_origin_allowed(request: Request) -> bool:
-    origin = request.headers.get("origin")
-    if origin:
-        return _same_host_header(request, origin)
-    referer = request.headers.get("referer")
-    if referer:
-        return _same_host_header(request, referer)
-    return True
-
-
 def _interactive_foreground_run() -> bool:
     """True when setup can hand the bootstrap server to launchd.
 
@@ -6189,16 +6293,9 @@ def _schedule_launchd_server_handoff() -> bool:
 async def setup_finish_endpoint(request: Request) -> JSONResponse:
     """Write real setup config from bootstrap mode and request supervisor restart."""
     config = request.app.state.config
-    if not getattr(config, "bootstrap_mode", False):
-        return JSONResponse({"error": "setup finish is only available in bootstrap mode"}, status_code=409)
-    if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
-        return JSONResponse(
-            {
-                "error": "setup finish is localhost-only — open the wizard at "
-                f"http://localhost:{config.pwa_port}"
-            },
-            status_code=403,
-        )
+    refusal = _setup_finish_refusal(request)
+    if refusal is not None:
+        return refusal
     try:
         body = await request.json()
     except ValueError:
