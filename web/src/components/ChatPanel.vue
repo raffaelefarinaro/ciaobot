@@ -5242,8 +5242,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   .work-inspector-trigger { min-width: var(--touch); min-height: var(--touch); }
 }
 .work-inspector-trigger:hover { color: var(--fg); border-color: var(--border-strong); }
+/* The header's own button rules set `position: relative`, which would let the
+   floating trigger's `top` push this one below the header's centre line. */
 .work-inspector-trigger--header {
   position: static;
+  top: auto;
+  right: auto;
   flex: none;
 }
 
