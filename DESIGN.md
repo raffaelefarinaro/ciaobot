@@ -273,3 +273,5 @@ Borders are structural, not decorative. Active navigation is marked by a slim ac
 - Don't expose long prompts or diagnostics in full by default on mobile.
 - Don't copy custom styling into a host-native surface when platform conventions are clearer.
 - Don't introduce new colors, radii, shadows, or typefaces when an existing token serves the purpose.
+
+- **Onboarding location:** Ask for the main Ciaobot folder before the workspace name. Before provisioning, it is a candidate location (empty or existing-notes folders are both valid); after provisioning, show the actual path as read-only and direct changes through the guarded move flow. Remote browsers explain that the folder belongs on the Ciaobot computer. Typing never creates, moves, or saves anything; Continue is the explicit handoff to the next stage.
