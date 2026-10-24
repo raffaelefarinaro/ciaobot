@@ -31,7 +31,9 @@ const error = ref('')
 
 const dirty = computed(() => scope.value !== savedScope.value || approval.value !== savedApproval.value)
 const canContinue = computed(() => !!scope.value && !dirty.value && !pending.value && !error.value)
-const windows = computed(() => platformKnown.value && platform.value.includes('win'))
+// Exact match: "darwin" contains "win", which would show the Windows warning
+// to every macOS user and lock them out of workspace scope.
+const windows = computed(() => platform.value === 'windows' || platform.value === 'win32')
 
 function report(): void {
   emit('state', { dirty: dirty.value, pending: pending.value, canContinue: canContinue.value, error: error.value || null })
@@ -55,7 +57,9 @@ onMounted(async () => {
     approval.value = savedApproval.value = stored
     engineApproval.value = routines.provider_default_modes?.[provider.value] || ''
     platform.value = String(host.platform || '').toLowerCase()
-    platformKnown.value = !!platform.value
+    // The host route reports "other" for an unsupported system; that is not a
+    // platform whose sandbox behaviour we can describe.
+    platformKnown.value = ['macos', 'darwin', 'windows', 'win32', 'linux'].includes(platform.value)
   } catch (e) {
     error.value = `Could not load access settings: ${apiErrorMessage(e, 'The request failed.')}`
   }

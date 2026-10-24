@@ -8,9 +8,9 @@ vi.mock('../../lib/api', () => ({ api: { get: vi.fn(), patch: vi.fn() } }))
 
 const context = { target: { kind: 'installation' as const }, workspace: 'personal', revision: 1, provisioned: true }
 
-function responses({ scope = 'workspace', platform = 'darwin', overrides = {}, engineMode = 'auto' } = {}) {
+function responses({ scope = 'workspace' as string | null, platform = 'darwin', overrides = {}, engineMode = 'auto', provider = 'claude' } = {}) {
   vi.mocked(api.get).mockImplementation((url: string) => {
-    if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: scope, default_provider: 'claude', provider_overrides: overrides }] })
+    if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: scope, default_provider: provider, provider_overrides: overrides }] })
     if (url === '/api/host/terminal') return Promise.resolve({ available: true, platform })
     if (url === '/api/settings/routines') return Promise.resolve({ provider_default_modes: { claude: engineMode } })
     return Promise.resolve({})
@@ -28,6 +28,32 @@ async function mounted(options = {}) {
 beforeEach(() => { vi.resetAllMocks() })
 
 describe('OnboardingAccessStage', () => {
+  it('keeps Continue disabled when no scope is stored yet', async () => {
+    const wrapper = await mounted({ scope: null })
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
+    expect(api.patch).not.toHaveBeenCalled()
+    await wrapper.find('input[value="workspace"]').setValue()
+    expect(api.patch).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false, dirty: true }))
+  })
+
+  it('states that scope is not a safety guarantee', async () => {
+    const wrapper = await mounted()
+    expect(wrapper.text()).toContain('not a safety guarantee')
+    expect(wrapper.text()).toContain('classifier decides')
+  })
+
+  it('describes OpenCode bypass as unenforced instructions', async () => {
+    const wrapper = await mounted({ provider: 'opencode' })
+    expect(wrapper.text()).toContain('not enforced safeguards')
+    expect(wrapper.text()).toContain('configurable rules')
+  })
+
+  it('treats an unsupported host platform as unknown', async () => {
+    const wrapper = await mounted({ platform: 'other' })
+    expect(wrapper.text()).toContain('platform was not reported')
+  })
+
   it('loads the saved scope without saving anything', async () => {
     const wrapper = await mounted()
     expect(api.patch).not.toHaveBeenCalled()
