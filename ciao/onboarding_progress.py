@@ -46,6 +46,46 @@ def get_progress(config: Any) -> OnboardingReceipt:
     return receipt
 
 
+def register_new_workspace(config: Any, name: str) -> OnboardingReceipt:
+    """Register onboarding for a newly-created workspace, without resetting an entry."""
+    receipt = get_progress(config)
+    if name in receipt.workspaces:
+        return receipt
+    workspaces = dict(receipt.workspaces)
+    workspaces[name] = OnboardingProgress("in_progress", "runtime")
+    return write_receipt(
+        _root(config),
+        OnboardingReceipt(receipt.revision, receipt.installation, workspaces),
+        expected_revision=receipt.revision,
+    )
+
+
+def rename_workspace_progress(
+    config: Any, *, source: str, destination: str, expected_revision: int
+) -> OnboardingReceipt:
+    """Move a renamed workspace's progress, dropping any stale destination entry.
+
+    Runs even when the source has no entry: a name reused from an archive must
+    not keep the old completion attached to the renamed workspace.
+    """
+    receipt = get_progress(config)
+    if receipt.revision != expected_revision:
+        raise OnboardingConflictError("onboarding receipt revision conflict")
+    workspaces = dict(receipt.workspaces)
+    progress = workspaces.pop(source, None)
+    stale = workspaces.pop(destination, None)
+    if progress is not None:
+        workspaces[destination] = progress
+    if progress is None and stale is None:
+        # Nothing to move and nothing stale to drop: do not burn a revision.
+        return receipt
+    return write_receipt(
+        _root(config),
+        OnboardingReceipt(receipt.revision, receipt.installation, workspaces),
+        expected_revision=expected_revision,
+    )
+
+
 def _select(
     receipt: OnboardingReceipt, target: dict[str, Any], config: Any
 ) -> tuple[OnboardingProgress, str | None]:
