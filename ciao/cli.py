@@ -78,9 +78,12 @@ def _run_command(args: argparse.Namespace) -> int:
         import uuid
 
         run_id = str(uuid.uuid4())
+    if not args.installer_bootstrap:
+        # Ordinary `ciao run` keeps its exact call shape.
+        return _run_server(supervised=args.supervised)
     return _run_server(
         supervised=args.supervised,
-        installer_bootstrap=args.installer_bootstrap,
+        installer_bootstrap=True,
         installer_run_id=run_id,
     )
 
@@ -95,11 +98,14 @@ def _run_server(
     from ciao.main import main as server_main
 
     try:
-        server_main(
-            supervised=supervised,
-            installer_bootstrap=installer_bootstrap,
-            installer_run_id=installer_run_id,
-        )
+        if installer_bootstrap:
+            server_main(
+                supervised=supervised,
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+            )
+        else:
+            server_main(supervised=supervised)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
