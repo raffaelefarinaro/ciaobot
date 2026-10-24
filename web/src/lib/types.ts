@@ -925,6 +925,14 @@ export interface ModelsResponse {
   // Keyed by runtime provider; Claude and opencode levels may be narrowed by
   // model_reasoning_levels.
   thinking_levels?: Record<string, string[]>
+  provider_catalog_evidence?: Record<string, ProviderCatalogEvidence>
+}
+
+export interface ProviderCatalogEvidence {
+  status: 'observed' | 'unknown'
+  source: 'claude_initialize' | 'opencode_catalog' | null
+  models: Array<{ id: string; label: string }>
+  reason: 'not_observed' | 'expired' | 'invalid_response' | 'no_models_reported' | null
 }
 
 export interface MoveToBackgroundResponse { moved: boolean }
