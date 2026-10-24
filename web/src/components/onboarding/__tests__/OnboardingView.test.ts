@@ -22,6 +22,26 @@ describe('onboarding route', () => {
   })
 })
 
+describe('OnboardingView resumes', () => {
+  it('can advance from a resumed access/memory step once both halves are ready', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: 'workspace' }] }) as never
+      if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot' }) as never
+      if (url === '/api/host/terminal') return Promise.resolve({ platform: 'darwin' }) as never
+      if (url === '/api/settings/routines') return Promise.resolve({ provider_default_modes: { claude: 'auto' } }) as never
+      if (url === '/api/proposals/handover') return Promise.resolve({ handover: 'off', acting_available: true }) as never
+      if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'off', acting_available: true }) as never
+      return Promise.resolve({ provider_catalog_evidence: {}, provider_models: {} }) as never
+    })
+    const wrapper = mount(OnboardingView)
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Access & memory'))
+    // The shell's Continue is off on this screen, but Memory's own continue must
+    // be able to advance once Access is ready too.
+    expect(wrapper.text()).toContain('Memory handover')
+  })
+})
+
 describe('OnboardingView', () => {
   it('waits for the context before mounting a stage', async () => {
     vi.mocked(api.get).mockImplementation((url: string) => {

@@ -88,7 +88,10 @@ async function load(): Promise<void> {
 onMounted(load)
 
 async function advance(): Promise<void> {
-  if (!state.value.canContinue || busy.value || !contextReady.value) return
+  // On the shared screen readiness lives in the two stage states; the shell's
+  // own flag is deliberately off there so Memory's save owns the action.
+  const ready = step.value === 'access_memory' ? combinedReady.value : state.value.canContinue
+  if (!ready || busy.value || !contextReady.value) return
   const order: OnboardingStep[] = ['location', 'runtime', 'access_memory', 'care', 'finish']
   if (step.value === 'finish') {
     if (await store.complete(target.value)) await router.replace(validReturn())

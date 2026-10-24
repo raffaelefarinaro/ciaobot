@@ -4,6 +4,26 @@ import { api } from '../lib/api'
 import type { ActionResult } from '../lib/types'
 import { clearSharedContent } from '../lib/sharedContent'
 
+/**
+ * A post-login destination, or null when it is not this app's internal path.
+ * Control characters are rejected before parsing because a raw tab makes the
+ * browser normalize `/<tab>/host` into `https://host/`.
+ */
+export function safeReturnPath(requested: string | null | undefined): string | null {
+  if (!requested) return null
+  if (/[\u0000-\u001f\u007f]/.test(requested)) return null
+  if (!requested.startsWith('/') || requested.startsWith('//') || requested.includes('\\')) return null
+  if (/^\/login(?:[/?#]|$)/.test(requested)) return null
+  if (/[?&](?:setup_token|token)=/i.test(requested)) return null
+  try {
+    const resolved = new URL(requested, window.location.origin)
+    if (resolved.origin !== window.location.origin) return null
+  } catch {
+    return null
+  }
+  return requested
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const authenticated = ref(false)
 
@@ -14,9 +34,8 @@ export const useAuthStore = defineStore('auth', () => {
     authenticated.value = true
     const params = new URLSearchParams(window.location.search)
     const shared = params.get('shared')
-    const requested = params.get('returnTo')
-    const safe = requested && requested.startsWith('/') && !requested.startsWith('//') && !requested.includes('\\') && !/^\/login(?:[/?#]|$)/.test(requested) && !/[?&](?:setup_token|token)=/i.test(requested)
-    window.location.replace(safe ? requested! : shared ? `/?shared=${encodeURIComponent(shared)}` : '/')
+    const safe = safeReturnPath(params.get('returnTo'))
+    window.location.replace(safe ?? (shared ? `/?shared=${encodeURIComponent(shared)}` : '/'))
   }
 
   async function logout() {
