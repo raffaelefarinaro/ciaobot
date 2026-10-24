@@ -1662,7 +1662,8 @@ class CiaoConfig:
 
     @classmethod
     def from_env(
-        cls, env: dict[str, str] | None = None, *, export: bool = True
+        cls, env: dict[str, str] | None = None, *, export: bool = True,
+        installer_bootstrap: bool = False,
     ) -> "CiaoConfig":
         """Build a config from the environment.
 
@@ -1683,6 +1684,24 @@ class CiaoConfig:
         discovery branch below already uses. Use it for anything read-only —
         a diagnostic must not change its caller's environment.
         """
+        if installer_bootstrap:
+            root = Path.home() / ".ciao" / "installer-bootstrap"
+            launcher, runtime = root / "launcher", root / "runtime"
+            for path in (root, launcher, runtime):
+                if path.is_symlink():
+                    raise ValueError(f"installer bootstrap refuses symlink path: {path}")
+            launcher.mkdir(parents=True, exist_ok=True)
+            runtime.mkdir(parents=True, exist_ok=True)
+            return cls(
+                pwa_auth_token=secrets.token_urlsafe(32),
+                workspace_root=root,
+                state_path=runtime / "state.json",
+                media_root=runtime / "media",
+                vault_root=root / "memory-vault",
+                bootstrap_mode=True,
+                pwa_host="127.0.0.1",
+                pwa_port=8443,
+            )
         overlay: dict[str, str] = {}
         if env is None:
             workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or "."
