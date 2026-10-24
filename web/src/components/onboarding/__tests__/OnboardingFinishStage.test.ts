@@ -49,15 +49,15 @@ describe('OnboardingFinishStage', () => {
     const store = useProjectStore()
     store.projects = [{ project_id: 'general', name: 'General', workspace: 'personal', order: 0 }] as typeof store.projects
     const create = vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'c1' } as never)
-    vi.spyOn(store, 'sendMessage').mockRejectedValue(new Error('offline'))
+    vi.spyOn(store, 'sendMessage').mockReturnValue(false)
     const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
     await flushPromises()
     expect(create).not.toHaveBeenCalled()
     await wrapper.get('textarea').setValue('Do a real task')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(wrapper.get('textarea').element as HTMLTextAreaElement).toHaveProperty('value', 'Do a real task')
-    expect(wrapper.text()).toContain('offline')
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('Do a real task')
+    expect(wrapper.text()).toContain('still here')
   })
 
   it('offers the archive video without autoplay and the companion guide', async () => {
@@ -72,5 +72,53 @@ describe('OnboardingFinishStage', () => {
     expect(wrapper.html()).toContain('companions.html')
     expect(wrapper.text()).toContain('Dictation')
     expect(wrapper.text()).toContain('KeepingYouAwake')
+  })
+})
+
+describe('OnboardingFinishStage refusals and unknowns', () => {
+  it('keeps the text when the store refuses the send without throwing', async () => {
+    payloads()
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'general', name: 'General', workspace: 'personal', order: 0 }] as typeof store.projects
+    vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'c1' } as never)
+    vi.spyOn(store, 'sendMessage').mockReturnValue(false)
+    const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
+    await flushPromises()
+    await wrapper.get('textarea').setValue('A task that will be refused')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('A task that will be refused')
+    expect(wrapper.text()).toContain('still here')
+    expect(wrapper.text()).not.toContain('Task sent in a new chat')
+  })
+
+  it('reports unknown, not deferred, when the workspace read fails', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/workspaces') return Promise.reject(new Error('offline')) as never
+      if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot', ready: true }) as never
+      if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: {} }) as never
+      if (url === '/api/settings/providers') return Promise.resolve({ connections: {} }) as never
+      if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'off', acting_available: true }) as never
+      return Promise.resolve([]) as never
+    })
+    const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
+    await flushPromises()
+    const text = wrapper.text()
+    expect(text.match(/unknown/g)?.length ?? 0).toBeGreaterThanOrEqual(3)
+    expect(text).not.toContain('No model chosen yet')
+    expect(text).not.toContain('Scope was not saved')
+  })
+
+  it('tells the shell when the draft changes', async () => {
+    payloads()
+    const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
+    await flushPromises()
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ dirty: false })
+    await wrapper.get('textarea').setValue('Something to ask')
+    await flushPromises()
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ dirty: true })
+    await wrapper.get('textarea').setValue('')
+    await flushPromises()
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ dirty: false })
   })
 })

@@ -23,7 +23,7 @@ const sendError = ref('')
 const sent = ref(false)
 
 const canContinue = computed(() => !loading.value && !readError.value && !sending.value)
-watch([canContinue, loading, readError, sending, sent], () => {
+watch([canContinue, loading, readError, sending, sent, prompt], () => {
   emit('state', {
     dirty: !!prompt.value.trim(),
     pending: loading.value || sending.value,
@@ -77,8 +77,8 @@ async function loadSummary(): Promise<void> {
       : row(
           'location',
           'Folder and workspace',
-          `${props.context.workspace}${props.context.provisioned ? ' · provisioned' : ' · not provisioned yet'}`,
-          props.context.provisioned ? 'ready' : 'deferred',
+          `${props.context.workspace}${setupRow?.workspace_root ? ` · ${setupRow.workspace_root}` : ''}`,
+          setupRow?.workspace_root ? 'ready' : 'deferred',
           SETTINGS_HREF,
         ),
   )
@@ -106,27 +106,40 @@ async function loadSummary(): Promise<void> {
     rows.push(row('runtime', 'Provider', 'No provider is ready yet', 'deferred', SETTINGS_HREF))
   }
 
+  // Without the workspace read, a missing value is unknown, not "not chosen".
   const overrides = wsRow?.provider_overrides ?? {}
   const chosenModel = Object.values(overrides).map(entry => entry?.model).find(Boolean)
-  rows.push(
-    chosenModel
-      ? row('model', 'Model', `${chosenModel} selected; a successful reply is not yet verified`, 'attention', SETTINGS_HREF)
-      : row('model', 'Model', 'No model chosen yet', 'deferred', SETTINGS_HREF),
-  )
+  if (!wsRow) {
+    rows.push(row('model', 'Model', 'Could not read the workspace settings', 'unknown', SETTINGS_HREF))
+  } else {
+    rows.push(
+      chosenModel
+        ? row('model', 'Model', `${chosenModel} selected; a successful reply is not yet verified`, 'attention', SETTINGS_HREF)
+        : row('model', 'Model', 'No model chosen yet', 'deferred', SETTINGS_HREF),
+    )
+  }
 
   const scope = wsRow?.agent_fs_scope
-  rows.push(
-    scope === 'workspace' || scope === 'machine'
-      ? row('file_access', 'File access', scope === 'machine' ? 'Whole machine' : 'Workspace only', 'ready', SETTINGS_HREF)
-      : row('file_access', 'File access', 'Scope was not saved', 'deferred', SETTINGS_HREF),
-  )
+  if (!wsRow) {
+    rows.push(row('file_access', 'File access', 'Could not read the workspace settings', 'unknown', SETTINGS_HREF))
+  } else {
+    rows.push(
+      scope === 'workspace' || scope === 'machine'
+        ? row('file_access', 'File access', scope === 'machine' ? 'Whole machine' : 'Workspace only', 'ready', SETTINGS_HREF)
+        : row('file_access', 'File access', 'Scope was not saved', 'deferred', SETTINGS_HREF),
+    )
+  }
 
   const explicitMode = Object.values(overrides).map(entry => entry?.permission_mode).find(Boolean)
-  rows.push(
-    explicitMode
-      ? row('approvals', 'Approvals', `${explicitMode} (explicit)`, 'ready', SETTINGS_HREF)
-      : row('approvals', 'Approvals', 'Engine default; no explicit mode', 'deferred', SETTINGS_HREF),
-  )
+  if (!wsRow) {
+    rows.push(row('approvals', 'Approvals', 'Could not read the workspace settings', 'unknown', SETTINGS_HREF))
+  } else {
+    rows.push(
+      explicitMode
+        ? row('approvals', 'Approvals', `${explicitMode} (explicit)`, 'ready', SETTINGS_HREF)
+        : row('approvals', 'Approvals', 'Engine default; no explicit mode', 'deferred', SETTINGS_HREF),
+    )
+  }
 
   if (!handoverRow) {
     rows.push(row('memory', 'Memory handover', 'Could not read memory handover', 'unknown', SETTINGS_HREF))
@@ -163,7 +176,11 @@ async function submit(): Promise<void> {
     if (!project) throw new Error('No project is available for a new chat.')
     const chat = await store.newChatInProject(project.project_id)
     if (!chat) throw new Error('Could not create a chat.')
-    await store.sendMessage(chat.chat_id, text)
+    // `sendMessage` reports a synchronous boolean and refuses without throwing
+    // (offline, a blocked send, no bridge), so the text must survive a refusal.
+    if (!store.sendMessage(chat.chat_id, text)) {
+      throw new Error('The task could not be sent. Your text is still here.')
+    }
     prompt.value = ''
     sent.value = true
   } catch (reason) {
