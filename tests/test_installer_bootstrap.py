@@ -114,14 +114,20 @@ def test_installer_bootstrap_clears_direct_environment_redirects(
     monkeypatch.setenv("CIAO_NO_BROWSER", "1")
     monkeypatch.setenv("GWS_PROFILE", "work")
 
-    main._enter_installer_bootstrap_environment(config_root=tmp_path / "scratch")
+    previous_cwd = Path.cwd()
+    try:
+        main._enter_installer_bootstrap_environment(config_root=tmp_path / "scratch")
 
-    assert "CIAO_WORKSPACE" not in os.environ
-    assert "CIAO_VAULT_ROOT" not in os.environ
-    assert "PWA_PORT" not in os.environ
-    assert "GWS_PROFILE" not in os.environ
-    assert os.environ["CIAO_NO_BROWSER"] == "1"
-    assert Path.cwd() == (tmp_path / "scratch" / "launcher").resolve()
+        assert "CIAO_WORKSPACE" not in os.environ
+        assert "CIAO_VAULT_ROOT" not in os.environ
+        assert "PWA_PORT" not in os.environ
+        assert "GWS_PROFILE" not in os.environ
+        assert os.environ["CIAO_NO_BROWSER"] == "1"
+        assert Path.cwd() == (tmp_path / "scratch" / "launcher").resolve()
+    finally:
+        # This call changes the process cwd; leaving it changed leaks into
+        # whatever test this worker runs next.
+        os.chdir(previous_cwd)
 
 
 def test_app_factory_initializes_explicit_installer_state(tmp_path: Path) -> None:
