@@ -42,8 +42,8 @@ onMounted(async () => {
   try {
     const [workspaces, host, routines] = await Promise.all([
       api.get<{ workspaces?: WorkspaceRow[] }>('/api/workspaces'),
-      api.get<{ platform?: string; available?: boolean }>('/api/host/terminal').catch(() => ({})),
-      api.get<{ provider_default_modes?: Record<string, string> }>('/api/settings/routines').catch(() => ({})),
+      api.get<{ platform?: string; available?: boolean }>('/api/host/terminal').catch((): { platform?: string } => ({})),
+      api.get<{ provider_default_modes?: Record<string, string> }>('/api/settings/routines').catch((): { provider_default_modes?: Record<string, string> } => ({})),
     ])
     const row = workspaces.workspaces?.find(item => item.name === props.context.workspace)
     // Only an explicit stored value is a scope; anything else is still unknown.

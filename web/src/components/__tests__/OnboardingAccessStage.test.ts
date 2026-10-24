@@ -21,7 +21,7 @@ async function mounted(options = {}) {
   responses(options)
   const wrapper = mount(OnboardingAccessStage, { props: { context, busy: false } })
   await vi.waitFor(() => expect(wrapper.text()).toContain('Filesystem scope'))
-  await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]?.pending).toBe(false))
+  await vi.waitFor(() => expect((wrapper.emitted('state')?.at(-1)?.[0] as { pending?: boolean })?.pending).toBe(false))
   return wrapper
 }
 
@@ -63,7 +63,7 @@ describe('OnboardingAccessStage', () => {
     expect((wrapper.find('input[value="machine"]').element as HTMLInputElement).disabled).toBe(true)
 
     resolvePatch({})
-    await vi.waitFor(() => expect(wrapper.emitted('state')?.at(-1)?.[0]?.pending).toBe(false))
+    await vi.waitFor(() => expect((wrapper.emitted('state')?.at(-1)?.[0] as { pending?: boolean })?.pending).toBe(false))
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, dirty: false })
   })
 
