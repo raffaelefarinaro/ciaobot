@@ -10,20 +10,29 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   const error = ref<string | null>(null)
   const conflict = ref(false)
   let generation = 0
+  let flight = 0
   let loadFlight: Promise<void> | null = null
+
+  // A response may only move the receipt forward. A slow GET that started
+  // before a successful PATCH must not roll the journey back to an older
+  // revision, and a pre-reset request must not clear a newer load's flight.
+  function adopt(value: OnboardingReceipt): void {
+    if (receipt.value === null || value.revision >= receipt.value.revision) receipt.value = value
+  }
 
   async function load(): Promise<void> {
     if (loadFlight) return loadFlight
     const ticket = generation
+    const mine = ++flight
     loading.value = true
     error.value = null
     loadFlight = api.get<OnboardingReceipt>('/api/onboarding').then(value => {
-      if (ticket === generation) receipt.value = value
+      if (ticket === generation) adopt(value)
     }).catch(reason => {
       if (ticket === generation) error.value = reason instanceof Error ? reason.message : 'Could not load onboarding progress.'
     }).finally(() => {
       if (ticket === generation) loading.value = false
-      loadFlight = null
+      if (mine === flight) loadFlight = null
     })
     return loadFlight
   }
@@ -42,7 +51,10 @@ export const useOnboardingStore = defineStore('onboarding', () => {
       const next = done
         ? await api.post<OnboardingReceipt>(url, body)
         : await api.patch<OnboardingReceipt>(url, body)
-      if (ticket === generation) receipt.value = next
+      // The journey this mutation belonged to was reset while it was in
+      // flight: do not report success to a caller that can no longer use it.
+      if (ticket !== generation) return false
+      adopt(next)
       return true
     } catch (reason) {
       if (ticket !== generation) return false
@@ -59,6 +71,7 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   const complete = (target: OnboardingTarget) => mutate(target, undefined, true)
   function reset() {
     generation++
+    flight++
     receipt.value = null
     loading.value = false
     saving.value = false

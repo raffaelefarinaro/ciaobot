@@ -64,3 +64,54 @@ describe('onboarding store', () => {
     expect(store.error).toBeTruthy()
   })
 })
+
+describe('onboarding store races', () => {
+  it('does not roll the receipt back when an older read resolves after a write', async () => {
+    const pending: Array<(value: unknown) => void> = []
+    vi.mocked(api.get).mockImplementation(() => new Promise(resolve => pending.push(resolve)) as never)
+    vi.mocked(api.patch).mockResolvedValue({ ...receipt(), revision: 5 })
+    const store = useOnboardingStore()
+    const first = store.load()
+    pending[0](receipt())
+    await first
+
+    const slow = store.load()
+    expect(await store.setStep({ kind: 'installation' }, 'runtime')).toBe(true)
+    pending[1]({ ...receipt(), revision: 4 })
+    await slow
+
+    expect(store.receipt?.revision).toBe(5)
+  })
+
+  it('a pre-reset load does not clear the next load flight', async () => {
+    const pending: Array<(value: unknown) => void> = []
+    vi.mocked(api.get).mockImplementation(() => new Promise(resolve => pending.push(resolve)) as never)
+    const store = useOnboardingStore()
+    const first = store.load()
+    store.reset()
+    const second = store.load()
+    pending[0](receipt())
+    await first
+    // The stale flight must not have cleared the current one: a caller asking
+    // again joins B instead of starting a third request.
+    const third = store.load()
+    expect(api.get).toHaveBeenCalledTimes(2)
+    pending[1](receipt())
+    await Promise.all([second, third])
+    expect(api.get).toHaveBeenCalledTimes(2)
+    expect(store.receipt?.revision).toBe(4)
+  })
+
+  it('a mutation invalidated by reset does not report success', async () => {
+    vi.mocked(api.get).mockResolvedValue(receipt())
+    let resolvePatch: (value: unknown) => void = () => {}
+    vi.mocked(api.patch).mockReturnValue(new Promise(resolve => { resolvePatch = resolve }) as never)
+    const store = useOnboardingStore()
+    await store.load()
+    const saving = store.setStep({ kind: 'installation' }, 'runtime')
+    store.reset()
+    resolvePatch({ ...receipt(), revision: 5 })
+    expect(await saving).toBe(false)
+    expect(store.receipt).toBeNull()
+  })
+})
