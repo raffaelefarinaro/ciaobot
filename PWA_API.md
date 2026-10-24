@@ -37,6 +37,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 |---|---|---|
 | GET | `/api/onboarding` | Read the installation and registered-workspace lifecycle receipt (signed browser session required). |
 | PATCH | `/api/onboarding` | Advance or step back one target with `{"expected_revision": n, "target": {"kind":"installation"}, "step":"runtime"}`. Only progress changes; status is server-controlled. |
+| POST | `/api/onboarding/interview` | Open the guided first-run interview for `?workspace=<name>` on request. It creates the interview chat in that workspace's General project and returns `{chat_id}`; nothing creates it on install. 400 without a workspace, 404 for an unknown workspace. |
 | POST | `/api/onboarding/complete` | Complete a target with `{"expected_revision": n, "target": {"kind":"installation"}}`; its step must already be `finish`. |
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie and end this browser's terminal grant |

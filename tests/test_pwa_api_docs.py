@@ -9,6 +9,7 @@ from pathlib import Path
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/onboarding": "browser-only resumable lifecycle progress; signed session, no settings/readiness writes",
+    "/api/onboarding/interview": "browser-only explicit first-run interview; signed session, creates only the interview chat",
     "/api/onboarding/complete": "browser-only onboarding completion; signed session, no host actions",
     "/api/terminal/unlock": (
         "browser-only grant issue; signed session and exact origin/transport "
