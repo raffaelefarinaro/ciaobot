@@ -15,7 +15,7 @@ export const useAuthStore = defineStore('auth', () => {
     const params = new URLSearchParams(window.location.search)
     const shared = params.get('shared')
     const requested = params.get('returnTo')
-    const safe = requested && requested.startsWith('/') && !requested.startsWith('//') && !requested.includes('\\') && !/^\/(login|onboarding)(?:[/?#]|$)/.test(requested) && !/[?&](?:setup_token|token)=/i.test(requested)
+    const safe = requested && requested.startsWith('/') && !requested.startsWith('//') && !requested.includes('\\') && !/^\/login(?:[/?#]|$)/.test(requested) && !/[?&](?:setup_token|token)=/i.test(requested)
     window.location.replace(safe ? requested! : shared ? `/?shared=${encodeURIComponent(shared)}` : '/')
   }
 
