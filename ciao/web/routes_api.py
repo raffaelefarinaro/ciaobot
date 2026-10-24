@@ -397,6 +397,18 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         created = workspace.name not in config.workspaces
+        onboarding_target = None
+        if created:
+            # Validate receipt access before mutating the live registry. A
+            # corrupt/unreadable receipt must not leave a half-created
+            # workspace. Installs predating receipt initialization retain the
+            # existing workspace-save behavior until startup initializes it.
+            from ciao.onboarding import read_receipt  # noqa: PLC0415
+            from ciao.onboarding_progress import register_new_workspace  # noqa: PLC0415
+
+            if read_receipt(Path(config.state_path).parent) is not None:
+                register_new_workspace(config, workspace.name)
+                onboarding_target = {"kind": "workspace", "name": workspace.name}
         profile_changed = (
             not created
             and existing is not None
@@ -404,12 +416,19 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
             != str(getattr(workspace, "gws_profile", "") or "")
         )
         config.workspaces[workspace.name] = workspace
-        _persist_workspaces(config)
+        try:
+            _persist_workspaces(config)
+        except Exception:
+            if created:
+                config.workspaces.pop(workspace.name, None)
+            raise
         _refresh_project_manager_workspaces(request)
         payload = _workspaces_payload(config)
         if renamed is not None:
             payload["renamed"] = renamed
         if created:
+            if onboarding_target is not None:
+                payload["onboarding_target"] = onboarding_target
             payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
         elif profile_changed:
             # Linking a workspace to its first account (or unlinking it) changes
