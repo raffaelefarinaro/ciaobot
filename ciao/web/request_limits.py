@@ -103,7 +103,9 @@ class ApiRequestBodyLimitMiddleware:
                     break
 
             media_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
-            if policy != "multipart_only" and (
+            # The PWA labels every request JSON, bodiless GETs included, so an
+            # empty body is no body rather than malformed JSON.
+            if size and policy != "multipart_only" and (
                 media_type == b"application/json" or media_type.endswith(b"+json")
             ):
                 spool.seek(0)
