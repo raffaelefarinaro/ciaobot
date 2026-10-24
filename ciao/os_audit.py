@@ -146,9 +146,19 @@ def audit_setup(
 
 
 def _user_skill_roots() -> tuple[Path, ...]:
-    """User-global skill folders OpenCode also loads, in full, into every chat."""
+    """User-global skill folders OpenCode also loads, in full, into every chat.
+
+    OpenCode's own global folder (``$XDG_CONFIG_HOME/opencode/skills``) plus the
+    Claude Code and ``.agents`` folders it reads the same way; the same set the
+    OpenCode sandbox exposes read-only (``_sandboxed_server_dirs``).
+    """
     home = Path.home()
-    return (home / ".claude" / "skills", home / ".agents" / "skills")
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return (
+        config_home / "opencode" / "skills",
+        home / ".claude" / "skills",
+        home / ".agents" / "skills",
+    )
 
 
 def _user_skill_warnings(workspace_skills: set[str], workspace_roots: Sequence[Path]) -> list[dict[str, Any]]:
@@ -208,8 +218,8 @@ def _user_skill_warnings(workspace_skills: set[str], workspace_roots: Sequence[P
 def audit_skills(workspace_dir: Path) -> dict[str, Any]:
     """Audit logical skills once across canonical and provider projections.
 
-    The user-global folders (``~/.claude/skills``, ``~/.agents/skills``) are
-    scanned too, as ``warnings``: OpenCode loads them in full like workspace
+    The user-global folders (``~/.config/opencode/skills``,
+    ``~/.claude/skills``, ``~/.agents/skills``) are scanned too, as ``warnings``: OpenCode loads them in full like workspace
     skills, but they are not the workspace's to fix.
     """
     issues: list[dict[str, Any]] = []
@@ -1743,13 +1753,17 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         for issue in report["skill_audit"]["issues"]:
             lines.append(f"  - ⚠️ {issue['message']}")
         user_warnings = report["skill_audit"].get("warnings", [])
-        if user_warnings:
+        over_budget = [w for w in user_warnings if w.get("type") == "user_skill_over_budget"]
+        if over_budget:
             lines.append(
-                "- User-global skills over 15 KiB (warning; OpenCode loads them in full): "
-                f"{report['skill_audit'].get('user_over_budget_count', 0)}"
+                f"- User-global skills over {MAX_SKILL_BYTES // 1024} KiB "
+                f"(warning; OpenCode loads them in full): {len(over_budget)}"
             )
-            for warning in user_warnings:
+            for warning in over_budget:
                 lines.append(f"  - ⚠️ {warning['message']}")
+        for warning in user_warnings:
+            if warning.get("type") != "user_skill_over_budget":
+                lines.append(f"- ⚠️ {warning['message']}")
 
     if "rule_audit" in report:
         lines.extend(

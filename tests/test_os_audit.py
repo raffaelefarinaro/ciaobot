@@ -7,6 +7,8 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from ciao import vault_lint
 
 def _seed_guide(guide: Path, *, memory: list[str] | None = None, profile: list[str] | None = None) -> Path:
@@ -30,6 +32,12 @@ from ciao.os_audit import (
     run_os_audit,
 )
 from ciao.skills_inventory import MAX_SKILL_BYTES
+
+
+@pytest.fixture(autouse=True)
+def _no_real_xdg_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """User-global skill scans resolve ~/.config under the isolated home."""
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
 
 
 def test_audit_skills_over_budget(tmp_path: Path) -> None:
@@ -112,6 +120,17 @@ def test_audit_skills_warns_about_over_budget_user_global_skills(tmp_path: Path)
         report["defect_count"],
         report["total_errors"],
     )
+
+
+def test_audit_skills_warns_about_opencode_global_skills(tmp_path: Path) -> None:
+    """OpenCode's own ~/.config/opencode/skills is loaded like the others."""
+    big = Path.home() / ".config" / "opencode" / "skills" / "big-opencode"
+    big.mkdir(parents=True)
+    (big / "SKILL.md").write_bytes(b"A" * (MAX_SKILL_BYTES + 1))
+
+    res = audit_skills(tmp_path / "ws")
+
+    assert [w["skill"] for w in res["warnings"]] == ["big-opencode"]
 
 
 def test_audit_skills_does_not_scan_a_workspace_root_twice_as_user_global(

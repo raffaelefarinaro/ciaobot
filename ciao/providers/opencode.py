@@ -3309,8 +3309,7 @@ class OpencodeProvider(BaseSDKProvider):
 
     def _restore_turn_metadata(self, messages: list[Any]) -> None:
         """Restore model, usage, cost, and assistant error after SSE loss."""
-        total_tokens: dict[str, int] = {}
-        last_context_usage: dict[str, str] = {}
+        message_usages: list[dict[str, str]] = []
         total_cost = 0.0
         for message in self._turn_scope(messages):
             info = message.get("info")
@@ -3334,26 +3333,18 @@ class OpencodeProvider(BaseSDKProvider):
                 self._effective_model = (
                     f"{provider_id}/{model_id}" if provider_id else model_id
                 )
-            tokens = info.get("tokens")
-            if isinstance(tokens, Mapping):
-                message_usage = usage_payload(tokens)
-                if message_usage:
-                    last_context_usage = message_usage
-                for key, value in message_usage.items():
-                    try:
-                        total_tokens[key] = total_tokens.get(key, 0) + int(value)
-                    except (TypeError, ValueError):
-                        continue
+            message_usage = usage_payload(info.get("tokens"))
+            if message_usage:
+                message_usages.append(message_usage)
             cost = info.get("cost")
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
                 total_cost += float(cost)
             message_error = info.get("error")
             if isinstance(message_error, Mapping):
                 self._poll_error = self._poll_error or error_text(message_error)
-        if total_tokens:
-            self._usage = {key: str(value) for key, value in total_tokens.items()}
-        if last_context_usage:
-            self._context_usage = last_context_usage
+        if message_usages:
+            self._usage = _summed_usage(message_usages)
+            self._context_usage = message_usages[-1]
         if total_cost:
             self._cost = total_cost
 
@@ -3631,7 +3622,12 @@ class OpencodeProvider(BaseSDKProvider):
                     )
             return []
         if kind == "session.step.ended":
-            step = str(props.get("assistantMessageID") or f"step-{len(self._step_usage)}")
+            # An id-less step gets a fresh key: counting only `_step_usage`
+            # would reuse a cost-only step's key and overwrite its cost.
+            step = str(
+                props.get("assistantMessageID")
+                or f"step-{len(self._step_usage.keys() | self._step_cost.keys())}"
+            )
             cost = props.get("cost")
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
                 self._step_cost[step] = float(cost)
