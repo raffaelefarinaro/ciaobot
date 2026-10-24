@@ -92,3 +92,19 @@ describe('OnboardingCareStage safety', () => {
     expect((wrapper.get('input[type="time"]').element as HTMLInputElement).value).toBe('15:00')
   })
 })
+
+describe('OnboardingCareStage after a failed save', () => {
+  it('lets the operator recover by keeping the packaged default', async () => {
+    vi.mocked(api.get).mockResolvedValue([routine])
+    vi.mocked(api.patch).mockRejectedValue(new Error('offline'))
+    const wrapper = mount(OnboardingCareStage, { props: { context, busy: false } })
+    await vi.waitFor(() => expect(wrapper.text()).toContain('Workspace care'))
+    await wrapper.get('input[type="time"]').setValue('09:15')
+    await wrapper.get('button[aria-label="Save care timing"]').trigger('click')
+    await vi.waitFor(() => expect(wrapper.text()).toContain('offline'))
+
+    await wrapper.get('button[aria-label="Keep packaged default"]').trigger('click')
+    expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: true, error: null })
+    expect(wrapper.text()).not.toContain('offline')
+  })
+})

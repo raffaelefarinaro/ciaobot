@@ -75,7 +75,12 @@ watch([time, timezone], () => { keepDefault.value = false })
 function onAvailability(): void {
   if (!touchedTime.value) time.value = suggestedTime()
 }
-function useDefault() { keepDefault.value = true; savedOnce.value = false }
+function useDefault() {
+  // An earlier failed save no longer matters: this decision writes nothing.
+  error.value = ''
+  keepDefault.value = true
+  savedOnce.value = false
+}
 onMounted(() => { void load() })
 defineExpose({ refresh: load })
 </script>
