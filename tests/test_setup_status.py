@@ -175,7 +175,9 @@ def test_setup_status_survives_a_deleted_working_directory(tmp_path, monkeypatch
 
     # A config without an explicit workspace_root has no root to fall back to,
     # but the payload must still be produced instead of raising.
-    bare = setup_status(SimpleNamespace(pwa_auth_token="test-token"), env={})
+    bare = setup_status(
+        SimpleNamespace(pwa_auth_token="test-token", suggested_workspace=None), env={}
+    )
     assert isinstance(bare["checks"], list)
     assert "providers" in bare
 
@@ -2604,3 +2606,22 @@ def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) 
         assert len(calls) == 2
     finally:
         probe.cache_clear()
+
+
+def test_setup_status_reports_the_installer_folder_suggestion(tmp_path) -> None:
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        bootstrap_mode=True,
+        suggested_workspace=tmp_path / "notes",
+    )
+
+    assert setup_status(config, env={})["suggested_workspace"] == str(tmp_path / "notes")
+
+
+def test_setup_status_has_no_suggestion_on_a_configured_install(tmp_path) -> None:
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+
+    assert setup_status(config, env={})["suggested_workspace"] is None

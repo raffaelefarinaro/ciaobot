@@ -51,6 +51,13 @@ if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
+def _absolute_installer_path(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("installer workspace suggestion must be an absolute path")
+    return str(path)
+
+
 def _workspace_name_arg(value: str) -> str:
     name = value.strip()
     if not _WORKSPACE_NAME_RE.fullmatch(name):
@@ -67,6 +74,9 @@ def _relaunch_argv() -> list[str]:
 
 
 def _run_command(args: argparse.Namespace) -> int:
+    if args.installer_suggest_workspace is not None and not args.installer_bootstrap:
+        print("--installer-suggest-workspace requires --installer-bootstrap", file=sys.stderr)
+        return 2
     if args.installer_run_id and not args.installer_bootstrap:
         print("--installer-run-id requires --installer-bootstrap", file=sys.stderr)
         return 2
@@ -85,6 +95,7 @@ def _run_command(args: argparse.Namespace) -> int:
         supervised=args.supervised,
         installer_bootstrap=True,
         installer_run_id=run_id,
+        installer_suggest_workspace=args.installer_suggest_workspace,
     )
 
 
@@ -123,6 +134,7 @@ def _run_server(
     supervised: bool = False,
     installer_bootstrap: bool = False,
     installer_run_id: str | None = None,
+    installer_suggest_workspace: str | None = None,
 ) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
@@ -133,6 +145,7 @@ def _run_server(
                 supervised=supervised,
                 installer_bootstrap=True,
                 installer_run_id=installer_run_id,
+                installer_suggest_workspace=installer_suggest_workspace,
             )
         else:
             server_main(supervised=supervised)
@@ -7415,6 +7428,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Installer-only correlation id for the handoff result (requires --installer-bootstrap).",
     )
+    run_parser.add_argument("--installer-suggest-workspace", type=_absolute_installer_path, default=None)
     run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(

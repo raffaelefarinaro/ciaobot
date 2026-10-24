@@ -32,7 +32,42 @@ def test_run_parser_forwards_installer_mode_and_run_id(monkeypatch) -> None:
         "supervised": False,
         "installer_bootstrap": True,
         "installer_run_id": run_id,
+        "installer_suggest_workspace": None,
     }
+
+
+def test_run_parser_forwards_installer_suggested_workspace(monkeypatch, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: seen.update(kwargs) or 0)
+    suggestion = tmp_path / "new-workspace"
+    args = _parser_run(["run", "--installer-bootstrap", "--installer-suggest-workspace", str(suggestion)])
+    assert args.func(args) == 0
+    assert seen["installer_suggest_workspace"] == str(suggestion)
+
+
+def test_installer_suggestion_rejects_relative_path_and_orphan_flag(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _parser_run(["run", "--installer-bootstrap", "--installer-suggest-workspace", "relative"])
+    assert exc.value.code == 2
+    assert "absolute" in capsys.readouterr().err
+    args = _parser_run(["run", "--installer-suggest-workspace", "/tmp/work"])
+    assert args.func(args) == 2
+    assert "requires --installer-bootstrap" in capsys.readouterr().err
+
+
+def test_ordinary_config_never_reads_a_suggested_workspace(monkeypatch) -> None:
+    monkeypatch.setenv("CIAO_SUGGESTED_WORKSPACE", "/must/not/be/read")
+    assert CiaoConfig.from_env().suggested_workspace is None
+
+
+def test_installer_config_records_the_suggestion_without_creating_it(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    target = tmp_path / "not-created"
+    config = CiaoConfig.from_env(installer_bootstrap=True, installer_suggest_workspace=str(target))
+    assert config.suggested_workspace == target
+    assert not target.exists()
 
 
 def test_installer_arguments_reject_supervised_and_orphan_run_id(capsys) -> None:
