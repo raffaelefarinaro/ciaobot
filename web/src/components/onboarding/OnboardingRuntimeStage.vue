@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { api } from '../../lib/api'
 import type { HostTerminalAction, ModelsResponse, RuntimeProvider } from '../../lib/types'
 import type { OnboardingStageProps, StageState } from '../../lib/onboarding'
@@ -20,7 +20,11 @@ const connections = ref<Record<string, ProviderStatus> | null>(null)
 const models = ref<ModelsResponse | null>(null)
 const loadingStatus = ref(false)
 const loadingModels = ref(false)
-const error = ref('')
+// Kept apart: a failed status read must not be erased by a later model read,
+// which would let the shell advance on a status nobody confirmed.
+const statusError = ref('')
+const modelsError = ref('')
+const error = computed(() => statusError.value || modelsError.value)
 const provider = ref<RuntimeProvider>('claude')
 const selection = ref('')
 const deferred = ref(false)
@@ -32,7 +36,9 @@ const configured = computed(() => models.value?.provider_models?.[provider.value
 // `auth` is the provider's own sentence ("signed in as …", "not signed in",
 // "not installed"). Only a clearly signed-in provider may skip repair.
 const signedIn = computed(() => !!connection.value?.ok && !/not|missing|no account|signed out|error/i.test(connection.value?.auth ?? ''))
-const ready = computed(() => !!connections.value && !error.value)
+// Readiness needs an actual row for the selected runtime; `{connections: {}}` is
+// not evidence that this provider is usable.
+const ready = computed(() => !!connection.value && !error.value)
 const terminalAction = computed<HostTerminalAction | undefined>(() => connection.value?.terminal_action)
 const state = computed<StageState>(() => ({
   dirty: false,
@@ -48,14 +54,16 @@ function resetChoice(): void {
   deferred.value = false
 }
 
-async function loadStatus(): Promise<void> {
+async function loadStatus(): Promise<boolean> {
   loadingStatus.value = true
-  error.value = ''
+  statusError.value = ''
   try {
     const payload = await api.get<{ connections: Record<string, ProviderStatus> }>('/api/settings/providers')
     connections.value = payload.connections ?? {}
+    return true
   } catch {
-    error.value = 'Could not read the provider status. Retry, or continue later with a deferred choice.'
+    statusError.value = 'Could not read the provider status. Retry, or continue later with a deferred choice.'
+    return false
   } finally {
     loadingStatus.value = false
   }
@@ -65,18 +73,19 @@ async function loadStatus(): Promise<void> {
 // an ephemeral provider process, which a page mount must never do.
 async function loadModels(): Promise<void> {
   loadingModels.value = true
-  error.value = ''
+  modelsError.value = ''
   try {
     models.value = await api.get<ModelsResponse>(`/api/models?workspace=${encodeURIComponent(props.context.workspace)}`)
   } catch {
-    error.value = 'Could not load model information. Retry, or continue later with a deferred choice.'
+    modelsError.value = 'Could not load model information. Retry, or continue later with a deferred choice.'
   } finally {
     loadingModels.value = false
   }
 }
 
 async function checkAgain(): Promise<void> {
-  await loadStatus()
+  const ok = await loadStatus()
+  if (!ok) return
   if (models.value !== null) await loadModels()
   emit('refresh')
 }
@@ -92,7 +101,6 @@ function defer(): void {
 }
 
 watch(provider, resetChoice)
-onMounted(loadStatus)
 defineExpose({ refresh: checkAgain })
 </script>
 
@@ -111,7 +119,14 @@ defineExpose({ refresh: checkAgain })
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <button v-if="error && !loadingStatus" type="button" class="retry" @click="checkAgain">Retry</button>
 
-    <template v-if="connections">
+    <div v-if="!connections" class="models-empty">
+      <p>Checking a runtime reads its status on this computer; it may also list its connectors.</p>
+      <button type="button" :disabled="loadingStatus" @click="checkAgain">
+        {{ loadingStatus ? 'Checking…' : 'Check this computer' }}
+      </button>
+    </div>
+
+    <template v-else-if="connection">
       <div v-if="!signedIn" class="repair">
         <p>{{ connection?.label ?? provider }} is not ready on this computer. Install or sign in, then check again.</p>
         <p v-if="connection?.command"><code>{{ connection.command }}</code></p>

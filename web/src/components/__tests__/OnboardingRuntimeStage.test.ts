@@ -30,16 +30,20 @@ const unknown = {
 async function mountWithStatus(payload: unknown) {
   vi.mocked(api.get).mockResolvedValueOnce(payload)
   const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })
-  await vi.waitFor(() => expect(api.get).toHaveBeenCalledTimes(1))
+  await wrapper.get('.models-empty button').trigger('click')
+  await vi.waitFor(() => expect(api.get).toHaveBeenCalled())
+  expect(String(vi.mocked(api.get).mock.calls[0]?.[0])).toBe('/api/settings/providers')
   return wrapper
 }
 
 beforeEach(() => { vi.clearAllMocks() })
 
 describe('OnboardingRuntimeStage', () => {
-  it('reads provider status on mount and never loads models or opens a terminal', async () => {
-    const wrapper = await mountWithStatus(ready)
-    expect(vi.mocked(api.get).mock.calls.map(call => String(call[0]))).toEqual(['/api/settings/providers'])
+  it('makes no request and opens no terminal on mount', async () => {
+    vi.mocked(api.get).mockResolvedValue(ready)
+    const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })
+    await wrapper.vm.$nextTick()
+    expect(api.get).not.toHaveBeenCalled()
     expect(wrapper.findComponent({ name: 'HostTerminalButton' }).exists()).toBe(false)
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ canContinue: false })
   })
@@ -67,6 +71,7 @@ describe('OnboardingRuntimeStage', () => {
   it('blocks Continue after a failed status read and offers a retry', async () => {
     vi.mocked(api.get).mockRejectedValue(new Error('offline'))
     const wrapper = mount(OnboardingRuntimeStage, { props: { context, busy: false } })
+    await wrapper.get('.models-empty button').trigger('click')
     await vi.waitFor(() => expect(wrapper.text()).toContain('Could not read the provider status'))
     expect(wrapper.find('button.retry').exists()).toBe(true)
     expect(wrapper.find('button.defer').exists()).toBe(false)
