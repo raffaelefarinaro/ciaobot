@@ -184,6 +184,29 @@ def rename_workspace(
                 f"could not rename '{old}' to '{new}': {exc}"
             ) from exc
     try:
+        from ciao.onboarding import read_receipt  # noqa: PLC0415
+        from ciao.onboarding_progress import rename_workspace_progress  # noqa: PLC0415
+
+        receipt = read_receipt(Path(config.state_path).parent)
+        snapshot_revision = snapshot.get("onboarding_revision")
+        if (
+            receipt is not None
+            and isinstance(snapshot_revision, int)
+            and receipt.revision != snapshot_revision
+        ):
+            from ciao.onboarding import OnboardingConflictError  # noqa: PLC0415
+
+            raise OnboardingConflictError("onboarding receipt revision conflict")
+        if receipt is not None:
+            # Run even when the source has no entry: a stale destination entry
+            # (say an archived name reused earlier) must not become the renamed
+            # workspace's progress.
+            renamed_receipt = rename_workspace_progress(
+                config, source=old, destination=new,
+                expected_revision=receipt.revision,
+            )
+            if renamed_receipt.revision != receipt.revision:
+                snapshot["onboarding_written_revision"] = renamed_receipt.revision
         # Replace the key in place so the renamed workspace keeps its position
         # in the registry: sidebar order, the 1-9 shortcuts and the
         # first-registered primary fallback all follow it.
@@ -303,6 +326,13 @@ def _take_snapshot(
     run_path = _store_path(runs, "_path")
     return {
         "workspaces": dict(config.workspaces),
+        "onboarding_path": Path(config.state_path).parent / "onboarding.json",
+        "onboarding_bytes": _read_bytes_if_present(
+            Path(config.state_path).parent / "onboarding.json"
+        ),
+        "onboarding_revision": _onboarding_revision(
+            Path(config.state_path).parent / "onboarding.json"
+        ),
         "registry_bytes": _read_bytes_if_present(
             Path(config.state_path).parent / "workspaces.json"
         ),
@@ -426,6 +456,7 @@ def _roll_back(
 
 def _restore_snapshot_files(snapshot: dict[str, Any]) -> None:
     """Write every snapshotted store file back, logging rather than raising."""
+    _restore_onboarding_receipt(snapshot)
     _restore_logged("background runs", snapshot.get("run_bytes"), snapshot)
     _restore_logged("import batches", snapshot.get("import_bytes"), snapshot)
     _restore_logged("webhook triggers", snapshot.get("webhook_bytes"), snapshot)
@@ -433,6 +464,39 @@ def _restore_snapshot_files(snapshot: dict[str, Any]) -> None:
     _restore_logged(
         "system schedule state", snapshot.get("system_state_bytes"), snapshot
     )
+
+
+def _onboarding_revision(path: Path) -> int | None:
+    """Return the valid receipt revision captured with a rename snapshot."""
+    try:
+        from ciao.onboarding import read_receipt  # noqa: PLC0415
+
+        receipt = read_receipt(path.parent)
+    except Exception:
+        return None
+    return None if receipt is None else receipt.revision
+
+
+def _restore_onboarding_receipt(snapshot: dict[str, Any]) -> None:
+    raw = snapshot.get("onboarding_bytes")
+    path = snapshot.get("onboarding_path")
+    written = snapshot.get("onboarding_written_revision")
+    if not isinstance(raw, bytes) or not isinstance(path, Path):
+        return
+    # Only the rename's own write is ours to undo. Comparing "snapshot + 1"
+    # would also match an unrelated PATCH that landed after the rename wrote,
+    # and restoring over it would delete that progress.
+    if not isinstance(written, int):
+        return
+    from ciao.async_reads import keyed_lock  # noqa: PLC0415
+
+    try:
+        with keyed_lock(f"onboarding:{path.resolve()}"):
+            if _onboarding_revision(path) != written:
+                return
+            _restore_file(path, raw)
+    except Exception:
+        logger.exception("Could not restore onboarding receipt after a failed workspace rename")
 
 
 def _restore_logged(label: str, raw: Any, snapshot: dict[str, Any]) -> None:
