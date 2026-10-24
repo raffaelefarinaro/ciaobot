@@ -329,6 +329,7 @@ async def test_authorized_turn_captures_from_the_same_connection(tmp_path: Path,
 
         async def query(self, _payload):
             FakeClient.queries += 1
+            order.append("query")
 
         async def receive_response(self):
             if False:  # pragma: no cover - an empty turn
@@ -346,7 +347,12 @@ async def test_authorized_turn_captures_from_the_same_connection(tmp_path: Path,
     monkeypatch.setattr(provider, "_ensure_connected", fake_ensure)
     connect_with_deadline = AsyncMock()
     monkeypatch.setattr(claude_module, "_connect_with_deadline", connect_with_deadline)
-    capture = AsyncMock()
+    order: list[str] = []
+
+    async def capture_side_effect(*_args, **_kwargs):
+        order.append("capture")
+
+    capture = AsyncMock(side_effect=capture_side_effect)
     monkeypatch.setattr(provider, "_capture_catalog_evidence", capture)
 
     _events = [
@@ -362,6 +368,7 @@ async def test_authorized_turn_captures_from_the_same_connection(tmp_path: Path,
     # One connect for the turn, then query; capture reuses that client.
     connect_with_deadline.assert_awaited_once_with(fake)
     assert FakeClient.queries == 1
+    assert order == ["capture", "query"], "metadata is read before the prompt is sent"
 
 
 def test_cancelled_sign_out_still_drops_evidence(tmp_path: Path, monkeypatch) -> None:
