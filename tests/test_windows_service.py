@@ -456,7 +456,19 @@ def test_engine_task_registered_treats_an_empty_query_as_absent(
     assert ws.engine_task_registered() is False
 
 
-@pytest.mark.parametrize("stdout", ["garbage\n", '"unterminated\n', "one,two\n", 'x,"y"\n'])
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "garbage\n",
+        '"unterminated\n',
+        "one,two\n",
+        'x,"y"\n',
+        '"TaskName","Next Run Time","Status"\r\n',
+        ",,\n",
+        "\\Task,x,y,extra\n",
+        "Ciaobot\\Engine,N/A,Ready\n",
+    ],
+)
 def test_engine_task_registered_refuses_unrecognised_queries(
     stdout: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -486,3 +498,15 @@ def test_engine_task_registered_surfaces_a_timeout(
     monkeypatch.setattr(ws.subprocess, "run", fake)
     with pytest.raises(ws.WindowsServiceError, match="timed out"):
         ws.engine_task_registered()
+
+
+def test_engine_task_registered_reads_a_utf16_leaked_bom_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = subprocess.CompletedProcess(
+        ["schtasks.exe"], 0,
+        stdout='\ufeff"\\Ciaobot\\Engine","N/A","Ready"\r\n',
+        stderr="",
+    )
+    monkeypatch.setattr(ws.subprocess, "run", _Schtasks(completed))
+    assert ws.engine_task_registered() is True

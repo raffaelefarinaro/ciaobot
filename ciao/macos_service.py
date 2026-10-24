@@ -326,13 +326,17 @@ def _loaded_definition(uid: int, runner: Runner) -> tuple[bool, list[str] | None
 _LAUNCHCTL_LIST_HEADER = ("pid", "status", "label")
 
 
+_SIGNED_STATUS = re.compile(r"-?\d+")
+
+
 def parse_launchctl_list(stdout: str) -> set[str]:
     """Labels from ``launchctl list``; unrecognised output is an error.
 
     ``launchctl list`` always prints the ``PID Status Label`` header, even with
     no jobs loaded, so an empty or differently shaped response is not evidence
-    that nothing is registered. Rows are ``PID``, exit status (both ``-`` or an
-    integer) and the label.
+    that nothing is registered. Rows are ``PID``, exit status (both ``-`` or a
+    number, and the status is negative when the job was killed by a signal) and
+    the label.
     """
     lines = [line for line in stdout.splitlines() if line.strip()]
     if not lines or tuple(field.casefold() for field in lines[0].split()) != _LAUNCHCTL_LIST_HEADER:
@@ -342,7 +346,8 @@ def parse_launchctl_list(stdout: str) -> set[str]:
         fields = line.split()
         if (
             len(fields) != 3
-            or not all(field == "-" or field.isdigit() for field in fields[:2])
+            or not (fields[0] == "-" or fields[0].isdigit())
+            or not (fields[1] == "-" or _SIGNED_STATUS.fullmatch(fields[1]))
         ):
             raise RuntimeError(f"launchctl list returned a malformed row: {line!r}")
         labels.add(fields[2])

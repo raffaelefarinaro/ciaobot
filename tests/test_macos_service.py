@@ -1910,6 +1910,7 @@ def test_server_job_registered_treats_a_header_only_listing_as_absent(
         "garbage\n",
         "PID\tStatus\tLabel\ncom.ciao.server\n",
         "PID\tStatus\tLabel\nnot-a-pid\t0\tcom.ciao.server\n",
+        "PID\tStatus\tLabel\n-1\t0\tcom.ciao.server\n",
         "Job\tState\tLabel\n-\t0\tcom.ciao.server\n",
     ],
 )
@@ -1946,3 +1947,19 @@ def test_server_job_registered_surfaces_a_timeout(
     monkeypatch.setattr(macos_service.subprocess, "run", fake)
     with pytest.raises(RuntimeError, match="Could not query launchd"):
         macos_service.server_job_registered()
+
+
+def test_server_job_registered_accepts_a_signal_exit_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """launchd prints a negative status for a job killed by a signal."""
+
+    def fake(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command, 0,
+            stdout="PID\tStatus\tLabel\n-\t-15\tother.job\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(macos_service.subprocess, "run", fake)
+    assert macos_service.server_job_registered() is False

@@ -336,28 +336,38 @@ def parse_task_query(stdout: str) -> set[str]:
     """Task names from a ``/Query /FO CSV /NH`` response.
 
     ``/NH`` suppresses the header, so an empty response is Task Scheduler's
-    legitimate "no tasks". Every other row must have the documented
-    ``TaskName, Next Run Time, Status`` columns: CSV quoting rules alone would
-    accept arbitrary one-column text as a task name.
+    legitimate "no tasks". Every other row must be the documented
+    ``TaskName, Next Run Time, Status`` shape, and the name must be the full
+    task path Task Scheduler prints (always leading ``\\``): CSV quoting rules
+    alone would accept arbitrary text, an unexpected header, or a row of empty
+    fields as a task name.
     """
     import csv
     import io
 
-    if not stdout.strip():
+    text = stdout.lstrip("\ufeff")
+    if not text.strip():
         return set()
     try:
-        rows = list(csv.reader(io.StringIO(stdout), strict=True))
+        rows = list(csv.reader(io.StringIO(text), strict=True))
     except csv.Error as exc:
         raise WindowsServiceError("Could not parse scheduled task query") from exc
     names: set[str] = set()
     for row in rows:
-        if not any(field.strip() for field in row):
+        if not row:
+            # A blank line produces no record; a content line that parses to
+            # empty fields does not.
             continue
-        if len(row) < 3:
+        if len(row) != 3:
             raise WindowsServiceError(
                 f"Unrecognised scheduled task query row: {row!r}"
             )
-        names.add(row[0].strip().casefold())
+        name = row[0].strip()
+        if not name.startswith("\\"):
+            raise WindowsServiceError(
+                f"Unrecognised scheduled task name in the query: {name!r}"
+            )
+        names.add(name.casefold())
     return names
 
 
