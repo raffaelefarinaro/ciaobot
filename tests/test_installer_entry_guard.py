@@ -181,3 +181,14 @@ def test_unreadable_dotenv_is_not_silently_absent_for_the_strict_helper(
                 install_discovery._strict_set_up_workspace(tmp_path)
         finally:
             _restore(dotenv)
+
+
+def test_unreadable_task_query_refuses_bootstrap(monkeypatch, tmp_path):
+    env, _ = _fresh(monkeypatch, tmp_path, platform="win32")
+
+    def no_output():
+        raise windows_service.WindowsServiceError("Scheduled task query returned no output")
+
+    monkeypatch.setattr(windows_service, "engine_task_registered", no_output)
+    with pytest.raises(install_discovery.InstallerEntryRefused):
+        install_discovery.require_fresh_installer_entry(environ=env, cwd=tmp_path)
