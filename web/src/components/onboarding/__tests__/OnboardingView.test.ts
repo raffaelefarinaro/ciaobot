@@ -11,7 +11,7 @@ vi.mock('vue-router', async importOriginal => ({
   useRoute: () => ({ query: {} }),
   useRouter: () => ({ replace }),
 }))
-vi.mock('../../../lib/api', () => ({ api: { get: vi.fn() } }))
+vi.mock('../../../lib/api', () => ({ api: { get: vi.fn(), patch: vi.fn(), post: vi.fn() } }))
 
 beforeEach(() => { setActivePinia(createPinia()); vi.resetAllMocks() })
 
@@ -55,5 +55,37 @@ describe('OnboardingView', () => {
     // The provisioned path is the engine's, not an empty query value.
     expect((wrapper.get('input[name="folder"]').element as HTMLInputElement).value).toBe('/srv/ciaobot')
     expect((wrapper.get('input[name="folder"]').element as HTMLInputElement).readOnly).toBe(true)
+  })
+})
+
+describe('OnboardingView advancement', () => {
+  it('advances from the shared screen only after memory saves and access is ready', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/onboarding') return Promise.resolve({ schema: 1, revision: 2, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} }) as never
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal' }] }) as never
+      if (url === '/api/setup-status') return Promise.resolve({ workspace_root: '/srv/ciaobot' }) as never
+      return Promise.resolve({}) as never
+    })
+    vi.mocked(api.patch).mockResolvedValue({ schema: 1, revision: 3, installation: { status: 'in_progress', step: 'care' }, workspaces: {} } as never)
+
+    const MemoryStub = {
+      name: 'OnboardingMemoryStage',
+      emits: ['state', 'continue', 'back', 'refresh'],
+      template: '<button class="memory-continue" @click="$emit(\'state\', { dirty: false, pending: false, canContinue: true, error: null }); $emit(\'continue\')">save</button>',
+    }
+    const AccessStub = {
+      name: 'OnboardingAccessStage',
+      emits: ['state', 'continue', 'back', 'refresh'],
+      template: '<div />',
+      mounted(this: { $emit: (event: string, payload: unknown) => void }) {
+        this.$emit('state', { dirty: false, pending: false, canContinue: true, error: null })
+      },
+    }
+    const wrapper = mount(OnboardingView, {
+      global: { stubs: { OnboardingAccessStage: AccessStub, OnboardingMemoryStage: MemoryStub } },
+    })
+    await vi.waitFor(() => expect(wrapper.find('.memory-continue').exists()).toBe(true))
+    await wrapper.get('.memory-continue').trigger('click')
+    await vi.waitFor(() => expect(api.patch).toHaveBeenCalledWith('/api/onboarding', expect.objectContaining({ step: 'care' })))
   })
 })

@@ -10,6 +10,7 @@ import OnboardingMemoryStage from './OnboardingMemoryStage.vue'
 import OnboardingCareStage from './OnboardingCareStage.vue'
 import OnboardingFinishStage from './OnboardingFinishStage.vue'
 import { useOnboardingStore } from '../../stores/onboarding'
+import { safeReturnPath } from '../../stores/auth'
 import {
   readyToAdvance,
   type OnboardingStageContext,
@@ -112,11 +113,9 @@ async function afterMemorySave(): Promise<void> {
 }
 
 function validReturn(): string {
-  const value = String(route.query.returnTo || '/')
-  const internal = value.startsWith('/') && !value.startsWith('//') && !value.includes('\\')
-  const notAuth = !/^\/(login|onboarding)(?:[/?#]|$)/.test(value)
-  const noToken = !/[?&](?:setup_token|token)=/i.test(value)
-  return internal && notAuth && noToken ? value : '/'
+  // Same normalized validation as login, but the journey may not return to
+  // itself (`/x/../onboarding` normalizes into it).
+  return safeReturnPath(String(route.query.returnTo || '/'), { allowOnboarding: false }) ?? '/'
 }
 
 function back(): void {

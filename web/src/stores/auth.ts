@@ -9,7 +9,10 @@ import { clearSharedContent } from '../lib/sharedContent'
  * Control characters are rejected before parsing because a raw tab makes the
  * browser normalize `/<tab>/host` into `https://host/`.
  */
-export function safeReturnPath(requested: string | null | undefined): string | null {
+export function safeReturnPath(
+  requested: string | null | undefined,
+  { allowOnboarding = true }: { allowOnboarding?: boolean } = {},
+): string | null {
   if (!requested) return null
   if (/[\u0000-\u001f\u007f]/.test(requested)) return null
   if (!requested.startsWith('/') || requested.startsWith('//') || requested.includes('\\')) return null
@@ -26,6 +29,8 @@ export function safeReturnPath(requested: string | null | undefined): string | n
   // login page, and `?%73etup_token=` decodes to a setup token.
   if (/^\/login(?:\/|$)/.test(resolved.pathname)) return null
   if (resolved.searchParams.has("setup_token") || resolved.searchParams.has("token")) return null
+  // The journey's own exit must not loop back into the journey.
+  if (!allowOnboarding && /^\/onboarding(?:\/|$)/.test(resolved.pathname)) return null
   return requested
 }
 
