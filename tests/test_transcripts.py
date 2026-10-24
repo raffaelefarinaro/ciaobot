@@ -628,3 +628,51 @@ def test_transcript_has_human_turn_does_not_skip_an_unknown_file(tmp_path: Path)
 
     assert transcript_has_human_turn(garbage) is True
     assert transcript_has_human_turn(tmp_path / "missing.md") is True
+
+
+def _record(store: TranscriptStore, prompt: str, label: str) -> None:
+    store.record_turn(
+        AgentRequest(prompt=prompt, model="sonnet", mode="bypass", resume_session=None, images=[]),
+        ctx=ChatContext(chat_id=1),
+        response_text="ok",
+        effective_model="sonnet",
+        session_id="ses_1",
+        usage={},
+        quota={},
+        input_kind="text",
+        context_label=label,
+    )
+
+
+def _archived_context(store: TranscriptStore) -> str:
+    archived = store.archive_session(
+        ctx=ChatContext(chat_id=1),
+        active_model="sonnet",
+        last_effective_model="sonnet",
+        session_id="ses_1",
+    )
+    assert archived is not None
+    for line in archived.read_text(encoding="utf-8").splitlines():
+        if line.startswith("context:"):
+            return line.split(":", 1)[1].strip().strip('"')
+    raise AssertionError("archive has no context line")
+
+
+def test_a_real_title_replaces_the_placeholder_label(tmp_path: Path) -> None:
+    """Turn 1 recorded before auto-title landed must not pin "New Chat" on the archive."""
+    from ciao.models import DEFAULT_CHAT_TITLE
+
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "chat-archive")
+    _record(store, "first", DEFAULT_CHAT_TITLE)
+    _record(store, "second", "Quarterly review prep")
+
+    assert _archived_context(store) == "Quarterly review prep"
+
+
+def test_a_real_label_is_not_overwritten_by_a_later_one(tmp_path: Path) -> None:
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "chat-archive")
+    _record(store, "first", "Quarterly review prep")
+    _record(store, "second", "Renamed later")
+    _record(store, "third", "New Chat")
+
+    assert _archived_context(store) == "Quarterly review prep"

@@ -127,6 +127,7 @@ from ciao.frontmatter import split_frontmatter
 from ciao.model_tiers import is_tier
 from ciao.repo_link import read_repo_instructions, repo_state
 from ciao.models import (
+    DEFAULT_CHAT_TITLE,
     THINKING_LEVELS,
     AgentRequest,
     BridgeMode,
@@ -262,12 +263,15 @@ _RESUME_CONTINUE_PROMPT = "continue"
 # persistently flaky connection cannot loop forever burning quota. Once hit,
 # the turn is left for the user to continue manually.
 _MAX_CONNECTION_DROP_RETRIES = 6
-# Cap on hourly quota retries. Claude's session limit resets on a 5-hour
-# window, so six hourly attempts (the five hours of the window plus one) cover
-# a session limit that clears on schedule. Weekly and monthly limits use the
-# "quota_terminal" kind instead: one attempt a day, capped by
-# _MAX_TERMINAL_QUOTA_RETRIES, and never by this cap.
+# Cap on quota retries. Consecutive quota retries back off exponentially from
+# _RETRY_INTERVAL_SECONDS (1h, 2h, 4h, then every _MAX_QUOTA_RETRY_INTERVAL_SECONDS),
+# so a limit that does not clear is not hit with the identical turn every
+# hour. When Claude's saved rate-limit snapshot names the rejected five-hour
+# bucket's reset, the retry is pointed there instead (_quota_reset_at). Weekly
+# and monthly limits use the "quota_terminal" kind instead: one attempt a day,
+# capped by _MAX_TERMINAL_QUOTA_RETRIES, and never by this cap.
 _MAX_QUOTA_RETRIES = 6
+_MAX_QUOTA_RETRY_INTERVAL_SECONDS = 8 * 60 * 60
 # Weekly and monthly usage limits reset on a days-long window, so an hourly
 # retry would only burn attempts. One attempt a day for a week covers a weekly
 # limit that clears on schedule.
@@ -286,6 +290,18 @@ _NETWORK_RETRY_REASON = "network unreachable"
 
 def _network_retry_interval(attempts: int) -> int:
     return _NETWORK_RETRY_BASE_SECONDS << attempts
+
+
+def _quota_retry_interval(attempts: int) -> int:
+    """Delay before quota retry number ``attempts + 1``: 1h, 2h, 4h, then capped."""
+    return min(_RETRY_INTERVAL_SECONDS << min(attempts, 8), _MAX_QUOTA_RETRY_INTERVAL_SECONDS)
+
+
+# Claude rate-limit buckets whose rejection explains each quota retry kind.
+_QUOTA_RESET_BUCKETS = {
+    "quota": ("five_hour",),
+    "quota_terminal": ("seven_day", "seven_day_opus", "seven_day_sonnet"),
+}
 
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
@@ -558,7 +574,7 @@ def _prune_send_id_history(send_ids: dict) -> None:
 class ChatInfo:
     chat_id: str
     project_id: str
-    title: str = "New Chat"
+    title: str = DEFAULT_CHAT_TITLE
     model: str = "opus"
     # Routing key for ProviderService: which CLI runs the turn.
     provider: str = "claude"
@@ -665,6 +681,9 @@ class ChatInfo:
     # kind's budget at zero.
     retry_kind: str = ""
     retry_interval_seconds: int = _RETRY_INTERVAL_SECONDS
+    # True when the failed turn was an automation run, so the replay runs
+    # unattended too (unattended guidance, no attended-turn bookkeeping).
+    retry_unattended: bool = False
     # Visible messages preserved when the chat is handed to a fresh provider
     # session. They are prepended by /messages so the same chat does not lose
     # pre-handover history after reload.
@@ -1218,6 +1237,7 @@ class ProjectChatManager:
                 retry_attempts=int(cd.get("retry_attempts", 0) or 0),
                 retry_kind=str(cd.get("retry_kind", "") or ""),
                 retry_interval_seconds=int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS),
+                retry_unattended=bool(cd.get("retry_unattended", False)),
                 handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
                 ),
@@ -1340,6 +1360,7 @@ class ProjectChatManager:
                     "retry_attempts": c.retry_attempts,
                     "retry_kind": c.retry_kind,
                     "retry_interval_seconds": c.retry_interval_seconds,
+                    "retry_unattended": c.retry_unattended,
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
                     "context_digest": c.context_digest,
@@ -7307,6 +7328,7 @@ class ProjectChatManager:
         current_images: list[ImageAttachment] | None,
         had_progress: bool,
         reason: str,
+        unattended: bool,
     ) -> bool:
         """Arm a deferred retry for a quota/connection/startup/auth failure.
 
@@ -7321,7 +7343,8 @@ class ProjectChatManager:
         same cap because they are safe to replay but should not retry forever
         when the local runtime is persistently unhealthy. Every armed retry
         parks queued follow-ups onto the chat so they survive to the retried
-        turn. Returns True if a retry was armed.
+        turn. ``unattended`` is the failed turn's flag; the replay keeps it.
+        Returns True if a retry was armed.
         """
         chat = self._chats.get(chat_id)
         # Replaying the prompt after output already streamed re-runs any tool
@@ -7374,16 +7397,15 @@ class ProjectChatManager:
         elif kind == "quota_terminal":
             interval = _TERMINAL_QUOTA_RETRY_INTERVAL_SECONDS
         else:
-            interval = _RETRY_INTERVAL_SECONDS
+            interval = _quota_retry_interval(attempts)
         armed = self.set_chat_retry(
             chat_id,
             prompt,
             image_refs=image_refs,
             reason=reason,
-            next_at=(
-                self._terminal_quota_reset_at(chat) if kind == "quota_terminal" else None
-            ),
+            next_at=self._quota_reset_at(chat, kind),
             interval_seconds=interval,
+            unattended=unattended,
         )
         if armed is None:
             return False
@@ -7391,14 +7413,17 @@ class ProjectChatManager:
         self._park_pending_for_retry(chat_id, stream)
         return True
 
-    def _terminal_quota_reset_at(self, chat: ChatInfo | None) -> str | None:
-        """Return when a rejected Claude weekly bucket resets, plus a minute.
+    def _quota_reset_at(self, chat: ChatInfo | None, kind: str) -> str | None:
+        """Return when the rejected Claude bucket behind a quota retry resets, plus a minute.
 
-        The next daily attempt is pointed at the reset instead of a fixed
-        interval when the saved rate-limit snapshot names one. The file is user
-        state, so every field is type-checked and nothing here raises.
+        ``kind`` picks the buckets: the five-hour session window for "quota",
+        the weekly buckets for "quota_terminal"; any other kind has none. The
+        next attempt is pointed at the reset instead of the backoff interval
+        when the saved rate-limit snapshot names one. The file is user state,
+        so every field is type-checked and nothing here raises.
         """
-        if chat is None or chat.provider != "claude":
+        bucket_names = _QUOTA_RESET_BUCKETS.get(kind)
+        if bucket_names is None or chat is None or chat.provider != "claude":
             return None
         try:
             payload = RateLimitStore(
@@ -7411,7 +7436,7 @@ class ProjectChatManager:
             return None
         now = time.time()
         resets = []
-        for name in ("seven_day", "seven_day_opus", "seven_day_sonnet"):
+        for name in bucket_names:
             bucket = buckets.get(name)
             if not isinstance(bucket, dict) or bucket.get("status") != "rejected":
                 continue
@@ -7433,11 +7458,13 @@ class ProjectChatManager:
         reason: str = "manual",
         next_at: str | None = None,
         interval_seconds: int = _RETRY_INTERVAL_SECONDS,
+        unattended: bool = False,
     ) -> ChatInfo | None:
         """Mark a chat turn for deferred retry, hourly unless told otherwise.
 
         A manual or MCP retry is always hourly, even when an earlier automatic
-        retry on this chat ran on a shorter or daily interval.
+        retry on this chat ran on a shorter or daily interval. ``unattended``
+        replays the turn as an automation run.
         """
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived:
@@ -7450,6 +7477,7 @@ class ProjectChatManager:
         chat.retry_image_refs = list(image_refs or [])
         chat.retry_last_error = reason
         chat.retry_interval_seconds = interval_seconds
+        chat.retry_unattended = unattended
         chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
@@ -7554,7 +7582,7 @@ class ProjectChatManager:
             chat.retry_prompt,
             images=images or None,
             is_retry=True,
-            unattended=network,
+            unattended=network or chat.retry_unattended,
         )
 
     def _resolve_retry_images(self, chat: ChatInfo) -> list[ImageAttachment]:
@@ -7595,6 +7623,7 @@ class ProjectChatManager:
         chat.retry_attempts = 0
         chat.retry_kind = ""
         chat.retry_interval_seconds = _RETRY_INTERVAL_SECONDS
+        chat.retry_unattended = False
         self._save()
         self._publish_retry(chat)
         task = self._retry_tasks.pop(chat.chat_id, None)

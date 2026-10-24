@@ -920,28 +920,196 @@ def test_terminal_quota_reset_at_uses_claude_weekly_bucket(tmp_path: Path) -> No
     from datetime import UTC, datetime
 
     expected = datetime.fromtimestamp(resets_at + 60, UTC).replace(microsecond=0)
-    assert pcm._terminal_quota_reset_at(chat) == (
+    assert pcm._quota_reset_at(chat, "quota_terminal") == (
         expected.isoformat().replace("+00:00", "Z")
     )
 
     chat.provider = "opencode"
-    assert pcm._terminal_quota_reset_at(chat) is None
+    assert pcm._quota_reset_at(chat, "quota_terminal") is None
     chat.provider = "claude"
 
     store.write_text(
         json.dumps({"buckets": {"seven_day": {"status": "allowed", "resets_at": resets_at}}}),
         encoding="utf-8",
     )
-    assert pcm._terminal_quota_reset_at(chat) is None
+    assert pcm._quota_reset_at(chat, "quota_terminal") is None
 
     store.write_text(
         json.dumps({"buckets": {"seven_day": {"status": "rejected", "resets_at": 1}}}),
         encoding="utf-8",
     )
-    assert pcm._terminal_quota_reset_at(chat) is None
+    assert pcm._quota_reset_at(chat, "quota_terminal") is None
 
     store.write_text("{not json", encoding="utf-8")
-    assert pcm._terminal_quota_reset_at(chat) is None
+    assert pcm._quota_reset_at(chat, "quota_terminal") is None
+
+
+def test_quota_reset_at_uses_claude_five_hour_bucket_for_session_limits(tmp_path: Path) -> None:
+    """An hourly-kind quota retry lands just after a rejected five-hour bucket resets."""
+    import json
+    import time
+    from datetime import UTC, datetime
+
+    from ciao.rate_limits import default_store_path
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test", provider="claude")
+    store = default_store_path(pcm._runtime_root)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    resets_at = int(time.time()) + 2 * 3600
+    store.write_text(
+        json.dumps({
+            "buckets": {
+                "five_hour": {"status": "rejected", "resets_at": resets_at},
+                "seven_day": {"status": "allowed", "resets_at": resets_at + 86400},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    expected = datetime.fromtimestamp(resets_at + 60, UTC).replace(microsecond=0)
+    assert pcm._quota_reset_at(chat, "quota") == expected.isoformat().replace("+00:00", "Z")
+    # The weekly bucket is not rejected, and other kinds read no bucket at all.
+    assert pcm._quota_reset_at(chat, "quota_terminal") is None
+    assert pcm._quota_reset_at(chat, "connection") is None
+
+
+def test_quota_retry_interval_backs_off_and_caps() -> None:
+    from ciao.web.project_chats import _MAX_QUOTA_RETRIES, _quota_retry_interval
+
+    schedule = [_quota_retry_interval(n) for n in range(_MAX_QUOTA_RETRIES + 4)]
+    hour = 3600
+    assert schedule[:5] == [hour, 2 * hour, 4 * hour, 8 * hour, 8 * hour]
+    assert max(schedule) == 8 * hour
+
+
+async def test_consecutive_quota_retries_back_off(tmp_path: Path) -> None:
+    """Each further session-limit failure waits twice as long, up to the cap."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): reached your session usage limit",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    intervals = [pcm.get_chat(chat.chat_id).retry_interval_seconds]  # type: ignore[union-attr]
+    for _ in range(4):
+        retried = pcm.try_chat_retry_now(chat.chat_id)
+        assert retried is not None
+        await asyncio.wait_for(_consume(retried), timeout=2.0)
+        intervals.append(pcm.get_chat(chat.chat_id).retry_interval_seconds)  # type: ignore[union-attr]
+
+    assert intervals == [3600, 7200, 14400, 28800, 28800]
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_unattended_quota_turn_is_replayed_unattended(tmp_path: Path) -> None:
+    """A scheduled turn that hits a usage limit keeps its unattended flag on replay,
+    including across a restart that reloads the retry state from disk."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    seen: list[bool] = []
+
+    async def failing_stream_chat(chat_id, prompt, images=None, **kwargs):
+        seen.append(bool(kwargs.get("unattended")))
+        yield ResultEvent(
+            type="result",
+            result="usage limit reached",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = failing_stream_chat  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "scheduled care", unattended=True)
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    failed = pcm.get_chat(chat.chat_id)
+    assert failed is not None
+    assert failed.retry_status == "pending"
+    assert failed.retry_kind == "quota"
+    assert failed.retry_unattended is True
+
+    reloaded = _make_manager(tmp_path)
+    restored = reloaded.get_chat(chat.chat_id)
+    assert restored is not None
+    assert restored.retry_unattended is True
+
+    async def ok_stream_chat(chat_id, prompt, images=None, **kwargs):
+        seen.append(bool(kwargs.get("unattended")))
+        yield ResultEvent(
+            type="result",
+            result="done",
+            session_id="",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    reloaded.stream_chat = ok_stream_chat  # type: ignore[assignment]
+    retried = reloaded.try_chat_retry_now(chat.chat_id)
+    assert retried is not None
+    await asyncio.wait_for(_consume(retried), timeout=2.0)
+
+    assert seen == [True, True]
+    after = reloaded.get_chat(chat.chat_id)
+    assert after is not None
+    replay_index = str(after.user_turn_count - 1)
+    assert after.user_turn_unattended.get(replay_index) is True
+    assert after.retry_status == ""
+    assert after.retry_unattended is False
+
+
+async def test_attended_quota_turn_is_replayed_attended(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    seen: list[bool] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **kwargs):
+        seen.append(bool(kwargs.get("unattended")))
+        yield ResultEvent(
+            type="result",
+            result="usage limit reached",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "typed by a person")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    assert pcm.get_chat(chat.chat_id).retry_unattended is False  # type: ignore[union-attr]
+
+    retried = pcm.try_chat_retry_now(chat.chat_id)
+    assert retried is not None
+    await asyncio.wait_for(_consume(retried), timeout=2.0)
+    assert seen == [False, False]
+    pcm.stop_chat_retry(chat.chat_id)
 
 
 async def test_failed_turn_sets_last_error_and_next_turn_clears_it(tmp_path: Path) -> None:

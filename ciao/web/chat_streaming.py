@@ -204,6 +204,7 @@ class ChatStreamingHost(Protocol):
         current_images: list[ImageAttachment] | None,
         had_progress: bool,
         reason: str,
+        unattended: bool,
     ) -> bool: ...
 
     def _stop_result_payload(
@@ -727,6 +728,7 @@ class ChatStreaming:
                                         current_images=run_images,
                                         had_progress=had_provider_progress,
                                         reason=result_text or "quota limit",
+                                        unattended=run_unattended,
                                     )
                                 elif chat_service._is_terminal_quota_error(result_text):
                                     _arm_retry(
@@ -737,6 +739,7 @@ class ChatStreaming:
                                         current_images=run_images,
                                         had_progress=had_provider_progress,
                                         reason=result_text or "quota limit",
+                                        unattended=run_unattended,
                                     )
                                 elif chat_service._is_retryable_connection_error(
                                     result_text
@@ -749,6 +752,7 @@ class ChatStreaming:
                                         current_images=run_images,
                                         had_progress=had_provider_progress,
                                         reason=result_text or "connection error",
+                                        unattended=run_unattended,
                                     )
                                 elif chat_service._is_retryable_auth_error(result_text):
                                     _arm_retry(
@@ -759,6 +763,7 @@ class ChatStreaming:
                                         current_images=run_images,
                                         had_progress=had_provider_progress,
                                         reason=result_text or "auth error",
+                                        unattended=run_unattended,
                                     )
                             else:
                                 turn_assistant_text = event.result or ""
@@ -901,6 +906,7 @@ class ChatStreaming:
                                 current_images=current_images,
                                 had_progress=had_provider_progress,
                                 reason=error_msg,
+                                unattended=turn_unattended,
                             )
                         elif chat_service._is_retryable_quota_error(error_msg):
                             _arm_retry(
@@ -911,6 +917,7 @@ class ChatStreaming:
                                 current_images=current_images,
                                 had_progress=had_provider_progress,
                                 reason=error_msg,
+                                unattended=turn_unattended,
                             )
                         elif chat_service._is_terminal_quota_error(error_msg):
                             _arm_retry(
@@ -921,6 +928,7 @@ class ChatStreaming:
                                 current_images=current_images,
                                 had_progress=had_provider_progress,
                                 reason=error_msg,
+                                unattended=turn_unattended,
                             )
                         elif chat_service._is_retryable_connection_error(error_msg):
                             _arm_retry(
@@ -931,6 +939,7 @@ class ChatStreaming:
                                 current_images=current_images,
                                 had_progress=had_provider_progress,
                                 reason=error_msg,
+                                unattended=turn_unattended,
                             )
                         elif chat_service._is_retryable_auth_error(error_msg):
                             _arm_retry(
@@ -941,6 +950,7 @@ class ChatStreaming:
                                 current_images=current_images,
                                 had_progress=had_provider_progress,
                                 reason=error_msg,
+                                unattended=turn_unattended,
                             )
                         self._host._fallback_steers(chat_id, stream, "finished")
                         parked = stream.drain_pending()

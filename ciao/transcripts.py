@@ -25,6 +25,7 @@ from ciao.frontmatter import yaml_scalar
 from ciao.jsonio import read_json_dict
 from ciao.memory_policy import is_unattended_turn
 from ciao.models import (
+    DEFAULT_CHAT_TITLE,
     AgentRequest,
     AssistantTextDelta,
     ChatContext,
@@ -371,7 +372,10 @@ class TranscriptStore:
                 "context_label": context_label,
                 "turns": [],
             }
-        if context_label and not transcript.get("context_label"):
+        # A turn recorded before auto-title landed (the provider-error path
+        # records turn 1 under the placeholder) must not pin the placeholder on
+        # the archive: a real title replaces it.
+        if context_label and transcript.get("context_label") in ("", None, DEFAULT_CHAT_TITLE):
             transcript["context_label"] = context_label
         transcript["updated_at"] = _now_iso()
         transcript["selected_model"] = request.model
