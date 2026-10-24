@@ -221,7 +221,8 @@ the foreground (a `--workspace` is passed only as
 handoff result with `ciao installer activate`. A cancel or guard refusal leaves
 a complete binary install that resumes with `ciao run --installer-bootstrap`,
 and `--no-start` provisions nothing. Migration and existing-workspace installs
-keep the `ciao setup` + `ciao service start` path, as does Linux.
+keep the `ciao setup` + `ciao service start` path; this installer runs on
+macOS only.
 
 `--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images

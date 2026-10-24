@@ -1625,6 +1625,14 @@ if [ "$migrate_path" = skip ] && [ "$(uname -s)" = Darwin ]; then
         "~") fresh_candidate=$HOME ;;
         "~/"*) fresh_candidate="$HOME/${fresh_candidate#"~/"}" ;;
     esac
+    # The child's validator takes an absolute suggestion; a relative one the
+    # user typed must not make the wizard unreachable.
+    case "$fresh_candidate" in
+        /*) ;;
+        *) fresh_candidate="$(pwd -P)/$fresh_candidate" ;;
+    esac
+    fresh_suggestion=
+    [ -z "$workspace" ] || fresh_suggestion=$fresh_candidate
     fresh_definition="$HOME/Library/LaunchAgents/$SERVER_LABEL.plist"
     if [ ! -e "$fresh_definition" ] &&
         ! is_set_up_workspace "$fresh_candidate" &&
@@ -1644,17 +1652,19 @@ if [ "$migrate_path" != client ]; then
             run_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
             [ -n "$run_id" ] || fail "could not generate an installer run id"
             set -- run --installer-bootstrap --installer-run-id "$run_id"
-            [ -z "$workspace" ] || set -- "$@" --installer-suggest-workspace "$workspace"
+            # `--flag=value` so a suggestion that begins with a dash still
+            # reaches the wizard as a path.
+            [ -z "$fresh_suggestion" ] || set -- "$@" "--installer-suggest-workspace=$fresh_suggestion"
             bootstrap_rc=0
             "$ciao" "$@" || bootstrap_rc=$?
             if [ "$bootstrap_rc" -ne 0 ]; then
                 echo "Ciaobot is installed, but setup did not finish. Nothing in a workspace was created or changed by this installer." >&2
-                echo "Resume setup with: ciao run --installer-bootstrap" >&2
+                echo "Resume setup with: $(quote_shell_path "$ciao") run --installer-bootstrap" >&2
                 exit "$bootstrap_rc"
             fi
             if ! "$ciao" installer activate --run-id "$run_id"; then
                 echo "Ciaobot is installed, but the background service did not start. Nothing in the chosen folder was deleted or moved." >&2
-                echo "Resume with: ciao installer activate --run-id $run_id" >&2
+                echo "Resume with: $(quote_shell_path "$ciao") installer activate --run-id $run_id" >&2
                 exit 1
             fi
             fresh_completed=1
@@ -1925,7 +1935,7 @@ if [ "$fresh_macos" -eq 1 ]; then
             open "http://localhost:8443" >/dev/null 2>&1 || true
         fi
     else
-        echo "Setup was not started. Resume with: ciao run --installer-bootstrap"
+        echo "Setup was not started. Resume with: $(quote_shell_path "$ciao") run --installer-bootstrap"
     fi
 elif [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ]; then
     # Printed to the terminal and nowhere else: the URL is a one-time
