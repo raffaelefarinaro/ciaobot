@@ -192,6 +192,8 @@ def _setup_finish_asgi_app(peer: tuple[str, int], origin: str | None = None) -> 
         ],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     request_headers = {"host": "localhost:8543", "content-type": "application/json"}
     if origin is not None:
         request_headers["origin"] = origin

@@ -88,6 +88,36 @@ def _run_command(args: argparse.Namespace) -> int:
     )
 
 
+def _installer_command(args: argparse.Namespace) -> int:
+    """Verify an installer bootstrap result and start the service."""
+    from ciao.installer_handoff import HandoffError, activate
+
+    as_json = bool(args.as_json)
+    try:
+        result = activate(run_id=args.run_id)
+    except HandoffError as exc:
+        if as_json:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(
+                "Ciaobot was installed, but the service was not started: "
+                f"{exc}",
+                file=sys.stderr,
+            )
+        return 1
+    if as_json:
+        print(json.dumps({
+            "ok": True,
+            "workspace": str(result.workspace),
+            "service_backend": result.service_backend,
+            "definition": str(result.definition_path),
+            "port": result.port,
+        }))
+    else:
+        print(f"Ciaobot is starting from {result.workspace}.")
+    return 0
+
+
 def _run_server(
     *,
     supervised: bool = False,
@@ -7481,6 +7511,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
     desktop_uninstall_parser.set_defaults(func=_desktop_command)
+
+    installer_parser = subparsers.add_parser(
+        "installer",
+        help="Installer-only: verify a bootstrap result and start the service.",
+    )
+    installer_sub = installer_parser.add_subparsers(
+        dest="installer_action", required=True
+    )
+    installer_activate_parser = installer_sub.add_parser(
+        "activate",
+        help="Activate the service for a completed installer bootstrap run.",
+    )
+    installer_activate_parser.add_argument(
+        "--run-id",
+        required=True,
+        help="The run id the installer passed to `ciao run --installer-bootstrap`.",
+    )
+    installer_activate_parser.add_argument("--json", action="store_true", dest="as_json")
+    installer_activate_parser.set_defaults(func=_installer_command)
 
     linux_service_parser = subparsers.add_parser(
         "linux-service",
