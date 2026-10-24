@@ -1061,6 +1061,32 @@ def test_write_tool_reports_a_file_touch(tmp_path):
     assert events[0].file_touches == [{"file_path": "/workspace/new.py", "action": "write"}]
 
 
+def test_shell_ciao_file_surface_emits_surfaced_touch(tmp_path):
+    events = _convert(
+        _provider(tmp_path),
+        "session.tool.called",
+        {"id": "c", "name": "shell", "input": {"command": "ciao file surface memory-vault/x.html"}},
+    )
+    assert events[0].file_touches == [
+        {"file_path": "memory-vault/x.html", "action": "surfaced"}
+    ]
+
+
+def test_shell_redirect_emits_touch(tmp_path):
+    events = _convert(
+        _provider(tmp_path),
+        "session.tool.called",
+        {"id": "c", "name": "shell", "input": {"command": "echo hi > out/a.md"}},
+    )
+    assert [t["file_path"] for t in events[0].file_touches] == ["out/a.md"]
+    plain = _convert(
+        _provider(tmp_path),
+        "session.tool.called",
+        {"id": "d", "name": "shell", "input": {"command": "pwd"}},
+    )
+    assert plain[0].file_touches is None
+
+
 def test_read_tool_reports_no_file_touch(tmp_path):
     events = _convert(
         _provider(tmp_path),

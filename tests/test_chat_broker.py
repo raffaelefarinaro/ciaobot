@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -629,3 +630,51 @@ def test_deny_tool_use_ignores_empty_id() -> None:
     stream.publish({"type": "text_delta", "text": "x"})
     stream.deny_tool_use("")
     assert all(ev.get("type") != "tool_denied" for ev in stream.buffered_events())
+
+
+def test_relative_touch_resolves_against_agent_root_but_stays_install_relative(
+    tmp_path: Path,
+) -> None:
+    from ciao.web.chat_broker import normalize_file_touch_paths
+
+    install = tmp_path / "install"
+    agent = install / "personal"
+    agent.mkdir(parents=True)
+    out = normalize_file_touch_paths(
+        [
+            {"file_path": "notes/a.md", "action": "written"},
+            {"file_path": str(install / "top.md"), "action": "written"},
+        ],
+        install,
+        agent_root=agent,
+    )
+    assert [t["file_path"] for t in out] == [
+        Path("personal/notes/a.md").as_posix(),
+        "top.md",
+    ]
+
+
+def test_relative_touch_in_a_linked_repo_is_absolute_and_refined_there(
+    tmp_path: Path,
+) -> None:
+    from ciao.web.chat_broker import (
+        normalize_file_touch_paths,
+        refine_file_touch_actions,
+    )
+
+    install = tmp_path / "install"
+    repo = tmp_path / "repo"
+    install.mkdir()
+    (repo / "src").mkdir(parents=True)
+    expected = str((repo / "src/a.py").resolve())
+    touch = [{"file_path": "src/a.py", "action": "written"}]
+
+    out = normalize_file_touch_paths(touch, install, agent_root=repo)
+    assert [t["file_path"] for t in out] == [expected]
+
+    refined = refine_file_touch_actions(touch, install, agent_root=repo)
+    assert refined[0]["action"] == "created"
+
+    (repo / "src/a.py").write_text("x")
+    refined = refine_file_touch_actions(touch, install, agent_root=repo)
+    assert refined[0]["action"] == "written"

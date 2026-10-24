@@ -406,6 +406,8 @@ def extract_file_touches(tool_name: str, tool_input: object) -> list[dict]:
 def normalize_file_touch_paths(
     touches: list[dict],
     workspace_root: Path | None = None,
+    *,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Canonicalise file-card paths and discard invalid surface requests.
 
@@ -418,10 +420,16 @@ def normalize_file_touch_paths(
     existing artifact was deliberately selected for preview. Its tool-use
     event arrives before the structured MCP result, so reject a missing target
     here instead of briefly painting a card for a request that will fail.
+
+    A relative tool path is the agent's cwd-relative path, so it resolves
+    against ``agent_root`` when given (else ``workspace_root``). The canonical
+    spelling stays relative to ``workspace_root``, which is what the viewer
+    endpoints anchor relative paths to.
     """
     if not touches:
         return touches
     root = workspace_root.resolve() if workspace_root is not None else None
+    base = agent_root.resolve() if agent_root is not None else root
     normalized: list[dict] = []
     seen: set[str] = set()
     for touch in touches:
@@ -431,21 +439,21 @@ def normalize_file_touch_paths(
             continue
         raw_path = Path(path_text.strip())
         target = raw_path
-        if not raw_path.is_absolute() and root is not None:
-            target = root / raw_path
+        if not raw_path.is_absolute() and base is not None:
+            target = base / raw_path
         try:
             resolved = target.resolve()
         except (OSError, RuntimeError):
             resolved = target
 
-        if item.get("action") == "surfaced" and root is not None:
+        if item.get("action") == "surfaced" and base is not None:
             # Match CiaoControlPlane._safe_relative: file_surface accepts only
             # existing files whose requested path is relative to, and resolves
             # inside, the active workspace.
             if raw_path.is_absolute():
                 continue
             try:
-                if not resolved.is_relative_to(root) or not resolved.is_file():
+                if not resolved.is_relative_to(base) or not resolved.is_file():
                     continue
             except OSError:
                 continue
@@ -455,8 +463,7 @@ def normalize_file_touch_paths(
             try:
                 canonical = resolved.relative_to(root).as_posix()
             except ValueError:
-                if raw_path.is_absolute():
-                    canonical = str(resolved)
+                canonical = str(resolved)
         item["file_path"] = canonical
         if canonical in seen:
             continue
@@ -468,6 +475,8 @@ def normalize_file_touch_paths(
 def refine_file_touch_actions(
     touches: list[dict],
     workspace_root: Path | None = None,
+    *,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Upgrade ``written`` → ``created`` when the path does not yet exist.
 
@@ -478,7 +487,9 @@ def refine_file_touch_actions(
         return touches
     root = workspace_root.resolve() if workspace_root is not None else None
     refined: list[dict] = []
-    for touch in normalize_file_touch_paths(touches, workspace_root):
+    for touch in normalize_file_touch_paths(
+        touches, workspace_root, agent_root=agent_root
+    ):
         item = dict(touch)
         action = item.get("action")
         path_text = item.get("file_path")
@@ -503,6 +514,7 @@ def apply_file_touches_to_payload(
     payload: dict,
     *,
     workspace_root: Path | None = None,
+    agent_root: Path | None = None,
 ) -> None:
     """Normalise ``file_touch`` / ``file_touches`` on a tool_use WS payload."""
     if payload.get("type") != "tool_use":
@@ -515,7 +527,9 @@ def apply_file_touches_to_payload(
         touches = [payload["file_touch"]]
     else:
         return
-    touches = refine_file_touch_actions(touches, workspace_root)
+    touches = refine_file_touch_actions(
+        touches, workspace_root, agent_root=agent_root
+    )
     if not touches:
         payload.pop("file_touch", None)
         payload.pop("file_touches", None)

@@ -204,6 +204,7 @@ def _failed_tool_use_ids(msgs: list) -> set[str]:
 def _extract_assistant_blocks(
     raw: object,
     workspace_root: Path | None = None,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
@@ -259,6 +260,7 @@ def _extract_assistant_blocks(
             touches = normalize_file_touch_paths(
                 extract_file_touches(name, tinput),
                 workspace_root,
+                agent_root=agent_root,
             )
             entry = {"kind": "tool_use", "name": name, "summary": summary}
             # Kept so the history builder can match this call against its
@@ -679,7 +681,13 @@ def _overlay_assistant_timings(
 
 
 def _render_opencode_thread(
-    thread: dict, chat, *, metadata: bool = True, start_user_idx: int = 0
+    thread: dict,
+    chat,
+    *,
+    metadata: bool = True,
+    start_user_idx: int = 0,
+    workspace_root: Path | None = None,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Render opencode session messages into the provider-neutral PWA row shape.
 
@@ -693,6 +701,9 @@ def _render_opencode_thread(
 
     ``start_user_idx`` offsets per-session user numbering when stitching
     ``previous_session_ids``.
+
+    ``workspace_root`` and ``agent_root`` normalise file-card paths the way the
+    Claude replay does (see :func:`normalize_file_touch_paths`).
     """
     messages = thread.get("messages")
     if not isinstance(messages, list):
@@ -788,7 +799,11 @@ def _render_opencode_thread(
                 state = part.get("state")
                 state = state if isinstance(state, dict) else {}
                 raw_input = state.get("input")
-                touches = _opencode_file_touches(tool, raw_input)
+                touches = normalize_file_touch_paths(
+                    _opencode_file_touches(tool, raw_input) or [],
+                    workspace_root,
+                    agent_root=agent_root,
+                )
                 if str(state.get("status") or "") == "error":
                     # A failed/denied write or edit reached nothing on disk:
                     # match the live path (and the Claude replay path) by
@@ -1464,7 +1479,11 @@ async def _assemble_chat_messages(
                 if not opencode_thread:
                     continue
                 segment = _render_opencode_thread(
-                    opencode_thread, chat, start_user_idx=start_user_idx
+                    opencode_thread,
+                    chat,
+                    start_user_idx=start_user_idx,
+                    workspace_root=config.workspace_root,
+                    agent_root=session_root,
                 )
             except Exception:  # noqa: BLE001 — one missing segment must not blank siblings
                 continue
@@ -1569,6 +1588,7 @@ async def _assemble_chat_messages(
             blocks = _extract_assistant_blocks(
                 m.message,
                 workspace_root=config.workspace_root,
+                agent_root=session_root,
             )
             # Drop the CLI's "No response requested." sentinel that marks
             # interrupted turns. If the message contained ONLY that sentinel
