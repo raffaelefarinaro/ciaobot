@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ciao.config import CiaoConfig
+from ciao.schedules import is_system_schedule_id
 from ciao.transcripts import transcript_has_human_turn
 from ciao.web.chat_broker import EventsHub
 
@@ -124,11 +125,8 @@ class ArchivePipeline:
     @staticmethod
     def _project_doc_path(chat: ChatInfo, project: ProjectInfo | None) -> str:
         """The canonical project doc the memory pass folds into, or ""."""
-        if chat.schedule_id:
-            from ciao.schedules import is_system_schedule_id
-
-            if is_system_schedule_id(chat.schedule_id):
-                return ""
+        if is_system_schedule_id(chat.schedule_id):
+            return ""
         if project is None or project.is_auto:
             return ""
         return project.vault_doc_path
@@ -142,7 +140,6 @@ class ArchivePipeline:
         focus: dict[str, str] | None = None,
     ) -> None:
         config = self._host._config
-        from ciao.schedules import is_system_schedule_id
         from ciao.web import memory_pass
 
         chat = self._host._chats.get(chat_id)

@@ -203,7 +203,8 @@ async def test_retry_due_on_busy_chat_defers_minutes_not_interval(tmp_path: Path
         next_at=chat_service._iso_after(0),
         interval_seconds=8 * 60 * 60,
     )
-    loop_task = asyncio.create_task(pcm._retry_loop(chat.chat_id))
+    # set_chat_retry started the chat's retry loop; drive that one, not a second.
+    loop_task = pcm._retry_tasks[chat.chat_id]
     await asyncio.sleep(0.05)
 
     due = chat_service._parse_iso(pcm.get_chat(chat.chat_id).retry_next_at)
@@ -1590,3 +1591,32 @@ async def test_control_plane_network_kind_maps_outcomes(tmp_path: Path) -> None:
         cp.chat_retry_update(principal, chat.chat_id, "set", prompt="job", kind="network")
     assert capped.value.code == "retry_exhausted"
     pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_control_plane_set_retry_from_unattended_turn_stays_unattended(tmp_path: Path) -> None:
+    from ciao.control_plane import CiaoControlPlane, McpPrincipal
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="sched")
+    other = pcm.create_chat(project.project_id, title="other")
+    chat.user_turn_count = 1
+    chat.user_turn_unattended["0"] = True
+    cp = CiaoControlPlane(pcm._config, project_chat_manager=pcm, schedule_manager=None)
+    principal = McpPrincipal(
+        token_id="t", chat_id=chat.chat_id, project_id="p",
+        workspace="personal", provider="claude",
+    )
+
+    cp.chat_retry_update(principal, chat.chat_id, "set", prompt="job")
+    assert pcm.get_chat(chat.chat_id).retry_unattended is True
+
+    # Arming another chat's retry does not lend it this turn's unattended flag.
+    cp.chat_retry_update(principal, other.chat_id, "set", prompt="job")
+    assert pcm.get_chat(other.chat_id).retry_unattended is False
+
+    chat.user_turn_unattended.clear()
+    cp.chat_retry_update(principal, chat.chat_id, "set", prompt="job")
+    assert pcm.get_chat(chat.chat_id).retry_unattended is False
+    pcm.stop_chat_retry(chat.chat_id)
+    pcm.stop_chat_retry(other.chat_id)

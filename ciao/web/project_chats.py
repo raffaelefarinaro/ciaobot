@@ -669,8 +669,9 @@ class ChatInfo:
     # with an explicit dismissal, and a restart ends it with everything else.
     terminal_offer: TerminalOffer | None = None
     # Deferred retry state for provider quota/session-limit failures. Pending
-    # retries are replayed hourly until they succeed, the user stops them, or
-    # the chat is archived/deleted.
+    # retries are replayed on their kind's schedule (see _arm_retry) until they
+    # succeed, hit the kind's cap, the user stops them, or the chat is
+    # archived/deleted.
     retry_status: str = ""
     retry_prompt: str = ""
     retry_image_refs: list[str] = field(default_factory=list)
