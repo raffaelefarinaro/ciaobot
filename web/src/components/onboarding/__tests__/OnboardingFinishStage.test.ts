@@ -122,3 +122,23 @@ describe('OnboardingFinishStage refusals and unknowns', () => {
     expect(wrapper.emitted('state')?.at(-1)?.[0]).toMatchObject({ dirty: false })
   })
 })
+
+describe('OnboardingFinishStage location check', () => {
+  it('reports the folder as unknown when the setup read fails but the registry answers', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => {
+      if (url === '/api/workspaces') return Promise.resolve({ workspaces: [{ name: 'personal', agent_fs_scope: 'workspace' }] }) as never
+      if (url === '/api/setup-status') return Promise.reject(new Error('offline')) as never
+      if (url === '/api/local/backup/setup-prompt') return Promise.resolve({ context: {} }) as never
+      if (url === '/api/settings/providers') return Promise.resolve({ connections: {} }) as never
+      if (url.startsWith('/api/proposals/handover')) return Promise.resolve({ handover: 'off', acting_available: true }) as never
+      return Promise.resolve([]) as never
+    })
+    const wrapper = mount(OnboardingFinishStage, { props: { context, busy: false } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('Could not read the folder')
+    // The folder row must be unknown, not a skipped choice.
+    const folderRow = wrapper.findAll('.summary-row')[0]
+    expect(folderRow.text()).toContain('unknown')
+    expect(folderRow.text()).not.toContain('deferred')
+  })
+})

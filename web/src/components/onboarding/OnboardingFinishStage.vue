@@ -72,7 +72,9 @@ async function loadSummary(): Promise<void> {
   const rows: OnboardingSummaryItem[] = []
 
   rows.push(
-    !wsRow && !setupRow
+    // The folder is only verified by the setup read; without it the state is
+    // unknown even when the workspace registry answered.
+    !setupRow
       ? row('location', 'Folder and workspace', 'Could not read the folder', 'unknown', SETTINGS_HREF)
       : row(
           'location',
