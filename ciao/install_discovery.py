@@ -148,6 +148,40 @@ class InstallerEntryRefused(RuntimeError):
     """Installer bootstrap cannot prove that this is a fresh installation."""
 
 
+def _strict_exists(path: Path) -> bool:
+    """Whether ``path`` exists, refusing when that cannot be established.
+
+    ``os.path.lexists`` reports ``False`` for an unreadable parent directory, so
+    an install whose definition merely cannot be seen would look fresh. Only a
+    definite "not there" is absence. A dangling symlink still counts as present.
+    """
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        raise InstallerEntryRefused(f"Could not inspect {path}: {exc}") from exc
+    return True
+
+
+def _strict_set_up_workspace(root: Path) -> bool:
+    """``is_set_up_workspace`` for the guard: I/O errors refuse, never read as absent."""
+    from ciao.setup_marker import RUNTIME_DIR_NAME, WORKSPACE_REGISTRY_FILENAME
+
+    if _strict_exists(root / RUNTIME_DIR_NAME / WORKSPACE_REGISTRY_FILENAME):
+        return True
+    env_path = root / ".env"
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InstallerEntryRefused(f"Could not read {env_path}: {exc}") from exc
+    from ciao.macos_service import parse_dotenv
+
+    return bool(parse_dotenv(text).get("CIAO_WORKSPACES", "").strip())
+
+
 def require_fresh_installer_entry(*, environ: Mapping[str, str], cwd: Path) -> None:
     """Raise unless installer bootstrap is demonstrably safe. Read-only."""
     platform = _platform()
@@ -158,24 +192,22 @@ def require_fresh_installer_entry(*, environ: Mapping[str, str], cwd: Path) -> N
         "CIAO_VAULT_DIR", "CIAO_VAULT_ROOT",
     )):
         raise InstallerEntryRefused("Inherited workspace or storage redirect is present")
-    from ciao.setup_marker import is_set_up_workspace
-    if is_set_up_workspace(cwd):
+    if _strict_set_up_workspace(cwd):
         raise InstallerEntryRefused("Current directory is an existing Ciaobot workspace")
     home_root = Path.home() / "Ciaobot"
-    if is_set_up_workspace(home_root):
+    if _strict_set_up_workspace(home_root):
         raise InstallerEntryRefused("Default Ciaobot workspace already exists")
     try:
         if platform == "darwin":
             from ciao import macos_service
             definition = macos_service.live_launch_agents_dir() / f"{macos_service.SERVER_LABEL}.plist"
-            # `lexists` so a dangling symlink is still evidence of an install.
-            if os.path.lexists(definition):
+            if _strict_exists(definition):
                 raise InstallerEntryRefused("Live LaunchAgent definition already exists")
             registered = macos_service.server_job_registered()
         else:
             from ciao import windows_service
             definition = windows_service.live_task_dir() / windows_service.TASK_FILE_NAME
-            if os.path.lexists(definition):
+            if _strict_exists(definition):
                 raise InstallerEntryRefused("Live scheduled-task definition already exists")
             registered = windows_service.engine_task_registered()
         if registered:
