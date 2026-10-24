@@ -399,7 +399,7 @@ def test_world_readable_result_never_activates(monkeypatch, tmp_path) -> None:
     path = _record(backend, workspace, definition, run_id)
     path.chmod(0o644)
     monkeypatch.setattr(service_backend, "current_backend", lambda: backend)
-    with pytest.raises(installer_handoff.HandoffError, match="readable by other users"):
+    with pytest.raises(installer_handoff.HandoffError, match="owner-only"):
         installer_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
     assert backend.loaded == []
 
@@ -473,3 +473,73 @@ def test_unbounded_startup_id_is_refused(monkeypatch, tmp_path) -> None:
             written=[definition],
             port=8443,
         )
+
+
+@SUPPORTED
+def test_a_predictable_temporary_path_cannot_redirect_the_write(
+    monkeypatch, tmp_path
+) -> None:
+    """A hardlinked ``handoff.json.tmp`` must not be written through."""
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("untouched", encoding="utf-8")
+    scratch = installer_handoff.scratch_root()
+    scratch.mkdir(parents=True, exist_ok=True)
+    os.link(sentinel, scratch / f"{installer_handoff.FILENAME}.tmp")
+    _record(backend, workspace, definition, run_id)
+    assert sentinel.read_text(encoding="utf-8") == "untouched"
+
+
+@SUPPORTED
+def test_windows_activation_requires_a_private_result(monkeypatch, tmp_path) -> None:
+    """The DACL gate is asked on every platform, not just where mode bits exist."""
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    _record(backend, workspace, definition, run_id)
+    monkeypatch.setattr(installer_handoff, "is_private", lambda _path: False)
+    monkeypatch.setattr(service_backend, "current_backend", lambda: backend)
+    with pytest.raises(installer_handoff.HandoffError, match="owner-only"):
+        installer_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
+    assert backend.loaded == []
+
+
+@SUPPORTED
+@pytest.mark.parametrize("failure", [OSError("no home"), RuntimeError("no dir"), ValueError("bad")])
+def test_live_directory_failure_is_reported(monkeypatch, tmp_path, failure) -> None:
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    _record(backend, workspace, definition, run_id)
+
+    def explode():
+        raise failure
+
+    backend.live_agents_dir = explode  # type: ignore[method-assign]
+    monkeypatch.setattr(service_backend, "current_backend", lambda: backend)
+    with pytest.raises(installer_handoff.HandoffError, match="live service definitions"):
+        installer_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
+
+
+@SUPPORTED
+def test_service_manager_value_error_is_reported(monkeypatch, tmp_path) -> None:
+    backend, workspace, definition, run_id = _recordable(monkeypatch, tmp_path)
+    _record(backend, workspace, definition, run_id)
+
+    def fail(_definition):
+        raise ValueError("invalid plist")
+
+    backend.load_agent = fail  # type: ignore[method-assign]
+    monkeypatch.setattr(service_backend, "current_backend", lambda: backend)
+    with pytest.raises(installer_handoff.HandoffError, match="invalid plist"):
+        installer_handoff.activate(run_id=run_id, is_set_up=lambda _ws: True)
+
+
+@SUPPORTED
+def test_unrelated_definition_errors_are_not_swallowed(monkeypatch, tmp_path) -> None:
+    """A programming error in the task parser surfaces as itself."""
+    definition = tmp_path / "task.xml"
+    definition.write_text("<Task/>", encoding="utf-8")
+
+    def explode(_definition):
+        raise TypeError("bug")
+
+    monkeypatch.setattr(windows_service, "task_workspace", explode)
+    with pytest.raises(TypeError, match="bug"):
+        installer_handoff._definition_workspace("windows", definition)
