@@ -85,7 +85,11 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
-from ciao.providers.opencode import OpencodeProvider, running_opencode_child_ids
+from ciao.providers.opencode import (
+    OpencodeProvider,
+    opencode_child_status,
+    running_opencode_child_ids,
+)
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
 from ciao.schedule_command import normalize_schedule_command
@@ -3248,7 +3252,7 @@ async def chat_subagents(request: Request) -> JSONResponse:
                 # endpoint is polled every few seconds while a turn streams —
                 # derive the lifecycle from the child's own messages and anchor
                 # it to the parent turn sent before the child was created.
-                "status": transcript_service._opencode_child_status(
+                "status": opencode_child_status(
                     messages,
                     info,
                     item.get("active") if isinstance(item.get("active"), bool) else None,

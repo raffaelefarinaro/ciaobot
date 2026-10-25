@@ -4549,15 +4549,61 @@ class OpencodeProvider(BaseSDKProvider):
                 return False
 
 
+def opencode_child_status(
+    messages: list,
+    info: dict | None = None,
+    active: bool | None = None,
+) -> str:
+    """A V2 child session's lifecycle state.
+
+    ``/api/session/active`` is authoritative for the current execution;
+    ``Session.Info.outcome`` describes only the previous completed execution.
+    Normalized projected messages remain a defensive fallback for sparse data.
+    """
+    if active is True:
+        return "running"
+    last: dict | None = None
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        message_info = message.get("info")
+        if isinstance(message_info, dict) and message_info.get("role") == "assistant":
+            last = message_info
+    if last is not None:
+        if last.get("error"):
+            return "failed"
+        time_info = last.get("time")
+        if (
+            isinstance(time_info, dict)
+            and time_info.get("created")
+            and not time_info.get("completed")
+        ):
+            return "running"
+    if isinstance(info, dict):
+        outcome = str(info.get("outcome") or "")
+        if outcome == "failed":
+            return "failed"
+        if outcome in {"succeeded", "interrupted"}:
+            return "completed"
+        if active is None:
+            # A read from a different OpenCode process cannot establish
+            # inactivity. Keep an unobserved child visible/running rather than
+            # allowing an archive or schedule waiter to settle it early.
+            return "running"
+    if active is False:
+        return "completed"
+    if active is None and isinstance(info, dict):
+        return "running"
+    return "completed"
+
+
 def running_opencode_child_ids(tree: Sequence[Mapping[str, Any]]) -> list[str]:
     """Ids of the children in a collab tree that are still running.
 
     The one running-child rule, shared by the watcher count and the
-    running-subagents route: a child runs by ``_opencode_child_status``
+    running-subagents route: a child runs by ``opencode_child_status``
     (``active`` is authoritative; otherwise message timing and ``outcome``).
     """
-    from ciao.web import transcript_service
-
     ids: list[str] = []
     for item in tree:
         if not isinstance(item, Mapping):
@@ -4570,7 +4616,7 @@ def running_opencode_child_ids(tree: Sequence[Mapping[str, Any]]) -> list[str]:
         messages = item.get("messages")
         messages = messages if isinstance(messages, list) else []
         active = item.get("active")
-        status = transcript_service._opencode_child_status(
+        status = opencode_child_status(
             messages, info, active if isinstance(active, bool) else None
         )
         if status == "running":

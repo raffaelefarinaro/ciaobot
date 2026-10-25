@@ -176,9 +176,10 @@ const outcome = computed(() => {
 const hasActivity = computed(() => props.agentCount > 0 || processCount.value > 0 || outcome.value !== null)
 const announcement = computed(() => {
   if (outcome.value) return `Background run: ${outcome.value.text}`
-  if (!props.runs.length) return ''
-  const more = props.runs.length > 1 ? ` and ${props.runs.length - 1} more` : ''
-  return `Running in the background: ${backgroundRunLabel(props.runs[0])}${more}`
+  if (!processCount.value) return ''
+  const first = props.runs.length ? backgroundRunLabel(props.runs[0]) : subagentLabel(shellRows.value[0])
+  const more = processCount.value > 1 ? ` and ${processCount.value - 1} more` : ''
+  return `Running in the background: ${first}${more}`
 })
 
 function toggle(key: string, event: MouseEvent) {
