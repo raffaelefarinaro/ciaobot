@@ -4019,6 +4019,8 @@ class ProjectChatManager:
                     }
                     if usage:
                         row["usage"] = usage
+                    if turn["effective_model"]:
+                        row["effective_model"] = turn["effective_model"]
                     turns_data.append(row)
 
         return turns_data
