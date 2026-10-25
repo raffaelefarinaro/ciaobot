@@ -97,6 +97,23 @@ def _is_sdk_internal_diagnostic(text: str) -> bool:
     return any(marker in lowered for marker in _SDK_INTERNAL_DIAGNOSTIC_MARKERS)
 
 
+def _unreported_usage(usage: dict[str, str]) -> bool:
+    """True when *usage* is non-empty and every value parses as int 0.
+
+    An accounted model call always reads more than 0 tokens, so an all-zero
+    dict (the CLI's interrupt result) means usage was not reported.
+    """
+    if not usage:
+        return False
+    for value in usage.values():
+        try:
+            if int(value) != 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 class ChatStreamingHost(Protocol):
     """The complete manager surface used by :class:`ChatStreaming`."""
 
@@ -1399,6 +1416,12 @@ class ChatStreaming:
                 # not become the durable/rendered reply. Keep it an error, but
                 # replace the internal with actionable prose.
                 event = replace(event, result=_SDK_INTERNAL_ERROR_MESSAGE)
+            if (
+                isinstance(event, ResultEvent)
+                and event.stopped
+                and _unreported_usage(event.usage)
+            ):
+                event = replace(event, usage={})
             # Aggregate the terminal state before yielding: a consumer that
             # inspects the outcome the moment this event is delivered (the
             # boundary contract) must already see response/usage/error flags.
