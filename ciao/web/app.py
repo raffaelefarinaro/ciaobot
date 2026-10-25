@@ -399,7 +399,17 @@ def _spa_catchall(request):
     return FileResponse(STATIC_DIR / "index.html", status_code=404, headers=headers)
 
 
-def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
+def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None) -> Starlette:
+    import uuid
+    if installer_bootstrap and not config.bootstrap_mode:
+        raise ValueError("installer bootstrap requires bootstrap-mode config")
+    if installer_bootstrap:
+        try:
+            uuid.UUID(installer_run_id or "")
+        except ValueError as exc:
+            raise ValueError("installer bootstrap requires a valid run id") from exc
+    elif installer_run_id is not None:
+        raise ValueError("installer run id requires installer bootstrap mode")
     serializer = make_serializer(config.pwa_auth_token)
 
     routes = [
@@ -858,6 +868,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.serializer = serializer
     app.state.config = config
+    app.state.installer_bootstrap = installer_bootstrap
+    app.state.installer_run_id = installer_run_id
     app.state.terminal_clock = time.monotonic
     app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
     # The one owner of every terminal shell the browser opens. It is built

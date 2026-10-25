@@ -66,16 +66,54 @@ def _relaunch_argv() -> list[str]:
     return [sys.executable, "-m", "ciao.cli", *sys.argv[1:]]
 
 
-def _run_server(*, supervised: bool = False) -> int:
+def _run_command(args: argparse.Namespace) -> int:
+    if args.installer_run_id and not args.installer_bootstrap:
+        print("--installer-run-id requires --installer-bootstrap", file=sys.stderr)
+        return 2
+    if args.installer_bootstrap and args.supervised:
+        print("--installer-bootstrap cannot be combined with --supervised", file=sys.stderr)
+        return 2
+    run_id = args.installer_run_id
+    if args.installer_bootstrap and not run_id:
+        import uuid
+
+        run_id = str(uuid.uuid4())
+    if not args.installer_bootstrap:
+        # Ordinary `ciao run` keeps its exact call shape.
+        return _run_server(supervised=args.supervised)
+    return _run_server(
+        supervised=args.supervised,
+        installer_bootstrap=True,
+        installer_run_id=run_id,
+    )
+
+
+def _run_server(
+    *,
+    supervised: bool = False,
+    installer_bootstrap: bool = False,
+    installer_run_id: str | None = None,
+) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
-        server_main(supervised=supervised)
+        if installer_bootstrap:
+            server_main(
+                supervised=supervised,
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+            )
+        else:
+            server_main(supervised=supervised)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
         code = 0
+    if installer_bootstrap:
+        # The installer parent owns this child's lifetime; a relaunch here would
+        # detach from it and make the outcome unobservable.
+        return code
     if code == RESTART_EXIT_CODE:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
@@ -7334,7 +7372,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit with the restart code instead of re-execing; for `ciao supervise`.",
     )
-    run_parser.set_defaults(func=lambda args: _run_server(supervised=args.supervised))
+    run_parser.add_argument(
+        "--installer-bootstrap",
+        action="store_true",
+        help=(
+            "Installer-only: start a scratch first-run bootstrap for a fresh machine. "
+            "Refused when a Ciaobot install already exists."
+        ),
+    )
+    run_parser.add_argument(
+        "--installer-run-id",
+        default=None,
+        help="Installer-only correlation id for the handoff result (requires --installer-bootstrap).",
+    )
+    run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(
         "supervise",
