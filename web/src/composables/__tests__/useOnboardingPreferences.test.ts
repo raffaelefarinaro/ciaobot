@@ -11,6 +11,23 @@ beforeEach(() => { setActivePinia(createPinia()); vi.resetAllMocks() })
 
 describe('useOnboardingPreferences', () => {
 
+  it('saves after the mounted stage reads dirty before preferences finish loading', async () => {
+    vi.mocked(api.get).mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/proposals/handover')
+        ? { handover: 'off', acting_available: true }
+        : { schema: 1, revision: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: {} },
+    ) as never)
+    const update = vi.spyOn(useProjectStore(), 'updateWorkspace').mockResolvedValue(undefined as never)
+    const prefs = useOnboardingPreferences({ kind: 'installation' }, 'personal')
+    expect(prefs.dirty.value).toBe(false)
+    await prefs.load()
+    expect(prefs.dirty.value).toBe(true)
+    prefs.draft.acknowledged = true
+    expect(await prefs.saveMemoryHandover()).toBe(true)
+    expect(update).toHaveBeenCalledWith('personal', { memory_handover: 'all' })
+    expect(prefs.dirty.value).toBe(false)
+  })
+
   it('preselects a pending workspace but does not save until explicitly requested', async () => {
     const progress = { revision: 1, schema: 1, installation: { status: 'in_progress', step: 'access_memory' }, workspaces: { studio: { status: 'in_progress', step: 'access_memory' } } }
     vi.mocked(api.get).mockResolvedValueOnce({ workspace: 'studio', handover: 'off', acting_available: true, agreement: {} } as never).mockResolvedValueOnce(progress as never)

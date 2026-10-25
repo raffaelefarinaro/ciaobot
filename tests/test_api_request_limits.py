@@ -49,6 +49,27 @@ def _app() -> Starlette:
     ])
 
 
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_bodyless_read_accepts_json_content_type(method: str) -> None:
+    async def status(request):
+        return Response("ready")
+
+    app = Starlette(routes=[Route("/api/setup-status", status, methods=["GET", "HEAD"])])
+    client = TestClient(ApiRequestBodyLimitMiddleware(app))
+    response = client.request(method, "/api/setup-status", headers={"Content-Type": "application/json"})
+    assert response.status_code == 200
+
+
+def test_nonempty_malformed_json_get_remains_rejected() -> None:
+    async def status(request):
+        raise AssertionError("malformed body must not reach the handler")
+
+    app = Starlette(routes=[Route("/api/setup-status", status, methods=["GET"])])
+    client = TestClient(ApiRequestBodyLimitMiddleware(app))
+    response = client.request("GET", "/api/setup-status", content=b"invalid", headers={"Content-Type": "application/json"})
+    assert response.status_code == 400
+
+
 def test_declared_oversize_is_rejected_without_reading_body() -> None:
     async def run() -> tuple[list[dict], bool]:
         app = ApiRequestBodyLimitMiddleware(_app())
