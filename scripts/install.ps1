@@ -279,6 +279,60 @@ print(name, digest, size)
         }
     }
 
+    # What a freshly activated engine's startup status says: 'ready',
+    # 'port_in_use', or '' for not yet. HTTP 200 alone can be an unrelated
+    # listener, so only the installed version with a finished bind phase is
+    # ready - the rule fresh_startup_state in install-engine.sh applies.
+    function Get-FreshStartupState([int]$Port, [string]$ExpectedVersion) {
+        try {
+            $response = Invoke-WebRequest -Uri "http://localhost:$Port/api/startup-status" `
+                -UseBasicParsing -TimeoutSec 5
+            if ($response.StatusCode -ne 200 -or $response.Content.Length -gt 65536) { return '' }
+            $status = $response.Content | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            return ''
+        }
+        if ([string]$status.version -ne $ExpectedVersion) { return '' }
+        if ($status.port_in_use -eq $true) { return 'port_in_use' }
+        $bind = @($status.phases | Where-Object { $_.name -eq 'server_starting' })
+        if (($status.overall_ready -eq $true) -and ($bind.Count -eq 1) -and ($bind[0].status -eq 'done')) {
+            return 'ready'
+        }
+        return ''
+    }
+
+    # Whether anything holds $Port on any interface. The activated engine may
+    # listen on every interface, so the probe is an exclusive wildcard bind,
+    # which Windows refuses while any other socket is bound to the port.
+    function Test-PortInUse([int]$Port) {
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $Port)
+        $listener.ExclusiveAddressUse = $true
+        try {
+            $listener.Start()
+            return $false
+        } catch [System.Net.Sockets.SocketException] {
+            return $true
+        } finally {
+            try { $listener.Stop() } catch { }
+        }
+    }
+
+    # The programs listening on $Port, or '' when none is known.
+    # Get-NetTCPConnection is missing on some editions, so its absence costs
+    # the owner's name, never the port check. The name is the holder's own
+    # choice, so only printable ASCII of it is ever printed.
+    function Get-PortOwner([int]$Port) {
+        try {
+            $ids = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop |
+                ForEach-Object { $_.OwningProcess } | Sort-Object -Unique)
+        } catch {
+            return ''
+        }
+        $names = @($ids | ForEach-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName } |
+            Where-Object { $_ })
+        return (($names -join ' ') -replace '[^\x20-\x7E]', ' ').Trim()
+    }
+
     # Why the engine could not bind its port (#1669), or '' when it did not say.
     #
     # The engine records the reason outside the workspace
@@ -853,6 +907,16 @@ print(name, digest, size)
             if ($NoStart) {
                 Write-Host 'Setup was not started. Resume with: ciao run --installer-bootstrap'
             } else {
+                # The bootstrap serves loopback only, so it can start on a port
+                # that the activated engine, which may listen on every
+                # interface, cannot bind. Warn, but let Advanced setup choose
+                # another port.
+                if (Test-PortInUse $DefaultPort) {
+                    $owner = Get-PortOwner $DefaultPort
+                    $heldBy = ''
+                    if ($owner) { $heldBy = " by $owner" }
+                    Write-Warning "Port $DefaultPort is already in use$heldBy. Choose another port in Advanced setup, or free port $DefaultPort before completing setup."
+                }
                 $runId = [guid]::NewGuid().ToString().ToLowerInvariant()
                 if (-not $runId) { Fail 'could not generate an installer run id' }
                 $bootstrapArgs = @('run', '--installer-bootstrap', '--installer-run-id', $runId)
@@ -867,11 +931,24 @@ print(name, digest, size)
                 }
                 $activation = Invoke-Native $ciao @('installer', 'activate', '--run-id', $runId, '--json') $false
                 $activationText = @($activation.Output) -join "`n"
+                # Only the verified activation result knows the wizard's chosen
+                # port: refuse an ambiguous result rather than guess the default.
                 try {
                     if ($activation.ExitCode -ne 0) { throw 'activation command failed' }
                     $activated = $activationText | ConvertFrom-Json -ErrorAction Stop
-                    if (-not $activated.workspace) { throw 'activation JSON did not contain workspace' }
-                    $workspace = [System.IO.Path]::GetFullPath([string]$activated.workspace)
+                    if ($activated.ok -ne $true) { throw 'activation was not successful' }
+                    if ($activated.service_backend -ne 'windows') { throw 'invalid activation backend' }
+                    $activatedPort = $activated.port
+                    if (-not (($activatedPort -is [int]) -or ($activatedPort -is [long])) -or
+                        ($activatedPort -lt 1) -or ($activatedPort -gt 65535)) {
+                        throw 'invalid activation port'
+                    }
+                    $activatedWorkspace = [string]$activated.workspace
+                    if (-not $activatedWorkspace -or -not [System.IO.Path]::IsPathRooted($activatedWorkspace)) {
+                        throw 'invalid activation workspace'
+                    }
+                    $workspace = [System.IO.Path]::GetFullPath($activatedWorkspace)
+                    $freshPort = [int]$activatedPort
                 } catch {
                     Write-Host $activationText
                     Write-Host "Resume with: ciao installer activate --run-id $runId"
@@ -888,12 +965,40 @@ print(name, digest, size)
                 $json = New-Object System.Text.UTF8Encoding($false)
                 [System.IO.File]::WriteAllText($StateFile, (ConvertTo-Json -InputObject $state), $json)
                 if (-not $stateWasThere) { $done += 'state' }
+                # `ciao installer activate` started the task; the engine still
+                # has to answer before the installer says it is running.
+                $freshReady = $false
+                $signedIn = Test-UserSignedIn
+                for ($wait = 1; $signedIn -and $wait -le $HealthAttempts; $wait++) {
+                    $startup = Get-FreshStartupState $freshPort $Version
+                    if ($startup -eq 'ready') {
+                        $freshReady = $true
+                        break
+                    }
+                    if ($startup -eq 'port_in_use') { break }
+                    Start-Sleep -Seconds 1
+                }
                 Write-Host "Ciaobot $Version is installed: $ciao"
                 Write-Host "Workspace: $workspace"
                 if ($pathEntry) { Write-Host "Added to your PATH for new terminals (and to this one): $pathEntry" }
-                Write-Host 'Return to the browser tab to finish onboarding, or open http://localhost:8443 if it is closed.'
-                if (-not [Console]::IsOutputRedirected) {
-                    try { Start-Process 'http://localhost:8443' | Out-Null } catch { }
+                $freshUrl = "http://localhost:$freshPort"
+                if ($freshReady) {
+                    Write-Host 'Ciaobot is running from the folder you chose. Return to the browser tab to finish onboarding.'
+                    Write-Host "If you closed it, open $freshUrl and log in with the password you set."
+                    if (-not [Console]::IsOutputRedirected) {
+                        try { Start-Process $freshUrl | Out-Null } catch { }
+                    }
+                } elseif (-not $signedIn) {
+                    Write-Host "Setup is saved in the folder you chose. Nobody is signed in to Windows as $env:USERDOMAIN\$env:USERNAME, so Ciaobot starts the next time this account signs in; then open $freshUrl and log in with the password you set."
+                } else {
+                    # The engine records a bind failure outside the workspace,
+                    # because an engine that cannot bind cannot serve the
+                    # endpoint that would report it (#1654, #1669).
+                    $freshPortReason = Read-PortInUseReason $uv $wheel
+                    if ($freshPortReason) { Write-Warning "Ciaobot engine installer: $freshPortReason" }
+                    Write-Host "Setup is saved in the folder you chose, but Ciaobot is not answering yet. Once it is, open $freshUrl and log in with the password you set."
+                    $mutated = $false
+                    throw 'Ciaobot did not answer after setup'
                 }
             }
         } else {

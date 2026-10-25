@@ -30,7 +30,11 @@ On a fresh machine, the installer leaves workspace creation to the browser
 onboarding flow. `-Workspace` suggests a folder but does not create it; after
 you finish setup, the installer activates the logon task. If setup is cancelled,
 resume with `ciao run --installer-bootstrap`. With `-NoStart`, nothing is
-provisioned and that same command resumes setup later.
+provisioned and that same command resumes setup later. If port 8443 is already
+taken, the installer warns before the wizard opens: choose another port in
+Advanced setup or free 8443. After activation it waits for the engine on the
+port you chose and reports it running only once it answers; otherwise setup is
+kept and the installer says Ciaobot is not answering yet.
 
 `iex` cannot take arguments, so to pass an option run the script as a script
 block:

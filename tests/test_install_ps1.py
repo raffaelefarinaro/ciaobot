@@ -902,3 +902,74 @@ def test_format_command_parses_back_to_the_same_arguments() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.splitlines() == [program, *arguments]
+
+
+def _fresh_path() -> str:
+    start = SCRIPT_TEXT.index("if ($freshInstall) {")
+    return SCRIPT_TEXT[start:SCRIPT_TEXT.index("# The workspace is never removed by this script", start)]
+
+
+def test_fresh_install_warns_about_a_held_port_before_the_wizard() -> None:
+    fresh = _fresh_path()
+    probe = fresh.index("if (Test-PortInUse $DefaultPort)")
+    assert probe < fresh.index("$bootstrap = Invoke-Native")
+    # A warning, as install-engine.sh prints: Advanced setup can pick another port.
+    sentence = "Choose another port in Advanced setup, or free port $DefaultPort before completing setup."
+    assert sentence in fresh
+    assert "Choose another port in Advanced setup, or free port $port before completing setup." in SH_TEXT
+
+
+def test_fresh_install_reports_running_only_once_the_engine_answers() -> None:
+    fresh = _fresh_path()
+    # The port is the wizard's, from the verified activation result.
+    assert "$freshPort = [int]$activatedPort" in fresh
+    assert "Get-FreshStartupState $freshPort $Version" in fresh
+    assert "localhost:8443" not in fresh
+    ready = fresh.index("if ($freshReady) {")
+    running = fresh.index("Ciaobot is running from the folder you chose.")
+    not_answering = fresh.index("but Ciaobot is not answering yet.")
+    assert fresh.index("Get-FreshStartupState") < ready < running < not_answering
+    assert "throw 'Ciaobot did not answer after setup'" in fresh[not_answering:]
+    for sentence in (
+        "Ciaobot is running from the folder you chose. Return to the browser tab to finish onboarding.",
+        "Setup is saved in the folder you chose, but Ciaobot is not answering yet.",
+    ):
+        assert sentence in fresh
+        assert sentence in SH_TEXT
+
+
+def test_fresh_startup_state_requires_the_installed_engine_and_a_finished_bind() -> None:
+    body = _ps1_function("Get-FreshStartupState")
+    assert "[string]$status.version -ne $ExpectedVersion" in body
+    assert "'server_starting'" in body
+    assert "$status.overall_ready -eq $true" in body
+    assert "return 'port_in_use'" in body
+    # The same rule as install-engine.sh's fresh_startup_state.
+    assert 'bind = by_name.get("server_starting", {})' in SH_TEXT
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs Windows PowerShell 5.1")
+def test_port_probe_sees_a_listener_on_one_interface() -> None:
+    import socket
+
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    port = held.getsockname()[1]
+    free = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    free.bind(("127.0.0.1", 0))
+    free_port = free.getsockname()[1]
+    free.close()
+    probe = (
+        _ps1_function("Test-PortInUse")
+        + f"\nTest-PortInUse {port}\nTest-PortInUse {free_port}\n"
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", probe],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    finally:
+        held.close()
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["True", "False"]
