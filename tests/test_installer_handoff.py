@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import plistlib
-import stat
 import sys
 import uuid
 from pathlib import Path
@@ -20,6 +19,7 @@ from starlette.testclient import TestClient
 
 from ciao import cli, installer_handoff, macos_service, service_backend, windows_service
 from ciao.config import CiaoConfig
+from ciao.os_support.private import is_private
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import setup_finish_endpoint
 
@@ -108,7 +108,7 @@ def test_setup_completion_records_a_private_bounded_result(
     path = _record(backend, workspace, definition, run_id)
 
     assert path == installer_handoff.result_path()
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert is_private(path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload == {
         "schema": installer_handoff.SCHEMA_VERSION,
@@ -292,7 +292,7 @@ def test_installer_activate_command_reports_success(monkeypatch, capsys) -> None
     assert cli.main(["installer", "activate", "--run-id", run_id, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["workspace"] == "/tmp/ws"
+    assert payload["workspace"] == str(Path("/tmp/ws"))
 
 
 def test_installer_activate_command_reports_refusal(monkeypatch, capsys) -> None:

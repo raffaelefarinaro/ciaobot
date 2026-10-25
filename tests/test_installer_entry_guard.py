@@ -165,6 +165,7 @@ def test_unreadable_task_directory_refuses_instead_of_reporting_absent(
         _restore(service)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod cannot deny reads on Windows")
 def test_unreadable_dotenv_is_not_silently_absent_for_the_strict_helper(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
