@@ -120,6 +120,12 @@ No manual step is needed; `ensure-deps.sh` handles both. If you set up the venv 
 
 ### End-user distribution
 
+Installer bootstrap is guarded by a read-only freshness check before setup:
+it refuses when an existing workspace, live service definition, or registered
+macOS LaunchAgent/Windows scheduled task is found, and also refuses if the
+service query cannot verify absence. Export-directory overrides do not affect
+the live service paths checked by this guard.
+
 The supported macOS release path is the one-line installer:
 
 ```bash

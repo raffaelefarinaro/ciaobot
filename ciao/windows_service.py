@@ -332,6 +332,60 @@ def _failure(action: str, completed: subprocess.CompletedProcess[str]) -> Window
     return WindowsServiceError(f"schtasks {action} failed: {detail}")
 
 
+def parse_task_query(stdout: str) -> set[str]:
+    """Task names from a ``/Query /FO CSV /NH`` response.
+
+    ``/NH`` suppresses the header, so an empty response is Task Scheduler's
+    legitimate "no tasks". Every other row must be the documented
+    ``TaskName, Next Run Time, Status`` shape, and the name must be the full
+    task path Task Scheduler prints (always leading ``\\``): CSV quoting rules
+    alone would accept arbitrary text, an unexpected header, or a row of empty
+    fields as a task name.
+    """
+    import csv
+    import io
+
+    text = stdout.lstrip("\ufeff")
+    if not text.strip():
+        return set()
+    try:
+        rows = list(csv.reader(io.StringIO(text), strict=True))
+    except csv.Error as exc:
+        raise WindowsServiceError("Could not parse scheduled task query") from exc
+    names: set[str] = set()
+    for row in rows:
+        if not row:
+            # A blank line produces no record; a content line that parses to
+            # empty fields does not.
+            continue
+        if len(row) != 3:
+            raise WindowsServiceError(
+                f"Unrecognised scheduled task query row: {row!r}"
+            )
+        name = row[0].strip()
+        if not name.startswith("\\"):
+            raise WindowsServiceError(
+                f"Unrecognised scheduled task name in the query: {name!r}"
+            )
+        names.add(name.casefold())
+    return names
+
+
+def engine_task_registered() -> bool:
+    """Strictly query Task Scheduler; malformed or failed output is unknown."""
+    try:
+        completed = _schtasks("/Query", "/FO", "CSV", "/NH")
+    except Exception as exc:
+        raise WindowsServiceError(f"Could not query scheduled tasks: {exc}") from exc
+    if completed.returncode != 0:
+        raise _failure("/Query", completed)
+    if completed.stdout is None:
+        # No output at all is not the same fact as an empty /NH response:
+        # Task Scheduler would have printed the latter.
+        raise WindowsServiceError("Scheduled task query returned no output")
+    return TASK_NAME.casefold() in parse_task_query(completed.stdout)
+
+
 def task_exists(name: str = TASK_NAME) -> bool:
     return _schtasks("/Query", "/TN", name).returncode == 0
 
