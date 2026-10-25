@@ -1124,6 +1124,68 @@ port_owner() {
         | sed 's/  */ /g; s/^ //; s/ $//'
 }
 
+fresh_startup_state() {
+    # HTTP 200 alone can be an unrelated listener. Only the installed engine's
+    # startup contract and completed bind phase can prove fresh setup is ready.
+    "$tool_python" -I -c '
+import json
+import sys
+import uuid
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate startup field")
+        result[key] = value
+    return result
+
+def reject_constant(value):
+    raise ValueError("invalid JSON constant")
+
+try:
+    with open(sys.argv[2], "rb") as response:
+        raw = response.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("oversized startup response")
+    result = json.loads(raw, object_pairs_hook=unique_fields, parse_constant=reject_constant)
+    if not isinstance(result, dict) or result.get("version") != sys.argv[1]:
+        raise ValueError("not the installed engine")
+    if type(result.get("desktop_api_version")) is not int or result["desktop_api_version"] != 1:
+        raise ValueError("unknown startup API")
+    for key in ("overall_ready", "port_in_use", "update_available"):
+        if type(result.get(key)) is not bool:
+            raise ValueError("invalid startup flag")
+    if "latest_version" not in result or (result["latest_version"] is not None and not isinstance(result["latest_version"], str)):
+        raise ValueError("invalid latest version")
+    startup_id = result.get("startup_id")
+    if not isinstance(startup_id, str) or uuid.UUID(startup_id).hex != startup_id:
+        raise ValueError("invalid live startup id")
+    if type(result.get("pid")) is not int or result["pid"] <= 0:
+        raise ValueError("invalid live engine pid")
+    phases = result.get("phases")
+    if not isinstance(phases, list):
+        raise ValueError("invalid startup phases")
+    by_name = {}
+    for phase in phases:
+        if not isinstance(phase, dict) or not isinstance(phase.get("name"), str) or not phase["name"] or phase["name"] in by_name:
+            raise ValueError("invalid or duplicate startup phase")
+        if phase.get("status") not in ("pending", "in_progress", "done", "failed") or not isinstance(phase.get("message"), str):
+            raise ValueError("invalid startup phase state")
+        for key in ("started_at", "finished_at"):
+            if key not in phase or (phase[key] is not None and not isinstance(phase[key], str)):
+                raise ValueError("invalid startup phase time")
+        by_name[phase["name"]] = phase
+    bind = by_name.get("server_starting", {})
+    if result["port_in_use"]:
+        print("port_in_use")
+    elif result["overall_ready"] and bind.get("status") == "done":
+        print("ready")
+except (ValueError, TypeError, KeyError, RecursionError, OSError):
+    sys.exit(1)
+' "$version" "$1"
+}
+
 python_probe_port() {
     # The verified wheel's own probe: `ciao.port_in_use.port_is_available`
     # binds the port the way the engine does. It answers 0 (the port is
@@ -1654,14 +1716,13 @@ if [ "$migrate_path" != client ]; then
         if [ "$no_start" -eq 0 ]; then
             # The bootstrap serves loopback only, so it can start on a port
             # that the activated engine, which may listen on every interface,
-            # cannot bind (`tailscale serve` on the Tailscale address is the
-            # usual holder). Refuse before the wizard rather than after it.
+            # cannot bind. Warn, but let Advanced setup select another port.
             port=$FRESH_PORT
             probe_rc=0
             python_probe_port "$port" || probe_rc=$?
             if [ "$probe_rc" -eq 1 ]; then
                 owner=$(port_owner "$port")
-                fail "port $port is already in use${owner:+ by $owner}. A fresh install serves on port $port; free it and run the installer again"
+                echo "Warning: port $port is already in use${owner:+ by $owner}. Choose another port in Advanced setup, or free port $port before completing setup." >&2
             fi
             run_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
             [ -n "$run_id" ] || fail "could not generate an installer run id"
@@ -1676,20 +1737,55 @@ if [ "$migrate_path" != client ]; then
                 echo "Resume setup with: $(quote_shell_path "$ciao") run --installer-bootstrap" >&2
                 exit "$bootstrap_rc"
             fi
-            activation=
-            if ! activation=$("$ciao" installer activate --run-id "$run_id" --json); then
-                printf '%s\n' "$activation" \
-                    | "$tool_python" -I -c 'import json, sys; print(json.load(sys.stdin).get("error", ""))' >&2 2>/dev/null || true
+            if ! activation_output=$("$ciao" installer activate --run-id "$run_id" --json); then
+                [ -z "$activation_output" ] || printf '%s\n' "$activation_output" >&2
                 echo "Ciaobot is installed, but the background service did not start. Nothing in the chosen folder was deleted or moved." >&2
                 echo "Resume with: $(quote_shell_path "$ciao") installer activate --run-id $run_id" >&2
                 exit 1
             fi
+            # Only the verified activation result knows the wizard's chosen
+            # port. Parse data, never shell text or private workspace state, and
+            # refuse an ambiguous result rather than guessing the default port.
+            if ! activated_fields=$("$tool_python" -I -c '
+import json
+import os
+import sys
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate activation field")
+        result[key] = value
+    return result
+
+try:
+    result = json.loads(sys.argv[1], object_pairs_hook=unique_fields)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise ValueError("activation was not successful")
+    port = result.get("port")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("invalid activation port")
+    workspace = result.get("workspace")
+    definition = result.get("definition")
+    for path in (workspace, definition):
+        if not isinstance(path, str) or not os.path.isabs(path) or any(ord(c) < 32 or ord(c) == 127 for c in path):
+            raise ValueError("invalid activation path")
+    if result.get("service_backend") != "macos":
+        raise ValueError("invalid activation backend")
+except (ValueError, TypeError):
+    sys.exit(1)
+print(workspace)
+print(port)
+' "$activation_output"); then
+                echo "Ciaobot is installed, but could not verify the background service activation result. Nothing in the chosen folder was deleted or moved." >&2
+                echo "Resume with: $(quote_shell_path "$ciao") installer activate --run-id $run_id" >&2
+                exit 1
+            fi
+            workspace=$(printf '%s\n' "$activated_fields" | head -1)
+            port=$(printf '%s\n' "$activated_fields" | tail -1)
+            fresh_url="http://localhost:$port"
             fresh_completed=1
-            # The folder activation verified, which the health wait reads the
-            # port from and the summary names.
-            workspace=$(printf '%s\n' "$activation" \
-                | "$tool_python" -I -c 'import json, sys; print(json.load(sys.stdin)["workspace"])') \
-                || fail "could not read the activated workspace; check: $(quote_shell_path "$ciao") service status"
         else
             workspace=
         fi
@@ -1770,10 +1866,12 @@ fi
 
 if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
     { [ "$fresh_macos" -eq 0 ] || [ "$fresh_completed" -eq 1 ]; }; then
-    # The workspace's own `.env` is the authority on the port, and setup has
-    # just written it.
-    port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
-    [ -n "$port" ] || port=8443
+    # Fresh setup uses the validated activation port; existing installs keep
+    # their workspace configuration as the authority.
+    if [ "$fresh_macos" -eq 0 ]; then
+        port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
+        [ -n "$port" ] || port=8443
+    fi
     # A fresh install's engine was already started by `ciao installer
     # activate`; it still has to answer before the installer says so.
     if [ "$fresh_macos" -eq 0 ]; then
@@ -1804,32 +1902,45 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
             port_in_use=1
             break
         fi
-        status=$("$CURL" -fsS "http://localhost:$port/api/startup-status" 2>/dev/null || true)
+        if [ "$fresh_macos" -eq 1 ]; then
+            # Bound both time and response size; discard even a partial body
+            # when curl fails (including its size/time limit).
+            if "$CURL" -fsS --max-time 5 --max-filesize 65536 \
+                "http://localhost:$port/api/startup-status" \
+                -o "$tmp/startup-status.json" 2>/dev/null; then
+                status=fresh
+            else
+                status=
+            fi
+        else
+            status=$("$CURL" -fsS "http://localhost:$port/api/startup-status" 2>/dev/null || true)
+        fi
         if [ -n "$status" ]; then
-            # The engine reports a bind failure as an explicit flag, so the
-            # installer can tell "the port is taken" from "still starting"
-            # without reading the phase's prose (#1654).
-            if printf '%s' "$status" | grep -q '"port_in_use":[[:space:]]*true'; then
-                port_in_use=1
-                break
-            fi
-            if [ "$migrate_path" != host ]; then
-                healthy=1
-                break
-            fi
-            # The version is picked out of the whole response, not counted out
-            # of it: the endpoint's payload has keys before `version`, so
-            # splitting the document on quotes and taking the fourth field
-            # reads whichever key happens to come first. `"version":` cannot
-            # match inside `"latest_version":` - the quote in front of `version`
-            # is a character in that name, not one - so this is the engine's own
-            # version and nothing else.
-            reported=$(printf '%s\n' "$status" \
-                | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
-                | head -1)
-            if [ "$reported" = "$version" ]; then
-                healthy=1
-                break
+            if [ "$fresh_macos" -eq 1 ]; then
+                startup_state=$(fresh_startup_state "$tmp/startup-status.json" 2>/dev/null || true)
+                case "$startup_state" in
+                    ready) healthy=1; break ;;
+                    port_in_use) port_in_use=1; break ;;
+                esac
+            else
+                # Preserve established-install and migration readiness rules.
+                # The engine reports a bind failure as an explicit flag (#1654).
+                if printf '%s' "$status" | grep -q '"port_in_use":[[:space:]]*true'; then
+                    port_in_use=1
+                    break
+                fi
+                if [ "$migrate_path" != host ]; then
+                    healthy=1
+                    break
+                fi
+                # Match the engine version, not a substring of latest_version.
+                reported=$(printf '%s\n' "$status" \
+                    | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+                    | head -1)
+                if [ "$reported" = "$version" ]; then
+                    healthy=1
+                    break
+                fi
             fi
         fi
         attempt=$((attempt + 1))
@@ -1958,13 +2069,14 @@ url=
 if [ "$fresh_macos" -eq 1 ]; then
     if [ "$fresh_completed" -eq 1 ] && [ "$engine_ready" -eq 1 ]; then
         echo "Ciaobot is running from the folder you chose. Return to the browser tab to finish onboarding."
-        echo "If you closed it, open http://localhost:$port and log in with the password you set."
+        echo "If you closed it, open $fresh_url and log in with the password you set."
         if [ -t 1 ] && command -v open >/dev/null 2>&1; then
-            open "http://localhost:$port" >/dev/null 2>&1 || true
+            open "$fresh_url" >/dev/null 2>&1 || true
         fi
     elif [ "$fresh_completed" -eq 1 ]; then
         # The health wait has already said why; setup itself is saved.
-        echo "Setup is saved in the folder you chose, but Ciaobot is not answering yet. Once it is, open http://localhost:$port and log in with the password you set."
+        echo "Setup is saved in the folder you chose, but Ciaobot is not answering yet. Once it is, open $fresh_url and log in with the password you set."
+        exit 1
     else
         echo "Setup was not started. Resume with: $(quote_shell_path "$ciao") run --installer-bootstrap"
     fi

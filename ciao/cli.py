@@ -1324,11 +1324,28 @@ def setup_workspace(
         and not detect_nested_workspaces(vault_path)
         and not vault_path.exists()
     )
-    if fresh_per_root:
+    fresh_adopted_notes = (
+        first_setup
+        and receipt.installation.status == "in_progress"
+        and registered_vaults is None
+        and vault_mode == "existing"
+        and not detect_nested_workspaces(vault_path)
+    )
+    if fresh_per_root or fresh_adopted_notes:
         from ciao.workspace_reroot import mark_born_per_root
 
-        vault_path = root / name / vault_path.name
+        if fresh_per_root:
+            vault_path = root / name / vault_path.name
+        # Adopting notes is also a new install, not an upgrade target. Keep its
+        # vault path exactly where the user chose it; only agent assets get a
+        # per-workspace root. Otherwise first startup snapshots their notes in
+        # Git and tries to relocate them through the legacy re-root migration.
         written.extend(mark_born_per_root(root, runtime_root, [name]))
+        resolved_vault_path = vault_path.resolve()
+        try:
+            stored_vault_root = resolved_vault_path.relative_to(root).as_posix()
+        except ValueError:
+            stored_vault_root = str(resolved_vault_path)
         # The registry has to exist before the asset loop too: `agent_roots_for`
         # reads the receipt for the gate and the REGISTRY for the names, and with
         # no registry it falls back to the install root — which is how the first
@@ -1340,7 +1357,7 @@ def setup_workspace(
             json.dumps(
                 [{
                     "name": name,
-                    "vault_root": f"{name}/{vault_path.name}",
+                    "vault_root": stored_vault_root,
                     "default_provider": default_provider,
                     # No Google account is linked at scaffold time; the user
                     # chooses in Settings → Overview after setup.
