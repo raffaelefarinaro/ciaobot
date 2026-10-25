@@ -103,10 +103,9 @@ class ApiRequestBodyLimitMiddleware:
                     break
 
             media_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
-            # The browser API client sets JSON content type even on bodyless
-            # reads. There is no JSON document to validate in that case.
-            bodyless_read = size == 0 and scope.get("method", "").upper() in {"GET", "HEAD"}
-            if not bodyless_read and policy != "multipart_only" and (
+            # The PWA labels every request JSON, bodiless GETs included, so an
+            # empty body is no body rather than malformed JSON.
+            if size and policy != "multipart_only" and (
                 media_type == b"application/json" or media_type.endswith(b"+json")
             ):
                 spool.seek(0)

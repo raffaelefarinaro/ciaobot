@@ -50,7 +50,7 @@
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
               <!-- Skeleton of the home screen this will become (lane header
-                   with the face+status row inside it, housekeeping tile, chat
+                   with the status row inside it, housekeeping tile, chat
                    rows) — a spinner pill read as "nothing is coming", while
                    the shapes promise the layout that is about to land. -->
               <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
@@ -66,7 +66,6 @@
                     <span class="boot-pill boot-shimmer"></span>
                   </div>
                   <div class="boot-status">
-                    <span class="boot-face boot-shimmer" aria-hidden="true"></span>
                     <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
                   </div>
                   <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
@@ -82,31 +81,6 @@
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
-              <!-- The glanceable status (face + summary) lives inside the active
-                   workspace's lane header now (HomeRecentChats.vue), right under
-                   the workspace name it summarizes. This header only remains for
-                   the first-run greeting face, which is the sole greeting-bubble
-                   owner: beside a status line that reads "nothing needs you" the
-                   bubble used to collide with it. -->
-              <div v-if="!hasHomeActivity" class="empty-home-header">
-                <div class="empty-mark">
-                  <button
-                    type="button"
-                    class="empty-face-btn"
-                    aria-label="Say hello"
-                    @click="onFaceClick"
-                    @mouseenter="onFaceEnter"
-                    @mouseleave="onFaceLeave"
-                  >
-                    <Transition name="face-bubble">
-                      <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                        {{ speechGreeting }}
-                      </div>
-                    </Transition>
-                    <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
-                  </button>
-                </div>
-              </div>
               <div class="home-workbench">
                 <div class="home-main">
                   <HomeIntake />
@@ -221,7 +195,6 @@
                     <span class="boot-pill boot-shimmer"></span>
                   </div>
                   <div class="boot-status">
-                    <span class="boot-face boot-shimmer" aria-hidden="true"></span>
                     <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
                   </div>
                   <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
@@ -237,31 +210,6 @@
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
-              <!-- The glanceable status (face + summary) lives inside the active
-                   workspace's lane header now (HomeRecentChats.vue), right under
-                   the workspace name it summarizes. This header only remains for
-                   the first-run greeting face, which is the sole greeting-bubble
-                   owner: beside a status line that reads "nothing needs you" the
-                   bubble used to collide with it. -->
-              <div v-if="!hasHomeActivity" class="empty-home-header">
-                <div class="empty-mark">
-                  <button
-                    type="button"
-                    class="empty-face-btn"
-                    aria-label="Say hello"
-                    @click="onFaceClick"
-                    @mouseenter="onFaceEnter"
-                    @mouseleave="onFaceLeave"
-                  >
-                    <Transition name="face-bubble">
-                      <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                        {{ speechGreeting }}
-                      </div>
-                    </Transition>
-                    <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
-                  </button>
-                </div>
-              </div>
               <div class="home-workbench">
                 <div class="home-main">
                   <HomeIntake />
@@ -606,48 +554,6 @@ function stopSplitDrag() {
   }
 }
 
-// Welcome-screen mascot. Hovering shows a comic bubble with "hello" in a
-// different language until the pointer leaves; clicking pins the bubble
-// on until the next click.
-const FACE_GREETINGS = [
-  'Ciao!', '¡Hola!', 'Salut!', 'Hallo!', 'Olá!', 'Hello!',
-  'こんにちは!', '안녕!', '你好!', 'مرحبا!', 'Привет!', 'नमस्ते!',
-  'Merhaba!', 'Γειά σου!', 'Hej!', 'Cześć!', 'สวัสดี!', 'Xin chào!',
-  'שלום!', 'Halo!', 'Ahoj!', 'Szia!', 'Dia dhuit!', 'Sawubona!',
-] as const
-
-const speechGreeting = ref<string | null>(null)
-const speechPinned = ref(false)
-let greetingQueue: string[] = []
-
-function shuffleGreetings(): string[] {
-  const next = [...FACE_GREETINGS]
-  for (let i = next.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[next[i], next[j]] = [next[j], next[i]]
-  }
-  return next
-}
-
-function nextGreeting(): string {
-  if (greetingQueue.length === 0) greetingQueue = shuffleGreetings()
-  return greetingQueue.pop()!
-}
-
-function onFaceClick() {
-  speechPinned.value = !speechPinned.value
-  speechGreeting.value = speechPinned.value ? nextGreeting() : null
-}
-
-function onFaceEnter() {
-  if (!speechPinned.value) speechGreeting.value = nextGreeting()
-}
-
-function onFaceLeave() {
-  if (!speechPinned.value) speechGreeting.value = null
-}
-
-const faceSrc = computed(() => (speechGreeting.value ? '/face_scared.png' : '/face.png'))
 const taskStore = useTaskStore()
 const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
@@ -1686,13 +1592,6 @@ onBeforeUnmount(() => {
   margin: 8px 0;
 }
 
-.boot-face {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-}
-
 .boot-tile {
   display: flex;
   flex-direction: column;
@@ -1812,108 +1711,6 @@ onBeforeUnmount(() => {
   order: -1;
 }
 
-.empty-home-header {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  max-width: var(--home-max);
-  min-height: 44px;
-  gap: 10px;
-  margin: 0 auto;
-}
-
-.empty-state--active .empty-home-header {
-  justify-content: flex-start;
-}
-
-.empty-state .empty-mark {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  opacity: 0.85;
-}
-.empty-state .empty-face-btn {
-  position: relative;
-  display: inline-flex;
-  padding: 0;
-  border: none;
-  background: none;
-  cursor: pointer;
-  user-select: none;
-  transition: transform 120ms var(--ease);
-}
-.empty-state .empty-face-btn:active { transform: scale(0.94); }
-.empty-state .empty-face {
-  display: block;
-  width: 120px;
-  height: 120px;
-  image-rendering: pixelated;
-  -webkit-user-drag: none;
-  pointer-events: none;
-  /* Soft accent halo — follows the active workspace without a hard stroke. */
-  filter:
-    drop-shadow(0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent))
-    drop-shadow(1px 0 0 color-mix(in srgb, var(--accent) 40%, transparent))
-    drop-shadow(-1px 0 0 color-mix(in srgb, var(--accent) 40%, transparent))
-    drop-shadow(0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent))
-    drop-shadow(0 -1px 0 color-mix(in srgb, var(--accent) 40%, transparent));
-}
-
-.face-speech-bubble {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 8px 14px;
-  background: #fff;
-  color: #111;
-  border: 3px solid #111;
-  border-radius: 14px 14px 14px 4px;
-  box-shadow: 4px 4px 0 #111;
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 1.2;
-  white-space: nowrap;
-  z-index: 1;
-}
-.face-speech-bubble::after {
-  content: '';
-  position: absolute;
-  left: 18px;
-  bottom: -12px;
-  width: 0;
-  height: 0;
-  border: 6px solid transparent;
-  border-top-color: #111;
-}
-.face-speech-bubble::before {
-  content: '';
-  position: absolute;
-  left: 20px;
-  bottom: -6px;
-  width: 0;
-  height: 0;
-  border: 4px solid transparent;
-  border-top-color: #fff;
-  z-index: 1;
-}
-.face-bubble-enter-active {
-  animation: face-bubble-pop 220ms var(--ease);
-}
-.face-bubble-leave-active {
-  animation: face-bubble-pop 160ms var(--ease) reverse;
-}
-@keyframes face-bubble-pop {
-  from {
-    opacity: 0;
-    transform: translateX(-50%) translateY(6px) scale(0.82);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0) scale(1);
-  }
-}
 .empty-state .empty-hint {
   color: var(--fg3);
   font-size: var(--text-sm);

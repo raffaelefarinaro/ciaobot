@@ -26,6 +26,9 @@ OSASCRIPT=osascript
 PGREP=pgrep
 CURL=curl
 SLEEP=sleep
+# The port `ciao run --installer-bootstrap` and a fresh install's first engine
+# serve on: ciao.config's `pwa_port` default.
+FRESH_PORT=8443
 version=
 workspace=
 no_start=0
@@ -1649,6 +1652,16 @@ if [ "$migrate_path" != client ]; then
         # the service from that result. A cancel or refusal leaves a complete
         # binary install whose setup can be resumed.
         if [ "$no_start" -eq 0 ]; then
+            # The bootstrap serves loopback only, so it can start on a port
+            # that the activated engine, which may listen on every interface,
+            # cannot bind. Warn, but let Advanced setup select another port.
+            port=$FRESH_PORT
+            probe_rc=0
+            python_probe_port "$port" || probe_rc=$?
+            if [ "$probe_rc" -eq 1 ]; then
+                owner=$(port_owner "$port")
+                echo "Warning: port $port is already in use${owner:+ by $owner}. Choose another port in Advanced setup, or free port $port before completing setup." >&2
+            fi
             run_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
             [ -n "$run_id" ] || fail "could not generate an installer run id"
             set -- run --installer-bootstrap --installer-run-id "$run_id"
@@ -1671,8 +1684,9 @@ if [ "$migrate_path" != client ]; then
             # Only the verified activation result knows the wizard's chosen
             # port. Parse data, never shell text or private workspace state, and
             # refuse an ambiguous result rather than guessing the default port.
-            if ! fresh_url=$("$tool_python" -c '
+            if ! activated_fields=$("$tool_python" -I -c '
 import json
+import os
 import sys
 
 def unique_fields(pairs):
@@ -1690,17 +1704,29 @@ try:
     port = result.get("port")
     if type(port) is not int or not 1 <= port <= 65535:
         raise ValueError("invalid activation port")
+    workspace = result.get("workspace")
+    definition = result.get("definition")
+    for path in (workspace, definition):
+        if not isinstance(path, str) or not os.path.isabs(path) or any(ord(c) < 32 or ord(c) == 127 for c in path):
+            raise ValueError("invalid activation path")
+    if result.get("service_backend") != "launchd":
+        raise ValueError("invalid activation backend")
 except (ValueError, TypeError):
     sys.exit(1)
-print(f"http://localhost:{port}")
+print(workspace)
+print(port)
 ' "$activation_output"); then
                 echo "Ciaobot is installed, but could not verify the background service activation result. Nothing in the chosen folder was deleted or moved." >&2
                 echo "Resume with: $(quote_shell_path "$ciao") installer activate --run-id $run_id" >&2
                 exit 1
             fi
+            workspace=$(printf '%s\n' "$activated_fields" | head -1)
+            port=$(printf '%s\n' "$activated_fields" | tail -1)
+            fresh_url="http://localhost:$port"
             fresh_completed=1
+        else
+            workspace=
         fi
-        workspace=
     else
     # --yes turns off every guard in `ciao setup` (a health check that never
     # comes up, a service silently re-pointed at a different workspace), so it
@@ -1776,13 +1802,20 @@ print(f"http://localhost:{port}")
     fi
 fi
 
-if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] && [ "$fresh_macos" -eq 0 ]; then
-    # The workspace's own `.env` is the authority on the port, and setup has
-    # just written it.
-    port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
-    [ -n "$port" ] || port=8443
-    install_step "could not start the engine; try: $(quote_shell_path "$ciao") service status" \
-        "$ciao" service start --workspace "$workspace" --json >/dev/null
+if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
+    { [ "$fresh_macos" -eq 0 ] || [ "$fresh_completed" -eq 1 ]; }; then
+    # Fresh setup uses the validated activation port; existing installs keep
+    # their workspace configuration as the authority.
+    if [ "$fresh_macos" -eq 0 ]; then
+        port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
+        [ -n "$port" ] || port=8443
+    fi
+    # A fresh install's engine was already started by `ciao installer
+    # activate`; it still has to answer before the installer says so.
+    if [ "$fresh_macos" -eq 0 ]; then
+        install_step "could not start the engine; try: $(quote_shell_path "$ciao") service status" \
+            "$ciao" service start --workspace "$workspace" --json >/dev/null
+    fi
     # A slow first boot is not a failed install: the plist is written, so say
     # so instead of failing an install that did everything it promised. A
     # migration is the exception - the app's own agent is about to be retired,
@@ -1959,12 +1992,16 @@ echo "  ciao:      $ciao"
 configure_path
 url=
 if [ "$fresh_macos" -eq 1 ]; then
-    if [ "$fresh_completed" -eq 1 ]; then
-        echo "Ciaobot is starting from the folder you chose. Return to the browser tab to finish onboarding."
+    if [ "$fresh_completed" -eq 1 ] && [ "$engine_ready" -eq 1 ]; then
+        echo "Ciaobot is running from the folder you chose. Return to the browser tab to finish onboarding."
         echo "If you closed it, open $fresh_url and log in with the password you set."
         if [ -t 1 ] && command -v open >/dev/null 2>&1; then
             open "$fresh_url" >/dev/null 2>&1 || true
         fi
+    elif [ "$fresh_completed" -eq 1 ]; then
+        # The health wait has already said why; setup itself is saved.
+        echo "Setup is saved in the folder you chose, but Ciaobot is not answering yet. Once it is, open $fresh_url and log in with the password you set."
+        exit 1
     else
         echo "Setup was not started. Resume with: $(quote_shell_path "$ciao") run --installer-bootstrap"
     fi

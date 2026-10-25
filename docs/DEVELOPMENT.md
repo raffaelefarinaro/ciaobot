@@ -221,7 +221,12 @@ the foreground (a `--workspace` is passed only as
 handoff result with `ciao installer activate --json`. The printed and opened
 browser URL uses the port in that verified activation response, including a
 custom port chosen in Advanced setup; malformed output refuses success rather
-than falling back to port 8443. A cancel or guard refusal leaves
+than falling back to port 8443. A busy default port warns the user to choose
+another port in Advanced setup instead of blocking the wizard. After activation,
+the installer retains the verified workspace and waits for the selected port to
+answer before reporting a running engine or opening its URL. If it cannot bind
+or answer, setup remains saved, recovery guidance is printed, and the fresh
+install exits unsuccessfully. A cancel or guard refusal leaves
 a complete binary install that resumes with `ciao run --installer-bootstrap`,
 and `--no-start` provisions nothing. Migration and existing-workspace installs
 keep the `ciao setup` + `ciao service start` path; this installer runs on

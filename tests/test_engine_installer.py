@@ -16,6 +16,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -493,6 +494,7 @@ PLIST
         mkdir -p "$proposed/.runtime"
         printf '[]\n' > "$proposed/.runtime/workspaces.json"
         printf 'PWA_PORT=8443\n' > "$proposed/.env"
+        printf '%s\n' "$proposed" > "$HOME/bootstrap-workspace"
         "__PYTHON__" - "$HOME/Library/LaunchAgents/com.ciao.server.plist" <<'PLIST'
 import pathlib
 import plistlib
@@ -515,7 +517,7 @@ PLIST
         if [ -f "$HOME/installer-activation-output" ]; then
             cat "$HOME/installer-activation-output"
         else
-            printf '{"ok":true,"workspace":"%s/Ciaobot","service_backend":"launchd","definition":"%s/Library/LaunchAgents/com.ciao.server.plist","port":8443}\n' "$HOME" "$HOME"
+            "__PYTHON__" -c 'import json, sys; print(json.dumps({"ok": True, "workspace": sys.argv[1], "service_backend": "launchd", "definition": sys.argv[2], "port": 8443}))' "$(cat "$HOME/bootstrap-workspace")" "$HOME/Library/LaunchAgents/com.ciao.server.plist"
         fi
         ;;
     service)
@@ -706,11 +708,21 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         rewritten,
         flags=re.MULTILINE,
     )
+    # A fresh install probes its port with the engine's own bind; 8443 is
+    # whatever this machine runs there, so the copy probes a port just freed.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("0.0.0.0", 0))
+    fresh_port = probe.getsockname()[1]
+    probe.close()
+    rewritten = re.sub(
+        r"^FRESH_PORT=.*$", f"FRESH_PORT={fresh_port}", rewritten, count=1, flags=re.MULTILINE
+    )
     script = tmp_path / "install-engine.sh"
     script.write_text(rewritten, encoding="utf-8")
     script.chmod(0o755)
 
     return {
+        "fresh_port": fresh_port,
         "home": home,
         "script": script,
         "release": release,
@@ -823,8 +835,9 @@ def test_fresh_install_opens_the_bootstrap_without_a_suggestion(tmp_path: Path) 
     calls = _log(harness, "ciao-calls.log").splitlines()
     bootstrap = next(line for line in calls if line.startswith("run --installer-bootstrap"))
     assert "--installer-suggest-workspace" not in bootstrap
-    assert "Return to the browser tab to finish onboarding." in result.stdout
-    assert "  workspace:" not in result.stdout
+    assert "Ciaobot is running from the folder you chose." in result.stdout
+    assert f"  workspace: {harness['home'] / 'Ciaobot'}" in result.stdout
+    assert "/api/startup-status" in _log(harness, "trace.log")
 
 
 @runs_the_sh_installer
@@ -833,6 +846,7 @@ def test_fresh_install_opens_the_bootstrap_without_a_suggestion(tmp_path: Path) 
 def test_fresh_install_uses_the_verified_activation_port(tmp_path: Path, port: int) -> None:
     harness = _harness(tmp_path)
     home = harness["home"]
+    (home / "engine-port").write_text(str(port), encoding="utf-8")
     # Simulate an interactive terminal without launching the host's browser.
     script = harness["script"]
     script.write_text(
@@ -860,6 +874,8 @@ def test_fresh_install_uses_the_verified_activation_port(tmp_path: Path, port: i
     result = _run_installer(harness, "--version", VERSION)
 
     assert result.returncode == 0, result.stderr
+    assert f"  workspace: {home / 'Chosen notes'}" in result.stdout
+    assert f"http://localhost:{port}/api/startup-status" in _log(harness, "trace.log")
     assert f"open http://localhost:{port} and log in" in result.stdout
     assert _log(harness, "open.log") == f"http://localhost:{port}\n"
     assert (
@@ -888,6 +904,13 @@ def test_fresh_install_refuses_malformed_activation_output(
     tmp_path: Path, output: str
 ) -> None:
     harness = _harness(tmp_path)
+    # Keep all unrelated required fields valid so each port/status case tests
+    # its own validation, including the duplicate-key case (no JSON re-encode).
+    if output.startswith('{"ok"'):
+        output = output.replace(
+            '{', '{"workspace":"/chosen-notes","service_backend":"launchd",'
+            '"definition":"/LaunchAgents/com.ciao.server.plist",', 1,
+        )
     (harness["home"] / "installer-activation-output").write_text(output, encoding="utf-8")
 
     result = _run_installer(harness, "--version", VERSION)
@@ -899,6 +922,36 @@ def test_fresh_install_refuses_malformed_activation_output(
     assert "Return to the browser tab" not in result.stdout
     assert "http://localhost:" not in result.stdout
     assert _install_receipt(harness)["version"] == VERSION
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(("field", "value"), [
+    ("workspace", None), ("workspace", "relative/notes"),
+    ("workspace", "/notes\n18446"), ("workspace", "/notes\r"),
+    ("definition", None), ("definition", "relative.plist"),
+    ("service_backend", None), ("service_backend", "systemd"),
+])
+def test_fresh_install_refuses_invalid_activation_workspace_schema(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    harness = _harness(tmp_path)
+    payload = {
+        "ok": True, "workspace": str(harness["home"] / "Ciaobot"),
+        "definition": str(harness["home"] / "Library/LaunchAgents/com.ciao.server.plist"),
+        "service_backend": "launchd", "port": 8443,
+    }
+    payload[field] = value
+    (harness["home"] / "installer-activation-output").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "could not verify the background service activation result" in result.stderr
+    assert "/api/startup-status" not in _log(harness, "trace.log")
+    assert "Return to the browser tab" not in result.stdout
 
 
 @runs_the_sh_installer
@@ -997,6 +1050,55 @@ def test_fresh_install_activation_failure_is_reported(tmp_path: Path) -> None:
         "11111111-2222-3333-4444-555555555555"
     ) in result.stderr
     assert _install_receipt(harness)["version"] == VERSION
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_warns_on_a_held_default_port_and_accepts_advanced_port(tmp_path: Path) -> None:
+    """A foreign default-port listener must not veto Advanced setup."""
+    harness = _harness(tmp_path)
+    home = harness["home"]
+    (home / "engine-port").write_text("18446", encoding="utf-8")
+    (home / "installer-activation-output").write_text(json.dumps({
+        "ok": True, "workspace": str(home / "Ciaobot"),
+        "service_backend": "launchd",
+        "definition": str(home / "Library/LaunchAgents/com.ciao.server.plist"),
+        "port": 18446,
+    }), encoding="utf-8")
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("0.0.0.0", harness["fresh_port"]))
+    holder.listen(1)
+    try:
+        result = _run_installer(harness, "--version", VERSION)
+    finally:
+        holder.close()
+
+    assert result.returncode == 0, result.stderr
+    assert f"port {harness['fresh_port']} is already in use" in result.stderr
+    assert "Choose another port in Advanced setup" in result.stderr
+    calls = _log(harness, "ciao-calls.log")
+    assert "run --installer-bootstrap" in calls
+    assert "installer activate" in calls
+    assert "Ciaobot is running from the folder you chose." in result.stdout
+    assert "open http://localhost:18446 and log in" in result.stdout
+    assert "http://localhost:18446/api/startup-status" in _log(harness, "trace.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_reports_an_engine_that_could_not_bind(tmp_path: Path) -> None:
+    """Activation succeeding is not the engine running: a bind failure after
+    the wizard is reported instead of sending the user back to the browser."""
+    harness = _harness(tmp_path)
+    (harness["home"] / "startup-port-in-use").write_text("8443", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1, result.stderr
+    assert "port 8443 is already in use" in result.stderr
+    assert "Return to the browser tab" not in result.stdout
+    assert "Setup is saved in the folder you chose, but Ciaobot is not answering yet." in result.stdout
 
 
 WELCOME_LINE = (

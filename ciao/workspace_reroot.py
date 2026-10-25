@@ -2723,6 +2723,12 @@ def migrate_if_needed(config: Any) -> dict[str, Any]:
         return {"status": "not_applicable", "reason": "no registered workspace"}
     if not vault_root.is_dir():
         return {"status": "not_applicable", "reason": f"no vault at {vault_root}"}
+    # An existing notes folder chosen at setup is kept in place: the vault IS
+    # the install folder, a supported layout rather than one waiting to be
+    # nested. Its top level mixes the owner's notes with install files, which
+    # the plan cannot classify, so an attempt would refuse on every boot.
+    if vault_root.resolve() == install_root.resolve():
+        return {"status": "not_applicable", "reason": "the vault is the install folder, kept in place"}
 
     try:
         outcome = apply(install_root, vault_root, names, runtime_root, primary=primary)
