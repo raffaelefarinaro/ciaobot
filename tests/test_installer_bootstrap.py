@@ -58,12 +58,12 @@ def test_run_parser_forwards_installer_suggested_workspace(monkeypatch, tmp_path
     assert seen["installer_suggest_workspace"] == str(suggestion)
 
 
-def test_installer_suggestion_rejects_relative_path_and_orphan_flag(capsys) -> None:
+def test_installer_suggestion_rejects_relative_path_and_orphan_flag(capsys, tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         _parser_run(["run", "--installer-bootstrap", "--installer-suggest-workspace", "relative"])
     assert exc.value.code == 2
     assert "absolute" in capsys.readouterr().err
-    args = _parser_run(["run", "--installer-suggest-workspace", "/tmp/work"])
+    args = _parser_run(["run", "--installer-suggest-workspace", str(tmp_path / "work")])
     assert args.func(args) == 2
     assert "requires --installer-bootstrap" in capsys.readouterr().err
 
