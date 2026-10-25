@@ -1662,8 +1662,39 @@ if [ "$migrate_path" != client ]; then
                 echo "Resume setup with: $(quote_shell_path "$ciao") run --installer-bootstrap" >&2
                 exit "$bootstrap_rc"
             fi
-            if ! "$ciao" installer activate --run-id "$run_id"; then
+            if ! activation_output=$("$ciao" installer activate --run-id "$run_id" --json); then
+                [ -z "$activation_output" ] || printf '%s\n' "$activation_output" >&2
                 echo "Ciaobot is installed, but the background service did not start. Nothing in the chosen folder was deleted or moved." >&2
+                echo "Resume with: $(quote_shell_path "$ciao") installer activate --run-id $run_id" >&2
+                exit 1
+            fi
+            # Only the verified activation result knows the wizard's chosen
+            # port. Parse data, never shell text or private workspace state, and
+            # refuse an ambiguous result rather than guessing the default port.
+            if ! fresh_url=$("$tool_python" -c '
+import json
+import sys
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate activation field")
+        result[key] = value
+    return result
+
+try:
+    result = json.loads(sys.argv[1], object_pairs_hook=unique_fields)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise ValueError("activation was not successful")
+    port = result.get("port")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("invalid activation port")
+except (ValueError, TypeError):
+    sys.exit(1)
+print(f"http://localhost:{port}")
+' "$activation_output"); then
+                echo "Ciaobot is installed, but could not verify the background service activation result. Nothing in the chosen folder was deleted or moved." >&2
                 echo "Resume with: $(quote_shell_path "$ciao") installer activate --run-id $run_id" >&2
                 exit 1
             fi
@@ -1930,9 +1961,9 @@ url=
 if [ "$fresh_macos" -eq 1 ]; then
     if [ "$fresh_completed" -eq 1 ]; then
         echo "Ciaobot is starting from the folder you chose. Return to the browser tab to finish onboarding."
-        echo "If you closed it, open http://localhost:8443 and log in with the password you set."
+        echo "If you closed it, open $fresh_url and log in with the password you set."
         if [ -t 1 ] && command -v open >/dev/null 2>&1; then
-            open "http://localhost:8443" >/dev/null 2>&1 || true
+            open "$fresh_url" >/dev/null 2>&1 || true
         fi
     else
         echo "Setup was not started. Resume with: $(quote_shell_path "$ciao") run --installer-bootstrap"

@@ -218,7 +218,10 @@ engine definition and no configured workspace it skips folder creation,
 `ciao setup` and service registration, runs `ciao run --installer-bootstrap` in
 the foreground (a `--workspace` is passed only as
 `--installer-suggest-workspace`), and activates the service from the matching
-handoff result with `ciao installer activate`. A cancel or guard refusal leaves
+handoff result with `ciao installer activate --json`. The printed and opened
+browser URL uses the port in that verified activation response, including a
+custom port chosen in Advanced setup; malformed output refuses success rather
+than falling back to port 8443. A cancel or guard refusal leaves
 a complete binary install that resumes with `ciao run --installer-bootstrap`,
 and `--no-start` provisions nothing. Migration and existing-workspace installs
 keep the `ciao setup` + `ciao service start` path; this installer runs on

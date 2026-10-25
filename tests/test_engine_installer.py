@@ -508,7 +508,15 @@ with path.open("wb") as handle:
 PLIST
         ;;
     installer)
-        if [ "${2:-}" = activate ] && [ -f "$HOME/fail-installer-activate" ]; then exit 1; fi
+        if [ "${2:-}" = activate ] && [ -f "$HOME/fail-installer-activate" ]; then
+            printf '{"ok":false,"error":"activation refused"}\n'
+            exit 1
+        fi
+        if [ -f "$HOME/installer-activation-output" ]; then
+            cat "$HOME/installer-activation-output"
+        else
+            printf '{"ok":true,"workspace":"%s/Ciaobot","service_backend":"launchd","definition":"%s/Library/LaunchAgents/com.ciao.server.plist","port":8443}\n' "$HOME" "$HOME"
+        fi
         ;;
     service)
         if [ -f "$HOME/fail-ciao-service-start" ]; then exit 1; fi
@@ -726,9 +734,18 @@ def _run_installer(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    # Simulate this harness's Mac, not the developer's workspace or a setup
+    # test that exported its destination. Explicit test inputs still win below.
+    inherited_env = {
+        key: value for key, value in os.environ.items()
+        if key not in {
+            "CIAO_WORKSPACE", "CIAO_WORKSPACES", "CIAO_RUNTIME_ROOT",
+            "CIAO_VAULT_ROOT", "CIAO_MEMORY_DIR", "CIAO_BOOTSTRAP_WORKSPACE",
+        }
+    }
     return subprocess.run(
         ["sh", str(harness["script"]), *args],
-        env={**os.environ, **harness["env"], **(env or {})},
+        env={**inherited_env, **harness["env"], **(env or {})},
         cwd=str(cwd) if cwd is not None else None,
         capture_output=True,
         text=True,
@@ -757,6 +774,45 @@ def _log(harness: dict[str, Any], name: str) -> str:
 
 
 @runs_the_sh_installer
+@pytest.mark.parametrize("explicit_source", [None, "harness", "call"])
+def test_installer_subprocess_isolates_inherited_storage_redirects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_source: str | None
+) -> None:
+    redirects = (
+        "CIAO_WORKSPACE", "CIAO_WORKSPACES", "CIAO_RUNTIME_ROOT",
+        "CIAO_VAULT_ROOT", "CIAO_MEMORY_DIR", "CIAO_BOOTSTRAP_WORKSPACE",
+    )
+    for key in redirects:
+        monkeypatch.setenv(key, "inherited-from-another-workspace")
+    monkeypatch.setenv("INSTALLER_TEST_SENTINEL", "keep-unrelated-environment")
+    script = tmp_path / "environment.sh"
+    script.write_text(
+        f"exec {shlex.quote(sys.executable)} -c "
+        "'import json, os; print(json.dumps(dict(os.environ)))'\n",
+        encoding="utf-8",
+    )
+    explicit = {key: "deliberately-supplied" for key in redirects}
+    harness = {
+        "script": script,
+        "env": explicit if explicit_source == "harness" else {},
+    }
+
+    result = _run_installer(
+        harness, env=explicit if explicit_source == "call" else None
+    )
+
+    assert result.returncode == 0, result.stderr
+    child_env = json.loads(result.stdout)
+    for key in redirects:
+        if explicit_source is None:
+            assert key not in child_env
+        else:
+            assert child_env[key] == "deliberately-supplied"
+        assert os.environ[key] == "inherited-from-another-workspace"
+    assert child_env["INSTALLER_TEST_SENTINEL"] == "keep-unrelated-environment"
+
+
+@runs_the_sh_installer
 @needs_local_tools
 def test_fresh_install_opens_the_bootstrap_without_a_suggestion(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
@@ -769,6 +825,80 @@ def test_fresh_install_opens_the_bootstrap_without_a_suggestion(tmp_path: Path) 
     assert "--installer-suggest-workspace" not in bootstrap
     assert "Return to the browser tab to finish onboarding." in result.stdout
     assert "  workspace:" not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("port", [8443, 18446])
+def test_fresh_install_uses_the_verified_activation_port(tmp_path: Path, port: int) -> None:
+    harness = _harness(tmp_path)
+    home = harness["home"]
+    # Simulate an interactive terminal without launching the host's browser.
+    script = harness["script"]
+    script.write_text(
+        script.read_text(encoding="utf-8").replace(
+            'if [ -t 1 ] && command -v open', 'if command -v open'
+        ),
+        encoding="utf-8",
+    )
+    opener = harness["fakebin"] / "open"
+    opener.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/open.log"\n', encoding="utf-8"
+    )
+    opener.chmod(0o755)
+    (home / "installer-activation-output").write_text(
+        json.dumps({
+            "ok": True,
+            "workspace": str(home / "Chosen notes"),
+            "service_backend": "launchd",
+            "definition": str(home / "Library/LaunchAgents/com.ciao.server.plist"),
+            "port": port,
+        }),
+        encoding="utf-8",
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert f"open http://localhost:{port} and log in" in result.stdout
+    assert _log(harness, "open.log") == f"http://localhost:{port}\n"
+    assert (
+        "installer activate --run-id 11111111-2222-3333-4444-555555555555 --json"
+    ) in _log(harness, "ciao-calls.log")
+    if port != 8443:
+        assert "http://localhost:8443" not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("output", [
+    "", "not json", "[]", "null",
+    '{"ok":false,"port":18446}',
+    '{"ok":1,"port":18446}',
+    '{"ok":true}',
+    '{"ok":true,"port":"18446"}',
+    '{"ok":true,"port":true}',
+    '{"ok":true,"port":18446.0}',
+    '{"ok":true,"port":0}',
+    '{"ok":true,"port":65536}',
+    '{"ok":true,"port":8443,"port":18446}',
+    '{"ok":true,"port":"18446; touch /untrusted"}',
+])
+def test_fresh_install_refuses_malformed_activation_output(
+    tmp_path: Path, output: str
+) -> None:
+    harness = _harness(tmp_path)
+    (harness["home"] / "installer-activation-output").write_text(output, encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "could not verify the background service activation result" in result.stderr
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert f"Resume with: '{ciao}' installer activate --run-id " in result.stderr
+    assert "Return to the browser tab" not in result.stdout
+    assert "http://localhost:" not in result.stdout
+    assert _install_receipt(harness)["version"] == VERSION
 
 
 @runs_the_sh_installer
@@ -860,6 +990,7 @@ def test_fresh_install_activation_failure_is_reported(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "the background service did not start" in result.stderr
+    assert "activation refused" in result.stderr
     ciao = harness["home"] / ".local/bin/ciao"
     assert (
         f"Resume with: '{ciao}' installer activate --run-id "
@@ -3926,7 +4057,7 @@ def test_ordinary_install_runs_the_browser_bootstrap(tmp_path: Path) -> None:
     assert len(bootstrap) == 1
     run_id = bootstrap[0].split("--installer-run-id ")[1].split()[0]
     assert f"--installer-suggest-workspace={workspace}" in bootstrap[0]
-    assert f"installer activate --run-id {run_id}" in calls
+    assert f"installer activate --run-id {run_id} --json" in calls
     assert not any(line.startswith("setup") for line in calls)
     # The folder did not exist when the wizard started: the installer had not
     # created it, and the suggestion is only a suggestion.
