@@ -750,6 +750,7 @@ class CiaoConfig:
     dev_mode: bool = False
     app_repo: Path | None = None
     bootstrap_mode: bool = False
+    suggested_workspace: Path | None = None
     vault_root: Path = Path("memory-vault")
     claude_default_model: str = CLAUDE_MODELS[0]
     # Per-workspace default models and tool denylists live on the WorkspaceConfig
@@ -1664,6 +1665,7 @@ class CiaoConfig:
     def from_env(
         cls, env: dict[str, str] | None = None, *, export: bool = True,
         installer_bootstrap: bool = False,
+        installer_suggest_workspace: str | None = None,
     ) -> "CiaoConfig":
         """Build a config from the environment.
 
@@ -1699,6 +1701,7 @@ class CiaoConfig:
                 media_root=runtime / "media",
                 vault_root=root / "memory-vault",
                 bootstrap_mode=True,
+                suggested_workspace=Path(installer_suggest_workspace) if installer_suggest_workspace is not None else None,
                 pwa_host="127.0.0.1",
                 pwa_port=8443,
             )

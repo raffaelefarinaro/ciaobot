@@ -850,3 +850,39 @@ describe('LoginView setup wizard tests', () => {
     })
   })
 })
+
+describe('installer folder suggestion', () => {
+  const bootstrap = (suggested?: string) => ({
+    configured: false,
+    bootstrap: true,
+    mode: 'bootstrap',
+    workspace_root: '/scratch',
+    vault_root: '/scratch/memory-vault',
+    ...(suggested ? { suggested_workspace: suggested } : {}),
+    providers: {},
+  })
+
+  it('seeds the main folder from the installer suggestion', async () => {
+    mockApiGet.mockResolvedValue(bootstrap('/Users/ada/Notes'))
+    const wrapper = await mountLoginView()
+    const field = wrapper.get('#setup-workspace').element as HTMLInputElement
+    expect(field.value).toBe('/Users/ada/Notes')
+  })
+
+  it('keeps the default folder when the installer suggests none', async () => {
+    mockApiGet.mockResolvedValue(bootstrap())
+    const wrapper = await mountLoginView()
+    const field = wrapper.get('#setup-workspace').element as HTMLInputElement
+    expect(field.value).toBe('~/ciaobot')
+  })
+
+  it('never overwrites a folder the user typed', async () => {
+    mockApiGet.mockResolvedValue(bootstrap('/Users/ada/Notes'))
+    const wrapper = await mountLoginView()
+    const input = wrapper.get('#setup-workspace')
+    await input.setValue('/Users/ada/Other')
+    await flushPromises()
+    const field = input.element as HTMLInputElement
+    expect(field.value).toBe('/Users/ada/Other')
+  })
+})

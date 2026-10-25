@@ -1237,12 +1237,14 @@ def setup_status(
     configured = all(row["ok"] for row in checks if row["required"])
     provider_ready = any(row["ok"] for row in providers.values())
     bootstrap = bool(getattr(config, "bootstrap_mode", False))
+    suggested = getattr(config, "suggested_workspace", None)
     return {
         "configured": configured and provider_ready,
         "bootstrap": bootstrap,
         "mode": "bootstrap" if bootstrap else "configured",
         "workspace_root": str(workspace_root),
         "vault_root": str(vault_root),
+        "suggested_workspace": str(suggested) if suggested is not None else None,
         "checks": checks,
         "providers": providers,
         "provider_ready": provider_ready,
