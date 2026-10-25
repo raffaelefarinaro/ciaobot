@@ -7949,7 +7949,8 @@ details[open] > .activity-summary::before {
      `pointer: coarse` rule below never fires on a fine-pointer device at a
      narrow viewport, so without this the button measures 46x34 and
      narrow-viewport.spec.ts fails. min-height beats the fixed height. */
-  .chat-archive-btn.btn-icon {
+  .chat-archive-btn.btn-icon,
+  .chat-archive-btn.btn-icon.chat-archive-btn--icon {
     min-width: var(--touch);
     min-height: var(--touch);
   }
