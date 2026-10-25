@@ -235,4 +235,18 @@ describe('ComposerActivity', () => {
     expect(wrapper.get('[role="status"]').text()).toBe('Background run: ITTA preview stopped')
     wrapper.unmount()
   })
+
+  it('lists a shell row under Processes, as a non-link, and keeps it out of the agent count', async () => {
+    const shell: RunningSubagent = { agent_id: 'shell:sh1', description: 'sleep 20', subagent_type: 'shell' }
+    const wrapper = mountBar({ agentCount: 1, agents: [AGENT, shell] })
+    expect(wrapper.get('.composer-activity-seg--agents').text()).toBe('1 agent')
+    expect(wrapper.get('.composer-activity-seg--runs').text()).toBe('1 shell')
+    await openAgents(wrapper)
+    expect(texts('.composer-activity-pop-head')).toEqual(['Agents', 'Processes'])
+    expect(texts('a.composer-activity-pop-item .composer-activity-pop-label')).toEqual(['Explore repo layout'])
+    const shellItem = Array.from(document.querySelectorAll<HTMLElement>('.composer-activity-pop-item'))
+      .find(el => el.textContent?.includes('sleep 20'))
+    expect(shellItem?.tagName).toBe('BUTTON')
+    wrapper.unmount()
+  })
 })

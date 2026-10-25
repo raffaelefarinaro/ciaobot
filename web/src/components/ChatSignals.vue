@@ -76,6 +76,7 @@ import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import type { WorkspaceAccent } from '../lib/workspaceColors'
 import { backgroundRunLabel } from '../lib/backgroundRuns'
+import { isShellRow } from '../lib/subagentIds'
 import ActivityGlyph from './ActivityGlyph.vue'
 
 const props = withDefaults(defineProps<{
@@ -97,7 +98,7 @@ const working = computed(() => store.isChatStreaming(props.chatId))
 // so the row never reads idle just because one of them has not ticked yet.
 const agentCount = computed(() => Math.max(
   Number(store.backgroundAgents[props.chatId] || 0),
-  store.runningSubagentsFor(props.chatId).length,
+  store.runningSubagentsFor(props.chatId).filter(sub => !isShellRow(sub)).length,
 ))
 const agentsTitle = computed(() =>
   agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`,

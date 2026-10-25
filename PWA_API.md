@@ -74,7 +74,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts. `?agent_id=` narrows to one agent (bare or `agent-`-prefixed) and skips reading the siblings — what the read-only subagent view polls |
-| GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows |
+| GET | `/api/subagents/running` | Live subagents per working chat (metadata only), for the sidebar's subagent rows. An opencode chat's live background shells are appended as rows with `subagent_type: "shell"`, `agent_id: "shell:<id>"`, the command as `description` (`Background command` when unknown) and `turn_index: null`; they are processes, not agents, and have no transcript |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
 | POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder; the browser receives bounded `file_refs`, not server paths |
 | GET | `/api/images/{ref}` | Read uploaded image blob |

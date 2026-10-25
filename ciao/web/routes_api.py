@@ -85,7 +85,7 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
-from ciao.providers.opencode import OpencodeProvider
+from ciao.providers.opencode import OpencodeProvider, running_opencode_child_ids
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
 from ciao.schedule_command import normalize_schedule_command
@@ -3440,21 +3440,12 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                 root, chat.session_id
             )
         rows: list[dict] = []
+        running_ids = set(running_opencode_child_ids(collab_tree))
         for item in collab_tree:
             info = item.get("info")
             info = info if isinstance(info, dict) else {}
             agent_id = str(info.get("id") or "")
-            if not agent_id:
-                continue
-            # The live tree carries no transcript; the ephemeral fallback still
-            # does, and the status falls back to message timing there.
-            messages = item.get("messages")
-            messages = messages if isinstance(messages, list) else []
-            if transcript_service._opencode_child_status(
-                messages,
-                info,
-                item.get("active") if isinstance(item.get("active"), bool) else None,
-            ) != "running":
+            if agent_id not in running_ids:
                 continue
             rows.append({
                 "agent_id": agent_id,
@@ -3464,6 +3455,22 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                 "status": "running",
                 "turn_index": transcript_service._opencode_child_turn_index(info, chat),
             })
+        if (
+            isinstance(live_provider, OpencodeProvider)
+            and live_provider.has_live_server
+            and live_provider.current_session_id == chat.session_id
+        ):
+            # Background shells are processes, not agents: the composer lists
+            # them under Processes and never links them to a transcript.
+            for shell in live_provider.background_shell_rows():
+                rows.append({
+                    "agent_id": f"shell:{shell['id']}",
+                    "description": shell["command"] or "Background command",
+                    "subagent_type": "shell",
+                    "is_async": True,
+                    "status": "running",
+                    "turn_index": None,
+                })
         return rows
 
     if provider != "claude":

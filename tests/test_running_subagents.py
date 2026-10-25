@@ -387,3 +387,76 @@ def test_late_steer_user_record_and_attachment_each_count_once(tmp_path: Path) -
     state = subagent_tracking.parse_session_subagents(session)
 
     assert state.subagents["after"].turn_index == 2
+
+
+def _opencode_app(tmp_path: Path, provider: OpencodeProvider | None) -> TestClient:
+    chat = SimpleNamespace(
+        chat_id="chat-1",
+        session_id="ses_parent",
+        provider="opencode",
+        archived=False,
+        user_turn_timings={},
+    )
+    pcm = SimpleNamespace(
+        get_chat=lambda chat_id: chat if chat_id == "chat-1" else None,
+        active_chat_ids=lambda: ["chat-1"],
+        _providers={"chat-1": SimpleNamespace(provider=provider)} if provider else {},
+        _agent_root_for_chat=lambda chat_id: None,
+    )
+    app = Starlette(
+        routes=[Route("/api/subagents/running", running_subagents, methods=["GET"])]
+    )
+    app.state.project_chat_manager = pcm
+    app.state.config = SimpleNamespace(workspace_root=tmp_path)
+    return TestClient(app)
+
+
+def test_opencode_running_rows_include_background_shells(
+    tmp_path: Path, monkeypatch
+) -> None:
+    provider = OpencodeProvider(tmp_path)
+    provider._client = object()  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)
+    provider._session_id = "ses_parent"
+    provider._background_shells = {"sh_a", "sh_b"}
+    provider._shell_commands = {"sh_a": "sleep 20"}
+
+    async def tree() -> list[dict]:
+        return [{"info": {"id": "ses_child", "title": "Child"}, "active": True}]
+
+    monkeypatch.setattr(provider, "read_live_collab_tree", tree)
+
+    rows = _opencode_app(tmp_path, provider).get("/api/subagents/running").json()[
+        "chats"
+    ]["chat-1"]
+
+    assert len(rows) == 3
+    shells = [row for row in rows if row["subagent_type"] == "shell"]
+    assert len(shells) == 2
+    assert {row["agent_id"]: row["description"] for row in shells} == {
+        "shell:sh_a": "sleep 20",
+        "shell:sh_b": "Background command",
+    }
+    assert all(row["turn_index"] is None and row["status"] == "running" for row in shells)
+
+
+def test_opencode_child_predicate_shared(tmp_path: Path, monkeypatch) -> None:
+    from ciao.providers.opencode import opencode_collab_tree_counts
+
+    cases = {
+        "active": ({"info": {"id": "c"}, "active": True}, 1),
+        "inactive": ({"info": {"id": "c"}, "active": False}, 0),
+        "absent": ({"info": {"id": "c"}}, 1),
+    }
+    for name, (item, expected) in cases.items():
+        async def read_tree(_root, _session, item=item) -> list[dict]:
+            return [item]
+
+        monkeypatch.setattr(
+            OpencodeProvider, "read_collab_tree", staticmethod(read_tree)
+        )
+        rows = _opencode_app(tmp_path, None).get("/api/subagents/running").json()[
+            "chats"
+        ].get("chat-1", [])
+        assert len(rows) == expected, name
+        assert opencode_collab_tree_counts([item])[0] == expected, name
