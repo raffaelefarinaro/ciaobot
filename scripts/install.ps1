@@ -56,14 +56,14 @@ function Install-Ciaobot {
     $UvVersion = '0.12.17'
     $PythonVersion = '3.13'   # must equal PYTHON_VERSION in install-engine.sh; a test enforces it
     $CryptographyPin = 'cryptography==50.0.0'
-    # Windows on Arm runs the engine as x64 under emulation: cryptography ships
-    # no win_arm64 wheel, so an Arm64 Python cannot install the engine or run
-    # the release verifier. Updates restage on the interpreter's own
-    # architecture (ciao/engine_update.python_request), so they stay x64.
-    $PythonRequest = $PythonVersion
-    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') {
-        $PythonRequest = "cpython-$PythonVersion-windows-x86_64-none"
-    }
+    # Always an x64 Python. Windows on Arm runs the engine as x64 under
+    # emulation: cryptography ships no win_arm64 wheel, so an Arm64 Python
+    # cannot install the engine or run the release verifier, and a native
+    # Arm64 uv picks one for a bare version. Not detected: launched from an
+    # x64 terminal (Git Bash) this script runs emulated, where .NET reports
+    # the OS as X64. Updates restage on the interpreter's own architecture
+    # (ciao/engine_update.python_request), so they stay x64.
+    $PythonRequest = "cpython-$PythonVersion-windows-x86_64-none"
     # Same key as ciao/release_manifest.py RELEASE_PUBLIC_KEY (a test keeps them equal).
     $ReleasePublicKey = 'RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm'
     $ManifestName = 'ciaobot-engine-manifest.json'
