@@ -1940,9 +1940,14 @@ class OpencodeProvider(BaseSDKProvider):
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             return len(self._background_shells)
         if shells != self._background_shells:
-            self._background_shells = shells
+            self._replace_background_shells(shells)
             self._background_changed.set()
         return len(self._background_shells)
+
+    def _replace_background_shells(self, shells: set[str]) -> None:
+        """Take the server's running shells, dropping commands of shells that are gone."""
+        self._background_shells = shells
+        self._shell_commands = {k: v for k, v in self._shell_commands.items() if k in shells}
 
     def _set_background_children(self, active: set[str], session_id: str) -> None:
         """Replace ``_background_children`` with what the server reports running.
@@ -2100,7 +2105,7 @@ class OpencodeProvider(BaseSDKProvider):
             active = await _read_active_sessions(client)
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
             return True
-        self._background_shells = shells
+        self._replace_background_shells(shells)
         self._set_background_children(active, session_id)
         return not shells and not self._background_children and session_id not in active
 

@@ -862,3 +862,16 @@ async def test_disconnect_forgets_child_sessions(tmp_path):
     await provider.disconnect()
 
     assert provider._child_sessions == {}
+
+
+@pytest.mark.asyncio
+async def test_refresh_background_shells_drops_commands_of_vanished_shells(tmp_path, monkeypatch):
+    provider = OpencodeProvider(tmp_path)
+    _attach_live(provider, object(), "ses_a")
+    provider._background_shells = {"sh_gone", "sh_live"}
+    provider._shell_commands = {"sh_gone": "sleep 60", "sh_live": "npm run dev"}
+    _script(monkeypatch, provider, shells=[{"sh_live"}])
+
+    assert await provider.refresh_background_shells() == 1
+    assert provider.background_shell_rows() == [{"id": "sh_live", "command": "npm run dev"}]
+    assert provider._shell_commands == {"sh_live": "npm run dev"}
