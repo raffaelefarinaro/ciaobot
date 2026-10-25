@@ -83,20 +83,43 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.installer_bootstrap and args.supervised:
         print("--installer-bootstrap cannot be combined with --supervised", file=sys.stderr)
         return 2
-    run_id = args.installer_run_id
-    if args.installer_bootstrap and not run_id:
-        import uuid
-
-        run_id = str(uuid.uuid4())
     if not args.installer_bootstrap:
         # Ordinary `ciao run` keeps its exact call shape.
         return _run_server(supervised=args.supervised)
+    if not args.installer_run_id:
+        # A person resumed setup by hand (the installers print this command for
+        # a cancelled run), so there is no installer parent to activate the
+        # service: this process becomes one.
+        return _resume_installer_bootstrap(args.installer_suggest_workspace)
     return _run_server(
         supervised=args.supervised,
         installer_bootstrap=True,
-        installer_run_id=run_id,
+        installer_run_id=args.installer_run_id,
         installer_suggest_workspace=args.installer_suggest_workspace,
     )
+
+
+def _resume_installer_bootstrap(suggestion: str | None) -> int:
+    """Run the bootstrap as a child and activate the service once it succeeds.
+
+    A child, not this process: the bootstrap ends its own process the moment
+    setup completes (the restart watchdog exits it directly), so nothing after
+    it here would ever run. The same parent/child split the installers use.
+    """
+    import uuid
+
+    run_id = str(uuid.uuid4())
+    argv = [sys.executable, "-m", "ciao.cli", "run", "--installer-bootstrap", "--installer-run-id", run_id]
+    if suggestion is not None:
+        # `--flag=value`, so a suggestion that begins with a dash stays a path.
+        argv.append(f"--installer-suggest-workspace={suggestion}")
+    try:
+        code = subprocess.call(argv)
+    except KeyboardInterrupt:
+        return 130
+    if code != 0:
+        return code
+    return _installer_command(argparse.Namespace(run_id=run_id, as_json=False))
 
 
 def _installer_command(args: argparse.Namespace) -> int:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import argparse
+
 import os
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,11 +52,43 @@ def test_run_parser_forwards_installer_mode_and_run_id(monkeypatch) -> None:
     }
 
 
+def test_resuming_setup_by_hand_runs_a_child_and_activates_it(monkeypatch, tmp_path: Path) -> None:
+    # The installers print `ciao run --installer-bootstrap` as the resume
+    # command; with no installer parent left to run `ciao installer activate`,
+    # setup finished and nothing started (#2051). The bootstrap exits its own
+    # process when setup completes, so the resume has to be its parent.
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli.subprocess, "call", lambda argv: calls.append(argv) or 0)
+    activated: list[argparse.Namespace] = []
+    monkeypatch.setattr(cli, "_installer_command", lambda args: activated.append(args) or 0)
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: pytest.fail("ran in-process"))
+    suggestion = tmp_path / "-notes"
+    args = _parser_run(["run", "--installer-bootstrap", f"--installer-suggest-workspace={suggestion}"])
+    assert args.func(args) == 0
+    [argv] = calls
+    assert argv[:6] == [sys.executable, "-m", "ciao.cli", "run", "--installer-bootstrap", "--installer-run-id"]
+    run_id = argv[6]
+    assert uuid.UUID(run_id)
+    assert argv[7:] == [f"--installer-suggest-workspace={suggestion}"]
+    assert [(a.run_id, a.as_json) for a in activated] == [(run_id, False)]
+
+
+@pytest.mark.parametrize("child_code", [1, 64])
+def test_a_resumed_bootstrap_that_fails_activates_nothing(monkeypatch, child_code) -> None:
+    monkeypatch.setattr(cli.subprocess, "call", lambda argv: child_code)
+    monkeypatch.setattr(cli, "_installer_command", lambda args: pytest.fail("activated"))
+    args = _parser_run(["run", "--installer-bootstrap"])
+    assert args.func(args) == child_code
+
+
 def test_run_parser_forwards_installer_suggested_workspace(monkeypatch, tmp_path: Path) -> None:
     seen: dict[str, object] = {}
     monkeypatch.setattr(cli, "_run_server", lambda **kwargs: seen.update(kwargs) or 0)
     suggestion = tmp_path / "new-workspace"
-    args = _parser_run(["run", "--installer-bootstrap", "--installer-suggest-workspace", str(suggestion)])
+    args = _parser_run([
+        "run", "--installer-bootstrap", "--installer-run-id", str(uuid.uuid4()),
+        "--installer-suggest-workspace", str(suggestion),
+    ])
     assert args.func(args) == 0
     assert seen["installer_suggest_workspace"] == str(suggestion)
 
