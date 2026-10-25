@@ -984,3 +984,11 @@ def test_windows_on_arm_installs_an_x64_engine() -> None:
     assert '$PythonRequest = "cpython-$PythonVersion-windows-x86_64-none"' in SCRIPT_TEXT
     assert not re.search(r"--python'?,? \$PythonVersion\b", SCRIPT_TEXT)
     assert SCRIPT_TEXT.count("$PythonRequest") >= 5
+
+
+def test_signed_in_check_uses_the_account_domain_not_userdomain() -> None:
+    # OpenSSH sets USERDOMAIN=WORKGROUP for a local account, so comparing it
+    # with the session's domain said "nobody is signed in" while the account
+    # was at the console, and skipped the readiness wait (#2051).
+    assert "return [CiaobotSessions]::SignedIn([Environment]::UserDomainName, [Environment]::UserName)" in SCRIPT_TEXT
+    assert "$env:USERDOMAIN" not in SCRIPT_TEXT

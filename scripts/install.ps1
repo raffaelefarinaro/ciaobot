@@ -272,7 +272,10 @@ print(name, digest, size)
             ) -join "`n"
             Add-Type -TypeDefinition $source
         }
-        return [CiaobotSessions]::SignedIn($env:USERDOMAIN, $env:USERNAME)
+        # The account's own domain, not the USERDOMAIN variable: an OpenSSH session
+        # reports WORKGROUP there for a local account (see
+        # windows_service.current_user), which matched no session at all.
+        return [CiaobotSessions]::SignedIn([Environment]::UserDomainName, [Environment]::UserName)
     }
 
     function Test-EngineAnswering([int]$Port) {
@@ -997,7 +1000,7 @@ print(name, digest, size)
                         try { Start-Process $freshUrl | Out-Null } catch { }
                     }
                 } elseif (-not $signedIn) {
-                    Write-Host "Setup is saved in the folder you chose. Nobody is signed in to Windows as $env:USERDOMAIN\$env:USERNAME, so Ciaobot starts the next time this account signs in; then open $freshUrl and log in with the password you set."
+                    Write-Host "Setup is saved in the folder you chose. Nobody is signed in to Windows as $([Environment]::UserDomainName)\$([Environment]::UserName), so Ciaobot starts the next time this account signs in; then open $freshUrl and log in with the password you set."
                 } else {
                     # The engine records a bind failure outside the workspace,
                     # because an engine that cannot bind cannot serve the
@@ -1118,7 +1121,7 @@ print(name, digest, size)
         # person in when it does.
         $engineReady = $true
         if (-not $signedIn) {
-            Write-Host "Nobody is signed in to Windows as $env:USERDOMAIN\$env:USERNAME, so the engine starts the next time this account signs in."
+            Write-Host "Nobody is signed in to Windows as $([Environment]::UserDomainName)\$([Environment]::UserName), so the engine starts the next time this account signs in."
         } elseif (-not $healthy) {
             # The engine records a bind failure outside the workspace, because
             # an engine that cannot bind cannot serve the endpoint that would

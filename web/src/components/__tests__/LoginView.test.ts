@@ -136,8 +136,10 @@ describe('LoginView setup wizard tests', () => {
     // default VAPID subject, so setup never asks for a contact.
     expect(wrapper.find('#setup-push').exists()).toBe(false)
     expect(wrapper.text()).toContain('claude auth login')
-    expect(wrapper.text()).toContain('Keep the terminal running ciao run open while you finish this setup')
-    expect(wrapper.text()).toContain('close the terminal and open Ciaobot Server.app')
+    expect(wrapper.text()).toContain('Keep the terminal that started Ciaobot open while you finish this setup')
+    expect(wrapper.text()).toContain('you can close the terminal and keep using this tab')
+    // The same wizard runs on Windows and Linux: no macOS-only app names.
+    expect(wrapper.text()).not.toContain('Server.app')
 
     // feature tour fills the 2-column grid: six tiles, no empty slot
     const tourItems = wrapper.findAll('.tour-list li')
