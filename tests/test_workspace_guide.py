@@ -368,6 +368,31 @@ def test_a_tracked_guide_is_renamed_without_dirtying_the_tree(tmp_path: Path) ->
     assert not (tmp_path / "AGENTS.md").is_symlink()
 
 
+def test_a_relinked_guide_commits_as_a_file_without_core_symlinks(tmp_path: Path) -> None:
+    """Git for Windows defaults to ``core.symlinks=false``.
+
+    There ``commit -- AGENTS.md`` kept HEAD's symlink mode for the now-regular
+    file, so the tree was left with a staged ``T AGENTS.md``.
+    """
+    _git(tmp_path, "init", "-q", ".")
+    (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "init")
+    _git(tmp_path, "config", "core.symlinks", "false")
+
+    assert wg.migrate_root(tmp_path) == "relinked"
+
+    import subprocess
+
+    assert _status(tmp_path) == ""
+    head = subprocess.run(
+        ["git", "ls-tree", "HEAD", "AGENTS.md"], cwd=tmp_path,
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert head.startswith("100644 "), head
+
+
 def test_an_untracked_guide_still_migrates(tmp_path: Path) -> None:
     """A workspace with no git repo at all is the other common shape."""
     (tmp_path / "CLAUDE.md").write_text(REGIONS, encoding="utf-8")
