@@ -3472,3 +3472,23 @@ def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:
         tmp_path / "other", tmp_path / "other" / "env" / "bin" / "ciao"
     )
     assert engine_update._runs_the_receipt_install(other, env, executable) is False
+
+
+@pytest.mark.parametrize(
+    ("platform", "host_platform", "expected"),
+    [
+        ("darwin", "macosx-11.0-arm64", "3.13"),
+        ("linux", "linux-x86_64", "3.13"),
+        ("win32", "win-amd64", "cpython-3.13-windows-x86_64-none"),
+        ("win32", "win-arm64", "cpython-3.13-windows-aarch64-none"),
+    ],
+)
+def test_python_request_keeps_the_running_version_and_windows_architecture(
+    monkeypatch: pytest.MonkeyPatch, platform: str, host_platform: str, expected: str
+) -> None:
+    # An x64 engine on Windows on Arm must restage as x64: a bare version lets
+    # uv pick an Arm64 interpreter, for which cryptography ships no wheel.
+    monkeypatch.setattr(engine_update.sys, "platform", platform)
+    monkeypatch.setattr(engine_update.sys, "version_info", SimpleNamespace(major=3, minor=13))
+    monkeypatch.setattr(engine_update.sysconfig, "get_platform", lambda: host_platform)
+    assert engine_update.python_request() == expected

@@ -973,3 +973,14 @@ def test_port_probe_sees_a_listener_on_one_interface() -> None:
         held.close()
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.split() == ["True", "False"]
+
+
+def test_windows_on_arm_installs_an_x64_engine() -> None:
+    # cryptography ships no win_arm64 wheel, so every uv call that builds or
+    # runs Python asks for x64 on an Arm64 OS; elsewhere the request is the
+    # plain version install-engine.sh uses.
+    assert "$PythonRequest = $PythonVersion" in SCRIPT_TEXT
+    assert "::OSArchitecture -eq 'Arm64'" in SCRIPT_TEXT
+    assert '$PythonRequest = "cpython-$PythonVersion-windows-x86_64-none"' in SCRIPT_TEXT
+    assert not re.search(r"--python'?,? \$PythonVersion\b", SCRIPT_TEXT)
+    assert SCRIPT_TEXT.count("$PythonRequest") >= 5

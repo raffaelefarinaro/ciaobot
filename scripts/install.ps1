@@ -56,6 +56,14 @@ function Install-Ciaobot {
     $UvVersion = '0.12.17'
     $PythonVersion = '3.13'   # must equal PYTHON_VERSION in install-engine.sh; a test enforces it
     $CryptographyPin = 'cryptography==50.0.0'
+    # Windows on Arm runs the engine as x64 under emulation: cryptography ships
+    # no win_arm64 wheel, so an Arm64 Python cannot install the engine or run
+    # the release verifier. Updates restage on the interpreter's own
+    # architecture (ciao/engine_update.python_request), so they stay x64.
+    $PythonRequest = $PythonVersion
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') {
+        $PythonRequest = "cpython-$PythonVersion-windows-x86_64-none"
+    }
     # Same key as ciao/release_manifest.py RELEASE_PUBLIC_KEY (a test keeps them equal).
     $ReleasePublicKey = 'RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm'
     $ManifestName = 'ciaobot-engine-manifest.json'
@@ -344,7 +352,7 @@ print(name, digest, size)
     function Read-PortInUseReason([string]$Uv, [string]$Wheel) {
         if (-not $Uv -or -not $Wheel) { return '' }
         $probe = Invoke-Native $Uv @(
-            'run', '--quiet', '--no-project', '--python', $PythonVersion, '--with', $Wheel,
+            'run', '--quiet', '--no-project', '--python', $PythonRequest, '--with', $Wheel,
             'python', '-I', '-c',
             "import sys`nfrom ciao.port_in_use import read_port_in_use`ntext = read_port_in_use()`nsys.stdout.write(text)`nsys.exit(0 if text else 1)"
         ) $true
@@ -785,7 +793,7 @@ print(name, digest, size)
         [System.IO.File]::WriteAllText($verifier, ($VerifierSource -replace "`r`n", "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
 
         # --- verify the manifest with the same Python verifier install-engine.sh runs ---
-        $manifestInfo = & $uv run --quiet --no-project --python $PythonVersion --with $CryptographyPin `
+        $manifestInfo = & $uv run --quiet --no-project --python $PythonRequest --with $CryptographyPin `
             python $verifier (Join-Path $tmp $ManifestName) (Join-Path $tmp $SignatureName) $Version $ReleasePublicKey
         if ($LASTEXITCODE -ne 0) { Fail 'release manifest verification failed' }
         $parts = (@($manifestInfo) -join ' ').Trim() -split '\s+'
@@ -838,7 +846,7 @@ print(name, digest, size)
         # locked file cannot be deleted, so uninstall and rollback would fail for
         # as long as that unrelated process runs. #857's spike measured it; own
         # files cost disk and install time.
-        $installed = Invoke-Native $uv @('tool', 'install', '--force', '--link-mode', 'copy', '--python', $PythonVersion, $wheel) $true
+        $installed = Invoke-Native $uv @('tool', 'install', '--force', '--link-mode', 'copy', '--python', $PythonRequest, $wheel) $true
         if ($installed.ExitCode -ne 0) { Fail 'uv tool install failed' }
         $binDir = Get-UvPath $uv $true
         if (-not $binDir) { Fail 'could not locate the uv tool bin directory' }
