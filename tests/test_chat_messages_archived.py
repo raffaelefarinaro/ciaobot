@@ -373,6 +373,23 @@ async def test_steered_index_is_skipped_in_archive(
 
 
 @pytest.mark.asyncio
+async def test_archive_rows_from_a_previous_provider_stint_get_no_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = _turn(1, "a", "ra") + _turn(2, "b", "rb") + _turn(3, "c", "rc")
+    rows = await _archived_rows(
+        tmp_path,
+        monkeypatch,
+        body,
+        user_turn_count=3,
+        turn_index_base=2,
+    )
+    users = [r for r in rows if r["role"] == "user"]
+    assert ["turn_index" in r for r in users] == [False, False, True]
+    assert users[-1]["turn_index"] == 2
+
+
+@pytest.mark.asyncio
 async def test_archive_without_historical_metadata_does_not_fabricate_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
