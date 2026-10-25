@@ -100,6 +100,7 @@
           v-if="!chat.archived"
           type="button"
           class="btn-icon chat-archive-btn"
+          :class="{ 'chat-archive-btn--icon': !isWidePane }"
           :title="ARCHIVE_ACTION_LABEL"
           :aria-label="ARCHIVE_ACTION_LABEL"
           @click="doArchive"
@@ -5257,6 +5258,15 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   top: auto;
   right: auto;
   flex: none;
+  /* Borderless like Archive beside it: no tile, the same hover fill. */
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg2);
+}
+.work-inspector-trigger--header:hover {
+  color: var(--fg);
+  border-color: transparent;
+  background: var(--bg3);
 }
 
 .chat-rail-head {
@@ -7823,7 +7833,17 @@ details[open] > .activity-summary::before {
 }
 .chat-archive-btn.btn-icon::before { inset: 0; }
 .chat-archive-btn svg { flex-shrink: 0; }
-@media (pointer: coarse) { .chat-archive-btn { min-height: var(--touch); } }
+/* Beside the header's Chat details opener Archive is icon-only and squares to
+   the opener's 34px; coarse pointers get the touch minimum below. */
+.chat-archive-btn--icon .chat-archive-label { display: none; }
+.chat-archive-btn.btn-icon.chat-archive-btn--icon {
+  padding: 0;
+  min-width: 34px;
+}
+@media (pointer: coarse) {
+  .chat-archive-btn { min-height: var(--touch); }
+  .chat-archive-btn.btn-icon.chat-archive-btn--icon { min-width: var(--touch); }
+}
 
 .model-picker-dropdown {
   position: absolute;
