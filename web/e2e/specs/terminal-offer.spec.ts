@@ -120,6 +120,9 @@ test.describe('the suggested command', () => {
     // The keyboard reaches the three controls in reading order. The command
     // itself is a stop before them: a scrollable region has to be
     // reachable, or a long command could not be read with the keyboard.
+    // The composer takes focus once the chat's data loads, which can land
+    // after the card is visible; wait for it so it cannot steal focus back.
+    await expect(page.locator(COMPOSER)).toBeFocused()
     await focusBeforeCard(page)
     let reached = false
     for (let i = 0; i < 4 && !reached; i += 1) {
