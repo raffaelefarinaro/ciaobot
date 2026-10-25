@@ -454,7 +454,10 @@ print(name, digest, size)
     function Read-InstallState {
         if (-not (Test-Path -LiteralPath $StateFile)) { return $null }
         try {
-            return (Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json)
+            # UTF-8, as it is written: Windows PowerShell 5.1 reads a file
+            # without a BOM as ANSI, which turned a workspace such as
+            # "Notes T<e-acute>st" into mojibake that `ciao setup` refused.
+            return (Get-Content -LiteralPath $StateFile -Raw -Encoding UTF8 | ConvertFrom-Json)
         } catch {
             return $null
         }
@@ -839,6 +842,25 @@ print(name, digest, size)
         # unregister action, so the task goes through schtasks and the tool
         # through uv.
 
+        # A re-run over our own engine replaces the environment it runs from, and
+        # Windows will not remove a file a running process holds: uv failed with
+        # "Access is denied" halfway through deleting the live environment. So
+        # the engine is stopped first; the existing-install path below starts
+        # it again.
+        if ($toolWasInstalled) {
+            $runningToolDir = Get-UvPath $uv $false
+            $previousInstall = Read-InstallState
+            $runningPort = $DefaultPort
+            if ($previousInstall -and $previousInstall.workspace) {
+                $runningPort = Read-WorkspacePort ([string]$previousInstall.workspace)
+            }
+            # A task that is not running exits non-zero here, which is fine.
+            if (Test-TaskRegistered) { $null = Invoke-Schtasks @('/End', '/TN', $TaskName) }
+            if (-not (Wait-EngineStopped $runningToolDir $runningPort)) {
+                Fail "the running Ciaobot engine did not stop; stop it (schtasks /End /TN $TaskName) and re-run"
+            }
+        }
+
         # ADDS: tool
         $mutated = $true
         # A tool that was already there is not this run's to remove on failure.
@@ -906,6 +928,14 @@ print(name, digest, size)
         }
 
         $workspaceWasSuggested = [bool]$Workspace
+        # A re-run without -Workspace keeps the folder this machine already
+        # uses. The browser wizard can put it anywhere, so the default name is
+        # only the default for a machine that has none; otherwise a repair
+        # would set up a second, empty workspace and repoint the task to it.
+        if (-not $Workspace) {
+            $recordedInstall = Read-InstallState
+            if ($recordedInstall -and $recordedInstall.workspace) { $Workspace = [string]$recordedInstall.workspace }
+        }
         if (-not $Workspace) { $Workspace = Join-Path $env:USERPROFILE $DefaultWorkspaceName }
         $Workspace = [Environment]::ExpandEnvironmentVariables($Workspace)
         $workspace = [System.IO.Path]::GetFullPath($Workspace)

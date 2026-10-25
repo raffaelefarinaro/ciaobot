@@ -992,3 +992,35 @@ def test_signed_in_check_uses_the_account_domain_not_userdomain() -> None:
     # was at the console, and skipped the readiness wait (#2051).
     assert "return [CiaobotSessions]::SignedIn([Environment]::UserDomainName, [Environment]::UserName)" in SCRIPT_TEXT
     assert "$env:USERDOMAIN" not in SCRIPT_TEXT
+
+
+def test_reinstall_stops_the_running_engine_before_replacing_its_environment() -> None:
+    # Windows will not delete a file a running process holds: a re-run over a
+    # running install failed in `uv tool install --force` with "Access is
+    # denied" halfway through removing the live environment (#2051).
+    stop = SCRIPT_TEXT.index("if ($toolWasInstalled) {\n            $runningToolDir")
+    block = SCRIPT_TEXT[stop:SCRIPT_TEXT.index("# ADDS: tool", stop)]
+    assert "Invoke-Schtasks @('/End', '/TN', $TaskName)" in block
+    assert "Wait-EngineStopped $runningToolDir $runningPort" in block
+    assert stop < SCRIPT_TEXT.index("$installed = Invoke-Native $uv @('tool', 'install'")
+    # Only after the release verified: a bad download never stops the engine.
+    assert SCRIPT_TEXT.index("release manifest verification failed") < stop
+
+
+def test_rerun_without_workspace_keeps_the_recorded_workspace() -> None:
+    # The wizard can choose any folder, so a repair run without -Workspace has
+    # to use the one the install state records, not the default name (#2051).
+    recorded = SCRIPT_TEXT.index("$recordedInstall = Read-InstallState")
+    default = SCRIPT_TEXT.index(
+        "if (-not $Workspace) { $Workspace = Join-Path $env:USERPROFILE $DefaultWorkspaceName }"
+    )
+    assert recorded < default
+    assert recorded > SCRIPT_TEXT.index("$workspaceWasSuggested = [bool]$Workspace")
+    assert recorded < SCRIPT_TEXT.index("$freshInstall = ")
+
+
+def test_install_state_is_read_as_the_utf8_it_is_written_in() -> None:
+    # 5.1 reads a BOM-less file as ANSI, so a non-ASCII workspace came back as
+    # mojibake and a repair or uninstall acted on a path that does not exist.
+    assert "New-Object System.Text.UTF8Encoding($false)" in SCRIPT_TEXT
+    assert "Get-Content -LiteralPath $StateFile -Raw -Encoding UTF8" in SCRIPT_TEXT
