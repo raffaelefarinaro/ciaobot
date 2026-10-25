@@ -41,7 +41,10 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
-async def _wait_for(predicate, timeout: float = 3.0, step: float = 0.01) -> None:
+async def _wait_for(predicate, timeout: float = 30.0, step: float = 0.01) -> None:
+    # A hang guard, not a speed assertion: it returns as soon as the predicate
+    # holds. 3s timed out on a loaded Windows runner (#1747); the bounded-stop
+    # contract is asserted by the `wait_for(stop_chat(...))` calls instead.
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         if predicate():
