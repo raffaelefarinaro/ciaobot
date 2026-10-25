@@ -9,7 +9,8 @@ Windows releases may still have rough edges. Report problems at
 
 - Windows 11 (build 22000 or newer), x64 or ARM64. Windows 10 is not supported. On ARM64 the
   engine runs as x64 under Windows' built-in emulation: `cryptography` ships no
-  ARM64 Windows build, so the installer and updates use an x64 Python there.
+  ARM64 Windows build, so the installer always uses an x64 Python (native on x64)
+  and updates keep the engine's own architecture.
 - PowerShell 5.1 or newer (the one that ships with Windows is enough).
 - No administrator rights. Everything is installed for your own account.
 - Internet access to GitHub for the install.

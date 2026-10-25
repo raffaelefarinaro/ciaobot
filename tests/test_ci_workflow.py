@@ -259,6 +259,9 @@ def test_windows_job_checks_the_install_ps1_advisorily() -> None:
     ).read_text(encoding="utf-8")
 
     assert "scripts/install.ps1" in workflow
+    assert "    runs-on: windows-latest\n" in workflow
+    windows_job = workflow.split("    runs-on: windows-latest\n", 1)[1].split("\n    steps:", 1)[0]
+    assert "timeout-minutes: 45" in windows_job, "a hung step must not hold the runner for six hours"
     assert "-ReleaseDir ./ps1-fixture/release -DryRun" in workflow
     assert "Invoke-ScriptAnalyzer" in workflow
     assert "windows-install-ps1.txt" in workflow
@@ -349,16 +352,23 @@ def test_windows_job_checks_the_install_ps1_advisorily() -> None:
     # is only known after the installer prints it, so it cannot be masked before
     # the fact: `::add-mask::` on its own masks the empty string and protects
     # nothing. The install output is redacted on the way into the file instead,
-    # and the exit code is the installer's, taken from PIPESTATUS before the
-    # pipe overwrites it.
+    # and the exit code is the installer's own, from `wait` on the background
+    # job rather than from sed.
     assert "add-mask" not in commands, (
         "the setup URL token is redacted, not masked: it is unknown until the "
         "installer prints it, so no mask can cover it"
     )
     assert r"sed -E 's#(Open Ciaobot: ).*#\1[redacted]#'" in commands
-    assert "${PIPESTATUS[0]}" in commands, (
-        "the install's exit code must come from PIPESTATUS, not from sed's"
+    assert 'wait "$installer"\n            install_exit=$?' in commands, (
+        "the install's exit code must come from the installer, not from sed's"
     )
+    # A fresh install serves the browser setup wizard and waits for it. Nobody
+    # is at a CI runner's browser, so the step finishes it over HTTP, and both
+    # the wizard wait and the installer wait are bounded: an unbounded wait
+    # held the Windows job for GitHub's six-hour limit on every develop push.
+    assert "/api/setup/finish" in commands
+    assert "deadline = time.time() + 600" in commands
+    assert "taskkill /F /T /PID" in commands
     # The version the installer is given is cut from the wheel *file name*. The
     # path has to go through basename first: `cut -d- -f2` on
     # `ps1-e2e/release/ciaobot-1.2.3-py3-none-any.whl` yields
