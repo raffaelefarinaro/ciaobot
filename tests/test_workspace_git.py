@@ -736,6 +736,65 @@ def test_setup_workspace_existing_mode_adopts_folder_as_vault(
     assert not (ws / "memory-vault").exists()
 
 
+@pytest.mark.parametrize("vault_relative", [".", "memory-vault", "../external-vault"])
+def test_fresh_existing_notes_are_not_upgrade_migrated_or_committed(
+    tmp_path: Path, vault_relative: str,
+) -> None:
+    from ciao.config import CiaoConfig
+    from ciao.workspace_reroot import migrate_if_needed
+
+    workspace = tmp_path / "adopted-notes"
+    vault = workspace / vault_relative
+    nested = vault / "Nested" / "keep.md"
+    nested.parent.mkdir(parents=True)
+    original = b"# Existing note\nKeep this content and path.\n"
+    nested.write_bytes(original)
+    setup_workspace(
+        workspace,
+        vault_mode="existing",
+        vault_root=vault if vault_relative == "../external-vault" else None,
+        workspace_name="notes",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+    config = CiaoConfig.from_env({
+        "CIAO_WORKSPACE": str(workspace), "CIAO_VAULT_ROOT": str(vault),
+    }, export=False)
+
+    assert migrate_if_needed(config) == {"status": "already_migrated"}
+    assert Path(config.workspace_vault_root("notes")) == vault.resolve()
+    assert config.agent_root("notes") == workspace / "notes"
+    assert nested.read_bytes() == original
+    assert not (workspace / ".git").exists()
+    assert not (vault / ".git").exists()
+
+
+@pytest.mark.parametrize("status", ["legacy_exempt", "completed"])
+def test_existing_notes_setup_preserves_non_new_layout_status(
+    tmp_path: Path, status: str,
+) -> None:
+    from ciao.onboarding import OnboardingProgress, OnboardingReceipt, ensure_receipt, write_receipt
+    from ciao.workspace_reroot import read_receipt
+
+    workspace = tmp_path / "prior-notes"
+    workspace.mkdir()
+    note = workspace / "keep.md"
+    note.write_text("Keep this prior note.\n", encoding="utf-8")
+    runtime = workspace / ".runtime"
+    original = ensure_receipt(runtime, established_install=False)
+    write_receipt(runtime, OnboardingReceipt(
+        original.revision, OnboardingProgress(status, "finish"), {},
+    ), expected_revision=original.revision)
+    setup_workspace(
+        workspace,
+        vault_mode="existing",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+    assert read_receipt(runtime) is None
+    assert note.read_text(encoding="utf-8") == "Keep this prior note.\n"
+
+
 def test_setup_workspace_existing_mode_keeps_scaffolded_vault(
     tmp_path: Path,
 ) -> None:

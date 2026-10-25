@@ -218,7 +218,26 @@ engine definition and no configured workspace it skips folder creation,
 `ciao setup` and service registration, runs `ciao run --installer-bootstrap` in
 the foreground (a `--workspace` is passed only as
 `--installer-suggest-workspace`), and activates the service from the matching
-handoff result with `ciao installer activate`. A cancel or guard refusal leaves
+handoff result with `ciao installer activate --json`. The Mac activation
+response uses the service backend name `macos`, not the install
+receipt's separate `launchd` name. The printed and opened
+browser URL uses the port in that verified activation response, including a
+custom port chosen in Advanced setup; malformed output refuses success rather
+than falling back to port 8443. A busy default port warns the user to choose
+another port in Advanced setup instead of blocking the wizard. After activation,
+the installer retains the verified workspace and waits for the selected port to
+answer before reporting a running engine or opening its URL. Fresh-install polls
+require duplicate-free startup JSON for the installed version and startup API 1,
+real boolean flags, a live startup UUID in `WorkspaceInstanceLock`'s canonical
+32-character lowercase hexadecimal (`uuid.uuid4().hex`) format and positive PID, and the
+`server_starting` phase marked `done` with `overall_ready: true` and no bind
+failure. The live startup UUID is not the foreground bootstrap's UUID. HTTP 200
+from an unrelated listener, malformed JSON, or an unfinished bind is not
+readiness. Each fresh poll is capped at five seconds and 64 KiB; a failed curl
+discards its partial response. Established-install and migration checks retain
+their existing behavior. If the fresh engine cannot bind
+or answer, setup remains saved, recovery guidance is printed, and the fresh
+install exits unsuccessfully. A cancel or guard refusal leaves
 a complete binary install that resumes with `ciao run --installer-bootstrap`,
 and `--no-start` provisions nothing. Migration and existing-workspace installs
 keep the `ciao setup` + `ciao service start` path; this installer runs on

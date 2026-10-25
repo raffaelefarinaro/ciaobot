@@ -133,6 +133,9 @@ def test_an_existing_notes_folder_kept_in_place_needs_no_migration(tmp_path: Pat
     })
 
     assert Path(config.vault_root).resolve() == tmp_path.resolve()
-    assert migrate_if_needed(config)["status"] == "not_applicable"
+    # Fresh adoption now has the same born-per-root receipt as empty-folder
+    # setup, so startup retires migration before it can snapshot any notes.
+    assert migrate_if_needed(config)["status"] == "already_migrated"
     assert vault_location_findings(config) == []
     assert (tmp_path / "existing.md").read_text(encoding="utf-8") == "# Existing note\n"
+    assert not (tmp_path / ".git").exists()
