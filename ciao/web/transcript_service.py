@@ -831,54 +831,6 @@ def _render_opencode_thread(
     return result
 
 
-def _opencode_child_status(
-    messages: list,
-    info: dict | None = None,
-    active: bool | None = None,
-) -> str:
-    """A V2 child session's lifecycle state.
-
-    ``/api/session/active`` is authoritative for the current execution;
-    ``Session.Info.outcome`` describes only the previous completed execution.
-    Normalized projected messages remain a defensive fallback for sparse data.
-    """
-    if active is True:
-        return "running"
-    last: dict | None = None
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        message_info = message.get("info")
-        if isinstance(message_info, dict) and message_info.get("role") == "assistant":
-            last = message_info
-    if last is not None:
-        if last.get("error"):
-            return "failed"
-        time_info = last.get("time")
-        if (
-            isinstance(time_info, dict)
-            and time_info.get("created")
-            and not time_info.get("completed")
-        ):
-            return "running"
-    if isinstance(info, dict):
-        outcome = str(info.get("outcome") or "")
-        if outcome == "failed":
-            return "failed"
-        if outcome in {"succeeded", "interrupted"}:
-            return "completed"
-        if active is None:
-            # A read from a different OpenCode process cannot establish
-            # inactivity. Keep an unobserved child visible/running rather than
-            # allowing an archive or schedule waiter to settle it early.
-            return "running"
-    if active is False:
-        return "completed"
-    if active is None and isinstance(info, dict):
-        return "running"
-    return "completed"
-
-
 def _opencode_child_duration_ms(info: dict) -> int | None:
     """Child run length from its session timestamps, or None.
 

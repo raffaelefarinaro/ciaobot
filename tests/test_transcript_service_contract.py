@@ -24,6 +24,7 @@ from ciao import cli_envelopes
 from ciao.models import AgentRequest, ChatContext
 from ciao.transcripts import TranscriptStore
 from ciao.web import app as web_app
+from ciao.providers.opencode import opencode_child_status
 from ciao.web import transcript_service
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1165,21 +1166,21 @@ def test_a_child_thread_keeps_its_own_turn_numbering() -> None:
 
 def test_opencode_child_status_reads_the_last_assistant_message() -> None:
     messages = OPENCODE_THREAD["messages"]
-    assert transcript_service._opencode_child_status(messages) == "failed"
-    assert transcript_service._opencode_child_status(messages[:2]) == "completed"
+    assert opencode_child_status(messages) == "failed"
+    assert opencode_child_status(messages[:2]) == "completed"
     assert (
-        transcript_service._opencode_child_status(
+        opencode_child_status(
             [{"info": {"role": "assistant", "time": {"created": 1}}}]
         )
         == "running"
     )
-    assert transcript_service._opencode_child_status([]) == "completed"
+    assert opencode_child_status([]) == "completed"
     # The active map describes the current execution, not Session.Info.outcome
     # from the previous completed turn.
-    assert transcript_service._opencode_child_status(
+    assert opencode_child_status(
         [], {"outcome": "failed"}, active=True
     ) == "running"
-    assert transcript_service._opencode_child_status(
+    assert opencode_child_status(
         [], {"outcome": "succeeded"}, active=False
     ) == "completed"
 

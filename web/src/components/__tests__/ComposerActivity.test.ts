@@ -236,6 +236,20 @@ describe('ComposerActivity', () => {
     wrapper.unmount()
   })
 
+  it('announces a shell-only process', () => {
+    const shell: RunningSubagent = { agent_id: 'shell:sh1', description: 'npm run dev', subagent_type: 'shell' }
+    const wrapper = mountBar({ agents: [shell] })
+    expect(wrapper.get('[role="status"]').text()).toBe('Running in the background: npm run dev')
+    wrapper.unmount()
+  })
+
+  it('counts a shell row beside a run in the announcement', () => {
+    const shell: RunningSubagent = { agent_id: 'shell:sh1', description: 'npm run dev', subagent_type: 'shell' }
+    const wrapper = mountBar({ runs: [run('r1', 'ITTA preview', 60_000)], agents: [shell] })
+    expect(wrapper.get('[role="status"]').text()).toBe('Running in the background: ITTA preview and 1 more')
+    wrapper.unmount()
+  })
+
   it('lists a shell row under Processes, as a non-link, and keeps it out of the agent count', async () => {
     const shell: RunningSubagent = { agent_id: 'shell:sh1', description: 'sleep 20', subagent_type: 'shell' }
     const wrapper = mountBar({ agentCount: 1, agents: [AGENT, shell] })
