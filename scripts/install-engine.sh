@@ -1124,6 +1124,68 @@ port_owner() {
         | sed 's/  */ /g; s/^ //; s/ $//'
 }
 
+fresh_startup_state() {
+    # HTTP 200 alone can be an unrelated listener. Only the installed engine's
+    # startup contract and completed bind phase can prove fresh setup is ready.
+    "$tool_python" -I -c '
+import json
+import sys
+import uuid
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate startup field")
+        result[key] = value
+    return result
+
+def reject_constant(value):
+    raise ValueError("invalid JSON constant")
+
+try:
+    with open(sys.argv[2], "rb") as response:
+        raw = response.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("oversized startup response")
+    result = json.loads(raw, object_pairs_hook=unique_fields, parse_constant=reject_constant)
+    if not isinstance(result, dict) or result.get("version") != sys.argv[1]:
+        raise ValueError("not the installed engine")
+    if type(result.get("desktop_api_version")) is not int or result["desktop_api_version"] != 1:
+        raise ValueError("unknown startup API")
+    for key in ("overall_ready", "port_in_use", "update_available"):
+        if type(result.get(key)) is not bool:
+            raise ValueError("invalid startup flag")
+    if "latest_version" not in result or (result["latest_version"] is not None and not isinstance(result["latest_version"], str)):
+        raise ValueError("invalid latest version")
+    startup_id = result.get("startup_id")
+    if not isinstance(startup_id, str) or uuid.UUID(startup_id).hex != startup_id:
+        raise ValueError("invalid live startup id")
+    if type(result.get("pid")) is not int or result["pid"] <= 0:
+        raise ValueError("invalid live engine pid")
+    phases = result.get("phases")
+    if not isinstance(phases, list):
+        raise ValueError("invalid startup phases")
+    by_name = {}
+    for phase in phases:
+        if not isinstance(phase, dict) or not isinstance(phase.get("name"), str) or not phase["name"] or phase["name"] in by_name:
+            raise ValueError("invalid or duplicate startup phase")
+        if phase.get("status") not in ("pending", "in_progress", "done", "failed") or not isinstance(phase.get("message"), str):
+            raise ValueError("invalid startup phase state")
+        for key in ("started_at", "finished_at"):
+            if key not in phase or (phase[key] is not None and not isinstance(phase[key], str)):
+                raise ValueError("invalid startup phase time")
+        by_name[phase["name"]] = phase
+    bind = by_name.get("server_starting", {})
+    if result["port_in_use"]:
+        print("port_in_use")
+    elif result["overall_ready"] and bind.get("status") == "done":
+        print("ready")
+except (ValueError, TypeError, KeyError, RecursionError, OSError):
+    sys.exit(1)
+' "$version" "$1"
+}
+
 python_probe_port() {
     # The verified wheel's own probe: `ciao.port_in_use.port_is_available`
     # binds the port the way the engine does. It answers 0 (the port is
@@ -1709,7 +1771,7 @@ try:
     for path in (workspace, definition):
         if not isinstance(path, str) or not os.path.isabs(path) or any(ord(c) < 32 or ord(c) == 127 for c in path):
             raise ValueError("invalid activation path")
-    if result.get("service_backend") != "launchd":
+    if result.get("service_backend") != "macos":
         raise ValueError("invalid activation backend")
 except (ValueError, TypeError):
     sys.exit(1)
@@ -1840,32 +1902,45 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
             port_in_use=1
             break
         fi
-        status=$("$CURL" -fsS "http://localhost:$port/api/startup-status" 2>/dev/null || true)
+        if [ "$fresh_macos" -eq 1 ]; then
+            # Bound both time and response size; discard even a partial body
+            # when curl fails (including its size/time limit).
+            if "$CURL" -fsS --max-time 5 --max-filesize 65536 \
+                "http://localhost:$port/api/startup-status" \
+                -o "$tmp/startup-status.json" 2>/dev/null; then
+                status=fresh
+            else
+                status=
+            fi
+        else
+            status=$("$CURL" -fsS "http://localhost:$port/api/startup-status" 2>/dev/null || true)
+        fi
         if [ -n "$status" ]; then
-            # The engine reports a bind failure as an explicit flag, so the
-            # installer can tell "the port is taken" from "still starting"
-            # without reading the phase's prose (#1654).
-            if printf '%s' "$status" | grep -q '"port_in_use":[[:space:]]*true'; then
-                port_in_use=1
-                break
-            fi
-            if [ "$migrate_path" != host ]; then
-                healthy=1
-                break
-            fi
-            # The version is picked out of the whole response, not counted out
-            # of it: the endpoint's payload has keys before `version`, so
-            # splitting the document on quotes and taking the fourth field
-            # reads whichever key happens to come first. `"version":` cannot
-            # match inside `"latest_version":` - the quote in front of `version`
-            # is a character in that name, not one - so this is the engine's own
-            # version and nothing else.
-            reported=$(printf '%s\n' "$status" \
-                | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
-                | head -1)
-            if [ "$reported" = "$version" ]; then
-                healthy=1
-                break
+            if [ "$fresh_macos" -eq 1 ]; then
+                startup_state=$(fresh_startup_state "$tmp/startup-status.json" 2>/dev/null || true)
+                case "$startup_state" in
+                    ready) healthy=1; break ;;
+                    port_in_use) port_in_use=1; break ;;
+                esac
+            else
+                # Preserve established-install and migration readiness rules.
+                # The engine reports a bind failure as an explicit flag (#1654).
+                if printf '%s' "$status" | grep -q '"port_in_use":[[:space:]]*true'; then
+                    port_in_use=1
+                    break
+                fi
+                if [ "$migrate_path" != host ]; then
+                    healthy=1
+                    break
+                fi
+                # Match the engine version, not a substring of latest_version.
+                reported=$(printf '%s\n' "$status" \
+                    | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+                    | head -1)
+                if [ "$reported" = "$version" ]; then
+                    healthy=1
+                    break
+                fi
             fi
         fi
         attempt=$((attempt + 1))
