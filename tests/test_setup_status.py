@@ -597,6 +597,8 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app).get("/api/setup-status")
@@ -635,6 +637,8 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -697,6 +701,8 @@ def _finish_client(tmp_path) -> TestClient:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
     return TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
@@ -926,6 +932,8 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -1011,6 +1019,8 @@ def test_setup_finish_handoff_goes_through_the_backend(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -1073,6 +1083,8 @@ def test_setup_finish_requires_workspace(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
@@ -1094,6 +1106,8 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     workspace = tmp_path / "workspace"
@@ -1137,6 +1151,8 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://0.0.0.0:8443", client=_LOOPBACK_PEER).post(
@@ -1172,6 +1188,8 @@ def test_setup_finish_refuses_a_protected_folder_without_a_host(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     workspace = home / "Documents" / "ws"
 
@@ -1199,6 +1217,8 @@ def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
@@ -1218,6 +1238,8 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="https://ciao.example").post(
@@ -1244,6 +1266,8 @@ def test_setup_routes_refuse_a_lan_peer_claiming_localhost(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
 
@@ -1281,6 +1305,8 @@ def _folder_picker_client(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     return TestClient(app, base_url=base_url, client=peer)
 
