@@ -119,6 +119,9 @@ class SubagentWatchers:
         # the sidebar badge and the /ws/events connect snapshot, so a reload
         # heals a count a dropped socket left stale.
         self._background_agents_last: dict[str, int] = {}
+        # Any background work (agents plus opencode shells) per chat, for
+        # lifecycle decisions; the published count is agents only.
+        self._background_work_last: dict[str, int] = {}
         # (chat_id, task_id) pairs this process has already woken for.
         self._cli_task_wakes_sent: set[tuple[str, str]] = set()
 
@@ -146,6 +149,10 @@ class SubagentWatchers:
     def running_count(self, chat_id: str) -> int:
         """Last announced count for one chat, 0 when nothing was published."""
         return self._background_agents_last.get(chat_id, 0)
+
+    def work_count(self, chat_id: str) -> int:
+        """Last announced background work for one chat, shells included."""
+        return self._background_work_last.get(chat_id, 0)
 
     def watching_chat_ids(self) -> set[str]:
         """Chats with a live watcher, counted as active work during a drain.
@@ -200,8 +207,12 @@ class SubagentWatchers:
         task = asyncio.create_task(self._host._watch_subagent_completion(chat_id, project_id))
         self._pending_subagent_watchers[chat_id] = task
 
-    def publish_count(self, chat_id: str, project_id: str, count: int) -> None:
+    def publish_count(
+        self, chat_id: str, project_id: str, count: int, *, work: int | None = None
+    ) -> None:
+        """Announce *count* agents; *work* is the lifecycle count when it differs."""
         self._background_agents_last[chat_id] = count
+        self._background_work_last[chat_id] = count if work is None else work
         self._host._events.publish({
             "type": "chat_subagents_ready",
             "chat_id": chat_id,
@@ -345,6 +356,7 @@ class SubagentWatchers:
                     # and will publish the real count on its first tick.
                     self.publish_count(chat_id, project_id, 0)
                 self._background_agents_last.pop(chat_id, None)
+                self._background_work_last.pop(chat_id, None)
             # A superseded watcher leaves the replacement's count alone: it
             # already published on its first tick, and wiping the baseline
             # here would make the next tick republish a duplicate event.
@@ -354,6 +366,7 @@ class SubagentWatchers:
     ) -> None:
         """Poll the opencode session tree and its background shells while background work runs."""
         last_count = -1
+        last_work = -1
         deadline = time.perf_counter() + 3600
         try:
             while time.perf_counter() < deadline:
@@ -387,20 +400,26 @@ class SubagentWatchers:
                     # server: with no live server there are none.
                     shells = 0
                 children, had_subagents = opencode_collab_tree_counts(tree)
-                count = children + shells
-                if count > 0 and not saw_work:
+                # Shells are background work, not agents: they keep the watcher
+                # alive but are not published as the agent count.
+                work = children + shells
+                if work > 0 and not saw_work:
                     # Tells `watch` a live drain owns the parked announce.
                     saw_work.append(True)
-                if count != last_count:
-                    if count == 0 and last_count > 0:
+                if work != last_work:
+                    if work == 0 and last_work > 0:
                         chat.last_activity_at = chat_service._now_iso()
                         self._host._save()
                         # No separate "Background agents finished" push — the
                         # chat's own result notification covers it; the extra
                         # generic ping was redundant (user feedback).
-                    self.publish_count(chat_id, project_id, count)
-                    last_count = count
-                if (not had_subagents and shells == 0) or count == 0:
+                    last_work = work
+                if children != last_count:
+                    self.publish_count(chat_id, project_id, children, work=work)
+                    last_count = children
+                else:
+                    self._background_work_last[chat_id] = work
+                if (not had_subagents and shells == 0) or work == 0:
                     break
                 if self._host._restart_draining:
                     # A restart must not wait an hour on this watcher:
@@ -423,6 +442,7 @@ class SubagentWatchers:
                     # count we have stopped maintaining.
                     self.publish_count(chat_id, project_id, 0)
                 self._background_agents_last.pop(chat_id, None)
+                self._background_work_last.pop(chat_id, None)
             # A superseded watcher must not wipe the replacement's baseline
             # (see the Claude watcher above).
 

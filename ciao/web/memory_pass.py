@@ -823,7 +823,7 @@ class MemoryPassCoordinator:
             or chat.pending_question
             or chat.pending_permission
             or chat.retry_status == "pending"
-            or host._subagents.running_count(chat_id) > 0
+            or host._subagents.work_count(chat_id) > 0
         ):
             return False
 

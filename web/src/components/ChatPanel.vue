@@ -1215,7 +1215,7 @@
             <ComposerActivity
               :chat-id="chat.chat_id"
               :agent-count="composerAgentCount"
-              :agents="runningSubagents"
+              :agents="runningRows"
               :runs="chatRuns"
               :finished="store.finishedBackgroundRuns[chat.chat_id] ?? null"
               :now="nowTs"
@@ -1523,7 +1523,7 @@ import { useTypeToComment } from '../composables/useTypeToComment'
 import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
-import { subagentLabel, subagentPath } from '../lib/subagentIds'
+import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
 import { handleAppLinkClick } from '../lib/appLinks'
 
 /** The footer facts for one turn: when it landed, how long it took, which
@@ -2205,7 +2205,10 @@ function compactContext() {
   void store.compactChat(chat.value.chat_id)
 }
 
-const runningSubagents = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
+// The poll's rows include background shells (`subagent_type: "shell"`); the
+// composer lists those as processes, everything else counts as an agent.
+const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
+const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
 const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))
 // Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
 // the running-subagent poll tick on different clocks, so take the larger.

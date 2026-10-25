@@ -299,14 +299,16 @@ async def _watch(pcm, project, chat, provider, monkeypatch, shells):
 
 
 @pytest.mark.asyncio
-async def test_opencode_watcher_counts_background_shells(tmp_path, monkeypatch):
+async def test_opencode_watcher_does_not_count_background_shells_as_agents(tmp_path, monkeypatch):
     pcm, project, chat = _opencode_chat(tmp_path)
     provider = _live_provider(tmp_path, chat.session_id)
 
-    published, _wait = await _watch(pcm, project, chat, provider, monkeypatch, [1, 0])
+    published, wait = await _watch(pcm, project, chat, provider, monkeypatch, [1, 0])
 
     remaining = [e["remaining"] for e in published if e.get("type") == "chat_subagents_ready"]
-    assert remaining == [1, 0]
+    # The shell keeps the watcher polling (one wait) but is not an agent.
+    assert remaining == [0]
+    assert wait.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -329,7 +331,7 @@ async def test_opencode_watcher_stops_for_a_restart_drain(tmp_path, monkeypatch)
 
     assert wait.await_count == 0
     remaining = [e["remaining"] for e in published if e.get("type") == "chat_subagents_ready"]
-    assert remaining == [1]
+    assert remaining == [0]
 
 
 @pytest.mark.asyncio
@@ -547,3 +549,42 @@ class _FakeDrainService:
             session_id="s",
             origin="task-notification",
         )
+
+
+@pytest.mark.asyncio
+async def test_opencode_watcher_publishes_children_not_shells(tmp_path, monkeypatch):
+    pcm, project, chat = _opencode_chat(tmp_path)
+    provider = _live_provider(tmp_path, chat.session_id)
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    tree = [{"info": {"id": "ses_child"}, "active": True}]
+    monkeypatch.setattr(provider, "read_live_collab_tree", AsyncMock(return_value=tree))
+    # Two shells stay alive for two ticks, then exit; the child ends with them.
+    monkeypatch.setattr(provider, "refresh_background_shells", AsyncMock(side_effect=[2, 2, 0]))
+    ended: list = []
+
+    async def wait(_timeout):
+        if len(ended) == 1:
+            tree[0]["active"] = False
+        ended.append(True)
+
+    monkeypatch.setattr(provider, "wait_background_change", wait)
+    published = _capture_publish(pcm)
+    work_seen: list[int] = []
+    original = pcm._subagents.publish_count
+
+    def spy(chat_id, project_id, count, *, work=None):
+        work_seen.append(pcm._subagents.work_count(chat_id))
+        original(chat_id, project_id, count, work=work)
+        work_seen.append(pcm._subagents.work_count(chat_id))
+
+    monkeypatch.setattr(pcm._subagents, "publish_count", spy)
+
+    await asyncio.wait_for(
+        pcm._subagents._watch_opencode(chat.chat_id, project.project_id, []), 5
+    )
+
+    remaining = [e["remaining"] for e in published if e.get("type") == "chat_subagents_ready"]
+    assert remaining == [1, 0]
+    # The watcher kept going while the shells were alive (three polls, not one).
+    assert len(ended) == 2
+    assert work_seen[1] == 3

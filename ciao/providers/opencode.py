@@ -1685,6 +1685,9 @@ class OpencodeProvider(BaseSDKProvider):
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
         # reconciles replace it wholesale (#1391).
         self._background_shells: set[str] = set()
+        # Command of each shell seen in `shell.created`, for the composer's
+        # process list. A shell found only by `GET /api/shell` has no entry.
+        self._shell_commands: dict[str, str] = {}
         self._background_children: set[str] = set()
         # Task/subagent sessions spawned under a parent session (any depth),
         # child id -> parent session. Only their permission/form requests are
@@ -1838,6 +1841,13 @@ class OpencodeProvider(BaseSDKProvider):
         """Background shells plus subagents tracked for this chat's session."""
         return len(self._background_shells) + len(self._background_children)
 
+    def background_shell_rows(self) -> list[dict[str, str]]:
+        """``{id, command}`` for each live background shell, in id order."""
+        return [
+            {"id": shell_id, "command": self._shell_commands.get(shell_id, "")}
+            for shell_id in sorted(self._background_shells)
+        ]
+
     @property
     def seconds_since_activity(self) -> float:
         """Seconds since the server last sent this provider an event."""
@@ -1866,9 +1876,11 @@ class OpencodeProvider(BaseSDKProvider):
                 and str(info["id"]) not in self._background_shells
             ):
                 self._background_shells.add(str(info["id"]))
+                self._shell_commands[str(info["id"])] = str(info.get("command") or "")
                 changed = True
         elif kind == "shell.exited":
             shell_id = str(props.get("id") or "")
+            self._shell_commands.pop(shell_id, None)
             if shell_id in self._background_shells:
                 self._background_shells.discard(shell_id)
                 changed = True
@@ -2551,6 +2563,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._tool_calls.clear()
         self._settled_tool_ids.clear()
         self._background_shells.clear()
+        self._shell_commands.clear()
         self._background_children.clear()
         self._child_sessions.clear()
         self._background_changed.set()
@@ -4531,44 +4544,38 @@ class OpencodeProvider(BaseSDKProvider):
                 return False
 
 
-def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int, bool]:
-    """Return running and observed counts, treating unknown activity safely."""
-    running = 0
+def running_opencode_child_ids(tree: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Ids of the children in a collab tree that are still running.
+
+    The one running-child rule, shared by the watcher count and the
+    running-subagents route: a child runs by ``_opencode_child_status``
+    (``active`` is authoritative; otherwise message timing and ``outcome``).
+    """
+    from ciao.web import transcript_service
+
+    ids: list[str] = []
     for item in tree:
         if not isinstance(item, Mapping):
             continue
-        if "active" not in item:
-            continue
-        active = item.get("active")
-        if active is True:
-            running += 1
-            continue
-        if active is False:
+        info = item.get("info")
+        info = info if isinstance(info, dict) else {}
+        child_id = str(info.get("id") or "")
+        if not child_id:
             continue
         messages = item.get("messages")
-        if not isinstance(messages, list):
-            # A different process cannot prove that a child with no projected
-            # assistant row is idle. Keep it conservatively running.
-            running += 1
-            continue
-        last: Mapping[str, Any] | None = None
-        for message in messages:
-            if not isinstance(message, Mapping):
-                continue
-            info = message.get("info")
-            if isinstance(info, Mapping) and info.get("role") == "assistant":
-                last = info
-        if last is None:
-            running += 1
-            continue
-        time_info = last.get("time") if isinstance(last, Mapping) else None
-        if (
-            isinstance(time_info, Mapping)
-            and time_info.get("created")
-            and not time_info.get("completed")
-        ):
-            running += 1
-    return running, bool(tree)
+        messages = messages if isinstance(messages, list) else []
+        active = item.get("active")
+        status = transcript_service._opencode_child_status(
+            messages, info, active if isinstance(active, bool) else None
+        )
+        if status == "running":
+            ids.append(child_id)
+    return ids
+
+
+def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int, bool]:
+    """Return the running child count and whether the tree has any children."""
+    return len(running_opencode_child_ids(tree)), bool(tree)
 
 
 def catalog_providers(catalog: Sequence[Mapping[str, Any]]) -> set[str]:

@@ -4485,7 +4485,7 @@ class ProjectChatManager:
             or chat.pending_question
             or chat.pending_permission
             or chat.retry_status
-            or self._subagents.running_count(chat_id) > 0
+            or self._subagents.work_count(chat_id) > 0
         ):
             return False
         try:
