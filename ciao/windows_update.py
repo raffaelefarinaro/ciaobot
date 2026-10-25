@@ -512,7 +512,7 @@ class WindowsUpdateHost:
             )
         stage = Path(op.stage_dir)
         (stage / CONSTRAINTS_NAME).write_text(_pins(op.env_freeze), encoding="utf-8", newline="")
-        python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        python_version = engine_update.python_request()
         started = self._clock()
         try:
             self._run(

@@ -223,6 +223,11 @@ RELOCATION_STANDARD = "standard_location"
 #: the unactionable card operators learn to ignore.
 RELOCATION_VAULT_MISSING = "vault_missing"
 
+#: The vault is the install folder itself: an existing notes folder setup kept in
+#: place (#2021). A supported layout, and one `vault-relocate` refuses anyway, so
+#: there is nothing to offer.
+RELOCATION_INSTALL_FOLDER = "vault_is_install_folder"
+
 #: A **completed** relocation is recorded for this workspace, and the workspace
 #: no longer sits outside its folder. Only a `status: "relocated"` receipt counts:
 #: a `refused` one means a run happened and moved nothing, and a receipt this
@@ -333,26 +338,16 @@ def vault_location_findings(config: Any) -> list[VaultLocationFinding]:
     lister = getattr(config, "workspace_names", None)
     if not callable(resolver) or not callable(standardizer) or not callable(lister):
         return []
-    try:
-        install_root: Path | None = Path(config.workspace_root).resolve()
-    except Exception:  # noqa: BLE001 — advisory; a bad config must not fail
-        install_root = None
     findings: list[VaultLocationFinding] = []
     for name in lister():
+        # One predicate with the card's (:func:`relocation_state`), so the notice
+        # and the task cannot disagree about which workspaces are misplaced.
         try:
+            if relocation_state(config, name) != RELOCATION_MISPLACED:
+                continue
             actual = Path(resolver(name)).resolve()
             standard = Path(standardizer(name)).resolve()
         except Exception:  # noqa: BLE001 — advisory; a bad registry must not fail
-            continue
-        # A root that does not exist is a different notice (`workspace-root-missing`
-        # on Home, and a setup finding in the audit): there is no misplaced vault
-        # to relocate, and offering a move for a path that is not there is the
-        # unactionable tile operators learn to ignore.
-        if actual == standard or not actual.is_dir():
-            continue
-        # An existing notes folder kept in place by setup is the install folder
-        # itself: a supported layout, and one `vault-relocate` refuses anyway.
-        if actual == install_root:
             continue
         findings.append(
             VaultLocationFinding(workspace=str(name), actual=actual, standard=standard)
@@ -445,6 +440,13 @@ def relocation_state(config: Any, workspace: str) -> str:
     # silent so a card-free workspace is readable as a reason.
     if not actual.is_dir():
         return RELOCATION_VAULT_MISSING
+    # An existing notes folder kept in place by setup is the install folder itself.
+    try:
+        install_root: Path | None = Path(config.workspace_root).resolve()
+    except Exception:  # noqa: BLE001 — no install root to compare is no exemption
+        install_root = None
+    if actual == install_root:
+        return RELOCATION_INSTALL_FOLDER
     return RELOCATION_MISPLACED
 
 

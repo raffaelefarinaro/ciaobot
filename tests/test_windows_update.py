@@ -27,6 +27,7 @@ from ciao.engine_update import (
     PREVIOUS_ENV_NAME,
     Operation,
     UpdateError,
+    python_request,
     read_operation,
     recover_apply,
     run_apply,
@@ -697,7 +698,8 @@ def test_install_env_is_an_offline_copy_mode_reinstall_with_relative_paths(
     assert argv == [
         str(tmp_path / "uv.exe"),
         "tool", "install", "--offline", "--force", "--link-mode", "copy",
-        "--python", f"{sys.version_info.major}.{sys.version_info.minor}",
+        # The running interpreter's version and, on Windows, architecture.
+        "--python", python_request(),
         # Relative to the stage dir: uv splits an absolute path with a space.
         "--constraint", CONSTRAINTS_NAME,
         Path(op.wheel).name,

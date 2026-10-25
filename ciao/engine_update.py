@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import sysconfig
 import time
 import urllib.error
 import urllib.request
@@ -349,6 +350,20 @@ def resolve_latest_version() -> str:
     return latest
 
 
+def python_request() -> str:
+    """The uv ``--python`` request that restages the engine like this one.
+
+    The running version, and on Windows its architecture too: Windows on Arm
+    runs the engine as x64 (cryptography ships no win_arm64 wheel), and a bare
+    version would let uv pick an Arm64 interpreter that cannot install it.
+    """
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    arch = {"win-amd64": "x86_64", "win-arm64": "aarch64"}.get(sysconfig.get_platform())
+    if sys.platform != "win32" or arch is None:
+        return version
+    return f"cpython-{version}-windows-{arch}-none"
+
+
 def find_uv(receipt_uv: str = "", *, host: UpdateHost | None = None) -> str:
     """Locate a ``uv`` executable, preferring the one that built this engine.
 
@@ -542,7 +557,7 @@ def _stage_locked(
         advance("staging")
         platform = host or default_update_host()
         uv_bin = uv or find_uv(_receipt_uv(), host=platform)
-        py = python_version or f"{sys.version_info.major}.{sys.version_info.minor}"
+        py = python_version or python_request()
         # A real tool env, in a tool dir of this update's own, because the apply
         # moves this directory into the live env's place: it has to be the shape
         # `uv tool install` produces — its `uv-receipt.toml`, its entry points —
