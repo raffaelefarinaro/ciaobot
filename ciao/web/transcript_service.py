@@ -49,7 +49,6 @@ from ciao.providers.opencode import (
     _summarize_tool_input as _summarize_opencode_tool_input,
 )
 from ciao.rate_limits import is_rate_limit_telemetry
-from ciao.web import chat_service
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 
 logger = logging.getLogger(__name__)
@@ -1314,6 +1313,37 @@ def _overlay_paired_metadata(
     flush()
 
 
+def _stamp_archive_turn_indices(rows: list[dict], chat) -> None:
+    """Give archived user rows the ``turn_index`` the live transcript uses.
+
+    Hidden continuation turns are already dropped from ``rows`` and carry no
+    index. Steered indices bump ``user_turn_count`` without a user row, so they
+    are skipped. Counting back from ``user_turn_count`` keeps the newest rows
+    right when earlier rows belong to a previous provider stint (below
+    ``turn_index_base``); those get no index.
+    """
+    base = chat.turn_index_base
+    count = chat.user_turn_count
+    steered = {int(key) for key in chat.user_turn_steered}
+    user_rows = [row for row in rows if row.get("role") == "user"]
+    if count > 0:
+        idx = count - 1
+        for row in reversed(user_rows):
+            while idx in steered:
+                idx -= 1
+            if idx < base:
+                break
+            row["turn_index"] = idx
+            idx -= 1
+    else:
+        idx = base
+        for row in user_rows:
+            while idx in steered:
+                idx += 1
+            row["turn_index"] = idx
+            idx += 1
+
+
 def _messages_from_archived_transcript(
     pcm,
     config,
@@ -1334,12 +1364,12 @@ def _messages_from_archived_transcript(
             archive_path,
         )
         return None
-    parsed = pcm._parse_transcript_messages(text)
-    parsed = chat_service._normalize_handover_messages(parsed)
+    parsed: list[dict] = pcm._parse_transcript_messages(text)
     # Map transcript timestamp field to the frontend's sent_at key.
     for parsed_entry in parsed:
         if "timestamp" in parsed_entry and "sent_at" not in parsed_entry:
             parsed_entry["sent_at"] = parsed_entry["timestamp"]
+    _stamp_archive_turn_indices(parsed, chat)
     _overlay_assistant_timings(parsed, chat.user_turn_timings)
     return parsed
 

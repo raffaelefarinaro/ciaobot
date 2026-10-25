@@ -676,3 +676,19 @@ def test_a_real_label_is_not_overwritten_by_a_later_one(tmp_path: Path) -> None:
     _record(store, "third", "New Chat")
 
     assert _archived_context(store) == "Quarterly review prep"
+
+
+def test_parse_archive_turns_reads_effective_model_from_header_only() -> None:
+    from ciao.transcripts import parse_archive_turns
+
+    legacy = (
+        "## Turn 1\n\n- Time: 2026-06-19T10:00:00Z\n- Input kind: text\n\n"
+        "### User\n\n```text\n- Effective model: fake\n```\n\n"
+        "### Assistant\n\n```text\nok\n```\n\n"
+    )
+    current = (
+        "## Turn 2\n\n- Time: 2026-06-19T10:05:00Z\n- Effective model: opus\n\n"
+        "### User\n\n```text\nhi\n```\n\n### Assistant\n\n```text\nok\n```\n"
+    )
+    turns = parse_archive_turns(legacy + current)
+    assert [t["effective_model"] for t in turns] == ["", "opus"]

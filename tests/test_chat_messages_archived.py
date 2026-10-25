@@ -260,3 +260,125 @@ async def test_archived_legacy_provider_chat_falls_back_to_transcript(
 
     assert '"content":"hello archived codex"' in payload
     assert '"content":"reply from archived codex"' in payload
+
+
+def _turn(n: int, user: str, reply: str, *, model: str = "opus", usage: str = "") -> str:
+    return (
+        f"\n## Turn {n}\n\n- Time: 2026-06-19T10:{n % 60:02d}:00Z\n"
+        f"- Input kind: text\n- Mode: auto\n- Effective model: {model}\n- Images: 0\n\n"
+        f"### User\n\n```text\n{user}\n```\n\n### Assistant\n\n```text\n{reply}\n```\n"
+        f"{usage}"
+    )
+
+
+_HEADER = "---\nprovider: claude\nsession_id: sess-archived\n---\n\n# Chat Transcript (claude)\n"
+
+
+async def _archived_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+    **chat_fields,
+) -> list[dict]:
+    import json
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Archive meta", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="archived-meta")
+    chat.session_id = "sess-archived"
+    path = tmp_path / "memory-vault" / "Logs" / "Chats" / chat.chat_id / "claude" / "a.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_HEADER + body, encoding="utf-8")
+    chat.archived = True
+    chat.archive_path = str(path.relative_to(tmp_path))
+    for key, value in chat_fields.items():
+        setattr(chat, key, value)
+    pcm._save()
+    fake_sdk = SimpleNamespace(
+        get_session_messages=lambda session_id, directory: (_ for _ in ()).throw(FileNotFoundError("gone"))
+    )
+    monkeypatch.setitem(__import__("sys").modules, "claude_agent_sdk", fake_sdk)
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    payload = json.loads(response.body.decode())
+    return payload["messages"] if isinstance(payload, dict) else payload
+
+
+@pytest.mark.asyncio
+async def test_archived_fallback_preserves_usage_model_and_duration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    usage = "\n### Usage\n\n- input_tokens: 14\n- output_tokens: 0\n"
+    body = _turn(1, "q1", "r1", usage=usage) + _turn(2, "q2", "r2")
+    rows = await _archived_rows(
+        tmp_path,
+        monkeypatch,
+        body,
+        user_turn_count=2,
+        user_turn_timings={"0": {"completed_at": "2026-06-19T10:00:04Z", "duration_ms": 4000}},
+    )
+    users = [r for r in rows if r["role"] == "user"]
+    assistants = [r for r in rows if r["role"] == "assistant"]
+    assert [u["turn_index"] for u in users] == [0, 1]
+    assert assistants[0]["usage"] == {"input_tokens": "14", "output_tokens": "0"}
+    assert assistants[0]["effective_model"] == "opus"
+    assert assistants[0]["duration_ms"] == 4000
+
+
+@pytest.mark.asyncio
+async def test_archived_display_is_not_truncated_to_handover_limits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "".join(_turn(n, f"question {n}", f"answer {n}") for n in range(1, 91))
+    rows = await _archived_rows(tmp_path, monkeypatch, body, user_turn_count=90)
+    assert len(rows) == 180
+    assert rows[0]["content"] == "question 1"
+
+
+@pytest.mark.asyncio
+async def test_hidden_archive_turns_do_not_shift_timing_indices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.cli_envelopes import RELOAD_CONTINUE_PROMPT
+
+    body = (
+        _turn(1, "first", "r1")
+        + _turn(2, RELOAD_CONTINUE_PROMPT, "hidden reply")
+        + _turn(3, "second", "r2")
+    )
+    rows = await _archived_rows(
+        tmp_path,
+        monkeypatch,
+        body,
+        user_turn_count=2,
+        user_turn_timings={"1": {"completed_at": "2026-06-19T10:03:09Z", "duration_ms": 9000}},
+    )
+    second = next(i for i, r in enumerate(rows) if r.get("content") == "second")
+    assert rows[second]["turn_index"] == 1
+    assert rows[second + 1]["duration_ms"] == 9000
+
+
+@pytest.mark.asyncio
+async def test_steered_index_is_skipped_in_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = _turn(1, "a", "ra") + _turn(2, "b", "rb")
+    rows = await _archived_rows(
+        tmp_path,
+        monkeypatch,
+        body,
+        user_turn_count=3,
+        user_turn_steered={"1": True},
+    )
+    assert [r["turn_index"] for r in rows if r["role"] == "user"] == [0, 2]
+
+
+@pytest.mark.asyncio
+async def test_archive_without_historical_metadata_does_not_fabricate_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = await _archived_rows(
+        tmp_path, monkeypatch, _turn(1, "q", "r", model="-"), user_turn_count=1
+    )
+    assistant = next(r for r in rows if r["role"] == "assistant")
+    for key in ("usage", "effective_model", "duration_ms"):
+        assert key not in assistant
