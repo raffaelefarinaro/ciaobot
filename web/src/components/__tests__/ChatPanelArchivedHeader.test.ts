@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
 import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { api } from '../../lib/api'
+import { ARCHIVE_ACTION_LABEL } from '../../lib/archiveCopy'
 import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
@@ -147,5 +148,34 @@ describe('ChatPanel archive action in the header', () => {
     const wrapper = await mountPanel(true)
     expect(wrapper.find('.chat-archive-btn').exists()).toBe(false)
     expect(wrapper.text()).toContain('This chat is archived.')
+  })
+
+  it('archive is icon-only while chat details opens from the header', async () => {
+    const originalObserver = globalThis.ResizeObserver
+    try {
+      // Narrow: jsdom has no ResizeObserver, so the pane stays narrow and the
+      // Chat details opener sits in the header beside Archive.
+      const narrow = await mountPanel(false)
+      const narrowArchive = narrow.find('.chat-archive-btn')
+      expect(narrowArchive.classes()).toContain('chat-archive-btn--icon')
+      expect(narrowArchive.attributes('aria-label')).toBe(ARCHIVE_ACTION_LABEL)
+
+      // Wide: report a pane wider than the 940px threshold, so the rail floats
+      // in the body and Archive keeps its word.
+      globalThis.ResizeObserver = class {
+        constructor(private readonly cb: ResizeObserverCallback) {}
+        observe() {
+          this.cb([{ contentRect: { width: 1000 } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+        }
+        unobserve() {}
+        disconnect() {}
+      } as unknown as typeof ResizeObserver
+      const wide = await mountPanel(false)
+      const wideArchive = wide.find('.chat-archive-btn')
+      expect(wideArchive.classes()).not.toContain('chat-archive-btn--icon')
+      expect(wideArchive.attributes('aria-label')).toBe(ARCHIVE_ACTION_LABEL)
+    } finally {
+      globalThis.ResizeObserver = originalObserver
+    }
   })
 })
