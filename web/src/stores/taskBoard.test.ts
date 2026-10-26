@@ -669,6 +669,29 @@ describe('taskBoard store: card order', () => {
     expect(store.remoteChangeEpoch).toBe(1)
   })
 
+  it('a placement queued behind another write sends the version read when it was asked', async () => {
+    const store = await loaded(3)
+    const first = deferred<unknown>()
+    patch.mockReturnValueOnce(first.promise as never)
+    patch.mockResolvedValueOnce({ ...stored({ status: 'in_review' }), order: orderOf(5), order_error: null })
+
+    const a = store.update('personal', 'ship', REVISION, { status: 'in_progress' }, undefined, {
+      before_id: null,
+      after_id: null,
+    })
+    const b = store.update('personal', 'ship', REVISION, { status: 'in_review' }, undefined, {
+      before_id: null,
+      after_id: null,
+    })
+    first.resolve({ ...stored({ status: 'in_progress' }), order: orderOf(4), order_error: null })
+    await a
+    await b
+
+    expect(patch).toHaveBeenCalledTimes(2)
+    expect(patch.mock.calls[0]![1]).toMatchObject({ placement: { expected_order_version: 3 } })
+    expect(patch.mock.calls[1]![1]).toMatchObject({ placement: { expected_order_version: 3 } })
+  })
+
   it('rejects order writes locally while the order file is unreadable', async () => {
     const store = useTaskBoardStore()
     get.mockResolvedValue(board(-1, { order_error: 'task-order.json is not valid JSON' }))

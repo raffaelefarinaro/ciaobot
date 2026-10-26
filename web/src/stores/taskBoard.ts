@@ -508,6 +508,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * `null` comes back from a refusal *and* from a workspace switch made while the
    * PATCH was in flight; the second drops the answer instead of adopting it onto
    * the board that replaced this one. See {@link drawingWorkspace}.
+   *
+   * A `placement` is dropped when the status does not change; use `reorder()` for a same-column move.
    */
   async function update(
     workspace: string,
@@ -518,52 +520,56 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     placement?: PlacementAnchors,
   ): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
+    // The version this gesture read, taken now: a write queued behind another
+    // must be judged against the order its anchors were computed from.
+    const expectedOrderVersion = order.value.version
+
+    async function sendUpdate(placed: PlacementAnchors | undefined): Promise<TaskDetail | null> {
+      // A description read that started before this write is behind it, and its
+      // answer would put the revision it read back on the row this write moved on.
+      descriptionSeq++
+      const ticket = ++orderSeq
+      saving.value = true
+      error.value = ''
+      try {
+        const data = await api.patch<{ task?: unknown; order?: unknown }>(taskUrl(taskId), {
+          workspace,
+          expected_revision: expectedRevision,
+          ...changes,
+          ...(body === undefined ? {} : { body }),
+          ...(placed ? { placement: { ...placed, expected_order_version: expectedOrderVersion } } : {}),
+        })
+        // The board moved to another workspace while this saved. The write landed
+        // in the one that was left; its answer is not a row on the one now drawn,
+        // and handing it back would let the caller draw it there.
+        if (!drawingWorkspace(workspace)) return null
+        const task = adopt(data?.task)
+        adoptOrder(workspace, data, ticket)
+        if (task.id && described.value?.id === task.id) described.value = task
+        return task
+      } catch (e) {
+        if (placed) await recover(workspace, e, 'Could not save the task')
+        else error.value = taskApiErrorMessage(e, 'Could not save the task')
+        return null
+      } finally {
+        saving.value = false
+      }
+    }
+
     // The server rejects a placement on a write that does not change the status
     // (a same-column edit), so none is sent: the card keeps its place.
     const row = rows.value.find((entry) => entry.id === taskId && !isTaskInvalidRow(entry))
     const moves =
       changes.status !== undefined && (!row || isTaskInvalidRow(row) || row.status !== changes.status)
-    if (!placement || !moves) return send(undefined)
+    if (!placement || !moves) return sendUpdate(undefined)
     if (orderError.value) {
       error.value = orderError.value
       return null
     }
-    return enqueue(() => send(placement), () => {
+    return enqueue(() => sendUpdate(placement), () => {
       error.value = ORDER_CONFLICT_MESSAGE
       return null
     })
-
-    async function send(placed: PlacementAnchors | undefined): Promise<TaskDetail | null> {
-    // A description read that started before this write is behind it, and its
-    // answer would put the revision it read back on the row this write moved on.
-    descriptionSeq++
-    const ticket = ++orderSeq
-    saving.value = true
-    error.value = ''
-    try {
-      const data = await api.patch<{ task?: unknown; order?: unknown }>(taskUrl(taskId), {
-        workspace,
-        expected_revision: expectedRevision,
-        ...changes,
-        ...(body === undefined ? {} : { body }),
-        ...(placed ? { placement: { ...placed, expected_order_version: order.value.version } } : {}),
-      })
-      // The board moved to another workspace while this saved. The write landed
-      // in the one that was left; its answer is not a row on the one now drawn,
-      // and handing it back would let the caller draw it there.
-      if (!drawingWorkspace(workspace)) return null
-      const task = adopt(data?.task)
-      adoptOrder(workspace, data, ticket)
-      if (task.id && described.value?.id === task.id) described.value = task
-      return task
-    } catch (e) {
-      if (placed) await recover(workspace, e, 'Could not save the task')
-      else error.value = taskApiErrorMessage(e, 'Could not save the task')
-      return null
-    } finally {
-      saving.value = false
-    }
-    }
   }
 
   /**
@@ -589,47 +595,50 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     placement?: PlacementAnchors,
   ): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
-    if (!placement) return send(undefined)
+    // Read now, not at send time; see `update`.
+    const expectedOrderVersion = order.value.version
+
+    async function sendComplete(placed: PlacementAnchors | undefined): Promise<TaskDetail | null> {
+      descriptionSeq++
+      const ticket = ++orderSeq
+      saving.value = true
+      error.value = ''
+      try {
+        const data = await api.post<{ task?: unknown; order?: unknown }>(`${taskUrl(taskId)}/complete`, {
+          workspace,
+          expected_revision: expectedRevision,
+          ...(resolution === undefined ? {} : { resolution }),
+          ...reasonBody(reason),
+          ...(placed ? { placement: { ...placed, expected_order_version: expectedOrderVersion } } : {}),
+        })
+        // Approving a reviewed result releases the linkage and closes the card, so
+        // whatever history was held is about an attempt that no longer holds this
+        // task.
+        invalidateAttempts()
+        // The board moved to another workspace while this completed.
+        if (!drawingWorkspace(workspace)) return null
+        const task = adopt(data?.task)
+        adoptOrder(workspace, data, ticket)
+        if (task.id && described.value?.id === task.id) described.value = task
+        return task
+      } catch (e) {
+        if (placed) await recover(workspace, e, 'Could not complete the task')
+        else error.value = taskApiErrorMessage(e, 'Could not complete the task')
+        return null
+      } finally {
+        saving.value = false
+      }
+    }
+
+    if (!placement) return sendComplete(undefined)
     if (orderError.value) {
       error.value = orderError.value
       return null
     }
-    return enqueue(() => send(placement), () => {
+    return enqueue(() => sendComplete(placement), () => {
       error.value = ORDER_CONFLICT_MESSAGE
       return null
     })
-
-    async function send(placed: PlacementAnchors | undefined): Promise<TaskDetail | null> {
-    descriptionSeq++
-    const ticket = ++orderSeq
-    saving.value = true
-    error.value = ''
-    try {
-      const data = await api.post<{ task?: unknown; order?: unknown }>(`${taskUrl(taskId)}/complete`, {
-        workspace,
-        expected_revision: expectedRevision,
-        ...(resolution === undefined ? {} : { resolution }),
-        ...reasonBody(reason),
-        ...(placed ? { placement: { ...placed, expected_order_version: order.value.version } } : {}),
-      })
-      // Approving a reviewed result releases the linkage and closes the card, so
-      // whatever history was held is about an attempt that no longer holds this
-      // task.
-      invalidateAttempts()
-      // The board moved to another workspace while this completed.
-      if (!drawingWorkspace(workspace)) return null
-      const task = adopt(data?.task)
-      adoptOrder(workspace, data, ticket)
-      if (task.id && described.value?.id === task.id) described.value = task
-      return task
-    } catch (e) {
-      if (placed) await recover(workspace, e, 'Could not complete the task')
-      else error.value = taskApiErrorMessage(e, 'Could not complete the task')
-      return null
-    } finally {
-      saving.value = false
-    }
-    }
   }
 
   /**
