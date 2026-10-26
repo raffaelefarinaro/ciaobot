@@ -2044,8 +2044,10 @@ async function confirmDeleteChat(chatId: string) {
 .sidebar-rail-bell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .sidebar-rail-bell-count {
   position: absolute;
-  top: -2px;
-  right: -4px;
+  /* The button is 44px (touch-hit) in a 40px rail, so the offset is measured
+     from the rail's edge: the badge stays inside the rail. */
+  top: 2px;
+  right: 4px;
   min-width: 14px;
   padding: 1px 3px;
   border: 1px solid var(--border-strong);
