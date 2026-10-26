@@ -17,7 +17,7 @@ ciao gws "$GWS_PROFILE" tasks <resource> <method> [flags]
 
 ### tasklists
 
-  - `delete` — Deletes the authenticated user's specified task list. If the list contains assigned tasks, both the assigned tasks and the original tasks in the assignment surface (Docs, Chat Spaces) are deleted.
+  - `delete` — Deletes the authenticated user's specified task list. If the list contains assigned tasks, both the assigned tasks and the original tasks in the assignment surface (Docs, Chat Spaces) are deleted. The user's default task list cannot be deleted.
   - `get` — Returns the authenticated user's specified task list.
   - `insert` — Creates a new task list and adds it to the authenticated user's task lists.
   - `list` — Returns all the authenticated user's task lists.
