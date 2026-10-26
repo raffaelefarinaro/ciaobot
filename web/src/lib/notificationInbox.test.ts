@@ -4,7 +4,11 @@ import {
   notificationBadgeText,
   notificationPath,
   projectNotificationInbox,
+  operatorInScope,
+  scheduleDisplayName,
   type ChatCandidate,
+  type OperatorCandidate,
+  type ScheduleCandidate,
   type SourceSnapshot,
 } from './notificationInbox'
 
@@ -24,7 +28,11 @@ function chat(o: Partial<ChatCandidate> & { chatId: string }): ChatCandidate {
   }
 }
 
-const READY: SourceSnapshot[] = [{ source: 'chats', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' }]
+const READY: SourceSnapshot[] = [
+  { source: 'chats', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
+  { source: 'operator', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
+  { source: 'automations', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
+]
 
 function project(chats: ChatCandidate[], sources: SourceSnapshot[] = READY) {
   return projectNotificationInbox({ chats, sources })
@@ -167,5 +175,255 @@ describe('notificationInbox', () => {
     expect(inbox.rows[0].urgency).toBe('failure')
     expect(inbox.rows[0].reason).toBe('The last turn failed')
     expect(inbox.rows[0].title).toBe('Untitled chat')
+  })
+})
+
+const READY3: SourceSnapshot[] = [
+  { source: 'chats', status: 'ready', lastSuccessAt: 'x' },
+  { source: 'operator', status: 'ready', lastSuccessAt: 'x' },
+  { source: 'automations', status: 'ready', lastSuccessAt: 'x' },
+]
+
+function op(o: Partial<OperatorCandidate> & { id: string }): OperatorCandidate {
+  return { kind: 'skill-triage-pending', workspace: '', title: 'T', detail: '', blocking: false, viewRoute: '', ...o }
+}
+
+function sched(o: Partial<ScheduleCandidate> & { scheduleId: string }): ScheduleCandidate {
+  return {
+    title: '', prompt: '', frequency: 'daily', enabled: true, missed: false,
+    lastStatus: '', needsAttention: true, ...o,
+  }
+}
+
+function project3(
+  o: { chats?: ChatCandidate[]; operators?: OperatorCandidate[]; schedules?: ScheduleCandidate[]; sources?: SourceSnapshot[] },
+) {
+  return projectNotificationInbox({
+    chats: o.chats ?? [],
+    operators: o.operators,
+    schedules: o.schedules,
+    sources: o.sources ?? READY3,
+  })
+}
+
+describe('notificationInbox operator and automation sources', () => {
+  it('operator_blocking_is_needs_you_nonblocking_is_to_review', () => {
+    const inbox = project3({
+      operators: [op({ id: 'a', blocking: true, title: 'Blocker' }), op({ id: 'b', blocking: false, title: 'Soft' })],
+    })
+    const a = inbox.rows.find((r) => r.key === 'operator:shared:a')!
+    const b = inbox.rows.find((r) => r.key === 'operator:shared:b')!
+    expect(a).toMatchObject({ section: 'needsYou', urgency: 'blocking', kind: 'operator-action', source: 'operator', title: 'Blocker' })
+    expect(b).toMatchObject({ section: 'toReview', urgency: 'review' })
+  })
+
+  it('blocking_operator_sorts_between_input_chat_and_failed_chat', () => {
+    const inbox = project3({
+      chats: [
+        chat({ chatId: 'f', title: 'A', failed: true }),
+        chat({ chatId: 'i', title: 'Z', needsInput: true }),
+      ],
+      operators: [op({ id: 'b', blocking: true, title: 'M' })],
+    })
+    expect(keys(inbox, 'needsYou')).toEqual(['chat:i', 'operator:shared:b', 'chat:f'])
+  })
+
+  it('github_star_excluded', () => {
+    const inbox = project3({
+      operators: [op({ id: 'g', kind: 'github-star' }), op({ id: 'l', kind: 'legacy-env-ignored' })],
+    })
+    expect(inbox.rows.map((r) => r.key)).toEqual(['operator:shared:l'])
+  })
+
+  it('operator_scope_helper', () => {
+    expect(operatorInScope('', 'personal')).toBe(true)
+    expect(operatorInScope('personal', 'personal')).toBe(true)
+    expect(operatorInScope('work', 'personal')).toBe(false)
+    expect(operatorInScope('work', '')).toBe(true)
+  })
+
+  it.each([
+    ['package-update', '', '/settings'],
+    ['provider-update', '', '/settings/providers'],
+    ['other', '/settings', '/settings'],
+    ['other', '/settings/providers', '/settings/providers'],
+    ['other', '', '/'],
+    ['other', '/schedules/x', '/'],
+    ['other', 'https://evil', '/'],
+    ['other', '//x', '/'],
+    ['other', '/api/x', '/'],
+  ])('operator_destinations %s %s', (kind, viewRoute, path) => {
+    const inbox = project3({ operators: [op({ id: 'x', kind, viewRoute })] })
+    expect(notificationPath(inbox.rows[0].destination)).toBe(path)
+    if (path === '/') expect(inbox.rows[0].destination).toEqual({ kind: 'home' })
+  })
+
+  it('operator_reason_strips_markdown', () => {
+    const inbox = project3({
+      operators: [
+        op({ id: 'a', detail: '- **x** [name](/schedules/a) `code`' }),
+        op({ id: 'b', detail: '# Head\n' + 'y'.repeat(300) }),
+      ],
+    })
+    const by = (k: string) => inbox.rows.find((r) => r.key === k)!
+    expect(by('operator:shared:a').reason).toBe('x name code')
+    const long = by('operator:shared:b').reason
+    expect(long.length).toBeLessThanOrEqual(160)
+    expect(long.endsWith('…')).toBe(true)
+    expect(long.startsWith('Head ')).toBe(true)
+  })
+
+  it('missed_aggregate_labelled_all_workspaces', () => {
+    const inbox = project3({
+      operators: [op({ id: 'missed-schedules', kind: 'missed-schedules', title: '2 reminders missed', detail: '[a](/schedules/a)' })],
+    })
+    expect(inbox.rows).toHaveLength(1)
+    expect(inbox.rows[0]).toMatchObject({
+      key: 'operator:shared:missed-schedules',
+      kind: 'missed-schedules',
+      section: 'needsYou',
+      urgency: 'failure',
+      source: 'operator',
+      title: 'All workspaces: 2 reminders missed',
+      reason: 'All workspaces. Open Home to fire or dismiss them.',
+      destination: { kind: 'home' },
+    })
+  })
+
+  const agg = op({ id: 'missed-schedules', kind: 'missed-schedules', title: 'Missed' })
+  const onceMissed = (o: Partial<ScheduleCandidate> = {}) =>
+    sched({ scheduleId: 's', title: 'Remind', frequency: 'once', enabled: true, missed: true, lastStatus: '', ...o })
+
+  it('missed_aggregate_suppresses_enabled_once_without_error', () => {
+    const withAgg = project3({ operators: [agg], schedules: [onceMissed()] })
+    expect(withAgg.rows.map((r) => r.key)).toEqual(['operator:shared:missed-schedules'])
+    const without = project3({ schedules: [onceMissed()] })
+    expect(without.rows.map((r) => r.key)).toEqual(['schedule:s'])
+  })
+
+  it.each([
+    ['error', { lastStatus: 'error' as const }],
+    ['missing-chat', { lastStatus: 'missing-chat' as const }],
+    ['disabled once', { enabled: false, lastStatus: 'missing-chat' as const }],
+  ])('missed_aggregate_keeps_%s', (_n, o) => {
+    const inbox = project3({ operators: [agg], schedules: [onceMissed(o)] })
+    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['operator:shared:missed-schedules', 'schedule:s'])
+  })
+
+  it('automation_rows', () => {
+    const inbox = project3({
+      schedules: [
+        sched({ scheduleId: 'e', title: 'Err', lastStatus: 'error' }),
+        sched({ scheduleId: 'm', title: 'Gone', lastStatus: 'missing-chat', enabled: false }),
+        sched({ scheduleId: 'x', prompt: 'Run the thing\nmore', missed: true }),
+        sched({ scheduleId: 'h', title: 'Healthy', enabled: false, needsAttention: false }),
+      ],
+    })
+    const by = (k: string) => inbox.rows.find((r) => r.key === k)!
+    expect(inbox.rows).toHaveLength(3)
+    expect(by('schedule:e')).toMatchObject({
+      kind: 'automation-attention', section: 'needsYou', urgency: 'failure', source: 'automations',
+      title: 'Err', reason: 'The last run failed.', destination: { kind: 'schedule', scheduleId: 'e' },
+    })
+    expect(by('schedule:m').reason).toBe('Its chat was deleted, so it is turned off.')
+    expect(by('schedule:x').reason).toBe('It did not run when expected.')
+    expect(by('schedule:x').title).toBe('Run the thing')
+    expect(notificationPath(by('schedule:e').destination)).toBe('/schedules/e')
+    expect(keys(inbox, 'needsYou')).toEqual(['schedule:e', 'schedule:m', 'schedule:x'])
+  })
+
+  it('schedule_display_name', () => {
+    expect(scheduleDisplayName({ title: '  T  ', prompt: 'p', scheduleId: 'i' })).toBe('T')
+    expect(scheduleDisplayName({ title: '', prompt: '\n first \nsecond', scheduleId: 'i' })).toBe('first')
+    expect(scheduleDisplayName({ title: '', prompt: 'a'.repeat(70), scheduleId: 'i' })).toBe(`${'a'.repeat(57)}…`)
+    expect(scheduleDisplayName({ title: '', prompt: '  ', scheduleId: 'i' })).toBe('i')
+  })
+
+  it('automation_suppresses_linked_failed_and_unread_chat', () => {
+    const inbox = project3({
+      schedules: [sched({ scheduleId: 'S', title: 'Brief', lastStatus: 'error' })],
+      chats: [
+        chat({ chatId: 'f', failed: true, scheduleId: 'S' }),
+        chat({ chatId: 'u', unread: true, scheduleId: 'S' }),
+      ],
+    })
+    expect(inbox.rows.map((r) => r.key)).toEqual(['schedule:S'])
+  })
+
+  it('automation_keeps_live_question_chat', () => {
+    const inbox = project3({
+      schedules: [sched({ scheduleId: 'S', title: 'Brief', lastStatus: 'error' })],
+      chats: [
+        chat({ chatId: 'q', needsInput: true, needsYou: true, scheduleId: 'S' }),
+        chat({ chatId: 'q2', needsInput: true, failed: true, scheduleId: 'S' }),
+        chat({ chatId: 'd', needsYou: true, scheduleId: 'S' }),
+      ],
+    })
+    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['chat:d', 'chat:q', 'chat:q2', 'schedule:S'])
+  })
+
+  it('automation_does_not_suppress_unlinked_chat', () => {
+    const inbox = project3({
+      schedules: [sched({ scheduleId: 'S', lastStatus: 'error' })],
+      chats: [
+        chat({ chatId: 'a', failed: true }),
+        chat({ chatId: 'b', failed: true, scheduleId: 'OTHER' }),
+        chat({ chatId: 'c', unread: true, scheduleId: '' }),
+      ],
+    })
+    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['chat:a', 'chat:b', 'chat:c', 'schedule:S'])
+  })
+
+  it('suppressed_automation_does_not_suppress_chat', () => {
+    const inbox = project3({
+      operators: [agg],
+      schedules: [onceMissed()],
+      chats: [chat({ chatId: 'f', failed: true, scheduleId: 's' })],
+    })
+    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['chat:f', 'operator:shared:missed-schedules'])
+  })
+
+  it('count_is_distinct_rows_across_sources', () => {
+    const inbox = project3({
+      chats: [chat({ chatId: 'c', unread: true })],
+      operators: [op({ id: 'o' }), op({ id: 'o' })],
+      schedules: [sched({ scheduleId: 's', lastStatus: 'error' })],
+    })
+    expect(inbox.count).toBe(3)
+  })
+
+  it('freshness_follows_own_source', () => {
+    const inbox = project3({
+      chats: [chat({ chatId: 'c', unread: true })],
+      operators: [op({ id: 'o' })],
+      schedules: [sched({ scheduleId: 's', lastStatus: 'error' })],
+      sources: [
+        { source: 'chats', status: 'stale', lastSuccessAt: 'x' },
+        { source: 'operator', status: 'ready', lastSuccessAt: 'x' },
+        { source: 'automations', status: 'unavailable', lastSuccessAt: '' },
+      ],
+    })
+    const f = (k: string) => inbox.rows.find((r) => r.key === k)!.freshness
+    expect(f('chat:c')).toBe('stale')
+    expect(f('operator:shared:o')).toBe('fresh')
+    expect(f('schedule:s')).toBe('stale')
+  })
+
+  it('notification_path_new_kinds', () => {
+    expect(notificationPath({ kind: 'schedule', scheduleId: 'a b' })).toBe('/schedules/a%20b')
+    expect(notificationPath({ kind: 'settings', tab: '' })).toBe('/settings')
+    expect(notificationPath({ kind: 'settings', tab: 'providers' })).toBe('/settings/providers')
+    expect(notificationPath({ kind: 'home' })).toBe('/')
+  })
+
+  it('sources_report_three_keys_in_order', () => {
+    const missing = project3({ sources: [{ source: 'chats', status: 'ready', lastSuccessAt: 'x' }] })
+    expect(missing.sources.map((s) => [s.source, s.status, s.label])).toEqual([
+      ['chats', 'ready', 'Chats'],
+      ['operator', 'checking', 'Settings'],
+      ['automations', 'checking', 'Automations'],
+    ])
+    expect(missing.allClear).toBe(false)
+    expect(project3({}).allClear).toBe(true)
   })
 })
