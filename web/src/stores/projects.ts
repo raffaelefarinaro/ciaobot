@@ -2676,6 +2676,11 @@ export const useProjectStore = defineStore('projects', () => {
       .map(pid => byId.get(pid)?.order)
       .filter((order): order is number => order !== undefined)
       .sort((a, b) => a - b)
+    // The first slot must not tie with a pinned row that sorts at or before it.
+    const pinnedOrders = projects.value
+      .filter(p => p.workspace === workspace && p.is_auto && !orderedIds.includes(p.project_id))
+      .map(p => p.order)
+    if (slots.length) slots[0] = Math.max(slots[0], ...pinnedOrders.filter(o => o <= slots[0]).map(o => o + 1))
     // Strictly increasing, so projects that tie on `order` still keep the drag.
     for (let i = 1; i < slots.length; i++) slots[i] = Math.max(slots[i], slots[i - 1] + 1)
     orderedIds.forEach((pid, index) => {

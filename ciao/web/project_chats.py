@@ -3035,6 +3035,15 @@ class ProjectChatManager:
         # value (after a deletion, or from loaded data) would otherwise
         # re-sort by name and undo the drag.
         slots = sorted(p.order for p in reorderables)
+        # Nor may the first slot tie with (or sit below) a pinned row that
+        # sorts at or before it, such as General: that row has to stay first.
+        pinned = [
+            p.order
+            for p in self._projects.values()
+            if p.workspace == workspace and p.project_id not in by_id and p.kind != "memory"
+        ]
+        if slots:
+            slots[0] = max([slots[0]] + [order + 1 for order in pinned if order <= slots[0]])
         for index in range(1, len(slots)):
             slots[index] = max(slots[index], slots[index - 1] + 1)
         for slot, pid in zip(slots, ordered_ids):

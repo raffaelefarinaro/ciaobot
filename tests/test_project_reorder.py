@@ -240,3 +240,18 @@ def test_reorder_with_duplicate_order_values_sticks(tmp_path: Path) -> None:
     assert _ids(pcm) == [c.project_id, a.project_id, b.project_id]
     assert len({a.order, b.order, c.order}) == 3
     assert general.order == general_order
+
+
+def test_reorder_never_ties_with_pinned_general(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    a = pcm.create_project("Alpha", workspace="personal")
+    b = pcm.create_project("Beta", workspace="personal")
+    general = _general(pcm)
+    general.order = 0
+    a.order = 0
+    b.order = 0
+
+    result = pcm.reorder_projects("personal", [b.project_id, a.project_id], _ids(pcm))
+
+    assert [p.name for p in result] == ["General", "Beta", "Alpha"]
+    assert a.order > general.order and b.order > general.order

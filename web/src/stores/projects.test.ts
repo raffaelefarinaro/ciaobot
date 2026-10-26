@@ -9374,6 +9374,21 @@ describe('reorderProjects', () => {
     expect(store.workspaceProjects.map(p => p.project_id)).toEqual(['c', 'a', 'b'])
   })
 
+  test('a reordered project never ties with pinned General', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      proj('general', 0, { name: 'General', is_auto: true }),
+      proj('a', 0, { name: 'Alpha' }),
+      proj('b', 0, { name: 'Beta' }),
+    ] as typeof store.projects
+    apiPost.mockResolvedValue([])
+
+    await store.reorderProjects(['b', 'a'], ['a', 'b'])
+
+    expect(store.workspaceProjects.map(p => p.project_id)).toEqual(['general', 'b', 'a'])
+  })
+
   test('restores the previous order and refetches when the server answers 409', async () => {
     const store = useProjectStore()
     seed(store)
