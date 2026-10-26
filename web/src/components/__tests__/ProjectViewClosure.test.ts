@@ -9,6 +9,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 
@@ -141,5 +143,22 @@ describe('ProjectView closure sheet', () => {
       note: 'Shipped the release',
     })
     wrapper.unmount()
+  })
+
+  // Scoped styles do not cross components: a class borrowed from another
+  // component's <style scoped> renders unstyled here. Every class on the sheet
+  // must have a rule in this file or be one of the app-wide ones in App.vue.
+  it('styles every class the sheet uses from its own or the app-wide sheet', () => {
+    const here = join(__dirname, '..')
+    const source = readFileSync(join(here, 'ProjectView.vue'), 'utf8')
+    const app = readFileSync(join(here, '..', 'App.vue'), 'utf8')
+    const sheet = source.slice(source.indexOf('v-if="closureOpen"'), source.indexOf('Project not found.'))
+    const style = source.slice(source.indexOf('<style scoped>'))
+    const classes = new Set([...sheet.matchAll(/\bclass="([^"]+)"/g)].flatMap(m => m[1].split(/\s+/)))
+    expect(classes.size).toBeGreaterThan(0)
+    for (const cls of classes) {
+      const rule = new RegExp(`\\.${cls}\\b[^{]*\\{`)
+      expect(rule.test(style) || rule.test(app), `.${cls} has no rule in ProjectView or App.vue`).toBe(true)
+    }
   })
 })
