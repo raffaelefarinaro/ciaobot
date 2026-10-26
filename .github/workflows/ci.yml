@@ -484,7 +484,7 @@ jobs:
         if-no-files-found: ignore
 
     - name: Set up uv
-      uses: astral-sh/setup-uv@v10.3.0
+      uses: astral-sh/setup-uv@v10.3.2
 
     # The release ships the engine wheel and nothing else (#653), so the
     # macOS-only coverage is the engine too: build the wheel this branch would
