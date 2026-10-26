@@ -1747,6 +1747,23 @@ def test_a_terminal_offer_refuses_an_unattended_turn(tmp_path: Path) -> None:
     assert manager.get_chat(chat.chat_id).terminal_offer is None
 
 
+@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task"])
+def test_a_terminal_offer_refuses_a_turn_the_person_did_not_type(
+    tmp_path: Path, origin: str
+) -> None:
+    """A webhook payload must not put a command card in front of the user (#2076)."""
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    chat.user_turn_count = 1
+    chat.user_turn_origin = {"0": origin}
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "unattended_forbidden"
+    assert manager.get_chat(chat.chat_id).terminal_offer is None
+
+
 def test_a_terminal_offer_refuses_a_chat_in_another_workspace(tmp_path: Path) -> None:
     service, manager, _config = _offer_service(tmp_path)
     project, chat = _offer_chat(manager, workspace="work")
