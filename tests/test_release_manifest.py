@@ -403,7 +403,7 @@ def test_manifest_with_host_signed_round_trip(tmp_path: Path) -> None:
         ("host_protocol", 3),
         ("host_protocol", None),
         ("host_revision", True),
-        ("host_revision", 4),
+        ("host_revision", 5),
         ("host_revision", None),
         ("size", 0),
         ("size", -1),

@@ -12,7 +12,7 @@ the direct shape is kept. Host upgrade and rollback are later children.
 
 ## What it does
 
-The host exposes exactly three fixed operations, revision 3:
+The host exposes exactly three fixed operations, revision 4:
 
 ```sh
 Ciaobot Server.app/Contents/MacOS/Ciaobot Server serve --python /absolute/interpreter
@@ -98,7 +98,11 @@ On the first stop:
 
 1. If the child has not launched yet, nothing is launched and the host exits `0`.
    The launch waits for the first event-loop turn, so a stop delivered while
-   AppKit is still starting is handled before the launch decision. A signal
+   AppKit is still starting is handled before the launch decision. The launch
+   also reads a private kqueue that counts `SIGTERM`/`SIGINT` from the moment the
+   handlers are installed, so a stop that arrives after the launch block is
+   queued, and whose dispatch handler would therefore run after it, still
+   prevents the spawn (revision 4). A signal
    landing in the tiny window before the handlers are installed still kills the
    host, which is also safe: no child exists yet.
 2. Otherwise the host forwards `SIGTERM` to the tracked child PID exactly once
@@ -135,7 +139,7 @@ built by the later service child (#1008 child B), not here.
 | Display name | `Ciaobot Server` |
 | Executable | `Ciaobot Server` |
 | Host protocol | `CiaobotServerHostProtocol` = `2` |
-| Bundle version | host revision (`3`), never the engine release |
+| Bundle version | host revision (`4`), never the engine release |
 | Minimum system | `13.0` |
 | `LSUIElement` | `true` (accessory app: no window, no Dock) |
 
@@ -209,6 +213,17 @@ a protected source or destination is still refused. A folder the user answered
 *Don't Allow* to is recorded through `ciao/workspace_access.py::record_denial`
 and reported with the move's folder, not as a traceback in
 `workspace-move.log`.
+
+Revision 4 closes a startup race (#1642). The signal sources deliver on the
+main queue, so a stop that arrived after the launch block was queued ran its
+handler after the launch: the host forked the child, then forwarded the stop
+and exited `0`. `launch()` now polls a private `EVFILT_SIGNAL` kqueue,
+registered before the sources and before `SIG_IGN`, and takes the same
+no-child exit path as `handleStop` when a stop has already arrived. No flag,
+environment variable or operation changes, so the protocol stays `2`.
+Replacing a revision-3 host changes the signed bytes, so it needs the same
+reapproval as any host upgrade; the release walk must still check whether the
+folder grant survives it.
 
 Revision 3 adds the three usage strings the prompt was missing
 (#1659): `NSDesktopFolderUsageDescription`,

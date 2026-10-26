@@ -312,6 +312,11 @@ final class ChildController {
     private var signalSources: [DispatchSourceSignal] = []
     private var escalation: DispatchSourceTimer?
     private var stopRequested = false
+    /// A private kqueue that counts SIGTERM/SIGINT from the moment `begin`
+    /// registers it. The dispatch signal sources deliver on the main queue, so
+    /// a stop that arrives after the launch block is queued would run after it;
+    /// this queue is read synchronously by `launch` instead.
+    private var stopQueue: Int32 = -1
 
     init(python: String, childName: String, spawn: @escaping () -> SpawnOutcome) {
         self.python = python
@@ -330,6 +335,20 @@ final class ChildController {
     /// therefore queued again from the first main-queue turn: by then every stop
     /// delivered during startup is already queued ahead of it.
     func begin() {
+        // Registered before the signal sources and before SIG_IGN, so no stop
+        // that either of them sees can be missed here. Every stop signal
+        // sent from now on stays readable until `launch` looks.
+        stopQueue = kqueue()
+        if stopQueue >= 0 {
+            for sig in [SIGTERM, SIGINT] {
+                var change = kevent(
+                    ident: UInt(sig), filter: Int16(EVFILT_SIGNAL),
+                    flags: UInt16(EV_ADD | EV_ENABLE), fflags: 0, data: 0,
+                    udata: nil
+                )
+                _ = kevent(stopQueue, &change, 1, nil, 0, nil)
+            }
+        }
         for sig in [SIGTERM, SIGINT] {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler { [weak self] in self?.handleStop() }
@@ -349,9 +368,24 @@ final class ChildController {
         }
     }
 
-    /// A stop that lands before this runs exits the host from `handleStop`, so
-    /// reaching here means no stop has been requested yet.
+    /// True when a stop signal has arrived since `begin`, whether or not its
+    /// dispatch source has run its handler yet. A non-blocking poll.
+    private func stopSignalArrived() -> Bool {
+        guard stopQueue >= 0 else { return false }
+        var event = kevent()
+        var immediately = timespec(tv_sec: 0, tv_nsec: 0)
+        return kevent(stopQueue, nil, 0, &event, 1, &immediately) > 0
+    }
+
+    /// A stop whose handler already ran exits the host from `handleStop`. A stop
+    /// that arrived after this block was queued has not run its handler yet
+    /// (the handler would run after this block), so it is read from the stop
+    /// queue first: the launch decision always sees every stop already sent.
     private func launch() {
+        if stopSignalArrived() {
+            handleStop()
+            return
+        }
         switch spawn() {
         case .failed(let message):
             writeStderr(

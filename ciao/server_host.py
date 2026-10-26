@@ -100,7 +100,7 @@ APP_NAME = "Ciaobot Server.app"
 BUNDLE_ID = "local.ciaobot.server"
 EXECUTABLE_NAME = "Ciaobot Server"
 ICON_NAME = "CiaobotServer.icns"
-HOST_REVISION = 3
+HOST_REVISION = 4
 HOST_PROTOCOL_KEY = "CiaobotServerHostProtocol"
 HOST_PROTOCOL = 2
 MINIMUM_SYSTEM_VERSION = "13.0"
@@ -109,9 +109,9 @@ MINIMUM_SYSTEM_VERSION = "13.0"
 #: the installer can replace it instead of refusing the upgrade and leaving
 #: the Mac without a host (#1659). A record of any other revision is refused
 #: by both readers.
-LEGACY_HOST_REVISION = 2
+LEGACY_HOST_REVISION = 3
 #: The protocol the superseded revision spoke.
-LEGACY_HOST_PROTOCOL = 1
+LEGACY_HOST_PROTOCOL = 2
 
 #: The first host protocol that carries the ``run-move`` operation, so the
 #: workspace move can run as a descendant of the host (#1658). A host below it
@@ -1141,7 +1141,7 @@ def verify_superseded_host(
 ) -> HostOwnership:
     """Prove a bundle is the superseded host this machine installed.
 
-    The upgrade path for a host revision bump (#1659). A revision-2 host is not
+    The upgrade path for a host revision bump (#1659). A revision-3 host is not
     the host this engine speaks to, so :func:`verify_owned_host` refuses it;
     but it is still *ours*, and the installer must be able to replace it rather
     than leave the Mac without a host. This answers that narrower question: it

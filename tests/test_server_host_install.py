@@ -183,26 +183,26 @@ def _make_superseded_bundle(root: Path) -> Path:
     (bundle / "Contents" / "MacOS").mkdir(parents=True)
     (bundle / "Contents" / "Resources").mkdir(parents=True)
     (bundle / "Contents" / "_CodeSignature").mkdir(parents=True)
-    (bundle / _EXE_REL).write_bytes(b"revision-two-host-binary")
+    (bundle / _EXE_REL).write_bytes(b"revision-three-host-binary")
     (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
     (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
     info = BUILD.bundle_info()
-    info["CFBundleVersion"] = "2"
-    info["CFBundleShortVersionString"] = "2"
-    info[BUILD.HOST_PROTOCOL_KEY] = 1
+    info["CFBundleVersion"] = "3"
+    info["CFBundleShortVersionString"] = "3"
+    info[BUILD.HOST_PROTOCOL_KEY] = 2
     with (bundle / _PLIST_REL).open("wb") as handle:
         plistlib.dump(info, handle)
     return bundle
 
 
 def _write_superseded_record(path: Path, bundle: Path) -> Path:
-    """The owner-only record a revision-2 installation would have written."""
+    """The owner-only record a revision-3 installation would have written."""
     document: dict[str, Any] = {
         "schema": 1,
         "bundle_path": os.fspath(bundle),
         "bundle_id": BUNDLE_ID,
-        "host_revision": 2,
-        "host_protocol": 1,
+        "host_revision": 3,
+        "host_protocol": 2,
         "executable_sha256": hashlib.sha256(
             (bundle / _EXE_REL).read_bytes()
         ).hexdigest(),
@@ -555,11 +555,11 @@ def test_install_refuses_a_revision_one_host_without_touching_it(
 
 
 @requires_posix_uid
-def test_install_replaces_a_superseded_revision_two_host(
+def test_install_replaces_a_superseded_revision_three_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The upgrade path for the revision bump (#1659). Without it the bump
-    # silently de-installs the host on every existing Mac: the revision-2
+    # silently de-installs the host on every existing Mac: the revision-3
     # record is refused, the installer says "a host already exists", and the
     # engine install continues without a host at all.
     monkeypatch.setattr(sys, "platform", "darwin")
@@ -578,7 +578,7 @@ def test_install_replaces_a_superseded_revision_two_host(
     )
 
     # The new host is in place, and the record vouches for it.
-    assert snapshot.host_revision == 3
+    assert snapshot.host_revision == 4
     assert snapshot.bundle_path == os.path.realpath(target)
     assert (target / _EXE_REL).read_bytes() == b"universal-host-binary"
     assert read_host_ownership(record) == snapshot
@@ -714,8 +714,8 @@ def test_install_refuses_a_host_it_cannot_prove_it_owns(
                 "schema": 1,
                 "bundle_path": os.fspath(tmp_path / "elsewhere" / APP_NAME),
                 "bundle_id": BUNDLE_ID,
-                "host_revision": 2,
-                "host_protocol": 1,
+                "host_revision": 3,
+                "host_protocol": 2,
                 "executable_sha256": "a" * 64,
                 "per_arch_cdhashes": dict(_CDHASH),
                 "bundle_files": {

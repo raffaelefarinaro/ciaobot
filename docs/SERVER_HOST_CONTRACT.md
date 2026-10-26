@@ -165,7 +165,7 @@ not re-spell them:
 
 - bundle `Ciaobot Server.app`, id `local.ciaobot.server`, executable
   `Ciaobot Server`, icon `CiaobotServer.icns`;
-- `HOST_REVISION` = `3` and `HOST_PROTOCOL` (`CiaobotServerHostProtocol`) = `2`, tied to
+- `HOST_REVISION` = `4` and `HOST_PROTOCOL` (`CiaobotServerHostProtocol`) = `2`, tied to
   the host, never the engine release;
 - `MINIMUM_SYSTEM_VERSION` `13.0`;
 - `STOP_GRACE_SECONDS` 35 and `EXIT_TIMEOUT_SECONDS` 45. The launchd job's
@@ -184,13 +184,13 @@ follow `Path.home()` and nothing else.
 A host revision bump has to be able to replace the host an older install left
 behind, and it has to be able to refuse one it cannot prove is ours (#1659).
 
-`LEGACY_HOST_REVISION` = `2` is the one revision this engine supersedes, and
-`LEGACY_HOST_PROTOCOL` = `1` is the protocol it spoke.
+`LEGACY_HOST_REVISION` = `3` is the one revision this engine supersedes, and
+`LEGACY_HOST_PROTOCOL` = `2` is the protocol it spoke.
 `read_superseded_ownership` and `verify_superseded_host` are the same strict
 reader and the same exact record-and-bundle match as their current-revision
 counterparts, run against that older pair. `read_host_ownership` and
 `verify_owned_host` keep refusing anything that is not the current revision:
-a revision-2 record is not proof that the installed bundle is the host this
+a revision-3 record is not proof that the installed bundle is the host this
 engine speaks to.
 
 `verify_superseded_host` answers one narrower question — *was this bundle
@@ -201,8 +201,8 @@ any other revision, a foreign bundle and a tampered one are all refused exactly
 as before, so the replacement path cannot be used to replace a host Ciaobot
 cannot prove it owns. Delete `LEGACY_HOST_REVISION`,
 `LEGACY_HOST_PROTOCOL`, `read_superseded_ownership` and
-`verify_superseded_host` once no supported install can still hold a revision-2
-bundle, i.e. after a release that ships revision 3 has been out for a full
+`verify_superseded_host` once no supported install can still hold a revision-3
+bundle, i.e. after a release that ships revision 4 has been out for a full
 release cycle.
 
 The record is outside the sealed app on purpose: an engine update changes the
