@@ -84,11 +84,14 @@ web/
                            rows, the short New workspace form and Archived; rows reorder by
                            drag, Alt/Option+Up/Down on the handle, or Move up / Move down in
                            the row menu, through `store.reorderWorkspaces`, with the polite
-                           announcement text from `lib/workspaceOrder.ts`; WorkspaceColorPicker.vue is the accent
+                           announcement text from `lib/workspaceOrder.ts` (these rows keep their own native drag handle and do not use `useDragSort`); WorkspaceColorPicker.vue is the accent
                            swatch group both use: five base presets plus a dashed "+" disclosure for
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
+    components/DragGrip.vue  the grip button the shared drag-sort engine binds to (`gripHandlers`, `data-drag-handle`);
+                           it is `draggable="false"` and emits nothing, and the row it sits in reveals it on hover or focus
+                           on a fine pointer
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
                            MemoryMapView under the header (so every Memory section shows it). Its open
                            state is the only storage, `ciao.memory.howOpen` ('1'/'0', read and written in
@@ -99,11 +102,20 @@ web/
                            modules (chatAnnotations) — see the ownership boundary below
                             `onboarding` owns lifecycle progress reads and revision-checked writes; onboarding
                             stages report their state to the presentation shell and never mutate progress directly.
+                           `taskBoard` holds the server's card order (`order`, one id sequence per status); the store
+                           never sorts or edits it locally, and its reorder and placement writes are serialised and
+                           roll back on failure. `projects` owns `reorderProjects` and `projectOrderEpoch`, which
+                           bumps when the project order changes outside the store's own reorder so an open sidebar
+                           drag can cancel.
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
                           useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices,
-                          useGwsAccounts)
-    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, etc.) — no Vue imports
+                          useGwsAccounts, useDragSort: the pointer and keyboard drag-sort engine for the
+                          task lanes and the sidebar's project list; it persists nothing and calls `onCommit`)
+    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, etc.) — no Vue imports;
+                          `taskOrder.ts` (the server order, lane derivation, placement anchors and the preview
+                          mirror of the server's insertion) and `dragSort.ts` (drop-slot geometry, auto-scroll
+                          step, announcement wording)
 ```
 
 ## iOS PWA gotchas
