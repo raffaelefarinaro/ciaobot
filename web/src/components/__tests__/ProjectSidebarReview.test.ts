@@ -18,6 +18,11 @@ import { api } from '../../lib/api'
 import { useProposalsStore } from '../../stores/proposals'
 import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useMemoryMapStore } from '../../stores/memoryMap'
+import { useNotificationInboxStore } from '../../stores/notificationInbox'
+import { useHousekeepingStore } from '../../stores/housekeeping'
+import { useTaskStore } from '../../stores/tasks'
+import { useTaskSignalsStore } from '../../stores/taskSignals'
+import type { SourceHealth } from '../../lib/sourceHealth'
 import type { ProposalRow, VaultReviewCandidate } from '../../lib/types'
 
 const apiGet = api.get as unknown as Mock
@@ -44,16 +49,22 @@ function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
   }
 }
 
-async function mountSidebar(mode: 'chat' | 'memory' | 'proposals' = 'proposals') {
+async function mountSidebar(
+  mode: 'chat' | 'memory' | 'proposals' | 'notifications' = 'proposals',
+  extra: { collapsed?: boolean } = {},
+) {
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: [{ path: '/', component: { template: '<div />' } }],
+    routes: [
+      { path: '/', component: { template: '<div />' } },
+      { path: '/notifications', component: { template: '<div />' } },
+    ],
   })
   await router.push('/')
   await router.isReady()
   return mount(ProjectSidebar, {
     attachTo: document.body,
-    props: { collapsed: false, mode },
+    props: { collapsed: extra.collapsed ?? false, mode },
     global: { plugins: [router] },
   })
 }
@@ -358,5 +369,144 @@ describe('ProjectSidebar review section', () => {
     })
 
     expect(wrapper.find('.mm-search').exists()).toBe(false)
+  })
+})
+
+const READY_AT = '2026-10-26T10:00:00.000Z'
+const readyHealth = (): SourceHealth => ({ status: 'ready', lastSuccessAt: READY_AT, error: '' })
+
+// Real stores, seeded the way the inbox store reads them: N unread chats in the
+// one personal project, every source ready.
+function seedInbox(unread: number) {
+  const projects = useProjectStore()
+  projects.projects = [
+    { project_id: 'p-personal', name: 'General', workspace: 'personal' },
+  ] as unknown as typeof projects.projects
+  projects.activeWorkspace = 'personal'
+  projects.activeChatId = null
+  projects.chats = Array.from({ length: unread }, (_, i) => ({
+    chat_id: `c${i}`,
+    project_id: 'p-personal',
+    title: `Chat ${i}`,
+    archived: false,
+    local: true,
+    last_activity_at: '2026-10-26T09:00:00Z',
+    last_read_at: '',
+  })) as unknown as typeof projects.chats
+  projects.chatsHealth = readyHealth()
+  const signals = useTaskSignalsStore()
+  signals.healthWorkspace = 'personal'
+  signals.health = readyHealth()
+  const housekeeping = useHousekeepingStore()
+  housekeeping.actionsHealth = readyHealth()
+  housekeeping.updateTasksWorkspace = 'personal'
+  housekeeping.updateTasksHealth = readyHealth()
+  useTaskStore().schedulesLoaded = true
+  useProposalsStore().rows = []
+  useProposalsStore().loaded = true
+  useVaultReviewStore().loadedWorkspace = 'personal'
+}
+
+describe('notifications bell', () => {
+  beforeEach(() => {
+    apiGet.mockClear()
+    setActivePinia(createPinia())
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '/tmp/p', default_provider: 'claude', gws_profile: '' },
+    ]
+    store.activeWorkspace = 'personal'
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  it('bell_sits_between_tasks_and_settings', async () => {
+    seedInbox(0)
+    const wrapper = await mountSidebar('chat')
+    const hrefs = wrapper.findAll('.nav-links a').map((a) => a.attributes('href'))
+    expect(hrefs).toEqual(['/', '/schedules', '/memory', '/tasks', '/notifications', '/settings'])
+    wrapper.unmount()
+  })
+
+  it('zero_count_has_no_numeral_and_plain_name', async () => {
+    seedInbox(0)
+    const wrapper = await mountSidebar('chat')
+    const bell = wrapper.get('.nav-links a[href="/notifications"]')
+    expect(bell.attributes('data-count')).toBeUndefined()
+    expect(bell.attributes('aria-label')).toBe('Notifications, none')
+    wrapper.unmount()
+  })
+
+  it('count_and_99_plus', async () => {
+    seedInbox(3)
+    const wrapper = await mountSidebar('chat')
+    let bell = wrapper.get('.nav-links a[href="/notifications"]')
+    expect(bell.attributes('data-count')).toBe('3')
+    expect(bell.attributes('aria-label')).toBe('Notifications, 3 items')
+    wrapper.unmount()
+
+    seedInbox(100)
+    const big = await mountSidebar('chat')
+    bell = big.get('.nav-links a[href="/notifications"]')
+    expect(bell.attributes('data-count')).toBe('99+')
+    expect(bell.attributes('aria-label')).toBe('Notifications, 100 items')
+    big.unmount()
+  })
+
+  it('partial_status_indicator', async () => {
+    seedInbox(1)
+    const projects = useProjectStore()
+    projects.chatsHealth = { status: 'stale', lastSuccessAt: READY_AT, error: 'x' }
+    const wrapper = await mountSidebar('chat')
+    expect(wrapper.find('.nav-item-alert--partial').exists()).toBe(true)
+    expect(wrapper.get('.nav-links a[href="/notifications"]').attributes('aria-label'))
+      .toBe('Notifications, 1 item. Some sources could not be fully checked')
+
+    projects.chatsHealth = { status: 'checking', lastSuccessAt: '', error: '' }
+    await nextTick()
+    expect(wrapper.find('.nav-item-alert--partial').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('active_state', async () => {
+    seedInbox(0)
+    const wrapper = await mountSidebar('notifications')
+    expect(wrapper.get('.nav-links a[href="/notifications"]').classes()).toContain('nav-item--active')
+    wrapper.unmount()
+  })
+
+  it('collapsed_rail_has_the_bell', async () => {
+    seedInbox(100)
+    const wrapper = await mountSidebar('chat', { collapsed: true })
+    expect(wrapper.find('.nav-links').exists()).toBe(false)
+    const bell = wrapper.get('a[href="/notifications"]')
+    expect(bell.attributes('aria-label')).toBe('Notifications, 100 items')
+    expect(bell.get('.sidebar-rail-bell-count').text()).toBe('99+')
+    wrapper.unmount()
+  })
+
+  it('click_collapses_the_mobile_drawer', async () => {
+    seedInbox(0)
+    const wrapper = await mountSidebar('chat')
+    await wrapper.get('.nav-links a[href="/notifications"]').trigger('click')
+    expect(wrapper.emitted('chat-selected')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('sidebar_never_calls_inbox_reads', async () => {
+    seedInbox(1)
+    const inbox = useNotificationInboxStore()
+    const init = vi.spyOn(inbox, 'init')
+    const refresh = vi.spyOn(inbox, 'refresh')
+    const retry = vi.spyOn(inbox, 'retry')
+    const wrapper = await mountSidebar('chat')
+    await wrapper.get('.nav-links a[href="/notifications"]').trigger('click')
+    expect(init).not.toHaveBeenCalled()
+    expect(refresh).not.toHaveBeenCalled()
+    expect(retry).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 })

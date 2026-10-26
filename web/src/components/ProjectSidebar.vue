@@ -252,6 +252,30 @@
             </span>
             <span class="nav-item-label" aria-hidden="true">Tasks</span>
           </router-link>
+          <!-- The inbox. 'chat-selected' is a misnomer here: it is the event
+               ChatLayout already maps to collapsing the mobile drawer, and a
+               dedicated emit would cost a ChatLayout edit. The sidebar only
+               reads the inbox store; ChatLayout owns init(). -->
+          <router-link
+            to="/notifications"
+            class="nav-item"
+            :class="{ 'nav-item--active': mode === 'notifications' }"
+            title="Notifications"
+            :data-count="inbox.count > 0 ? inbox.badgeText : undefined"
+            :aria-label="inbox.accessibleName"
+            @click="emit('chat-selected')"
+          >
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <path d="M6 17V10a6 6 0 0 1 12 0v7" />
+                <line x1="4" y1="17" x2="20" y2="17" />
+                <line x1="10" y1="21" x2="14" y2="21" />
+              </svg>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">Notifications</span>
+            <span v-if="inboxPartial" class="nav-item-alert nav-item-alert--partial" aria-hidden="true"></span>
+          </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/providers, /settings/workspaces, ...) and none of them match
                the /settings record, so active-class left this item inactive on
@@ -307,6 +331,22 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6" /></svg>
         </button>
       </div>
+      <router-link
+        to="/notifications"
+        class="history-btn touch-hit sidebar-rail-bell"
+        title="Notifications"
+        :aria-label="inbox.accessibleName"
+        @click="emit('chat-selected')"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
+          <path d="M6 17V10a6 6 0 0 1 12 0v7" />
+          <line x1="4" y1="17" x2="20" y2="17" />
+          <line x1="10" y1="21" x2="14" y2="21" />
+        </svg>
+        <span v-if="inbox.count > 0" class="sidebar-rail-bell-count" aria-hidden="true">{{ inbox.badgeText }}</span>
+        <span v-if="inboxPartial" class="nav-item-alert nav-item-alert--partial sidebar-rail-bell-dot" aria-hidden="true"></span>
+      </router-link>
     </div>
 
     <!-- No section title here: the nav pill above already names this view.
@@ -1007,6 +1047,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
+import { useNotificationInboxStore } from '../stores/notificationInbox'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 import DragGrip from './DragGrip.vue'
@@ -1042,6 +1083,9 @@ const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
 const proposals = useProposalsStore()
 const vaultReview = useVaultReviewStore()
+const inbox = useNotificationInboxStore()
+// Not while checking, so every cold load does not flash it.
+const inboxPartial = computed(() => inbox.overall === 'stale' || inbox.overall === 'unavailable')
 const taskSignals = useTaskSignalsStore()
 
 // Memory's sections and their counts. Scoped counts come from the stores so
@@ -2044,7 +2088,9 @@ async function confirmDeleteChat(chatId: string) {
 }
 .sidebar-history-rail {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   padding: 8px 0;
 }
 .sidebar-history--rail {
@@ -2068,6 +2114,28 @@ async function confirmDeleteChat(chatId: string) {
 .history-btn:hover:not(:disabled) { color: var(--fg); }
 .history-btn:disabled { color: var(--fg3); opacity: 0.45; cursor: default; }
 .history-btn:disabled::before { background: transparent; }
+.sidebar-rail-bell { position: relative; text-decoration: none; }
+.sidebar-rail-bell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sidebar-rail-bell-count {
+  position: absolute;
+  /* The button is 44px (touch-hit) in a 40px rail, so the offset is measured
+     from the rail's edge: the badge stays inside the rail. */
+  top: 2px;
+  right: 4px;
+  min-width: 14px;
+  padding: 1px 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg2);
+  color: var(--fg2);
+  font: 700 9px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.sidebar-rail-bell-dot { position: absolute; top: 2px; left: 2px; }
+@media (pointer: coarse) {
+  .sidebar-rail-bell { width: var(--touch); height: var(--touch); }
+}
 .history-divider {
   flex: none;
   width: 1px;
@@ -2374,6 +2442,11 @@ async function confirmDeleteChat(chatId: string) {
 .nav-item-alert {
   display: inline-flex;
   flex: 0 0 auto;
+}
+
+.nav-item-alert--partial {
+  background: transparent;
+  border: 1.5px solid var(--warning);
 }
 
 .nav-item .spinner-dot { margin-left: 0; }
