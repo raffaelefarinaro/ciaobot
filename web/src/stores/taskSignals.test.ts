@@ -307,4 +307,94 @@ describe('useTaskSignalsStore', () => {
     expect(store.chatHoldsTask(linked, task)).toBe(false)
     expect(store.chatTaskWaitingOnUser(linked)).toBe(false)
   })
+
+  describe('health', () => {
+    it('health: initial is checking, a failed first read is unavailable', async () => {
+      const store = useTaskSignalsStore()
+      expect(store.health.status).toBe('checking')
+      get.mockRejectedValueOnce(new Error('offline'))
+      await expect(store.reload('personal')).resolves.toBeUndefined()
+      expect(store.health.status).toBe('unavailable')
+      expect(store.health.lastSuccessAt).toBe('')
+      expect(store.healthWorkspace).toBe('personal')
+    })
+
+    it('health: empty success is ready', async () => {
+      get.mockResolvedValueOnce({ tasks: [] })
+      const store = useTaskSignalsStore()
+      await store.reload('personal')
+      expect(store.health.status).toBe('ready')
+      expect(store.health.error).toBe('')
+      expect(store.loadedWorkspace).toBe('personal')
+      expect(store.tasks).toEqual([])
+    })
+
+    it('health: success then failure is stale and keeps rows', async () => {
+      get.mockResolvedValueOnce({ tasks: [delegated()] })
+      const store = useTaskSignalsStore()
+      await store.reload('personal')
+      const first = store.health.lastSuccessAt
+      expect(first).not.toBe('')
+      get.mockRejectedValueOnce(new Error('offline'))
+      await store.reload('personal')
+      expect(store.health.status).toBe('stale')
+      expect(store.health.lastSuccessAt).toBe(first)
+      expect(store.health.error).toBe('offline')
+      expect(store.tasks).toHaveLength(1)
+    })
+
+    it('health: failed retry of a first read stays unavailable, never checking', async () => {
+      get.mockRejectedValueOnce(new Error('offline'))
+      const store = useTaskSignalsStore()
+      await store.reload('personal')
+      const retry = deferred<unknown>()
+      get.mockReturnValueOnce(retry.promise as Promise<never>)
+      const pending = store.reload('personal')
+      expect(store.health.status).toBe('unavailable')
+      retry.reject(new Error('still offline'))
+      await pending
+      expect(store.health.status).toBe('unavailable')
+    })
+
+    it('health: A, B, A late response and late failure do not touch current health', async () => {
+      for (const outcome of ['resolve', 'reject'] as const) {
+        setActivePinia(createPinia())
+        get.mockReset()
+        const stale = deferred<unknown>()
+        get.mockReturnValueOnce(stale.promise as Promise<never>)
+        get.mockResolvedValueOnce({ tasks: [delegated({ id: 'work-task' })] })
+        get.mockResolvedValueOnce({ tasks: [delegated({ id: 'fresh' })] })
+        const store = useTaskSignalsStore()
+
+        const a = store.reload('personal')
+        await store.reload('work')
+        await store.reload('personal')
+        if (outcome === 'resolve') stale.resolve({ tasks: [delegated({ id: 'stale' })] })
+        else stale.reject(new Error('late'))
+        await a
+
+        expect(store.tasks.map(t => t.id)).toEqual(['fresh'])
+        expect(store.health.status).toBe('ready')
+        expect(store.health.error).toBe('')
+        expect(store.healthWorkspace).toBe('personal')
+      }
+    })
+
+    it('health: a switch resets health to checking until the new read lands', async () => {
+      get.mockResolvedValueOnce({ tasks: [delegated({ id: 'personal-task' })] })
+      const store = useTaskSignalsStore()
+      await store.reload('personal')
+      expect(store.health.status).toBe('ready')
+      const work = deferred<unknown>()
+      get.mockReturnValueOnce(work.promise as Promise<never>)
+
+      const pending = store.reload('work')
+      expect(store.health.status).toBe('checking')
+      expect(store.health.lastSuccessAt).toBe('')
+      expect(store.healthWorkspace).toBe('work')
+      work.resolve({ tasks: [] })
+      await pending
+      expect(store.health.status).toBe('ready')
+    })
+  })
 })
