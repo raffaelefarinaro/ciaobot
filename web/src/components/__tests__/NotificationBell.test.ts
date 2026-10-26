@@ -7,6 +7,7 @@ import type { VueWrapper } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import NotificationBell from '../NotificationBell.vue'
+import { requestInboxOpen } from '../../composables/useInboxPopover'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { useHousekeepingStore } from '../../stores/housekeeping'
@@ -251,5 +252,20 @@ describe('NotificationBell', () => {
     window.dispatchEvent(new Event('resize'))
     await flushPromises()
     expect(dialog()).toBeNull()
+  })
+
+  it('opens_on_request_only_when_visible', async () => {
+    await mountBell({ chats: 1 })
+    const rect = (r: Partial<DOMRect>) => ({ x: 0, y: 0, toJSON: () => ({}), ...r }) as DOMRect
+    const spy = vi.spyOn(bellButton(), 'getBoundingClientRect')
+    // Laid out but translated off screen (the drawer's rail bell on a phone).
+    spy.mockReturnValue(rect({ left: -50, right: -10, top: 10, bottom: 40, width: 40, height: 30 }))
+    requestInboxOpen()
+    await flushPromises()
+    expect(dialog()).toBeNull()
+    spy.mockReturnValue(rect({ left: 10, right: 50, top: 10, bottom: 40, width: 40, height: 30 }))
+    requestInboxOpen()
+    await flushPromises()
+    expect(dialog()).not.toBeNull()
   })
 })

@@ -35,7 +35,10 @@ import {
 test.use({ viewport: { width: 1440, height: 900 } })
 
 const SUMMARY = `${INBOX_DIALOG} [data-testid="inbox-summary"]`
-const row = (page: Page, key: string) => page.locator(`[data-testid="row-${key}"]`)
+// Home's At a glance renders the same inbox in the page, so everything here is
+// scoped to the popover dialog.
+const inbox = (page: Page) => page.locator(INBOX_DIALOG)
+const row = (page: Page, key: string) => inbox(page).locator(`[data-testid="row-${key}"]`)
 
 /**
  * Writes made on the user's behalf. Boot itself syncs the appearance settings
@@ -175,7 +178,7 @@ test.describe('notification inbox', () => {
         (await (await page.request.get('/__fixture__/ws-count')).json()).open,
       ).toBeGreaterThanOrEqual(2)
       for (const p of [page, b]) {
-        await expect(p.locator('ul[aria-label="Source status"]')).toHaveCount(0)
+        await expect(inbox(p).locator('ul[aria-label="Source status"]')).toHaveCount(0)
       }
 
       // A opens chat-1. Opening is what reads it, and B hears about it.
@@ -246,17 +249,17 @@ test.describe('notification inbox', () => {
     await expect(activeWorkspaceButton(page)).toContainText('Gamma')
     await openInbox(page)
 
-    await expect(page.locator('[data-testid="inbox-empty-unavailable"]')).toBeVisible()
-    await expect(page.locator('[data-testid="inbox-empty-clear"]')).toHaveCount(0)
-    await expect(page.locator('[data-testid="source-automations"]'))
+    await expect(inbox(page).locator('[data-testid="inbox-empty-unavailable"]')).toBeVisible()
+    await expect(inbox(page).locator('[data-testid="inbox-empty-clear"]')).toHaveCount(0)
+    await expect(inbox(page).locator('[data-testid="source-automations"]'))
       .toContainText('Automations: could not be checked.')
     await expect(page.locator(BELL)).toHaveAttribute('aria-label', /Some sources could not be fully checked$/)
     await expect(page.locator(`${BELL} .notif-bell-ring`)).toBeVisible()
 
     await page.unroute('**/api/schedules')
-    await page.getByRole('button', { name: 'Retry checking Automations' }).click()
-    await expect(page.locator('[data-testid="inbox-empty-clear"]')).toHaveText("You're all caught up.")
-    await expect(page.locator('[data-testid="source-automations"]')).toHaveCount(0)
+    await inbox(page).getByRole('button', { name: 'Retry checking Automations' }).click()
+    await expect(inbox(page).locator('[data-testid="inbox-empty-clear"]')).toHaveText("You're all caught up.")
+    await expect(inbox(page).locator('[data-testid="source-automations"]')).toHaveCount(0)
     await expect(page.locator(`${BELL} .notif-bell-ring`)).toHaveCount(0)
     await expect(page.locator(BELL)).toHaveAttribute('aria-label', 'Notifications, none')
   })
@@ -272,12 +275,12 @@ test.describe('notification inbox', () => {
 
     await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toBeVisible()
     await expect(row(page, UNREAD_ROW('alpha-chat-2')).getByText('May be out of date')).toBeVisible()
-    await expect(page.locator('[data-testid="source-chats"]'))
+    await expect(inbox(page).locator('[data-testid="source-chats"]'))
       .toContainText('Chats: showing the last successful check')
 
     await page.unroute('**/api/chats*')
-    await page.getByRole('button', { name: 'Retry checking Chats' }).click()
-    await expect(page.locator('[data-testid="source-chats"]')).toHaveCount(0)
+    await inbox(page).getByRole('button', { name: 'Retry checking Chats' }).click()
+    await expect(inbox(page).locator('[data-testid="source-chats"]')).toHaveCount(0)
     await expect(row(page, UNREAD_ROW('alpha-chat-2')).getByText('May be out of date')).toHaveCount(0)
     await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toBeVisible()
   })
@@ -334,7 +337,7 @@ test.describe('notification inbox', () => {
     let last = -1
     let stable = 0
     await expect.poll(async () => {
-      const n = await page.locator(ROWS).count()
+      const n = await inbox(page).locator(ROWS).count()
       stable = n === last ? stable + 1 : 0
       last = n
       return stable
@@ -362,7 +365,7 @@ test.describe('notification inbox', () => {
 
     // Gone on the server, and nothing told the page.
     await seedInbox(page, { removeChats: ['alpha-chat-2'], tasks: { alpha: [] } })
-    const notice = page.locator('[data-testid="inbox-unavailable"]')
+    const notice = inbox(page).locator('[data-testid="inbox-unavailable"]')
 
     await row(page, UNREAD_ROW('alpha-chat-2')).locator(ROWS).click()
     await expect(notice).toBeVisible()
@@ -532,10 +535,10 @@ test.describe('notification inbox', () => {
 
       await quiesce(page)
       expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
-      const box = await page.locator(ROWS).first().boundingBox()
+      const box = await inbox(page).locator(ROWS).first().boundingBox()
       expect(box).not.toBeNull()
       expect(box!.height).toBeGreaterThanOrEqual(52)
-      const retry = await page.locator('.notif-retry').first().boundingBox()
+      const retry = await inbox(page).locator('.notif-retry').first().boundingBox()
       expect(retry).not.toBeNull()
       expect(retry!.height).toBeGreaterThanOrEqual(44)
       await page.screenshot({ path: test.info().outputPath('inbox-mobile.png') })
@@ -590,6 +593,6 @@ test.describe('notification inbox', () => {
 
     await expect(page.getByRole('button', { name: /^Notifications, \d+ items?/ }).first()).toBeVisible()
     await expect(page.locator(SUMMARY)).toHaveAttribute('role', 'status')
-    await expect(page.getByRole('status').filter({ hasText: /items? needs? a look/ })).toBeVisible()
+    await expect(inbox(page).getByRole('status').filter({ hasText: /items? needs? a look/ })).toBeVisible()
   })
 })
