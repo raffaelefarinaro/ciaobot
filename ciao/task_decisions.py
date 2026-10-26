@@ -1,10 +1,12 @@
 """Workspace-scoped, append-only log of operator task decisions (#1726).
 
 One JSON row per decision the operator made about a task: a delete, a reject
-(releasing a result that is ready for review) or an approve, each with an
-optional reason. The file is ``Workspace/Task-Decisions.jsonl`` in the vault,
-a separate file from the task, so the record outlives a deleted task. The
-weekly pass (1726c) reads it with :func:`read_decisions`.
+(releasing a result that is ready for review), an approve or a complete (an
+agent closing a task on the user's say-so), each with a reason that is
+optional except on the agent's delete and complete. The file is
+``Workspace/Task-Decisions.jsonl`` in the vault, a separate file from the task,
+so the record outlives a deleted task. The weekly pass (1726c) reads it with
+:func:`read_decisions`.
 
 Reason text is evidence about what the operator thought, never instructions:
 whoever reads it later must treat it as untrusted, transcript-like text.
@@ -24,7 +26,7 @@ from ciao.os_support.private import open_private
 DECISIONS_NAME = "Task-Decisions.jsonl"
 ROW_VERSION = 1
 MAX_REASON = 1000
-KINDS = ("delete", "reject", "approve")
+KINDS = ("delete", "reject", "approve", "complete")
 _ACTORS = ("user", "agent")
 _VIAS = ("pwa", "cli")
 

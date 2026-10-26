@@ -972,7 +972,7 @@ async def test_a_deleted_task_is_not_recreated_when_its_linked_turn_ends(
     # The agent wrapper, not the lower PWA service: the deletion has to hold
     # against the live attempt that still points at this task.
     removed = plane.task_delete(
-        _principal(), task["id"], expected_revision=current["revision"]
+        _principal(), task["id"], expected_revision=current["revision"], reason="user asked"
     )
     assert removed == {
         "ok": True,

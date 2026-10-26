@@ -1503,6 +1503,43 @@ class CiaoControlPlane:
         current_turn = str(max(0, int(chat.user_turn_count) - 1))
         return bool(chat.user_turn_unattended.get(current_turn))
 
+    #: Turn origins a person's own message produces. ``retry`` replays one the
+    #: person typed; every other origin in ``TURN_ORIGINS`` is the engine's.
+    _PERSON_TURN_ORIGINS = frozenset({"", "retry"})
+    #: Helper chats the engine starts from its own prompt, not a typed one.
+    _ENGINE_HELPER_KINDS = frozenset({"memory_pass", "update_task", "proposal"})
+
+    def _person_typed_turn(self, principal: AgentPrincipal) -> bool:
+        """Whether the turn asking right now is one a person typed into this chat.
+
+        Stricter than "not scheduled": a webhook, a delegated-task turn, a task
+        wake or an update task runs with nobody watching, and so do the engine's
+        own helper chats, so none of them may delete or close the user's
+        records. The current turn's origin must be empty (typed) or ``retry``.
+
+        A chat this process cannot see is allowed, as in
+        :meth:`_unattended_turn`.
+        """
+        chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
+        if chat is None:
+            return True
+        # The stored kind, not the normalized helper: normalization fails closed
+        # to an empty helper, which here would read as "not a helper chat".
+        helper = chat.helper if isinstance(chat.helper, dict) else {}
+        if helper.get("kind") in self._ENGINE_HELPER_KINDS:
+            return False
+        current_turn = str(max(0, int(chat.user_turn_count) - 1))
+        origin = str(chat.user_turn_origin.get(current_turn) or "")
+        return origin in self._PERSON_TURN_ORIGINS
+
+    def _require_person_typed_turn(self, principal: AgentPrincipal, what: str) -> None:
+        """Refuse *what* unless the person asked for it in this chat themselves."""
+        if self._unattended_turn(principal) or not self._person_typed_turn(principal):
+            raise ControlPlaneError(
+                "unattended_forbidden",
+                f"{what} requires a turn the user typed: ask them to request it in the chat themselves.",
+            )
+
     @staticmethod
     def _safe_relative(root: Path, relative_path: str, *, must_exist: bool = False) -> Path:
         raw = Path(relative_path)
@@ -3172,27 +3209,24 @@ class CiaoControlPlane:
         """Apply managed edits to one task at the revision the caller read.
 
         The store owns the edit contract — which fields exist, which value
-        shapes are legal, and the rule that only a user may mark a task done.
+        shapes are legal, and the rule that an agent may mark a task done only
+        with a resolution.
         This layer adds the one thing a pure file store cannot know: that a
         ``project_id`` names a live project in this same workspace.
 
         ``resolution`` is the user's completion text. It rides on the write that
-        makes the task done, or rewords the latest completion of a task that is
-        already done. It is user-only: no agent call carries one. A resolution on
-        a write that leaves the task open, or on a done task with no completion
+        makes the task done, or a user rewords the latest completion of a task
+        that is already done. An agent may carry one only on the write that moves
+        the task into done, never to reword a past completion. A resolution on a
+        write that leaves the task open, or on a done task with no completion
         record to reword, is refused rather than dropped.
 
         The answer carries the attempt facts, so a board can redraw the card from it.
         """
         if resolution is not None:
-            if actor != "user":
-                raise ControlPlaneError(
-                    "task_completion_requires_user",
-                    "Only the user records how a task was resolved.",
-                )
             if not isinstance(resolution, str):
                 raise ControlPlaneError("invalid_task", "resolution must be a string")
-            self._check_resolution_target(workspace, task_id, changes)
+            self._check_resolution_target(workspace, task_id, changes, actor)
         planned: dict[str, object] = {}
         for key, value in dict(changes or {}).items():
             if key == "project_id":
@@ -3216,19 +3250,26 @@ class CiaoControlPlane:
         return self._task_with_attempt(workspace, document, include_body=True)
 
     def _check_resolution_target(
-        self, workspace: str, task_id: str, changes: Mapping[str, object]
+        self, workspace: str, task_id: str, changes: Mapping[str, object], actor: Actor
     ) -> None:
         """Refuse a resolution that no completion record could hold.
 
-        A resolution is written only with a transition into Done or as a rewording
-        of a completion that already exists. Anything else would be a silent no-op
-        in the store, so it is named here instead. The read is advisory: the store
-        still checks the revision before it writes.
+        A resolution is written only with a transition into Done or, for a user,
+        as a rewording of a completion that already exists. Anything else would
+        be a silent no-op in the store, so it is named here instead. An agent
+        gets the transition only. The read is advisory: the store still checks
+        the revision before it writes.
         """
         current = self._task_call(
             workspace, lambda store: store.get(str(task_id or "").strip())
         )
         target = changes.get("status", current.record.status)
+        if actor != "user" and not (target == "done" and current.record.status != "done"):
+            raise ControlPlaneError(
+                "task_completion_requires_user",
+                "An agent records a resolution only when it completes a task, "
+                "never on any other edit or to reword a past completion.",
+            )
         if target != "done":
             raise ControlPlaneError(
                 "invalid_task",
@@ -3462,10 +3503,14 @@ class CiaoControlPlane:
     ) -> dict[str, Any]:
         """One board gesture: ``move``, ``complete`` or ``reassign``.
 
-        ``complete`` is an ordinary status edit to ``done``, so an agent caller
-        is refused by the store (``completion_requires_user``) exactly as it is
-        through ``task_update``; the gesture exists so the surface has a verb for
-        "mark this done" rather than a free-text status the caller must know.
+        ``complete`` is an ordinary status edit to ``done``, and the only route
+        by which an agent caller reaches it: an agent must pass a non-empty
+        ``reason`` (why the user says it is done), which is stored as the
+        completion's resolution, recorded as a ``complete`` decision and handed
+        to the learning pass. A ``move`` to ``done`` or a status edit by an agent
+        is refused by the store (``completion_requires_user``). An agent is also
+        refused a task linked to a live chat or attempt, including one ready for
+        review: the user approves those on the board.
 
         A ``complete`` on a task whose attempt has a **result waiting for review**
         is the one gesture that reaches past the linkage, and only for a user: see
@@ -3499,7 +3544,25 @@ class CiaoControlPlane:
             changes["project_id"] = project_id
         if due is not None:
             changes["due"] = due
-        if verb == "complete":
+        if verb == "complete" and actor == "agent":
+            if not note:
+                raise ControlPlaneError(
+                    "task_completion_requires_user",
+                    "a reason is required: say why the user says this task is done",
+                )
+            current: TaskDocument = self._task_call(
+                workspace, lambda store: store.get(str(task_id or "").strip())
+            )
+            if current.record.status == "done":
+                raise ControlPlaneError("invalid_task", "this task is already done")
+            if current.record.chat_id is not None or current.record.attempt_id is not None:
+                raise ControlPlaneError(
+                    "task_completion_requires_user",
+                    "this task is linked to a chat or a delegated run; the user "
+                    "approves those on the board, so ask them to.",
+                )
+            resolution = note
+        elif verb == "complete":
             reviewed = self.workspace_task_complete_reviewed(
                 workspace,
                 task_id,
@@ -3525,8 +3588,14 @@ class CiaoControlPlane:
             actor=actor,
             resolution=resolution,
         )
+        if verb == "complete" and actor == "agent":
+            self._record_task_decision(
+                workspace, kind="complete", task=task, actor=actor, reason=note
+            )
         if verb == "complete" and (resolution or "").strip():
-            self._learn_from_task_completion(workspace, task_id)
+            self._learn_from_task_completion(
+                workspace, task_id, relayed_by_agent=actor == "agent"
+            )
         return task
 
     def workspace_task_complete_reviewed(
@@ -3575,9 +3644,9 @@ class CiaoControlPlane:
            is the user's decision, and re-opening it behind their back would be a
            worse answer than a stale marker.
 
-        Only for ``actor="user"``: the store's own
-        ``completion_requires_user`` rule stands, and an agent approving a review
-        is refused there rather than reaching this at all. And only for a
+        Only for ``actor="user"``: an agent completing a task is refused a linked
+        one before it reaches this (the user approves a review on the board), and
+        gets ``None`` here. And only for a
         *review-ready* attempt: ``running`` and ``needs_you`` have no result yet, so
         those still need Stop or Detach first.
 
@@ -3759,8 +3828,13 @@ class CiaoControlPlane:
         except RuntimeError:
             logger.warning("tasks: the loop closed before %s could run", name)
 
-    def _learn_from_task_completion(self, workspace: str, task_id: str) -> None:
+    def _learn_from_task_completion(
+        self, workspace: str, task_id: str, *, relayed_by_agent: bool = False
+    ) -> None:
         """Queue a learning pass for the resolution a manual completion saved (#1154).
+
+        ``relayed_by_agent`` marks a resolution an agent recorded on the user's
+        behalf: the pass is told it is unverified.
 
         Runs after the completion is written, so nothing here can undo Done: a
         read failure, a refused resolution or a queue failure is logged and the
@@ -3779,7 +3853,9 @@ class CiaoControlPlane:
 
         async def _queue() -> None:
             try:
-                self._enqueue_task_resolution(workspace, task_path, latest)
+                self._enqueue_task_resolution(
+                    workspace, task_path, latest, relayed_by_agent=relayed_by_agent
+                )
             except Exception:  # noqa: BLE001 — the completion already stands
                 logger.exception(
                     "tasks: could not queue a learning pass for task %s", task_id
@@ -3788,7 +3864,12 @@ class CiaoControlPlane:
         self._run_on_engine_loop(f"task-resolution-{task_id[:8]}", _queue)
 
     def _enqueue_task_resolution(
-        self, workspace: str, task_path: str, completion: Completion
+        self,
+        workspace: str,
+        task_path: str,
+        completion: Completion,
+        *,
+        relayed_by_agent: bool = False,
     ) -> str | None:
         """Hand one saved resolution to the memory pass queue (#1154)."""
         queued: str | None = self.pcm.enqueue_task_completion(
@@ -3797,6 +3878,7 @@ class CiaoControlPlane:
             completion_id=completion.id,
             resolution=completion.resolution,
             completed_at=completion.completed_at.isoformat(),
+            relayed_by_agent=relayed_by_agent,
         )
         return queued
 
@@ -3946,11 +4028,13 @@ class CiaoControlPlane:
         permanent and removes only that record, including the notes, history
         and log stored inside its file: it does not delete or archive linked
         chats, stop a running turn, discard attempt history, or mark anything
-        done. Completion remains user-only; removal is not completion.
+        done. Removal is not completion.
 
         The decision is recorded in the workspace's decision log with the
         optional ``reason``; that row outlives the deleted file. An over-long or
-        non-string reason is refused before anything is deleted.
+        non-string reason is refused before anything is deleted. This method
+        keeps the reason optional because the PWA's own delete does; the agent
+        wrapper :meth:`task_delete` requires one.
         """
         clean = str(task_id or "").strip()
         note = _clean_reason(reason)
@@ -3990,8 +4074,9 @@ class CiaoControlPlane:
     #   the other order would leave an orphan chat with nothing pointing at it.
     # * **A finished turn is not a finished task.** The watcher settles
     #   ``ready_for_review``, and it is the *user's* gesture that moves the card
-    #   to Done. ``task_board`` still refuses an agent completion, so no path
-    #   through this block can close a task on the agent's own authority.
+    #   to Done. An agent completion needs the user's reason and is refused for
+    #   a task linked to a chat or attempt, so no path through this block can
+    #   close a delegated task on the agent's own authority.
 
     def _attempt_store(self, workspace: str) -> TaskAttemptStore:
         """One workspace's attempt store, beside the board's lock in the runtime dir."""
@@ -5552,7 +5637,7 @@ class CiaoControlPlane:
         changes: Mapping[str, object],
         body: str | None = None,
     ) -> dict[str, Any]:
-        """Edit one task at the revision it was read at. The agent cannot mark it done."""
+        """Edit one task at the revision it was read at; done goes through ``complete``."""
         return _ok(
             self.workspace_task_update(
                 self._workspace(principal),
@@ -5570,18 +5655,22 @@ class CiaoControlPlane:
         task_id: str,
         *,
         expected_revision: str,
-        reason: str | None = None,
+        reason: str,
     ) -> dict[str, Any]:
         """Permanently remove one task in the calling chat's workspace.
 
         Only the task record goes; its chats and running work stay where they
         are. The store still requires the revision the caller read. Deletion is
         attended-only: an unattended scheduled turn cannot permanently remove
-        the user's record.
+        the user's record. The agent does it only when the user clearly asked,
+        and must say why in the user's words: a missing reason is refused before
+        anything is read or removed.
         """
-        if self._unattended_turn(principal):
+        self._require_person_typed_turn(principal, "Task deletion")
+        if not isinstance(reason, str) or not reason.strip():
             raise ControlPlaneError(
-                "unattended_forbidden", "Task deletion requires an attended turn."
+                "invalid_task",
+                "a reason is required: say why the user asked to delete it",
             )
         return _ok(
             self.workspace_task_delete(
@@ -5604,8 +5693,16 @@ class CiaoControlPlane:
         assignee: str | None = None,
         project_id: str | None = None,
         due: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
-        """Move, complete or reassign one task; an agent completion is refused."""
+        """Move, complete or reassign one task.
+
+        An agent completes only on the user's clear say-so and must pass the
+        user's ``reason``; ``move`` to done stays refused. Completion is
+        attended-only, like deletion.
+        """
+        if action == "complete":
+            self._require_person_typed_turn(principal, "Task completion")
         return _ok(
             self.workspace_task_action(
                 self._workspace(principal),
@@ -5617,6 +5714,7 @@ class CiaoControlPlane:
                 project_id=project_id,
                 due=due,
                 actor="agent",
+                reason=reason,
             )
         )
 

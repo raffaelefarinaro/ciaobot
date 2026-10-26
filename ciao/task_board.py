@@ -27,7 +27,7 @@ and the refusal names the shape instead of normalizing it silently.
 raw bytes. Every update must present the revision it read; a stale one is a
 :ref:`revision_conflict <TaskBoardError>` and the file is left unchanged.
 
-**Managed-operation rules are not file restrictions.** The agent-cannot-complete,
+**Managed-operation rules are not file restrictions.** The agent-completes-only-with-a-resolution
 and linked-task rules below bind this store's ``update`` path.
 A user editing the Markdown directly can write whatever the schema accepts;
 this module never polices hand edits, it only refuses to manufacture such
@@ -215,7 +215,7 @@ class TaskBoardError(Exception):
     - ``unsafe_path``: a malformed id, a link or reparse point where a
       real file must be, a non-regular file, or a path escaping the vault.
     - ``completion_requires_user``: the agent caller tried to set status
-      ``done`` through the managed API.
+      ``done`` through the managed API without a resolution.
     - ``bad_request``: a managed-API argument has the wrong type (a
       non-string ``resolution`` or ``attempt_id`` on ``update``).
     - ``read_failed``: store I/O failed (directory traversal, read, lock
@@ -1641,9 +1641,10 @@ class TaskBoardStore:
         Managed-operation rules (they bind this API, not direct file
         editors):
 
-        - An agent caller cannot set status ``done``
-          (``completion_requires_user``). A user can complete a
-          manual/non-live task.
+        - An agent caller can set status ``done`` only on a write that carries
+          a non-empty ``resolution``, the user's reason for closing it
+          (``completion_requires_user`` otherwise). A user can complete a
+          manual/non-live task with or without one.
         - A task linked to a live chat or attempt (non-null ``chat_id`` /
           ``attempt_id``) cannot be completed or reassigned here at all:
           that needs the later delegation service's stop/detach workflow.
@@ -1692,7 +1693,7 @@ class TaskBoardStore:
                     "task body has more than one completion history section; "
                     "refusing to guess which one the write should keep",
                 )
-            effective = self._plan_changes(document, dict(changes), actor)
+            effective = self._plan_changes(document, dict(changes), actor, resolution)
             current_status = document.record.status
             patched_status = effective.get("status", current_status)
             working = body
@@ -2124,9 +2125,17 @@ class TaskBoardStore:
         self._changed()
 
     def _plan_changes(
-        self, document: TaskDocument, changes: dict[str, object], actor: Actor
+        self,
+        document: TaskDocument,
+        changes: dict[str, object],
+        actor: Actor,
+        resolution: str | None = None,
     ) -> dict[str, object]:
-        """Validate requested edits and apply the managed-operation rules."""
+        """Validate requested edits and apply the managed-operation rules.
+
+        An agent may reach ``done`` only on a write that carries a non-empty
+        ``resolution``: the user's reason, which the completion record keeps.
+        """
         _check_editable(changes)
         current = document.record
         # Validate value shapes first, so a bad enum is reported as such
@@ -2135,10 +2144,11 @@ class TaskBoardStore:
             _normalize_change(key, value)
         linked = current.chat_id is not None or current.attempt_id is not None
         if changes.get("status") == "done":
-            if actor == "agent":
+            if actor == "agent" and not (resolution or "").strip():
                 raise TaskBoardError(
                     "completion_requires_user",
-                    "only the user can mark a task done through the managed API",
+                    "an agent can mark a task done only with a resolution: "
+                    "the reason the user gave for closing it",
                 )
             if linked:
                 raise TaskBoardError(

@@ -1122,10 +1122,10 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
             fields you pass change. Omit one to leave it alone.
         body: Replaces the description/links wholesale when given.
 
-    Setting `status: done` here is refused: only the user completes a task
-    (`task_completion_requires_user`). Use `task_action` with `complete` for
-    the same reason it is a separate verb — it is a human decision, and a
-    refused completion must not be mistaken for a broken edit.
+    Setting `status: done` here is refused (`task_completion_requires_user`).
+    Use `task_action` with `complete` and a `reason` once the user has clearly
+    said the task is done; it is a separate verb because it is the user's
+    decision, and a refused completion must not be mistaken for a broken edit.
     """
     changes: dict[str, Any] = {
         key: value
@@ -1145,22 +1145,22 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
 
 
 async def _op_task_delete(service: CiaoMcpService, task_id: str,
-                          expected_revision: str,
-                          reason: str | None = None) -> dict[str, Any]:
-    """Permanently remove one task record the user asked you to delete.
+                          expected_revision: str, reason: str) -> dict[str, Any]:
+    """Permanently remove one task record, only when the user clearly asked.
 
     Args:
         task_id: The task's 32-hex id, from `task_list` or `task_get`.
         expected_revision: The `revision` you read. A stale one removes
             nothing — re-read rather than resending the same revision.
-        reason: Optional. Why the record is being removed, in the user's words
-            if they gave one. Stored with the decision, never acted on.
+        reason: Required. Why the record is being removed, in the user's words.
+            An empty one is refused. Stored with the decision and read by the
+            weekly rules pass, never acted on.
 
     This removes only that task file, including the notes, history and
     delegation log stored inside it. It does not delete or archive linked
     chats, stop a running turn, discard attempt history, or complete the
-    task. Deletion is permanent and has no trash: do it only at the user's
-    request, and tell them the record is gone for good. It is attended-only:
+    task. Deletion is permanent and has no trash: do it only when the user
+    clearly asked, and say what will be lost before you do it. It is attended-only:
     a scheduled or otherwise unattended turn is refused
     (`unattended_forbidden`) and must ask the user to run it.
     """
@@ -1320,7 +1320,8 @@ async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
 async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
                           expected_revision: str, status: str | None = None,
                           assignee: str | None = None, project_id: str | None = None,
-                          due: str | None = None) -> dict[str, Any]:
+                          due: str | None = None,
+                          reason: str | None = None) -> dict[str, Any]:
     """Move, complete or reassign one task, at the revision you read.
 
     action:
@@ -1328,21 +1329,27 @@ async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
             (`backlog` = To do, `in_progress`, `in_review`, `done`). A task you
             were delegated reaches `in_review` by your `task_report` with
             outcome `done`; you need not move it there yourself.
-        "complete" — mark it done. **Refused for you**: the user completes a
-            task, not the agent, so this returns
-            `task_completion_requires_user` however it is spelled. Ask the
-            user to mark it done rather than trying another route to the
-            same status.
+        "complete" — mark it done, only when the user clearly said it is done.
+            `reason` is required: why the user says so, in their words. It is
+            stored as the completion's resolution and read by the learning
+            pass. It is attended-only (`unattended_forbidden` on a scheduled
+            turn). A task linked to a chat or a delegated run, including one
+            ready for review, is refused: the user approves those on the
+            board. `move` with `status: done` and `task_update` with
+            `status: done` stay refused (`task_completion_requires_user`);
+            do not try them.
         "reassign" — set the assignee (`user` or `agent`).
 
     Args:
         project_id, due: Applied with the gesture when given.
+        reason: Required for `complete`, refused on any other action.
     """
     return await service._invoke(
         "task_action",
         lambda cp, p: cp.task_action(
             p, action, task_id, expected_revision=expected_revision,
             status=status, assignee=assignee, project_id=project_id, due=due,
+            reason=reason,
         ),
         mutating=True,
     )
