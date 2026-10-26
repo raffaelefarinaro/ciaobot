@@ -428,6 +428,58 @@ async def test_a_drain_with_outstanding_background_work_holds_its_provider(
         drain.cancel()
 
 
+@pytest.mark.asyncio
+async def test_live_background_child_survives_the_idle_threshold_until_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live child holds its server across the idle threshold; its end releases it.
+
+    Pins the backend owner for #1664: while the provider reports outstanding
+    background work with recent activity, no sweep tears it down however long the
+    chat has been idle, and the stamp is refreshed so completion does not reap
+    it on the very next sweep. Once the work is gone the normal timeout applies.
+    A provider whose work already ended is reaped on schedule, so a "running"
+    row with nothing outstanding is stale status, not lost live work.
+    """
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    threshold = manager._provider_idle_timeout
+    clock = [1_000_000.0]
+    monkeypatch.setattr("ciao.web.project_chats.time.monotonic", lambda: clock[0])
+    provider = _StubProvider()
+    manager._providers[chat_id] = provider  # type: ignore[assignment]
+    manager._provider_last_used[chat_id] = clock[0]
+    provider.background_work_outstanding = True
+    provider.background_activity_age = 5.0
+
+    for _ in range(3):
+        clock[0] += threshold + 1
+        assert await manager.reap_idle_providers() == []
+        assert not provider.disconnected
+        assert chat_id in manager._providers
+
+    # Completion: the child ends. The stamp was refreshed by the last busy
+    # sweep, so teardown waits one full idle window, then happens.
+    provider.background_work_outstanding = False
+    clock[0] += threshold - 1
+    assert await manager.reap_idle_providers() == []
+    clock[0] += 2
+    assert await manager.reap_idle_providers() == [chat_id]
+    assert provider.disconnected
+
+
+@pytest.mark.asyncio
+async def test_ended_background_work_does_not_hold_its_provider(tmp_path: Path) -> None:
+    """No watcher and nothing outstanding: the idle timeout reclaims the server."""
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _attach(manager, chat_id, idle_for=manager._provider_idle_timeout + 1)
+    assert manager._streaming.has_live_drain(chat_id) is False
+
+    assert await manager.reap_idle_providers() == [chat_id]
+    assert provider.disconnected
+
+
 # ── The Claude warm pool ──────────────────────────────────────────────────
 # A Claude provider is one CLI process whose rebuild costs a cold start that
 # measured 13-53 s under load, which is what the SDK's initialize deadline

@@ -226,6 +226,23 @@ describe('ChatPanel live trace', () => {
 
       expect(shownIds(wrapper)).toEqual(['this-turn'])
     })
+
+    it('keeps an idle running agent visible with an unmatched turn index', async () => {
+      const { wrapper, store } = await mountPanel()
+      store.messages['chat-1'] = [
+        ...loaded(),
+        { role: 'assistant' as const, content: 'Now reply.', timestamp: '2026-10-19T11:00:05Z' },
+      ]
+      store.subagents['chat-1'] = [
+        { agent_id: 'earlier', messages: [], status: 'running' as const, turn_index: 2 },
+        { agent_id: 'later', messages: [], status: 'running' as const, turn_index: 20 },
+        { agent_id: 'null-index', messages: [], status: 'running' as const, turn_index: null },
+        { agent_id: 'old-done', messages: [], status: 'completed' as const, turn_index: 2 },
+      ] as never
+      await flushPromises()
+
+      expect(shownIds(wrapper)).toEqual(['earlier', 'later', 'null-index'])
+    })
   })
 
   it('keeps the live trace collapsed by default while streaming', async () => {
