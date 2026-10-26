@@ -1125,7 +1125,7 @@ def test_agent_delete_and_complete_allow_a_typed_or_retried_turn(
     assert removed["data"]["deleted"] is True
 
 
-@pytest.mark.parametrize("kind", ["memory_pass", "update_task"])
+@pytest.mark.parametrize("kind", ["memory_pass", "update_task", "proposal"])
 def test_agent_delete_and_complete_refuse_an_engine_helper_chat(
     tmp_path: Path, kind: str
 ) -> None:
