@@ -145,6 +145,10 @@ async function tagTriggers(page: Page): Promise<number> {
     for (const el of Array.from(document.querySelectorAll(sel))) {
       const r = el.getBoundingClientRect()
       if (r.width === 0 || r.height === 0 || getComputedStyle(el).visibility === 'hidden') continue
+      // Covered by an open modal's backdrop (the task detail over the page
+      // header): not something the user can open from here.
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+      if (hit && !el.contains(hit)) continue
       el.setAttribute('data-touch-trigger', String(n))
       n += 1
     }
