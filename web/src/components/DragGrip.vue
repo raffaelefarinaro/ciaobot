@@ -12,6 +12,10 @@ defineProps<{
   shortcutHint?: string
   /** The sortable item's id; the engine finds the grip by it. */
   id: string
+  /** The grip is shown but cannot start a move; `title` then says why. */
+  disabled?: boolean
+  /** Replaces the label as the tooltip, for example the reason it is disabled. */
+  title?: string
 }>()
 </script>
 
@@ -21,7 +25,8 @@ defineProps<{
     class="drag-grip"
     :data-drag-handle="id"
     :aria-label="label"
-    :title="label"
+    :title="title ?? label"
+    :disabled="disabled"
     aria-roledescription="sortable handle"
     :aria-keyshortcuts="shortcutHint ?? 'Space Enter'"
     draggable="false"
@@ -63,6 +68,10 @@ defineProps<{
   touch-action: none;
 }
 
+.drag-grip:disabled {
+  cursor: not-allowed;
+}
+
 .drag-grip:active {
   cursor: grabbing;
 }
@@ -88,10 +97,20 @@ defineProps<{
   :global([data-drag-row]:focus-within) .drag-grip {
     opacity: 1;
   }
+
+  .drag-grip:disabled:hover,
+  :global([data-drag-row]:hover) .drag-grip:disabled,
+  :global([data-drag-row]:focus-within) .drag-grip:disabled {
+    opacity: 0.4;
+  }
 }
 
 /* A 44px target that does not widen the row: the glyph stays small. */
 @media (pointer: coarse) {
+  .drag-grip:disabled {
+    opacity: 0.4;
+  }
+
   .drag-grip::after {
     content: '';
     position: absolute;

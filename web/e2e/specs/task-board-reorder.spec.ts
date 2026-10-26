@@ -1,0 +1,227 @@
+import { devices, expect, test, type Locator, type Page } from '@playwright/test'
+import { boot, isolate } from '../support/app'
+
+/**
+ * Placing cards on the board: the grip's pointer drag within and across lanes,
+ * the order surviving a reload, a narrow scrolled board, the keyboard flow and a
+ * touch drag. Geometry, hit testing and pointer capture only exist in a real
+ * browser, so the gestures are driven here; the writes are held by a stateful
+ * stand-in for the engine's `/api/tasks` routes.
+ */
+const NOW = new Date()
+const BASE = {
+  project_id: '', due: '', assignee: 'user', chat_id: '', attempt_id: '',
+  created_at: '2026-01-01T09:00:00+00:00', updated_at: NOW.toISOString(),
+  revision: 'a'.repeat(64), attempt_state: '', attempt_outcome: '', attempt_summary: '',
+  attempt_detail: '', live_attempt_id: '',
+}
+type Status = 'backlog' | 'in_progress' | 'in_review' | 'done'
+
+const makeTask = (n: number, title: string, status: Status) => ({
+  ...BASE, id: String(n).repeat(32), title, status, relative_path: `Workspace/Tasks/${n}.md`,
+})
+const TASKS = [
+  makeTask(1, 'Plan the offsite', 'backlog'),
+  makeTask(2, 'Book the venue', 'backlog'),
+  makeTask(3, 'Send the invites', 'backlog'),
+  makeTask(4, 'Draft the agenda', 'in_progress'),
+  makeTask(5, 'Review the budget', 'in_review'),
+]
+
+interface Sent { path: string; body: Record<string, unknown> }
+
+/**
+ * The engine's task routes, kept in memory so a reload reads what a write left:
+ * a list with the order, `POST /order`, and `PATCH` with a placement.
+ */
+async function serve(page: Page): Promise<Sent[]> {
+  const rows = TASKS.map(t => ({ ...t }))
+  const sequences: Record<Status, string[]> = {
+    backlog: rows.filter(t => t.status === 'backlog').map(t => t.id),
+    in_progress: rows.filter(t => t.status === 'in_progress').map(t => t.id),
+    in_review: rows.filter(t => t.status === 'in_review').map(t => t.id),
+    done: [],
+  }
+  let version = 1
+  const sent: Sent[] = []
+  const order = () => ({ version, sequences })
+  const place = (id: string, status: Status, body: Record<string, unknown>) => {
+    for (const key of Object.keys(sequences) as Status[]) sequences[key] = sequences[key].filter(x => x !== id)
+    const into = sequences[status]
+    const anchor = (body.before_id ?? body.after_id) as string | null | undefined
+    const at = anchor ? into.indexOf(anchor) + (body.before_id ? 0 : 1) : into.length
+    into.splice(at < 0 ? into.length : at, 0, id)
+    version += 1
+  }
+  await page.route(/\/api\/tasks(?:\?|$)/, route => route.fulfill({
+    json: { workspace: 'alpha', tasks: rows, order: order() },
+  }))
+  await page.route(/\/api\/tasks\/(\d{32})\/order$/, async route => {
+    const body = route.request().postDataJSON() as Record<string, unknown>
+    const id = /tasks\/(\d{32})/.exec(route.request().url())![1]!
+    sent.push({ path: `/api/tasks/${id}/order`, body })
+    const row = rows.find(t => t.id === id)!
+    place(id, row.status as Status, body)
+    await route.fulfill({ json: { workspace: 'alpha', task: row, order: order() } })
+  })
+  await page.route(/\/api\/tasks\/(\d{32})$/, async route => {
+    if (route.request().method() !== 'PATCH') return route.fallback()
+    const body = route.request().postDataJSON() as Record<string, unknown>
+    const id = /tasks\/(\d{32})/.exec(route.request().url())![1]!
+    sent.push({ path: `/api/tasks/${id}`, body })
+    const row = rows.find(t => t.id === id)!
+    row.status = body.status as Status
+    row.revision = 'b'.repeat(64)
+    place(id, row.status as Status, (body.placement ?? {}) as Record<string, unknown>)
+    await route.fulfill({ json: { workspace: 'alpha', task: row, order: order() } })
+  })
+  return sent
+}
+
+async function open(page: Page, id: string): Promise<Sent[]> {
+  await isolate(page, id)
+  const sent = await serve(page)
+  await boot(page, '/tasks', '.task-card')
+  return sent
+}
+
+const lane = (page: Page, name: string) => page.locator('.task-lanes').getByRole('region', { name, exact: true })
+const titles = (page: Page, name: string) => lane(page, name).locator('.task-card .task-open').allTextContents()
+
+/** Hold the grip, move in steps so the engine activates, and release `dy` below the target's middle. */
+async function dragGrip(page: Page, title: string, target: Locator, dy = 0) {
+  const card = page.locator('.task-card', { hasText: title })
+  await card.hover()
+  const grip = (await card.locator('.drag-grip').boundingBox())!
+  const from = { x: grip.x + grip.width / 2, y: grip.y + grip.height / 2 }
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  await page.mouse.move(from.x, from.y + 12, { steps: 3 })
+  const to = (await target.boundingBox())!
+  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2 + dy, { steps: 12 })
+  await page.mouse.up()
+}
+
+test.describe('placing cards with the mouse', () => {
+  test.use({ viewport: { width: 1440, height: 900 } })
+
+  test('reorders within a lane, persists once and keeps the order across a reload', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-within')
+    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    // Drop the last card on the first one's upper half: it lands first.
+    await dragGrip(page, 'Send the invites', page.locator('.task-card', { hasText: 'Plan the offsite' }), -15)
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.path).toBe(`/api/tasks/${'3'.repeat(32)}/order`)
+    expect(sent[0]!.body).toMatchObject({ before_id: '1'.repeat(32), expected_order_version: 1 })
+    // No native drag ghost and no leftover overlay.
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+
+    await page.reload()
+    await expect(page.locator('.task-card').first()).toBeVisible()
+    expect(await titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+  })
+
+  test('moves a card across lanes in one PATCH with its placement', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-across')
+    await dragGrip(page, 'Plan the offsite', page.locator('.task-card', { hasText: 'Draft the agenda' }), -15)
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.body).toMatchObject({
+      status: 'in_progress',
+      placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
+    })
+    expect(await titles(page, 'To do')).toEqual(['Book the venue', 'Send the invites'])
+  })
+
+  test('Escape cancels a drag without a request', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-escape')
+    const card = page.locator('.task-card', { hasText: 'Plan the offsite' })
+    await card.hover()
+    const grip = (await card.locator('.drag-grip').boundingBox())!
+    await page.mouse.move(grip.x + 8, grip.y + 8)
+    await page.mouse.down()
+    await page.mouse.move(grip.x + 8, grip.y + 60, { steps: 4 })
+    await expect(page.locator('.drag-overlay')).toHaveCount(1)
+    await page.keyboard.press('Escape')
+    await page.mouse.up()
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+    expect(sent).toHaveLength(0)
+    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+  })
+})
+
+test.describe('placing cards by keyboard', () => {
+  test.use({ viewport: { width: 1440, height: 900 } })
+
+  test('Space picks a card up, the arrows move it, Enter drops it, and Shift+Arrow still changes lane', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-keyboard')
+    const grip = page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.drag-grip')
+    await grip.focus()
+    await page.keyboard.press('Space')
+    await expect(page.getByRole('status').filter({ hasText: 'Picked up Plan the offsite' })).toHaveCount(1)
+    await page.keyboard.press('ArrowDown')
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Plan the offsite', 'Send the invites'])
+    await page.keyboard.press('Enter')
+    await expect.poll(() => sent.length).toBe(1)
+    await expect(page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.drag-grip')).toBeFocused()
+
+    // The old one-lane move, with no placement.
+    await page.locator('.task-card', { hasText: 'Send the invites' }).locator('.task-open').focus()
+    await page.keyboard.press('Shift+ArrowRight')
+    await expect.poll(() => titles(page, 'In progress')).toContain('Send the invites')
+    expect(sent[1]!.body).not.toHaveProperty('placement')
+  })
+
+  test('Move up and Move down in the card menu reorder it', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-menu')
+    await page.locator('.task-card', { hasText: 'Book the venue' }).getByRole('button', { name: /^Actions for/ }).click()
+    await page.getByRole('menuitem', { name: 'Move up' }).click()
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Plan the offsite', 'Send the invites'])
+    expect(sent).toHaveLength(1)
+    await page.locator('.task-card', { hasText: 'Book the venue' }).getByRole('button', { name: /^Actions for/ }).click()
+    await expect(page.getByRole('menuitem', { name: 'Move up' })).toHaveAttribute('aria-disabled', 'true')
+  })
+})
+
+test.describe('placing cards on a narrow, scrolled board', () => {
+  test.use({ viewport: { width: 700, height: 800 } })
+
+  test('drops into a lane that was scrolled into view, with the grip target large enough', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-narrow')
+    await page.locator('.task-lanes').evaluate(el => { el.scrollLeft = 320 })
+    await dragGrip(page, 'Draft the agenda', page.locator('.task-card', { hasText: 'Review the budget' }), -15)
+    await expect.poll(() => titles(page, 'In review')).toEqual(['Draft the agenda', 'Review the budget'])
+    expect(sent).toHaveLength(1)
+    // The page itself never scrolls sideways.
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+  })
+})
+
+test.describe('placing cards by touch', () => {
+  const { defaultBrowserType: _ignored, ...iphone } = devices['iPhone 13']
+  test.use(iphone)
+
+  test('the grip is a 44px target and a touch drag reorders', async ({ page, context }) => {
+    const sent = await open(page, 'task-reorder-touch')
+    const card = page.locator('.task-card', { hasText: 'Send the invites' })
+    const grip = card.locator('.drag-grip')
+    const hit = (await grip.boundingBox())!
+    expect(hit.width).toBeGreaterThanOrEqual(44)
+    expect(hit.height).toBeGreaterThanOrEqual(44)
+
+    const cdp = await context.newCDPSession(page)
+    const box = (await grip.boundingBox())!
+    const target = (await page.locator('.task-card', { hasText: 'Plan the offsite' }).boundingBox())!
+    const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+    const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', x: number, y: number) =>
+      cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] })
+    await touch('touchStart', start.x, start.y)
+    for (let step = 1; step <= 10; step++) {
+      await touch('touchMove', start.x, start.y + (target.y + 4 - start.y) * (step / 10))
+    }
+    await touch('touchEnd', 0, 0)
+    await expect.poll(() => sent.length).toBe(1)
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+  })
+})
