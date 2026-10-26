@@ -241,6 +241,7 @@ from ciao.web.routes_tasks import (
     task_delete,
     task_get,
     task_list,
+    task_order,
     task_update,
 )
 from ciao.web.routes_webhooks import (
@@ -544,6 +545,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         # Literal `complete` precedes the `{task_id}` pattern so it is not
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+        Route("/api/tasks/{task_id}/order", task_order, methods=["POST"]),
         Route("/api/tasks/{task_id}/updates", task_add_update, methods=["POST"]),
         Route("/api/tasks/{task_id}/chats", task_link_chat, methods=["POST"]),
         Route(

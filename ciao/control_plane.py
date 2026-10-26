@@ -73,6 +73,7 @@ from ciao.task_attempts import (
 from ciao.task_board import Actor, TaskBoardError, TaskBoardStore, TaskDocument
 from ciao.task_decisions import append_decision, clean_reason
 from ciao.task_log import extract_log, log_text, render_item, strip_log, upsert_item
+from ciao.task_order import Placement, TaskOrder
 from ciao.task_resolution import (
     Completion,
     extract_section,
@@ -314,6 +315,10 @@ _TASK_ERROR_CODES: dict[str, tuple[str, bool]] = {
     "unsupported_schema": ("task_unsupported_schema", False),
     "completion_requires_user": ("task_completion_requires_user", False),
     "read_failed": ("task_read_failed", True),
+    # The order version moved: re-read the order and place again.
+    "order_conflict": ("task_order_conflict", True),
+    "invalid_order": ("task_order_invalid", False),
+    "order_unreadable": ("task_order_unreadable", False),
 }
 
 #: The same translation for the delegation child's attempt store. Kept as its own
@@ -325,6 +330,44 @@ _ATTEMPT_ERROR_CODES: dict[str, tuple[str, bool]] = {
     "invalid_attempt": ("task_invalid", False),
     "read_failed": ("task_read_failed", True),
 }
+
+
+def _placement(raw: object) -> Placement | None:
+    """A ``Placement`` from the request's ``placement`` object, or ``None`` when absent.
+
+    A violation of the shape is ``task_order_invalid``; whether the anchors fit
+    the order is the store's call, so no ordering rule is duplicated here.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, Placement):
+        return raw
+    if not isinstance(raw, Mapping):
+        raise ControlPlaneError("task_order_invalid", "placement must be an object")
+    extra = sorted(set(raw) - {"before_id", "after_id", "expected_order_version"})
+    if extra:
+        raise ControlPlaneError("task_order_invalid", f"unknown placement keys: {', '.join(extra)}")
+    anchors: dict[str, str | None] = {}
+    for key in ("before_id", "after_id"):
+        value = raw.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ControlPlaneError("task_order_invalid", f"placement {key} must be a string")
+        anchors[key] = value
+    version = raw.get("expected_order_version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ControlPlaneError(
+            "task_order_invalid", "placement expected_order_version must be an integer"
+        )
+    return Placement(
+        before_id=anchors["before_id"], after_id=anchors["after_id"], expected_version=version
+    )
+
+
+def _order_payload(order: TaskOrder) -> dict[str, Any]:
+    return {
+        "version": order.version,
+        "sequences": {status: list(ids) for status, ids in order.sequences.items()},
+    }
 
 
 def _latest_completion(body: str) -> Completion | None:
@@ -3155,6 +3198,44 @@ class CiaoControlPlane:
             for entry in result.invalid
         ]
 
+    def workspace_task_order(self, workspace: str) -> dict[str, Any]:
+        """The workspace's task order: ``{"order", "order_error"}``.
+
+        ``order_error`` is a message when the order file is unreadable (the
+        order is then the baseline at version -1), else ``None``.
+        """
+        result = self._task_call(workspace, lambda store: store.list())
+        return {"order": _order_payload(result.order), "order_error": result.order_error}
+
+    def workspace_task_reorder(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        before_id: str | None,
+        after_id: str | None,
+        expected_order_version: int,
+    ) -> dict[str, Any]:
+        """Reposition one task inside its status column; no task file is touched."""
+        placement = _placement(
+            {
+                "before_id": before_id,
+                "after_id": after_id,
+                "expected_order_version": expected_order_version,
+            }
+        )
+        assert placement is not None
+        clean = str(task_id or "").strip()
+        order: TaskOrder = self._task_call(
+            workspace, lambda store: store.reorder(clean, placement=placement)
+        )
+        document: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
+        return {
+            "task": self._task_with_attempt(workspace, document),
+            "order": _order_payload(order),
+            "order_error": None,
+        }
+
     def workspace_task_get(self, workspace: str, task_id: str) -> dict[str, Any]:
         """One task as source currently reads it, body and attempt facts included.
 
@@ -3203,6 +3284,7 @@ class CiaoControlPlane:
         body: str | None = None,
         actor: Actor = "agent",
         resolution: str | None = None,
+        placement: Mapping[str, object] | Placement | None = None,
     ) -> dict[str, Any]:
         """Apply managed edits to one task at the revision the caller read.
 
@@ -3219,8 +3301,13 @@ class CiaoControlPlane:
         write that leaves the task open, or on a done task with no completion
         record to reword, is refused rather than dropped.
 
+        ``placement`` (``before_id``/``after_id``/``expected_order_version``) puts
+        the task next to an anchor in its destination column; it is valid only on a
+        write that changes the status, and the store commits it with that write.
+
         The answer carries the attempt facts, so a board can redraw the card from it.
         """
+        planned_placement = _placement(placement)
         if resolution is not None:
             if not isinstance(resolution, str):
                 raise ControlPlaneError("invalid_task", "resolution must be a string")
@@ -3243,6 +3330,7 @@ class CiaoControlPlane:
                 body=body,
                 actor=actor,
                 resolution=resolution,
+                placement=planned_placement,
             ),
         )
         return self._task_with_attempt(workspace, document, include_body=True)
@@ -3498,6 +3586,7 @@ class CiaoControlPlane:
         actor: Actor = "agent",
         resolution: str | None = None,
         reason: str | None = None,
+        placement: Mapping[str, object] | Placement | None = None,
     ) -> dict[str, Any]:
         """One board gesture: ``move``, ``complete`` or ``reassign``.
 
@@ -3517,6 +3606,8 @@ class CiaoControlPlane:
         here and has to be stopped or detached first.
         """
         verb = str(action or "").strip()
+        if placement is not None and verb not in ("move", "complete"):
+            raise ControlPlaneError("invalid_action", "placement is only used by move or complete.")
         if resolution is not None and verb != "complete":
             raise ControlPlaneError("invalid_action", "resolution is only recorded by complete.")
         if reason is not None and verb != "complete":
@@ -3569,6 +3660,7 @@ class CiaoControlPlane:
                 actor=actor,
                 resolution=resolution,
                 reason=note,
+                placement=placement,
             )
             if reviewed is not None:
                 return reviewed
@@ -3585,6 +3677,7 @@ class CiaoControlPlane:
             changes=changes,
             actor=actor,
             resolution=resolution,
+            placement=placement,
         )
         if verb == "complete" and actor == "agent":
             self._record_task_decision(
@@ -3606,6 +3699,7 @@ class CiaoControlPlane:
         actor: Actor,
         resolution: str | None = None,
         reason: str = "",
+        placement: Mapping[str, object] | Placement | None = None,
     ) -> dict[str, Any] | None:
         """Close a task whose delegated turn has a result waiting, in one gesture.
 
@@ -3680,6 +3774,7 @@ class CiaoControlPlane:
                 changes=changes,
                 actor=actor,
                 resolution=resolution,
+                placement=placement,
             )
         except ControlPlaneError:
             # The unlink landed and the completion did not, so the task is free of
