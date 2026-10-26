@@ -12,8 +12,8 @@
       <rect x="7.2" y="10" width="1.6" height="1.6" class="activity-glyph-knock" />
     </svg>
     <template v-else-if="kind === 'run'">
-      <i class="activity-glyph-ring"></i>
-      <i class="activity-glyph-orbit"></i>
+      <i class="activity-glyph-prompt"></i>
+      <i class="activity-glyph-cursor"></i>
     </template>
     <template v-else>
       <i
@@ -34,8 +34,8 @@
 // One mark per kind of live work, all in the row's accent: shape and motion
 // carry the meaning, never hue, because an accent preset can sit next to any
 // semantic colour. A working turn (or its subagents) is a 3x3 pixel grid whose
-// lit pixel chases the perimeter; a background run is a ring with one dot
-// orbiting it. Anything that wants the owner (a question, a failure, a stuck
+// lit pixel chases the perimeter; a background run is a shell prompt, `$` and
+// a blinking block cursor. Anything that wants the owner (a question, a failure, a stuck
 // pass) is a filled alert triangle, still.
 // Decorative only: the caller owns the accessible name.
 export type ActivityGlyphKind = 'working' | 'run' | 'alert'
@@ -76,30 +76,24 @@ const WORKING_CHASE = [0, 1, 2, 7, -1, 3, 6, 5, 4]
 
 .activity-glyph-pixel--fixed { animation: none; }
 
-/* A background run: a ring with a satellite dot orbiting it. */
+/* A background run: a shell prompt waiting on its command, `$` and a block
+   cursor that blinks. Sized to sit on the same 11px line as the grid. */
 .activity-glyph--run {
-  width: 10px;
-  height: 10px;
+  gap: 1px;
+  height: 11px;
+  color: var(--accent);
 }
 
-.activity-glyph-ring {
-  box-sizing: border-box;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+.activity-glyph-prompt::before {
+  content: "$";
+  font: normal 700 11px/11px var(--font-mono);
 }
 
-.activity-glyph-orbit {
-  position: absolute;
-  top: -2.5px;
-  left: calc(50% - 2px);
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--accent);
-  transform-origin: 2px 7.5px;
-  animation: activity-glyph-orbit 1.6s linear infinite;
+.activity-glyph-cursor {
+  width: 5px;
+  height: 9px;
+  background: currentColor;
+  animation: activity-glyph-blink 1.1s steps(1, end) infinite;
 }
 
 /* The alert: a filled triangle with a knocked-out "!". */
@@ -112,18 +106,18 @@ const WORKING_CHASE = [0, 1, 2, 7, -1, 3, 6, 5, 4]
   70%, 100% { opacity: var(--pixel-rest); }
 }
 
-@keyframes activity-glyph-orbit {
-  to { transform: rotate(360deg); }
+@keyframes activity-glyph-blink {
+  50% { opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .activity-glyph-pixel,
-  .activity-glyph-orbit {
+  .activity-glyph-cursor {
     animation: none;
   }
 
   /* Frozen into a shape, never a bare dot: the working grid a checker, the
-     run its ring with the satellite at the top. */
+     run its prompt with a solid cursor. */
   .activity-glyph-pixel--still { opacity: 1; }
 }
 </style>

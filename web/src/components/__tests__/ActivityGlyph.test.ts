@@ -23,10 +23,12 @@ describe('ActivityGlyph', () => {
     const still = pixels.flatMap((p, i) => (p.classes('activity-glyph-pixel--still') ? [i] : []))
     expect(still).toEqual([0, 2, 4, 6, 8])
 
-    // A background run is a ring with one orbiting dot, never the grid.
+    // A background run is a shell prompt with a blinking block cursor, never
+    // the grid. The `$` is CSS content, so it never joins the label's text.
     const run = mount(ActivityGlyph, { props: { kind: 'run' } })
-    expect(run.find('.activity-glyph-ring').exists()).toBe(true)
-    expect(run.find('.activity-glyph-orbit').exists()).toBe(true)
+    expect(run.find('.activity-glyph-prompt').exists()).toBe(true)
+    expect(run.text()).toBe('')
+    expect(run.find('.activity-glyph-cursor').exists()).toBe(true)
     expect(run.findAll('.activity-glyph-pixel')).toHaveLength(0)
     expect(run.find('svg').exists()).toBe(false)
     expect(mount(ActivityGlyph, { props: { kind: 'alert' } }).find('svg').exists()).toBe(true)
