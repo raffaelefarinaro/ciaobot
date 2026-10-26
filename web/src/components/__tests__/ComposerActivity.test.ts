@@ -3,6 +3,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, RouterLinkStub } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { BackgroundRunSummary, RunningSubagent } from '../../lib/types'
 import ComposerActivity from '../ComposerActivity.vue'
 
@@ -66,6 +68,11 @@ describe('ComposerActivity', () => {
     expect(seg.classes()).toContain('composer-activity-seg--ok')
     expect(seg.find('.activity-glyph--run').exists()).toBe(true)
     ok.unmount()
+  })
+
+  it('keeps run outcomes off the semantic palette', () => {
+    const source = readFileSync(join(__dirname, '..', 'ComposerActivity.vue'), 'utf8')
+    expect(source).not.toMatch(/var\(--(success|error|warning)/)
   })
 
   it('says how a finished run ended and opens Chat details from it', async () => {
