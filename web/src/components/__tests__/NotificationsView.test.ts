@@ -10,6 +10,8 @@ import source from '../NotificationsView.vue?raw'
 import { useNotificationInboxStore } from '../../stores/notificationInbox'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
+import { useHousekeepingStore } from '../../stores/housekeeping'
+import { useTaskStore } from '../../stores/tasks'
 import { api } from '../../lib/api'
 import { readyHealth } from '../../lib/sourceHealth'
 import type { SourceHealth } from '../../lib/sourceHealth'
@@ -55,6 +57,8 @@ async function mountView(opts: Opts = {}) {
   taskSignals.healthWorkspace = 'personal'
   taskSignals.loadedWorkspace = 'personal'
   taskSignals.health = readyHealth()
+  useHousekeepingStore().actionsHealth = readyHealth()
+  useTaskStore().schedulesLoaded = true
 
   const router = createRouter({
     history: createMemoryHistory(),
