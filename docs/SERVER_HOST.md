@@ -219,9 +219,14 @@ main queue, so a stop that arrived after the launch block was queued ran its
 handler after the launch: the host forked the child, then forwarded the stop
 and exited `0`. `launch()` now polls a private `EVFILT_SIGNAL` kqueue,
 registered before the sources and before `SIG_IGN`, and takes the same
-no-child exit path as `handleStop` when a stop has already arrived. No flag,
+no-child exit path as `handleStop` when a stop has already arrived. If the
+queue cannot be created or armed the host exits `1` with a stderr line instead
+of running without the guarantee. No flag,
 environment variable or operation changes, so the protocol stays `2`.
-Replacing a revision-3 host changes the signed bytes, so it needs the same
+`run-move` shares `ChildController`, so it takes the same pre-check.
+Replacing a revision-2 or revision-3 host (both are accepted as superseded;
+revision 2 is dropped one release after revision 4 ships) changes the signed
+bytes, so it needs the same
 reapproval as any host upgrade; the release walk must still check whether the
 folder grant survives it.
 

@@ -127,7 +127,8 @@ grants are tied to the exact signed bytes.
 Revision 4 (#1642) changes only the host's startup stop handling: the launch
 reads a private signal queue, so a stop that arrives just before the launch
 still prevents the spawn. The sealed bytes change, so the installer replaces a
-revision-3 host the same way and the user is warned once.
+revision-2 (v1.6.0) or revision-3 (v1.6.1) host the same way and the user is warned
+once. The revision-2 allowance is removed one release after revision 4 ships.
 
 ## What this does not do
 

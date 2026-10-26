@@ -70,8 +70,7 @@ __all__ = [
     "HOST_PROTOCOL_KEY",
     "HOST_REVISION",
     "ICON_NAME",
-    "LEGACY_HOST_PROTOCOL",
-    "LEGACY_HOST_REVISION",
+    "SUPERSEDED_HOST_PROTOCOLS",
     "MOVE_HOST_PROTOCOL",
     "MINIMUM_SYSTEM_VERSION",
     "NATIVE_TIMEOUT_SECONDS",
@@ -105,13 +104,12 @@ HOST_PROTOCOL_KEY = "CiaobotServerHostProtocol"
 HOST_PROTOCOL = 2
 MINIMUM_SYSTEM_VERSION = "13.0"
 
-#: The one superseded host revision this engine can still prove it owns, so
-#: the installer can replace it instead of refusing the upgrade and leaving
-#: the Mac without a host (#1659). A record of any other revision is refused
-#: by both readers.
-LEGACY_HOST_REVISION = 3
-#: The protocol the superseded revision spoke.
-LEGACY_HOST_PROTOCOL = 2
+#: The superseded host revisions this engine can still prove it owns, each
+#: mapped to the protocol it spoke, so the installer can replace one instead of
+#: refusing the upgrade and leaving the Mac without a host (#1659, #1642).
+#: Revision 2 is the v1.6.0 host, revision 3 the v1.6.1 host. A record of any
+#: other revision is refused by both readers.
+SUPERSEDED_HOST_PROTOCOLS: Mapping[int, int] = MappingProxyType({2: 1, 3: 2})
 
 #: The first host protocol that carries the ``run-move`` operation, so the
 #: workspace move can run as a descendant of the host (#1658). A host below it
@@ -729,16 +727,22 @@ def read_host_ownership(path: Path) -> HostOwnership:
 
 
 def read_superseded_ownership(path: Path) -> HostOwnership:
-    """Read the ownership record of the one superseded host revision.
+    """Read the ownership record of a superseded host revision.
 
-    The same strict reader, but it accepts a record whose revision is
-    :data:`LEGACY_HOST_REVISION` and whose protocol is the one that revision
-    spoke. It answers "was this host ours?", not "is this the host this engine
-    speaks to?": the installer uses it to prove a host it may replace.
+    The same strict reader, but it accepts a record whose revision is a key of
+    :data:`SUPERSEDED_HOST_PROTOCOLS` and whose protocol is the one that
+    revision spoke. It answers "was this host ours?", not "is this the host
+    this engine speaks to?": the installer uses it to prove a host it may
+    replace.
     """
-    return _read_ownership_record(
-        path, revision=LEGACY_HOST_REVISION, protocol=LEGACY_HOST_PROTOCOL
-    )
+    first_error: ServerHostError | None = None
+    for revision, protocol in SUPERSEDED_HOST_PROTOCOLS.items():
+        try:
+            return _read_ownership_record(path, revision=revision, protocol=protocol)
+        except ServerHostError as exc:
+            first_error = first_error or exc
+    assert first_error is not None
+    raise first_error
 
 
 def _read_ownership_record(
@@ -1141,7 +1145,7 @@ def verify_superseded_host(
 ) -> HostOwnership:
     """Prove a bundle is the superseded host this machine installed.
 
-    The upgrade path for a host revision bump (#1659). A revision-3 host is not
+    The upgrade path for a host revision bump (#1659). A revision-2 or -3 host is not
     the host this engine speaks to, so :func:`verify_owned_host` refuses it;
     but it is still *ours*, and the installer must be able to replace it rather
     than leave the Mac without a host. This answers that narrower question: it
@@ -1150,7 +1154,7 @@ def verify_superseded_host(
     pair, and requires the canonical bundle path, identity, executable digest,
     both CDHashes and the whole file set to be equal.
 
-    Only :data:`LEGACY_HOST_REVISION` is accepted. A record of any other
+    Only a revision in :data:`SUPERSEDED_HOST_PROTOCOLS` is accepted. A record of any other
     revision - the current one, an older one this engine never shipped, or a
     future one - is refused, so this can never prove a host the installer may
     not replace. It never writes, signs, launches or deletes anything.
@@ -1162,8 +1166,8 @@ def verify_superseded_host(
     inspected = inspect_host_bundle(
         bundle_path,
         runner=runner,
-        revision=LEGACY_HOST_REVISION,
-        protocol=LEGACY_HOST_PROTOCOL,
+        revision=record.host_revision,
+        protocol=SUPERSEDED_HOST_PROTOCOLS[record.host_revision],
     )
 
     if record.bundle_path != inspected.bundle_path:

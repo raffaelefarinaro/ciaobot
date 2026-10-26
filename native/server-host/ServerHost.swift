@@ -338,15 +338,21 @@ final class ChildController {
         // Registered before the signal sources and before SIG_IGN, so no stop
         // that either of them sees can be missed here. Every stop signal
         // sent from now on stays readable until `launch` looks.
+        // Failing to build it is fatal: without it a stop that races the launch
+        // could be missed, so the host refuses to start rather than run without
+        // the guarantee. No child exists yet, so exiting here is safe.
         stopQueue = kqueue()
-        if stopQueue >= 0 {
-            for sig in [SIGTERM, SIGINT] {
-                var change = kevent(
-                    ident: UInt(sig), filter: Int16(EVFILT_SIGNAL),
-                    flags: UInt16(EV_ADD | EV_ENABLE), fflags: 0, data: 0,
-                    udata: nil
-                )
-                _ = kevent(stopQueue, &change, 1, nil, 0, nil)
+        if stopQueue < 0 || fcntl(stopQueue, F_SETFD, FD_CLOEXEC) < 0 {
+            failStartup("could not create the stop queue")
+        }
+        for sig in [SIGTERM, SIGINT] {
+            var change = kevent(
+                ident: UInt(sig), filter: Int16(EVFILT_SIGNAL),
+                flags: UInt16(EV_ADD | EV_ENABLE), fflags: 0, data: 0,
+                udata: nil
+            )
+            if kevent(stopQueue, &change, 1, nil, 0, nil) < 0 {
+                failStartup("could not watch signal \(sig)")
             }
         }
         for sig in [SIGTERM, SIGINT] {
@@ -368,10 +374,14 @@ final class ChildController {
         }
     }
 
+    private func failStartup(_ reason: String) -> Never {
+        writeStderr("Ciaobot Server: \(reason) (errno \(errno))\n")
+        exit(EXIT_LAUNCH_FAILURE)
+    }
+
     /// True when a stop signal has arrived since `begin`, whether or not its
     /// dispatch source has run its handler yet. A non-blocking poll.
     private func stopSignalArrived() -> Bool {
-        guard stopQueue >= 0 else { return false }
         var event = kevent()
         var immediately = timespec(tv_sec: 0, tv_nsec: 0)
         return kevent(stopQueue, nil, 0, &event, 1, &immediately) > 0

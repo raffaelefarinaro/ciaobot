@@ -1562,8 +1562,8 @@ if [ -n "$host_entry" ]; then
     # so the user is told once.
     #
     # The revision that is superseded is read from the wheel itself
-    # (`ciao.server_host.LEGACY_HOST_REVISION`), never written here: a copy of
-    # the number in this script would silently stop matching on the next
+    # (`ciao.server_host.SUPERSEDED_HOST_PROTOCOLS`, a set), never written here:
+    # a copy of the numbers in this script would silently stop matching on the next
     # revision bump, and the warning is exactly what a user needs then. The
     # installed revision is read from the sealed plist with `plutil`, the one
     # tool macOS has for exactly this. A plist it cannot read is not proof of
@@ -1572,12 +1572,12 @@ if [ -n "$host_entry" ]; then
     # from the ownership record, not from this.
     host_superseded_plist="$HOME/Applications/Ciaobot Server.app/Contents/Info.plist"
     host_replacing=0
-    superseded_revision=$(
+    superseded_revisions=$(
         "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
-            python -I -c 'from ciao.server_host import LEGACY_HOST_REVISION; print(LEGACY_HOST_REVISION)' \
+            python -I -c 'from ciao.server_host import SUPERSEDED_HOST_PROTOCOLS; print(*SUPERSEDED_HOST_PROTOCOLS)' \
             2>/dev/null || true
     )
-    if [ -n "$superseded_revision" ] && [ -f "$host_superseded_plist" ]; then
+    if [ -n "$superseded_revisions" ] && [ -f "$host_superseded_plist" ]; then
         # `plutil` is looked up on PATH, not by its absolute path: the
         # installer is exercised on Linux CI too, where macOS's own plutil is
         # not there. A missing plutil only means "not a superseded host".
@@ -1585,9 +1585,11 @@ if [ -n "$host_entry" ]; then
             plutil -extract CFBundleVersion raw -o - \
                 "$host_superseded_plist" 2>/dev/null || true
         )
-        if [ "$host_revision" = "$superseded_revision" ]; then
-            host_replacing=1
-        fi
+        for superseded_revision in $superseded_revisions; do
+            if [ "$host_revision" = "$superseded_revision" ]; then
+                host_replacing=1
+            fi
+        done
     fi
     host_rc=0
     "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \

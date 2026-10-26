@@ -1426,7 +1426,8 @@ def test_host_startup_stop_precedes_child_launch(
             0,
         )
         host.send_signal(signal.SIGTERM)
-        time.sleep(0.2)  # let the kernel record it; the main queue is blocked
+        # kill() records the signal in the host's kqueue synchronously, and the
+        # main queue is blocked, so releasing the launch now is deterministic.
         Path(f"{prefix}.go").touch()
         events: list[Any] = []
         while not any(event.fflags & select.KQ_NOTE_EXIT for event in events):
@@ -1450,9 +1451,11 @@ def test_host_startup_launch_then_stop_reaps_its_child(
     # host exits 0. Not a startup violation.
     pids = tmp_path / "launched.pids"
     got_term = tmp_path / "got_term"
+    ready = tmp_path / "ready"
     child = _write_fake_child(
         tmp_path,
-        f"#!/bin/sh\necho $$ >> \"{pids}\"\ntrap 'touch \"{got_term}\"; exit 0' TERM\n"
+        f"#!/bin/sh\ntrap 'touch \"{got_term}\"; exit 0' TERM\n"
+        f"echo $$ >> \"{pids}\"\ntouch \"{ready}\"\n"
         "while :; do sleep 0.1; done\n",
     )
     prefix = tmp_path / "pause"
@@ -1460,9 +1463,9 @@ def test_host_startup_launch_then_stop_reaps_its_child(
     child_pid = 0
     try:
         Path(f"{prefix}.go").touch()
-        assert _wait_for(lambda: pids.exists() and pids.read_text().strip() != "", 10)
+        # The child touches `ready` only after its trap is installed.
+        assert _wait_for(ready.exists, 10), "the child never became ready"
         child_pid = int(pids.read_text().split()[0])
-        time.sleep(0.2)  # the shell has installed its trap
         host.send_signal(signal.SIGTERM)
         assert host.wait(timeout=45) == 0
         assert got_term.exists(), "the child never received the forwarded stop"

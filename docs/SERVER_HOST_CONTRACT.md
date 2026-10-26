@@ -184,13 +184,14 @@ follow `Path.home()` and nothing else.
 A host revision bump has to be able to replace the host an older install left
 behind, and it has to be able to refuse one it cannot prove is ours (#1659).
 
-`LEGACY_HOST_REVISION` = `3` is the one revision this engine supersedes, and
-`LEGACY_HOST_PROTOCOL` = `2` is the protocol it spoke.
+`SUPERSEDED_HOST_PROTOCOLS` = `{2: 1, 3: 2}` maps each revision this engine
+supersedes (revision 2, the v1.6.0 host, and revision 3, the v1.6.1 host) to the
+protocol it spoke.
 `read_superseded_ownership` and `verify_superseded_host` are the same strict
 reader and the same exact record-and-bundle match as their current-revision
-counterparts, run against that older pair. `read_host_ownership` and
+counterparts, run against the revision the record names, each proven against its own pair; a revision outside the map (1, 5, the current one) is refused. `read_host_ownership` and
 `verify_owned_host` keep refusing anything that is not the current revision:
-a revision-3 record is not proof that the installed bundle is the host this
+a revision-2 or -3 record is not proof that the installed bundle is the host this
 engine speaks to.
 
 `verify_superseded_host` answers one narrower question — *was this bundle
@@ -199,11 +200,11 @@ aside, writes the new record, renames the new bundle in, and puts the old
 bundle and the old record back if anything fails. A bundle whose record names
 any other revision, a foreign bundle and a tampered one are all refused exactly
 as before, so the replacement path cannot be used to replace a host Ciaobot
-cannot prove it owns. Delete `LEGACY_HOST_REVISION`,
-`LEGACY_HOST_PROTOCOL`, `read_superseded_ownership` and
-`verify_superseded_host` once no supported install can still hold a revision-3
-bundle, i.e. after a release that ships revision 4 has been out for a full
-release cycle.
+cannot prove it owns. Delete the revision-2 entry of
+`SUPERSEDED_HOST_PROTOCOLS` one release after revision 4 ships. Delete the map,
+`read_superseded_ownership` and `verify_superseded_host` once no supported
+install can still hold a revision-3 bundle, i.e. after a release that ships
+revision 4 has been out for a full release cycle.
 
 The record is outside the sealed app on purpose: an engine update changes the
 engine and its sidecar files, never the host bytes, so the host keeps its CDHash
