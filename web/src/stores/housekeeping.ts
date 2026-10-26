@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 import { apiErrorMessage, errorPayload } from '../lib/errorMessage'
+import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 import { useProjectStore } from './projects'
 import type {
   HousekeepingDismissResponse,
@@ -116,6 +117,13 @@ function query(workspace: string): string {
  */
 export const useHousekeepingStore = defineStore('housekeeping', () => {
   const actions = ref<OperatorAction[]>([])
+  /** Whether `/api/housekeeping` could be read. Installation-wide, so there is
+   *  no scope change to reset it on. */
+  const actionsHealth = ref<SourceHealth>(checkingHealth())
+  /** Which actions answer is current: `refresh` takes a number before it asks,
+   *  and `run`/`dismiss` bump it when their own fresh list lands, so a poll
+   *  opened before the decision cannot restore the pre-decision list. */
+  let actionsSeq = 0
   const loading = ref(false)
   const runningIds = ref<Set<string>>(new Set())
   let initialized = false
@@ -130,6 +138,15 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
   const updateTasks = ref<UpdateTaskRow[]>([])
   const updateTasksWorkspace = ref('')
   const updateTasksCoverageGap = ref<UpdateTaskCoverageGap | null>(null)
+  /** Whether the update-task listing could be read, for `updateTasksWorkspace`.
+   *  A switch resets it to `checking`; a refresh never does. */
+  const updateTasksHealth = ref<SourceHealth>(checkingHealth())
+  /** The listing worked but could not answer: no eligible task, or none it
+   *  could substantiate. `nothing_offered` is a healthy empty result. */
+  const updateTasksCoverageBlocked = computed(() => {
+    const reason = updateTasksCoverageGap.value?.reason
+    return reason === 'no_eligible_task' || reason === 'not_substantiated'
+  })
   const pendingUpdateTaskIds = ref<Set<string>>(new Set())
   const taskErrors = ref<Record<string, string>>({})
 
@@ -145,11 +162,17 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
   let requestSeq = 0
 
   async function refresh() {
+    const seq = ++actionsSeq
     try {
       const data = await api.get<HousekeepingResponse>('/api/housekeeping')
+      if (seq !== actionsSeq) return
       actions.value = data.actions ?? []
-    } catch {
-      // Best-effort: the strip just stays empty if the check fails.
+      actionsHealth.value = readyHealth()
+    } catch (e) {
+      // Best-effort: the strip just stays empty if the check fails. The failure
+      // is observable through `actionsHealth`; the rows are left as they were.
+      if (seq !== actionsSeq) return
+      actionsHealth.value = failedHealth(actionsHealth.value, e)
     }
   }
 
@@ -163,6 +186,7 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     if (updateTasksWorkspace.value !== wanted) {
       updateTasks.value = []
       updateTasksCoverageGap.value = null
+      updateTasksHealth.value = checkingHealth()
       taskErrors.value = {}
     }
     updateTasksWorkspace.value = wanted
@@ -176,7 +200,8 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       if (updateTasksWorkspace.value !== wanted || seq !== requestSeq) return
       updateTasks.value = data.tasks ?? []
       updateTasksCoverageGap.value = data.coverage_gap ?? null
-    } catch {
+      updateTasksHealth.value = readyHealth()
+    } catch (e) {
       // Best-effort, exactly like `refresh` above, and for the same reason: this
       // is a background poll on the home screen, and a red line here would nag
       // about a condition the operator cannot act on from this page. The
@@ -186,6 +211,10 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
       //
       // Where a failed check *is* reported: Settings → Overview → Update task history, which
       // fetches for itself and owns the error, its retry and its empty state.
+      // It is also recorded in `updateTasksHealth`, behind the same guard as the
+      // rows: a superseded answer touches neither.
+      if (updateTasksWorkspace.value !== wanted || seq !== requestSeq) return
+      updateTasksHealth.value = failedHealth(updateTasksHealth.value, e)
     }
   }
 
@@ -193,7 +222,9 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     runningIds.value = new Set(runningIds.value).add(id)
     try {
       const data = await api.post<HousekeepingRunResponse>(`/api/housekeeping/${id}/run`)
+      actionsSeq += 1
       actions.value = data.actions ?? []
+      actionsHealth.value = readyHealth()
       if (!data.ok) {
         return { ok: false, summary: data.error || 'Run failed' }
       }
@@ -213,7 +244,9 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
   async function dismiss(id: string): Promise<{ ok: boolean; summary: string }> {
     try {
       const data = await api.post<HousekeepingDismissResponse>(`/api/housekeeping/${id}/dismiss`)
+      actionsSeq += 1
       actions.value = data.actions ?? []
+      actionsHealth.value = readyHealth()
       return { ok: !!data.ok, summary: data.summary || '' }
     } catch (e) {
       // Best-effort like refresh: re-fetch so the strip reflects whatever the
@@ -237,6 +270,7 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     // These rows are the server's answer *after* the decision, so every listing
     // still in flight was asked before it and would put the old card back.
     requestSeq += 1
+    updateTasksHealth.value = readyHealth()
     updateTasks.value = data.tasks
     return true
   }
@@ -380,6 +414,7 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
 
   return {
     actions,
+    actionsHealth,
     loading,
     runningIds,
     refresh,
@@ -388,6 +423,8 @@ export const useHousekeepingStore = defineStore('housekeeping', () => {
     updateTasks,
     updateTasksWorkspace,
     updateTasksCoverageGap,
+    updateTasksHealth,
+    updateTasksCoverageBlocked,
     pendingUpdateTaskIds,
     taskErrors,
     refreshUpdateTasks,
