@@ -18,6 +18,10 @@ import { useProjectStore } from './projects'
 import { useTaskSignalsStore } from './taskSignals'
 import { useHousekeepingStore } from './housekeeping'
 import { useTaskStore } from './tasks'
+import { useProposalsStore } from './proposals'
+import { useVaultReviewStore } from './vaultReview'
+import { reviewPath } from './memoryMap'
+import { notificationPath } from '../lib/notificationInbox'
 import projectsSrc from './projects.ts?raw'
 import taskSignalsSrc from './taskSignals.ts?raw'
 import housekeepingSrc from './housekeeping.ts?raw'
@@ -64,6 +68,8 @@ function setChats(projects: ReturnType<typeof useProjectStore>, chats: unknown[]
 function markHealthy(projects: ReturnType<typeof useProjectStore>, signals: ReturnType<typeof useTaskSignalsStore>) {
   useHousekeepingStore().actionsHealth = ready()
   useTaskStore().schedulesLoaded = true
+  useProposalsStore().loaded = true
+  useVaultReviewStore().loadedWorkspace = 'personal'
   projects.chatsHealth = ready()
   signals.healthWorkspace = projects.activeWorkspace
   signals.health = ready()
@@ -138,6 +144,10 @@ describe('notification inbox store', () => {
     useHousekeepingStore().actionsHealth = ready()
     expect(inbox.allClear).toBe(false)
     useTaskStore().schedulesLoaded = true
+    expect(inbox.allClear).toBe(false)
+    useProposalsStore().loaded = true
+    expect(inbox.allClear).toBe(false)
+    useVaultReviewStore().loadedWorkspace = 'personal'
     expect(inbox.allClear).toBe(true)
   })
 
@@ -577,6 +587,195 @@ describe('notification inbox store', () => {
       await Promise.all([a, b, c])
       expect(fetchSchedules.mock.calls.length).toBeGreaterThanOrEqual(1)
       expect(fetchSchedules.mock.calls.length).toBeLessThanOrEqual(2)
+    })
+  })
+
+  describe('review, queue and memory sources', () => {
+    const task = (o: Record<string, unknown> = {}) => ({
+      id: 'T1', title: 'Write docs', status: 'in_review', attempt_state: 'ready_for_review',
+      live_attempt_id: 'att-2', attempt_id: 'att-2', chat_id: 'c-del', linked_chats: [], ...o,
+    })
+    const setTasks = (signals: ReturnType<typeof useTaskSignalsStore>, list: unknown[], ws = 'personal') => {
+      signals.tasks = list as never
+      signals.loadedWorkspace = ws
+    }
+    const delegated = (id: string, attemptId: string, o: Record<string, unknown> = {}) =>
+      makeChat(id, { last_read_at: '', helper: { kind: 'task_delegation', task_id: 'T1', attempt_id: attemptId }, ...o })
+    const keysOf = (inbox: ReturnType<typeof useNotificationInboxStore>) => inbox.rows.map((r) => r.key).sort()
+
+    it('board_review_row_scoped_to_workspace', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setTasks(signals, [task()])
+      expect(keysOf(inbox)).toEqual(['task:personal:T1'])
+      projects.activeWorkspace = 'work'
+      expect(keysOf(inbox)).toEqual([])
+      // A to B to A: tasks of the old scope are held, but loadedWorkspace is not active.
+      setTasks(signals, [task()], 'personal')
+      expect(keysOf(inbox)).toEqual([])
+      projects.activeWorkspace = 'personal'
+      expect(keysOf(inbox)).toEqual(['task:personal:T1'])
+    })
+
+    it('delegated_result_unread_row_deduped_for_current_attempt', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setChats(projects, [delegated('c-del', 'att-2')])
+      setTasks(signals, [task()])
+      expect(keysOf(inbox)).toEqual(['task:personal:T1'])
+    })
+
+    it('old_attempt_chat_not_matched', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setChats(projects, [delegated('c-old', 'att-1')])
+      setTasks(signals, [task()])
+      expect(keysOf(inbox)).toEqual(['chat:c-old', 'task:personal:T1'])
+    })
+
+    it('manually_linked_unread_chat_retained', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setChats(projects, [makeChat('c-linked', { last_read_at: '' })])
+      setTasks(signals, [task({ linked_chats: ['c-linked'] })])
+      expect(keysOf(inbox)).toEqual(['chat:c-linked', 'task:personal:T1'])
+    })
+
+    it('live_question_stays_beside_review_row', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setChats(projects, [delegated('c-del', 'att-2', { pending_permission: '{"tool":"Bash"}' })])
+      setTasks(signals, [task()])
+      expect(keysOf(inbox)).toEqual(['chat:c-del', 'task:personal:T1'])
+      expect(inbox.rows.find((r) => r.key === 'chat:c-del')!.section).toBe('needsYou')
+    })
+
+    it('proposals_queue_row_and_scope', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      const proposals = useProposalsStore()
+      expect(keysOf(inbox)).toEqual([])
+      proposals.rows = [
+        { id: 'a', workspace: 'personal' }, { id: 'b', workspace: 'personal' }, { id: 'c', workspace: 'work' },
+      ] as never
+      expect(keysOf(inbox)).toEqual(['proposals:personal'])
+      expect(inbox.rows[0].reason).toContain('2 suggested')
+      expect(inbox.rows[0].destination).toEqual({ kind: 'review', filter: 'suggested' })
+    })
+
+    it('revisit_row_only_for_loaded_workspace', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      const review = useVaultReviewStore()
+      review.loadedWorkspace = 'work'
+      review.candidates = [{ path: 'a.md' }, { path: 'b.md' }] as never
+      expect(keysOf(inbox)).toEqual([])
+      expect(inbox.sources.find((s) => s.source === 'revisit')!.status).toBe('checking')
+      review.loadedWorkspace = 'personal'
+      expect(keysOf(inbox)).toEqual(['revisit:personal'])
+      expect(inbox.rows[0].reason).toContain('2 notes need')
+    })
+
+    it('proposals_and_revisit_source_status', () => {
+      const { projects, signals, inbox } = setup()
+      const proposals = useProposalsStore()
+      const review = useVaultReviewStore()
+      const status = (k: string) => inbox.sources.find((s) => s.source === k)!.status
+      expect(status('proposals')).toBe('checking')
+      expect(status('revisit')).toBe('checking')
+      proposals.loadError = 'x'
+      review.loadError = 'x'
+      expect(status('proposals')).toBe('unavailable')
+      expect(status('revisit')).toBe('unavailable')
+      proposals.loadError = ''
+      review.loadError = ''
+      markHealthy(projects, signals)
+      expect(status('proposals')).toBe('ready')
+      expect(status('revisit')).toBe('ready')
+      expect(inbox.allClear).toBe(true)
+      proposals.rows = [{ id: 'a', workspace: 'personal' }] as never
+      proposals.loadError = 'x'
+      review.loadError = 'x'
+      expect(status('proposals')).toBe('stale')
+      expect(status('revisit')).toBe('stale')
+      expect(keysOf(inbox)).toEqual(['proposals:personal'])
+      expect(inbox.rows[0].freshness).toBe('stale')
+      expect(inbox.allClear).toBe(false)
+    })
+
+    it('review_refreshers_are_noops_when_healthy', async () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      vi.spyOn(projects, 'syncLatest').mockResolvedValue()
+      vi.spyOn(signals, 'reload').mockResolvedValue()
+      vi.spyOn(useHousekeepingStore(), 'refresh').mockResolvedValue()
+      vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+      const pf = vi.spyOn(useProposalsStore(), 'fetch').mockResolvedValue()
+      const vf = vi.spyOn(useVaultReviewStore(), 'fetch').mockResolvedValue()
+      await inbox.refresh()
+      expect(pf).not.toHaveBeenCalled()
+      expect(vf).not.toHaveBeenCalled()
+      useProposalsStore().loadError = 'x'
+      useVaultReviewStore().loadedWorkspace = 'work'
+      await inbox.refresh()
+      expect(pf).toHaveBeenCalledTimes(1)
+      expect(vf).toHaveBeenCalledTimes(1)
+      expect(vf).toHaveBeenCalledWith('personal')
+      await inbox.retry('proposals')
+      expect(pf).toHaveBeenCalledTimes(2)
+    })
+
+    it('review_path_parity', () => {
+      expect(notificationPath({ kind: 'review', filter: 'suggested' })).toBe(reviewPath('suggested'))
+      expect(notificationPath({ kind: 'review', filter: 'revisit' })).toBe(reviewPath('revisit'))
+    })
+
+    it('memory_insight_rows_attention_only', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      const insights = [
+        { sourceChatId: 's-need', passChatId: 'p-need', title: 'Need', phase: 'needsYou', question: 'Ok?', timestamp: '2026-10-26T09:00:00Z', blocking: true },
+        { sourceChatId: 's-att', passChatId: 'p-att', title: 'Att', phase: 'attention', question: '', timestamp: '', blocking: true },
+        { sourceChatId: 's-q', passChatId: 'p-q', title: 'Q', phase: 'queued', question: '', timestamp: '', blocking: false },
+        { sourceChatId: 's-r', passChatId: 'p-r', title: 'R', phase: 'running', question: '', timestamp: '', blocking: false },
+        { sourceChatId: 's-d', passChatId: 'p-d', title: 'D', phase: 'done', question: '', timestamp: '', blocking: false },
+        { sourceChatId: 's-a', passChatId: '', title: 'A', phase: 'archiving', question: '', timestamp: '', blocking: false },
+        { sourceChatId: 's-w', passChatId: 'p-w', title: 'W', phase: 'needsYou', question: '', timestamp: '', blocking: true },
+      ]
+      vi.spyOn(projects, 'memoryInsightRows', 'get').mockReturnValue(insights as never)
+      const inWs = (id: string) => ({ project_id: id === 'p-w' ? 'p-work' : 'p-personal' })
+      vi.spyOn(projects, 'projectFor').mockImplementation(
+        ((id: string) => (id.startsWith('p-') ? { ...inWs(id), workspace: id === 'p-w' ? 'work' : 'personal' } : null)) as never,
+      )
+      setChats(projects, [makeChat('p-need', { last_read_at: '', pending_permission: '{"tool":"Bash"}' })])
+      expect(keysOf(inbox)).toEqual(['memory:s-att', 'memory:s-need'])
+      expect(inbox.rows.find((r) => r.key === 'memory:s-need')!.reason).toBe('Ok?')
+      expect(inbox.rows.some((r) => r.key === 'chat:p-need')).toBe(false)
+    })
+
+    it('never_mutates_review', async () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      const proposals = useProposalsStore()
+      const review = useVaultReviewStore()
+      const act = vi.spyOn(proposals, 'act')
+      const batch = vi.spyOn(proposals, 'batch')
+      const markRead = vi.spyOn(projects, 'markRead')
+      vi.spyOn(projects, 'syncLatest').mockResolvedValue()
+      vi.spyOn(signals, 'reload').mockResolvedValue()
+      proposals.loadError = 'x'
+      review.loadError = 'x'
+      inbox.init()
+      await inbox.refresh()
+      window.dispatchEvent(new Event('focus'))
+      await nextTick()
+      expect(act).not.toHaveBeenCalled()
+      expect(batch).not.toHaveBeenCalled()
+      expect(markRead).not.toHaveBeenCalled()
+      expect(api.post).not.toHaveBeenCalled()
+      expect(api.patch).not.toHaveBeenCalled()
+      expect(api.del).not.toHaveBeenCalled()
+      inbox.dispose()
     })
   })
 })
