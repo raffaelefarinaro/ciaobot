@@ -4532,6 +4532,7 @@ class ProjectChatManager:
         completion_id: str,
         resolution: str,
         completed_at: str,
+        relayed_by_agent: bool = False,
     ) -> str | None:
         return self._memory_pass.enqueue_task_completion(
             workspace=workspace,
@@ -4539,6 +4540,7 @@ class ProjectChatManager:
             completion_id=completion_id,
             resolution=resolution,
             completed_at=completed_at,
+            relayed_by_agent=relayed_by_agent,
         )
 
     def enqueue_project_closure(

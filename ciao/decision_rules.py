@@ -72,6 +72,8 @@ TASK_REASON_CHIPS = ("not mine", "not a task", "already done", "wrong person", "
 _LEAN_SHARE = 0.75
 _LEAN_MIN_N = 4
 _EXAMPLES = 3
+#: What the digest says of a row an agent recorded on the user's behalf.
+AGENT_RELAYED = "agent-relayed, unverified"
 _FREE_TEXT_MAX = 20
 _TEXT_CAP = 120
 _REASON_CAP = 160
@@ -178,27 +180,49 @@ def _split_reason(reason: str, chips: tuple[str, ...]) -> tuple[list[str], str]:
 # ── Digest ────────────────────────────────────────────────────────────────
 
 
+# How a task decision kind reads in the digest. A completion is the user closing
+# a task as done, so it counts on the keep side with an approval; every other
+# kind (a delete, a reject) is a dismissal.
+_TASK_ACTIONS = {"approve": "accepted", "complete": "completed"}
+
+
+def _is_accepted(entry: dict[str, str]) -> bool:
+    return entry["action"] in ("accepted", "completed")
+
+
 def _group(key: str, entries: list[dict[str, str]]) -> dict[str, Any]:
-    accepted = sum(1 for e in entries if e["action"] == "accepted")
+    accepted = sum(1 for e in entries if _is_accepted(e))
     n = len(entries)
     dismissed = n - accepted
+    # The lean is the user's own: a row an agent relayed is evidence to cite,
+    # never a vote, so an agent cannot tip a verdict by recording reasons.
+    by_user = [e for e in entries if e["by"] == "user"]
+    user_n = len(by_user)
+    user_accepted = sum(1 for e in by_user if _is_accepted(e))
     lean = "mixed"
-    if n >= _LEAN_MIN_N:
-        if accepted / n >= _LEAN_SHARE:
+    if user_n >= _LEAN_MIN_N:
+        if user_accepted / user_n >= _LEAN_SHARE:
             lean = "keep"
-        elif dismissed / n >= _LEAN_SHARE:
+        elif (user_n - user_accepted) / user_n >= _LEAN_SHARE:
             lean = "drop"
-    newest = sorted(entries, key=lambda e: (bool(e["reason"]), e["at"]), reverse=True)
+    newest = sorted(
+        entries, key=lambda e: (e["by"] == "user", bool(e["reason"]), e["at"]), reverse=True
+    )
     examples = [
         {
             "at": e["at"],
             "text": e["text"],
             "reason_excerpt": e["reason"],
             "cite": _cite(e["at"], e["text"]),
+            "by": e["by"],
+            **({"note": AGENT_RELAYED} if e["by"] == "agent" else {}),
         }
         for e in newest[:_EXAMPLES]
     ]
-    return {"key": key, "n": n, "accepted": accepted, "dismissed": dismissed, "lean": lean, "examples": examples}
+    return {
+        "key": key, "n": n, "user_n": user_n, "accepted": accepted, "dismissed": dismissed,
+        "lean": lean, "examples": examples,
+    }
 
 
 def _flip_decisions(rows: list[dict[str, Any]]) -> set[tuple[str, str, str]]:
@@ -251,10 +275,18 @@ def _entries_task(
         if day is None or day < cutoff:
             continue
         actor = row.get("actor")
-        if actor == "user":
+        kind = str(row.get("kind", ""))
+        # An agent delete or completion that carries a reason was done on the
+        # user's explicit request and holds their words, so it is operator
+        # evidence; any other agent row is only counted.
+        on_request = (
+            actor == "agent"
+            and kind in ("delete", "complete")
+            and bool(str(row.get("reason", "")).strip())
+        )
+        if actor == "user" or on_request:
             operator.append({**row, "_day": day.isoformat()})
         elif actor == "agent":
-            kind = str(row.get("kind", ""))
             agent[kind] = agent.get(kind, 0) + 1
     return operator, agent
 
@@ -286,7 +318,7 @@ def _section(
             keys = [f"kind:{label}"]
         else:
             label = str(row.get("kind", ""))
-            action = "accepted" if label == "approve" else "dismissed"
+            action = _TASK_ACTIONS.get(label, "dismissed")
             text_raw = str(row.get("task_title", ""))
             fp_rows.append((str(row.get("at", "")), label, action, str(row.get("task_id", "")), reason))
             keys = [f"kind:{label}:{row.get('task_created_by', '')}"]
@@ -295,27 +327,36 @@ def _section(
                 keys.append(f"state:{attempt}")
         found, rest = _split_reason(reason, chips)
         keys += [f"chip:{chip}" for chip in found]
+        by = "agent" if row.get("actor") == "agent" else "user"
         entry = {
             "at": at,
             "action": action,
             "text": _excerpt(text_raw, _TEXT_CAP),
             "reason": _excerpt(reason, _REASON_CAP),
+            "by": by,
         }
         entries.append(entry)
         for key in keys:
             buckets.setdefault(key, []).append(entry)
         if rest:
             excerpt = _excerpt(rest, _REASON_CAP)
-            free.append({"at": at, "kind": label, "excerpt": excerpt, "cite": _cite(at, excerpt)})
+            free.append({
+                "at": at, "kind": label, "excerpt": excerpt, "cite": _cite(at, excerpt),
+                "by": by, **({"note": AGENT_RELAYED} if by == "agent" else {}),
+            })
     groups = [_group(key, items) for key, items in sorted(buckets.items())]
     state = read_state(vault_root, kind, strict=False)
     for group in groups:
         existing = state.rules.get(group["key"])
         group["flip"] = bool(existing and group["lean"] != "mixed" and existing != group["lean"])
         group["flip_approved"] = bool(group["flip"] and (kind, group["key"], group["lean"]) in approved)
-    free.sort(key=lambda f: f["at"], reverse=True)
+    # User reasons first, so a run of agent-relayed ones never pushes them out.
+    free.sort(key=lambda f: (f["by"] == "user", f["at"]), reverse=True)
     return {
-        "rows": len(entries),
+        # Rows the user made: an agent-relayed row never counts toward the
+        # threshold that plans a rules pass.
+        "rows": sum(1 for e in entries if e["by"] == "user"),
+        "agent_relayed_rows": sum(1 for e in entries if e["by"] == "agent"),
         "fingerprint": _fingerprint(fp_rows),
         "progress_key": progress_key(kind),
         "file": _NAMES[kind],

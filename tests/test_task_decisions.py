@@ -90,6 +90,12 @@ def test_a_reason_with_newlines_and_quotes_stays_one_row(tmp_path: Path) -> None
     assert json.loads(lines[0])["kind"] == "delete"
 
 
+def test_complete_is_a_valid_kind(tmp_path: Path) -> None:
+    row = _append(tmp_path, kind="complete", actor="agent", via="cli", reason="shipped")
+    assert row["kind"] == "complete"
+    assert [r["kind"] for r in read_decisions(tmp_path)] == ["complete"]
+
+
 def test_append_refuses_an_unknown_kind(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         _append(tmp_path, kind="archive")

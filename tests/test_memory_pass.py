@@ -1647,6 +1647,37 @@ def test_task_completion_enqueue_has_no_chat_and_quotes_the_resolution(
     assert streams.chat_ids == [chat_id]
 
 
+def test_agent_relayed_completion_is_labelled_unverified_and_user_one_is_unchanged(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    manager = _make_manager(tmp_path)
+    user_id = manager.enqueue_task_completion(
+        workspace="work", task_path=_TASK_PATH, completion_id=_COMPLETION_ID,
+        resolution=_RESOLUTION, completed_at="2026-10-08T10:00:00+00:00",
+    )
+    agent_id = manager.enqueue_task_completion(
+        workspace="work", task_path=_TASK_PATH, completion_id=_COMPLETION_ID,
+        resolution=_RESOLUTION, completed_at="2026-10-08T10:00:00+00:00",
+        relayed_by_agent=True,
+    )
+    # The same text relayed by an agent is its own pass, not the user's.
+    assert agent_id is not None and agent_id != user_id
+    user_prompt = manager._memory_pass._prompt_for(manager.get_chat(user_id))
+    agent_prompt = manager._memory_pass._prompt_for(manager.get_chat(agent_id))
+    assert "resolution below is the user's verdict" in user_prompt
+    assert "recorded by the agent" not in user_prompt
+    assert "resolution below is the user's verdict" not in agent_prompt
+    assert "recorded by the agent" in agent_prompt
+    assert "unverified" in agent_prompt
+    assert "user preference" in agent_prompt
+    assert f"<quoted-resolution>\n{_RESOLUTION}\n</quoted-resolution>" in agent_prompt
+    helper = chat_service._normalize_chat_helper(manager.get_chat(agent_id).helper)
+    assert helper["relayed_by_agent"] is True
+    assert chat_service._normalize_chat_helper(helper) == helper
+    user_helper = chat_service._normalize_chat_helper(manager.get_chat(user_id).helper)
+    assert user_helper["relayed_by_agent"] is False
+
+
 def test_approved_focus_fences_the_user_resolution_and_round_trips() -> None:
     focus = {
         "focus": "approved_task",

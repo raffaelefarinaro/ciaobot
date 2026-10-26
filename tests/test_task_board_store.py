@@ -552,6 +552,56 @@ def test_agent_cannot_complete_and_user_can_complete_manual_task(tmp_path: Path)
     assert done.record.chat_id is None and done.record.attempt_id is None
 
 
+def test_agent_completes_only_with_a_non_empty_resolution(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    created = store.create(title="manual work")
+    path = task_path(vault, created.record.id)
+    for resolution in (None, "", "   "):
+        with pytest.raises(TaskBoardError) as excinfo:
+            store.update(
+                created.record.id,
+                expected_revision=created.revision,
+                changes={"status": "done"},
+                actor="agent",
+                resolution=resolution,
+            )
+        assert excinfo.value.code == "completion_requires_user"
+        assert path.read_bytes() == created.raw
+
+    done = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"status": "done"},
+        actor="agent",
+        resolution="The user said it shipped.",
+    )
+    assert done.record.status == "done"
+    assert "The user said it shipped." in done.body
+
+
+def test_agent_cannot_complete_a_linked_task_even_with_a_resolution(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    linked = store.create(title="live work")
+    link_path = task_path(vault, linked.record.id)
+    link_path.write_text(
+        link_path.read_text(encoding="utf-8").replace("attempt_id: null", "attempt_id: att-1"),
+        encoding="utf-8",
+    )
+    current = store.get(linked.record.id)
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.update(
+            linked.record.id,
+            expected_revision=current.revision,
+            changes={"status": "done"},
+            actor="agent",
+            resolution="The user said it is done.",
+        )
+    assert excinfo.value.code == "invalid_task"
+    assert link_path.read_bytes() == current.raw
+
+
 def test_in_review_is_an_ordinary_column_and_linked_live_completion_is_refused(
     tmp_path: Path,
 ) -> None:
