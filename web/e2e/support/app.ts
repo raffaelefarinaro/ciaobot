@@ -67,3 +67,41 @@ export async function horizontalOverflow(page: Page) {
     return { limit, overflow, culprits: culprits.slice(0, 8) }
   })
 }
+
+/**
+ * Resolve once the page has stopped changing underneath a measurement: web
+ * fonts loaded, every `<link rel=stylesheet>` applied, finite animations and
+ * transitions finished, and the element count and document height unchanged
+ * for `frames` consecutive animation frames.
+ *
+ * A route's CSS arrives with its lazy chunk, and Vite's preload helper only
+ * waits for a stylesheet the first time it injects it: a second import of the
+ * same chunk resolves at once, so a component can render and be measured
+ * before its stylesheet (including the `(pointer: coarse)` sizes) has applied.
+ * Elements being visible says nothing about that. Waiting is by frame count,
+ * not wall clock, so a loaded runner waits longer instead of giving up.
+ */
+export async function quiesce(page: Page, frames = 5): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as { __quiet?: { sig: string; n: number } }
+    w.__quiet = { sig: '', n: 0 }
+  })
+  await page.waitForFunction((need) => {
+    const w = window as unknown as { __quiet: { sig: string; n: number } }
+    const styled = Array.from(document.querySelectorAll('link[rel~="stylesheet"]')).every(
+      (l) => (l as HTMLLinkElement).sheet !== null,
+    )
+    const animating = document.getAnimations().some((a) => {
+      const t = a.effect?.getComputedTiming()
+      return t !== undefined && Number.isFinite(t.endTime) && a.playState === 'running'
+    })
+    if (!styled || animating || document.fonts.status !== 'loaded') {
+      w.__quiet.n = 0
+      return false
+    }
+    const sig = `${document.getElementsByTagName('*').length}:${document.documentElement.scrollHeight}`
+    w.__quiet.n = w.__quiet.sig === sig ? w.__quiet.n + 1 : 0
+    w.__quiet.sig = sig
+    return w.__quiet.n >= need
+  }, frames, { polling: 'raf', timeout: 0 })
+}

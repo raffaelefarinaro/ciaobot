@@ -1100,20 +1100,37 @@ export const useProjectStore = defineStore('projects', () => {
   // chat has running background agents OR is streaming a turn (agents
   // dispatched mid-turn nest live inside the Working trace).
   let subagentPollTimer: ReturnType<typeof setInterval> | null = null
+  // Rows the cheap running list names for the active chat. A separate owner
+  // from the engine count above: the count only exists while a watcher lives,
+  // so a chat whose count is 0 can still have a running child the list found.
+  // Never written back into `backgroundAgents`.
+  const activeRunningSubagentCount = computed(() =>
+    (runningSubagents.value[activeChatId.value || ''] || []).length,
+  )
+  // True while the running-list poll is alive. Independent running rows keep
+  // the full-list poll going only while that poll can still learn they ended,
+  // so a row the server never retires cannot hold a 4s transcript poll forever.
+  const runningPollLive = ref(false)
   watch(
     () => [
       activeChatId.value,
       activeBackgroundAgents.value,
       isStreaming.value,
       subagentViewActiveChatId.value,
+      activeRunningSubagentCount.value > 0 && runningPollLive.value,
     ] as const,
-    ([chatId, count, streamingNow, viewChatId]) => {
+    ([chatId, count, streamingNow, viewChatId, runningKnown], previous) => {
       if (subagentPollTimer !== null) {
         clearInterval(subagentPollTimer)
         subagentPollTimer = null
       }
-      if (!chatId || (count <= 0 && !streamingNow)) return
+      if (!chatId || (count <= 0 && !streamingNow && !runningKnown)) return
       if (viewChatId !== null && viewChatId === chatId) return
+      // Discovery: running rows appeared for this chat with nothing else
+      // polling it. Paint the full list now instead of after the first tick.
+      if (runningKnown && count <= 0 && !streamingNow && !(previous && previous[0] === chatId && previous[4])) {
+        void loadSubagents(chatId)
+      }
       subagentPollTimer = setInterval(() => {
         void loadSubagents(chatId)
       }, 4000)
@@ -1206,19 +1223,13 @@ export const useProjectStore = defineStore('projects', () => {
       clearInterval(runningSubagentTimer)
       runningSubagentTimer = null
     }
+    runningPollLive.value = false
   }
-  watch(anyChatWorking, (working) => {
-    stopRunningSubagentPoll()
-    // Refresh on both edges: rising paints the rows without waiting a tick,
-    // falling starts the drain that clears the last of them.
-    void refreshRunningSubagents()
-    if (working) {
-      runningSubagentTimer = setInterval(() => {
-        void refreshRunningSubagents()
-      }, RUNNING_SUBAGENT_POLL_MS)
-      return
-    }
+  // Poll until the rows clear or the drain budget is spent. Used for the
+  // falling edge of work and for rows discovered while nothing is working.
+  function startRunningSubagentDrain(): void {
     let drainTicksLeft = RUNNING_SUBAGENT_DRAIN_TICKS
+    runningPollLive.value = true
     runningSubagentTimer = setInterval(() => {
       if (Object.keys(runningSubagents.value).length === 0 || drainTicksLeft <= 0) {
         stopRunningSubagentPoll()
@@ -1227,7 +1238,35 @@ export const useProjectStore = defineStore('projects', () => {
       drainTicksLeft -= 1
       void refreshRunningSubagents()
     }, RUNNING_SUBAGENT_POLL_MS)
+  }
+  watch(anyChatWorking, (working) => {
+    stopRunningSubagentPoll()
+    // Refresh on both edges: rising paints the rows without waiting a tick,
+    // falling starts the drain that clears the last of them.
+    void refreshRunningSubagents()
+    if (working) {
+      runningPollLive.value = true
+      runningSubagentTimer = setInterval(() => {
+        void refreshRunningSubagents()
+      }, RUNNING_SUBAGENT_POLL_MS)
+      return
+    }
+    startRunningSubagentDrain()
   })
+  // Rows fetched while nothing is working (page load, reconnect, a child the
+  // engine count never announced) would otherwise be listed once and never
+  // refreshed, so a finished child kept its spinner. Discovery restarts the
+  // bounded drain; a failed request is not completion, only a successful
+  // list without the row is, and `refreshRunningSubagents` keeps the rows
+  // across a failure.
+  watch(
+    () => Object.values(runningSubagents.value).some(rows => rows.length > 0),
+    (any) => {
+      if (any && !anyChatWorking.value && runningSubagentTimer === null) {
+        startRunningSubagentDrain()
+      }
+    },
+  )
 
   function projectChats(projectId: string): ChatInfo[] {
     // Hide remote chats (session lives on another device, not openable here).

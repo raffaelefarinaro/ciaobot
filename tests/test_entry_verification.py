@@ -16,9 +16,8 @@ properties that only exist at this width:
 * **the mutation**. A ``still_valid`` re-stamps *the entry's own*
   ``[verified:]`` date and changes nothing else, an ``update`` applies an exact
   replacement with citations behind it, and a ``retire`` is never applied — the
-  same three-way rule 726-B reaches, with one genuinely new refusal: an entry
-  with no usable stamp to replace is ``needs_review`` rather than a stamp written
-  onto a fact nobody checked;
+  same three-way rule 726-B reaches; an entry with no stamp yet gets one, on
+  the same evidence a re-stamp needs;
 * **the refusals that keep a write honest**. An identity the note no longer
   holds, an entry whose fingerprint is not the one the caller read, a stale
   ``expected_revision`` and an edit planned against text the entry no longer has
@@ -634,14 +633,14 @@ def test_a_restamp_needs_a_citation_somebody_could_re_open(tmp_path: Path) -> No
     assert note.read_text(encoding="utf-8") == PLAIN, "nothing was written"
 
 
-def test_a_still_valid_entry_with_no_stamp_to_replace_needs_a_person(
+def test_a_cited_still_valid_entry_with_no_stamp_gets_one(
     tmp_path: Path) -> None:
-    """The one rule that genuinely differs from 726-B's, and why.
+    """A checked fact with no stamp is stamped, not sent to a person.
 
-    A note's frontmatter ``updated:`` can be added without asserting anything
-    about the note, so 726-B declines only as a courtesy. An entry's
-    ``[verified:]`` token IS the claim, and writing one nobody checked would be
-    inventing a verification — so it comes back for a person instead.
+    The evidence rule already ran: complete coverage and a citation naming the
+    note. Refusing here filed one proposal per unstamped bullet asking a person
+    to confirm a check that had passed, and the proposal went stale the moment
+    the note was touched.
     """
     vault = _vault(tmp_path)
     note = _write(vault)
@@ -649,11 +648,12 @@ def test_a_still_valid_entry_with_no_stamp_to_replace_needs_a_person(
 
     result = _verify(vault, _request(unstamped))
 
-    assert result.status == ev.NEEDS_REVIEW
+    assert result.status == ev.APPLIED, result.message
     assert result.check is not None
     assert result.check.outcome == ev.STILL_VALID
-    assert "stamp" in result.message
-    assert note.read_text(encoding="utf-8") == PLAIN
+    text = note.read_text(encoding="utf-8")
+    assert "- The landlord is Bianchi [verified: " in text
+    assert text.count("[verified:") == PLAIN.count("[verified:") + 1
 
 
 def test_an_update_applies_an_exact_replacement(tmp_path: Path) -> None:
