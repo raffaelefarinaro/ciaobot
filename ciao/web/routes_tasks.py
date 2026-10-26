@@ -21,6 +21,10 @@ point this surface at a directory it likes.
 409, writing nothing. A board that drew a card from an older read therefore
 cannot silently overwrite what is on disk now.
 
+**Order version and placement are CAS inputs too.** A placement carries the
+``expected_order_version`` the board read; a stale one is a 409
+``task_order_conflict`` that writes nothing, exactly as a stale revision does.
+
 **Completing is the user's act, and this is the user's session.** The browser
 route acts as ``actor="user"``, so ``complete`` works here; the same operation
 through the agent CLI acts as ``actor="agent"`` and is refused by the store.
@@ -59,6 +63,9 @@ _STATUS_BY_CODE = {
     # malformed request: the request was well formed and its content moved on.
     "task_revision_conflict": 409,
     "task_completion_requires_user": 403,
+    "task_order_conflict": 409,
+    "task_order_invalid": 400,
+    "task_order_unreadable": 409,
     # A delegated chat the manager would not create, or a turn it would not
     # start: a server fault with a way forward, and retryable because the reply
     # names the attempt to resume or retry.
@@ -195,6 +202,26 @@ def _revision(body: dict[str, Any]) -> str | JSONResponse:
     return revision
 
 
+def _placement_arg(body: dict[str, Any]) -> dict[str, Any] | None | JSONResponse:
+    """The optional ``placement`` a status-changing write carries, or the 400.
+
+    Absent or ``null`` is ``None``. Present must be an object; its fields are
+    validated by the service, which names a violation ``task_order_invalid``.
+    """
+    value = body.get("placement")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return _refusal("task_order_invalid", "placement must be an object", 400)
+    return value
+
+
+async def _order_fields(plane: Any, workspace: str) -> dict[str, Any]:
+    """``{"order", "order_error"}``: the latest order, read after a write."""
+    fields: dict[str, Any] = await asyncio.to_thread(plane.workspace_task_order, workspace)
+    return fields
+
+
 async def task_list(request: Request) -> JSONResponse:
     """One workspace's board rows; ``?workspace=`` names the workspace.
 
@@ -217,9 +244,10 @@ async def task_list(request: Request) -> JSONResponse:
             completed_since=request.query_params.get("completed_since"),
             completed_before=request.query_params.get("completed_before"),
         )
+        order = await asyncio.to_thread(plane.workspace_task_order, workspace)
     except ControlPlaneError as exc:
         return _error(exc)
-    return JSONResponse({"workspace": workspace, "tasks": rows})
+    return JSONResponse({"workspace": workspace, "tasks": rows, **order})
 
 
 async def task_get(request: Request) -> JSONResponse:
@@ -275,9 +303,10 @@ async def task_create(request: Request) -> JSONResponse:
             project_id=body.get("project_id") or None,
             due=body.get("due") or None,
         )
+        order = await _order_fields(plane, workspace)
     except ControlPlaneError as exc:
         return _error(exc)
-    return JSONResponse({"workspace": workspace, "task": task}, status_code=201)
+    return JSONResponse({"workspace": workspace, "task": task, **order}, status_code=201)
 
 
 async def task_update(request: Request) -> JSONResponse:
@@ -299,7 +328,9 @@ async def task_update(request: Request) -> JSONResponse:
     unknown = sorted(
         key
         for key in body
-        if key not in _WRITE_KEYS and key not in _PATCHABLE and key != "resolution"
+        if key not in _WRITE_KEYS
+        and key not in _PATCHABLE
+        and key not in ("resolution", "placement")
     )
     if unknown:
         return _refusal(
@@ -317,6 +348,9 @@ async def task_update(request: Request) -> JSONResponse:
     resolution = _resolution(body)
     if isinstance(resolution, JSONResponse):
         return resolution
+    placement = _placement_arg(body)
+    if isinstance(placement, JSONResponse):
+        return placement
     if not changes and description is None and resolution is None:
         return _refusal(
             "nothing_to_change",
@@ -333,10 +367,12 @@ async def task_update(request: Request) -> JSONResponse:
             body=description,
             actor="user",
             resolution=resolution,
+            placement=placement,
         )
+        order = await _order_fields(plane, workspace)
     except ControlPlaneError as exc:
         return _error(exc)
-    return JSONResponse({"workspace": workspace, "task": task})
+    return JSONResponse({"workspace": workspace, "task": task, **order})
 
 
 async def task_delegate(request: Request) -> JSONResponse:
@@ -500,6 +536,9 @@ async def task_complete(request: Request) -> JSONResponse:
     reason = _reason(body)
     if isinstance(reason, JSONResponse):
         return reason
+    placement = _placement_arg(body)
+    if isinstance(placement, JSONResponse):
+        return placement
     workspace = _workspace(request.app.state.config, body.get("workspace"))
     if workspace is None:
         return _workspace_required()
@@ -513,10 +552,12 @@ async def task_complete(request: Request) -> JSONResponse:
             actor="user",
             resolution=resolution,
             reason=reason,
+            placement=placement,
         )
+        order = await _order_fields(plane, workspace)
     except ControlPlaneError as exc:
         return _error(exc)
-    return JSONResponse({"workspace": workspace, "task": task})
+    return JSONResponse({"workspace": workspace, "task": task, **order})
 
 
 async def task_resolution_review(request: Request) -> JSONResponse:
@@ -581,6 +622,44 @@ async def task_delete(request: Request) -> JSONResponse:
             expected_revision=revision,
             reason=reason,
             actor="user",
+        )
+        order = await _order_fields(plane, workspace)
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, **result, **order})
+
+
+async def task_order(request: Request) -> JSONResponse:
+    """Reposition one task inside its status column.
+
+    ``{"workspace", "before_id"?, "after_id"?, "expected_order_version"}``. The
+    version is required: a stale one is a 409 ``task_order_conflict`` and nothing
+    is written. Session-only and acting as the user; there is no agent verb.
+    """
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    body = await _body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    version = body.get("expected_order_version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        return _refusal(
+            "expected_order_version_required",
+            "expected_order_version is required: pass the order version you read.",
+            400,
+        )
+    workspace = _workspace(request.app.state.config, body.get("workspace"))
+    if workspace is None:
+        return _workspace_required()
+    try:
+        result = await asyncio.to_thread(
+            plane.workspace_task_reorder,
+            workspace,
+            str(request.path_params.get("task_id") or ""),
+            before_id=body.get("before_id"),
+            after_id=body.get("after_id"),
+            expected_order_version=version,
         )
     except ControlPlaneError as exc:
         return _error(exc)
