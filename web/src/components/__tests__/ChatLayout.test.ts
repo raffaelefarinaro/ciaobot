@@ -3294,7 +3294,10 @@ describe('ChatLayout chat route without a catalog entry', () => {
       const signals = useTaskSignalsStore()
       const inbox = useNotificationInboxStore()
       vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
-      useHousekeepingStore().actionsHealth = { status: 'ready', lastSuccessAt: '2026-08-12T10:00:00.000Z', error: '' }
+      const housekeeping = useHousekeepingStore()
+      housekeeping.actionsHealth = { status: 'ready', lastSuccessAt: '2026-08-12T10:00:00.000Z', error: '' }
+      housekeeping.updateTasksWorkspace = 'personal'
+      housekeeping.updateTasksHealth = { status: 'ready', lastSuccessAt: '2026-08-12T10:00:00.000Z', error: '' }
       useTaskStore().schedulesLoaded = true
       useProposalsStore().loaded = true
       useVaultReviewStore().loadedWorkspace = 'personal'

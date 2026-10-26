@@ -66,7 +66,10 @@ function setChats(projects: ReturnType<typeof useProjectStore>, chats: unknown[]
 }
 
 function markHealthy(projects: ReturnType<typeof useProjectStore>, signals: ReturnType<typeof useTaskSignalsStore>) {
-  useHousekeepingStore().actionsHealth = ready()
+  const housekeeping = useHousekeepingStore()
+  housekeeping.actionsHealth = ready()
+  housekeeping.updateTasksWorkspace = 'personal'
+  housekeeping.updateTasksHealth = ready()
   useTaskStore().schedulesLoaded = true
   useProposalsStore().loaded = true
   useVaultReviewStore().loadedWorkspace = 'personal'
@@ -148,6 +151,10 @@ describe('notification inbox store', () => {
     useProposalsStore().loaded = true
     expect(inbox.allClear).toBe(false)
     useVaultReviewStore().loadedWorkspace = 'personal'
+    expect(inbox.allClear).toBe(false)
+    const housekeeping = useHousekeepingStore()
+    housekeeping.updateTasksWorkspace = 'personal'
+    housekeeping.updateTasksHealth = ready()
     expect(inbox.allClear).toBe(true)
   })
 
@@ -241,6 +248,7 @@ describe('notification inbox store', () => {
     const gate = deferred()
     const syncLatest = vi.spyOn(projects, 'syncLatest').mockImplementation(() => gate.promise)
     vi.spyOn(signals, 'reload').mockResolvedValue()
+    vi.spyOn(useHousekeepingStore(), 'refreshUpdateTasks').mockResolvedValue()
     inbox.init()
     const first = inbox.refresh()
     inbox.refresh() // asks for an extra round
@@ -772,6 +780,174 @@ describe('notification inbox store', () => {
       expect(act).not.toHaveBeenCalled()
       expect(batch).not.toHaveBeenCalled()
       expect(markRead).not.toHaveBeenCalled()
+      expect(api.post).not.toHaveBeenCalled()
+      expect(api.patch).not.toHaveBeenCalled()
+      expect(api.del).not.toHaveBeenCalled()
+      inbox.dispose()
+    })
+  })
+
+  describe('update-task source', () => {
+    const utRow = (o: Record<string, unknown> = {}) => ({
+      id: 'review-legacy-rows', revision: 1, scope: 'workspace', title: 'Review the rows',
+      why: '', since_version: '2.1.0', status: 'offered', applicability: 'applicable',
+      applicability_checked_at: '', offered: true, suppressed: false, chat_id: '', chat_live: false,
+      prompt_digest: '', attempted_fingerprint: '', updated_at: '', ...o,
+    })
+    const setRows = (rows: unknown[], ws = 'personal') => {
+      const hk = useHousekeepingStore()
+      hk.updateTasks = rows as never
+      hk.updateTasksWorkspace = ws
+      return hk
+    }
+    const keysOf = (inbox: ReturnType<typeof useNotificationInboxStore>) => inbox.rows.map((r) => r.key).sort()
+
+    it('rows_only_for_loaded_workspace', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setRows([utRow()], 'work')
+      expect(keysOf(inbox)).toEqual([])
+      expect(inbox.sources.find((s) => s.source === 'updateTasks')!.status).toBe('checking')
+      expect(inbox.allClear).toBe(false)
+      projects.activeWorkspace = 'work'
+      expect(keysOf(inbox)).toEqual(['update-task:work:review-legacy-rows@1'])
+      projects.activeWorkspace = 'personal'
+      expect(keysOf(inbox)).toEqual([])
+      setRows([utRow()], 'personal')
+      expect(keysOf(inbox)).toEqual(['update-task:personal:review-legacy-rows@1'])
+    })
+
+    it('dismissed_revision_excluded_newer_revision_reappears', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setRows([utRow({ revision: 1, status: 'dismissed' }), utRow({ revision: 2 })])
+      expect(keysOf(inbox)).toEqual(['update-task:personal:review-legacy-rows@2'])
+    })
+
+    it('dead_remembered_chat_never_linked', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setChats(projects, [makeChat('chat-x', { last_read_at: '' })])
+      setRows([utRow({ status: 'waiting_review', chat_live: false, chat_id: 'chat-x' })])
+      expect(inbox.updateTaskCandidates[0].chatId).toBe('')
+      expect(inbox.updateTaskCandidates[0].chatLive).toBe(false)
+      expect(keysOf(inbox)).toEqual(['chat:chat-x', 'update-task:personal:review-legacy-rows@1'])
+      // An archived chat is not live either.
+      setChats(projects, [makeChat('chat-x', { archived: true })])
+      setRows([utRow({ status: 'waiting_review', chat_live: true, chat_id: 'chat-x' })])
+      expect(inbox.updateTaskCandidates[0].chatId).toBe('')
+    })
+
+    it('live_failed_chat_prefers_task_row', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setChats(projects, [makeChat('c1', { last_error: 'boom' })])
+      setRows([utRow({ status: 'in_progress', chat_live: true, chat_id: 'c1' })])
+      expect(keysOf(inbox)).toEqual(['update-task:personal:review-legacy-rows@1'])
+      expect(inbox.updateTaskCandidates[0].chatFailed).toBe(true)
+    })
+
+    it('live_question_prefers_chat_row', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      setChats(projects, [makeChat('c1', { pending_permission: '{"tool":"Bash"}' })])
+      setRows([utRow({ status: 'in_progress', chat_live: true, chat_id: 'c1' })])
+      expect(keysOf(inbox)).toEqual(['chat:c1'])
+      expect(inbox.updateTaskCandidates[0].chatNeedsInput).toBe(true)
+    })
+
+    it('coverage_gap_is_unavailable_nothing_offered_is_ready', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      const hk = setRows([])
+      const status = () => inbox.sources.find((s) => s.source === 'updateTasks')!.status
+      expect(inbox.allClear).toBe(true)
+      for (const reason of ['no_eligible_task', 'not_substantiated']) {
+        hk.updateTasksCoverageGap = { reason, detail: '' }
+        expect(status()).toBe('unavailable')
+        expect(inbox.allClear).toBe(false)
+      }
+      hk.updateTasksCoverageGap = { reason: 'nothing_offered', detail: '' }
+      expect(status()).toBe('ready')
+      expect(inbox.allClear).toBe(true)
+    })
+
+    it('update_tasks_source_status', () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      const hk = setRows([utRow()], '')
+      const snap = () => inbox.sources.find((s) => s.source === 'updateTasks')!
+      expect(snap().status).toBe('checking')
+      hk.updateTasksWorkspace = 'personal'
+      hk.updateTasksHealth = unavailable()
+      expect(snap().status).toBe('unavailable')
+      hk.updateTasksHealth = ready()
+      expect(snap().status).toBe('ready')
+      expect(snap().lastSuccessAt).toBe(READY_AT)
+      hk.updateTasksHealth = stale()
+      expect(snap().status).toBe('stale')
+      expect(snap().lastSuccessAt).toBe(READY_AT)
+      expect(keysOf(inbox)).toEqual(['update-task:personal:review-legacy-rows@1'])
+      expect(inbox.rows[0].freshness).toBe('stale')
+    })
+
+    it('refresher_noop_when_healthy_reads_when_not', async () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      const hk = setRows([])
+      const read = vi.spyOn(hk, 'refreshUpdateTasks').mockResolvedValue()
+      await inbox.refresh(['updateTasks'])
+      expect(read).not.toHaveBeenCalled()
+      hk.updateTasksHealth = stale()
+      await inbox.retry('updateTasks')
+      expect(read).toHaveBeenCalledTimes(1)
+      expect(read).toHaveBeenLastCalledWith('personal')
+      hk.updateTasksHealth = ready()
+      hk.updateTasksCoverageGap = { reason: 'no_eligible_task', detail: '' }
+      await inbox.refresh(['updateTasks'])
+      expect(read).toHaveBeenCalledTimes(2)
+    })
+
+    it('init_and_switch_read_update_tasks_once', async () => {
+      const { projects, inbox } = setup()
+      const hk = useHousekeepingStore()
+      const read = vi.spyOn(hk, 'refreshUpdateTasks').mockResolvedValue()
+      vi.spyOn(projects, 'syncLatest').mockResolvedValue()
+      const interval = vi.spyOn(globalThis, 'setInterval')
+      expect(hk.updateTasksWorkspace).toBe('')
+      inbox.init()
+      await nextTick()
+      expect(read).toHaveBeenCalledTimes(1)
+      expect(read).toHaveBeenLastCalledWith('personal')
+      inbox.init()
+      await nextTick()
+      expect(read).toHaveBeenCalledTimes(1)
+      projects.activeWorkspace = 'work'
+      await nextTick()
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(read).toHaveBeenLastCalledWith('work')
+      expect(interval).not.toHaveBeenCalled()
+      inbox.dispose()
+    })
+
+    it('never_mutates_update_tasks', async () => {
+      const { projects, signals, inbox } = setup()
+      markHealthy(projects, signals)
+      const hk = setRows([utRow(), utRow({ id: 'b', status: 'failed' })])
+      const start = vi.spyOn(hk, 'startUpdateTask')
+      const dismiss = vi.spyOn(hk, 'dismissUpdateTask')
+      const run = vi.spyOn(hk, 'run')
+      const dismissAction = vi.spyOn(hk, 'dismiss')
+      const init = vi.spyOn(hk, 'init')
+      vi.spyOn(projects, 'syncLatest').mockResolvedValue()
+      vi.spyOn(signals, 'reload').mockResolvedValue()
+      vi.spyOn(hk, 'refresh').mockResolvedValue()
+      inbox.init()
+      await inbox.refresh()
+      window.dispatchEvent(new Event('focus'))
+      await nextTick()
+      expect(inbox.count).toBe(2)
+      for (const fn of [start, dismiss, run, dismissAction, init]) expect(fn).not.toHaveBeenCalled()
       expect(api.post).not.toHaveBeenCalled()
       expect(api.patch).not.toHaveBeenCalled()
       expect(api.del).not.toHaveBeenCalled()
