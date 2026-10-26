@@ -201,7 +201,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Automations</span>
-            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"></span>
+            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="run-failed" /></span>
           </router-link>
           <router-link
             to="/memory"
@@ -278,7 +278,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Settings</span>
-            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"></span>
+            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="run-failed" /></span>
           </router-link>
         </nav>
 
@@ -341,7 +341,7 @@
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span class="schedule-time">{{ oneOffWhen(s) }}</span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
               </router-link>
             </div>
           </div>
@@ -377,7 +377,7 @@
                   class="spinner-dot"
                   title="This automation is working"
                 />
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
               </router-link>
             </div>
         </div>
@@ -401,7 +401,7 @@
                   class="spinner-dot"
                   title="This automation is working"
                 />
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
               </router-link>
             </div>
           </div>
@@ -1031,7 +1031,7 @@ import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
 import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 
-const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' }>()
+const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'notifications' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
 
 const store = useProjectStore()
@@ -1183,7 +1183,7 @@ const memoryCount = computed(() => {
   const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
   return proposals.scopedRows(workspace).length + retirement
 })
-// Settings has no count. A blocking action is the warning dot like any other
+// Settings has no count. A blocking action is the alert glyph like any other
 // failure; an available update is news, not trouble, so it is a muted word.
 const settingsNote = computed(() => (store.packageStatus?.update_available ? 'update' : ''))
 
@@ -2358,7 +2358,7 @@ async function confirmDeleteChat(chatId: string) {
 /* Subtle section counts: plain numerals on the right of the row, drawn from
    a data attribute so they stay out of the link's text (its aria-label
    carries the full sentence). One colour role per signal: every count is
-   the same muted numeral, a failure is the warning dot (.nav-item-alert),
+   the same muted numeral, a failure is the accent alert glyph (.nav-item-alert),
    live work is the spinner dot, and the accent marks only the current row.
    Icons never change colour. */
 .nav-item[data-count]::after,
@@ -2372,11 +2372,8 @@ async function confirmDeleteChat(chatId: string) {
 .nav-item[data-note]::after { content: attr(data-note); font-family: var(--font); }
 
 .nav-item-alert {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  border-radius: 50%;
-  background: var(--warning);
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
 .nav-item .spinner-dot { margin-left: 0; }
@@ -2816,11 +2813,6 @@ async function confirmDeleteChat(chatId: string) {
   text-transform: none;
   letter-spacing: 0;
   vertical-align: middle;
-}
-.badge--missed {
-  margin-left: 0;
-  background: var(--warning);
-  color: var(--bg);
 }
 
 .chat-item:hover {
@@ -3419,10 +3411,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedule-item--disabled .schedule-label { color: var(--fg3); }
 .schedule-item .missed-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warning);
+  display: inline-flex;
   flex-shrink: 0;
 }
 
