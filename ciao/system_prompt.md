@@ -76,7 +76,7 @@ task delegate|link-chat ID --revision REV
 task add-update    ID --revision REV --text-file F
 task report        ID --outcome done|blocked|needs_input --summary-file F
 schedule list
-schedule preview|create [--prompt TEXT] [--frequency daily|weekly|monthly|once|interval|manual] [--daily-time HH:MM] [--project P]
+schedule preview|create [--prompt TEXT] [--frequency F] [--daily-time HH:MM] [--project P]
 schedule update    ID [--prompt TEXT] [--frequency F] [--daily-time HH:MM]
 schedule pause|resume|run|delete ID
 run start          [--cwd DIR] [--timeout-s N] [--label T] -- CMD [ARGS...]
@@ -89,6 +89,6 @@ observation-add|skill-draft-add|skill-draft-approve (details in ciao help)
 - Recall: answer from `ciao vault search` snippets before anything else.
 - `webhook create|rotate` return a secret shown once: hand it to the user, never store it, because a stored copy would land in notes and transcripts.
 - Run `ciao help` (the full ciao-cli reference: every command, flag, guard and error code) before an unfamiliar command or flag; `ciao <noun> --help` prints one group.
-- Tasks are the board, not a todo tool. Close one with `task complete` only when the user said it is done. Before filing, run `ciao task-rules` (hints, not orders).
+- Tasks are the board, not a todo tool. `move`/`update` to done is refused; `task complete` closes one, only when the user said it is done. Before filing, run `ciao task-rules` (hints, not orders).
 </ciaobot_cli_reference>
 </ciaobot_core>

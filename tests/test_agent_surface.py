@@ -210,7 +210,8 @@ def _task_service(tmp_path: Path, *, mode: str = "auto"):
 
         def __init__(self) -> None:
             self.chat = SimpleNamespace(
-                mode=mode, user_turn_count=1, user_turn_unattended={}
+                mode=mode, user_turn_count=1, user_turn_unattended={},
+                user_turn_origin={}, helper={},
             )
 
         def _workspace_vault_root(self, workspace: str) -> Path:
@@ -459,6 +460,65 @@ def test_task_delete_is_destructive_and_mutating(tmp_path: Path) -> None:
         gone = _post(client, token, "task_get", {"task_id": created["id"]})
     assert gone.status_code == 422
     assert gone.json()["error"]["code"] == "task_not_found"
+
+
+@pytest.mark.parametrize("reason", [None, "", "  \n"])
+def test_task_delete_without_a_reason_is_refused_and_keeps_the_task(
+    tmp_path: Path, reason: str | None
+) -> None:
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Keep me"}).json()["data"]
+        path = (
+            service.control_plane.config.workspace_vault_root("personal")
+            / "Workspace" / "Tasks" / f"{created['id']}.md"
+        )
+        arguments: dict[str, Any] = {
+            "task_id": created["id"], "expected_revision": created["revision"],
+        }
+        if reason is not None:
+            arguments["reason"] = reason
+        refused = _post(client, token, "task_delete", arguments)
+        assert refused.status_code in (400, 422), refused.text
+        assert refused.json()["ok"] is False
+        assert path.is_file()
+
+
+@pytest.mark.parametrize("reason", [None, "", "  "])
+def test_task_complete_without_a_reason_is_refused_and_leaves_the_task_open(
+    tmp_path: Path, reason: str | None
+) -> None:
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Still open"}).json()["data"]
+        arguments: dict[str, Any] = {
+            "action": "complete", "task_id": created["id"],
+            "expected_revision": created["revision"],
+        }
+        if reason is not None:
+            arguments["reason"] = reason
+        refused = _post(client, token, "task_action", arguments)
+        assert refused.status_code in (400, 422), refused.text
+        assert refused.json()["ok"] is False
+        got = _post(client, token, "task_get", {"task_id": created["id"]}).json()["data"]
+        assert got["status"] == "backlog"
+
+
+def test_an_empty_reason_file_reaches_the_refusal_instead_of_dropping_the_key(
+    tmp_path: Path,
+) -> None:
+    empty = tmp_path / "empty.txt"
+    empty.write_text("", encoding="utf-8")
+    parser = agent_cli.build_parser()
+    for verb in ("delete", "complete"):
+        _name, arguments = agent_cli.resolve(
+            parser.parse_args(
+                ["task", verb, "a" * 32, "--revision", "rev1", "--reason-file", str(empty)]
+            )
+        )
+        assert arguments["reason"] == ""
 
 
 def test_an_unattended_turn_cannot_delete_task(tmp_path: Path) -> None:

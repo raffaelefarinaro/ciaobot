@@ -653,6 +653,7 @@ def _normalize_task_completion_pass(value: dict[str, Any], state: str) -> dict[s
         "completed_at": str(value.get("completed_at") or "")[:64],
         "resolution": resolution,
         "resolution_sha256": digest,
+        "relayed_by_agent": value.get("relayed_by_agent") is True,
         "archive_path": "",
         "doc_path": "",
         "source_title": "",

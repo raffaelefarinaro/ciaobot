@@ -134,13 +134,53 @@ def test_agent_rows_with_a_reason_are_operator_evidence(tmp_path: Path) -> None:
     _task(tmp_path, kind="complete", actor="agent", via="cli", task_id="t4")
     _task(tmp_path, kind="reject", actor="agent", via="cli", task_id="t5", reason="not a delete")
     section = dr.build_digest(tmp_path, today=TODAY)["task"]
-    assert section["rows"] == 2
+    # Agent-relayed rows are evidence, but they are not the user's own rows.
+    assert section["rows"] == 0
+    assert section["agent_relayed_rows"] == 2
     assert section["agent_counts"] == {"delete": 1, "complete": 1, "reject": 1}
     assert _group(section, "kind:delete:agent")["n"] == 1
     assert _group(section, "kind:complete:agent")["n"] == 1
     # A completion is the user closing a task, so it sits on the keep side.
     assert _group(section, "kind:complete:agent")["accepted"] == 1
     assert _group(section, "kind:delete:agent")["dismissed"] == 1
+    example = _group(section, "kind:complete:agent")["examples"][0]
+    assert example["by"] == "agent"
+    assert example["note"] == "agent-relayed, unverified"
+    cite = section["free_text_reasons"][0]
+    assert cite["by"] == "agent" and cite["note"] == "agent-relayed, unverified"
+
+
+def test_agent_rows_never_set_the_lean_or_count_toward_the_rules_threshold(
+    tmp_path: Path,
+) -> None:
+    for i in range(6):
+        _task(tmp_path, actor="agent", via="cli", task_id=f"a{i}", reason="drop it, per user")
+    section = dr.build_digest(tmp_path, today=TODAY)["task"]
+    group = _group(section, "kind:delete:agent")
+    assert (group["n"], group["user_n"], group["lean"]) == (6, 0, "mixed")
+    assert section["rows"] == 0
+
+    # Four user dismissals decide the lean, whatever the agent rows say.
+    for i in range(4):
+        _task(tmp_path, task_id=f"u{i}", kind="approve", attempt_state="", reason="")
+    for i in range(4):
+        _task(tmp_path, task_id=f"d{i}", reason="")
+    section = dr.build_digest(tmp_path, today=TODAY)["task"]
+    group = _group(section, "kind:delete:agent")
+    assert (group["user_n"], group["lean"]) == (4, "drop")
+    assert section["rows"] == 8
+
+
+def test_free_text_reasons_list_user_reasons_before_agent_ones(tmp_path: Path) -> None:
+    _task(tmp_path, task_id="u1", reason="a duplicate of the Friday one", via="pwa")
+    for i in range(25):
+        _task(
+            tmp_path, actor="agent", via="cli", task_id=f"a{i}", reason=f"agent relayed {i}"
+        )
+    free = dr.build_digest(tmp_path, today=TODAY)["task"]["free_text_reasons"]
+    assert len(free) == 20
+    assert free[0]["by"] == "user" and free[0]["excerpt"] == "a duplicate of the Friday one"
+    assert all(f["by"] == "agent" for f in free[1:])
 
 
 def test_digest_window_drops_old_rows(tmp_path: Path) -> None:

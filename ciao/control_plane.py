@@ -1503,6 +1503,43 @@ class CiaoControlPlane:
         current_turn = str(max(0, int(chat.user_turn_count) - 1))
         return bool(chat.user_turn_unattended.get(current_turn))
 
+    #: Turn origins a person's own message produces. ``retry`` replays one the
+    #: person typed; every other origin in ``TURN_ORIGINS`` is the engine's.
+    _PERSON_TURN_ORIGINS = frozenset({"", "retry"})
+    #: Helper chats the engine runs with nobody in them.
+    _ENGINE_HELPER_KINDS = frozenset({"memory_pass", "update_task"})
+
+    def _person_typed_turn(self, principal: AgentPrincipal) -> bool:
+        """Whether the turn asking right now is one a person typed into this chat.
+
+        Stricter than "not scheduled": a webhook, a delegated-task turn, a task
+        wake or an update task runs with nobody watching, and so do the engine's
+        own helper chats, so none of them may delete or close the user's
+        records. The current turn's origin must be empty (typed) or ``retry``.
+
+        A chat this process cannot see is allowed, as in
+        :meth:`_unattended_turn`.
+        """
+        chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
+        if chat is None:
+            return True
+        # The stored kind, not the normalized helper: normalization fails closed
+        # to an empty helper, which here would read as "not a helper chat".
+        helper = chat.helper if isinstance(chat.helper, dict) else {}
+        if helper.get("kind") in self._ENGINE_HELPER_KINDS:
+            return False
+        current_turn = str(max(0, int(chat.user_turn_count) - 1))
+        origin = str(chat.user_turn_origin.get(current_turn) or "")
+        return origin in self._PERSON_TURN_ORIGINS
+
+    def _require_person_typed_turn(self, principal: AgentPrincipal, what: str) -> None:
+        """Refuse *what* unless the person asked for it in this chat themselves."""
+        if self._unattended_turn(principal) or not self._person_typed_turn(principal):
+            raise ControlPlaneError(
+                "unattended_forbidden",
+                f"{what} requires a turn the user typed: ask them to request it in the chat themselves.",
+            )
+
     @staticmethod
     def _safe_relative(root: Path, relative_path: str, *, must_exist: bool = False) -> Path:
         raw = Path(relative_path)
@@ -3516,9 +3553,11 @@ class CiaoControlPlane:
             current: TaskDocument = self._task_call(
                 workspace, lambda store: store.get(str(task_id or "").strip())
             )
+            if current.record.status == "done":
+                raise ControlPlaneError("invalid_task", "this task is already done")
             if current.record.chat_id is not None or current.record.attempt_id is not None:
                 raise ControlPlaneError(
-                    "task_invalid",
+                    "task_completion_requires_user",
                     "this task is linked to a chat or a delegated run; the user "
                     "approves those on the board, so ask them to.",
                 )
@@ -3554,7 +3593,9 @@ class CiaoControlPlane:
                 workspace, kind="complete", task=task, actor=actor, reason=note
             )
         if verb == "complete" and (resolution or "").strip():
-            self._learn_from_task_completion(workspace, task_id)
+            self._learn_from_task_completion(
+                workspace, task_id, relayed_by_agent=actor == "agent"
+            )
         return task
 
     def workspace_task_complete_reviewed(
@@ -3787,8 +3828,13 @@ class CiaoControlPlane:
         except RuntimeError:
             logger.warning("tasks: the loop closed before %s could run", name)
 
-    def _learn_from_task_completion(self, workspace: str, task_id: str) -> None:
+    def _learn_from_task_completion(
+        self, workspace: str, task_id: str, *, relayed_by_agent: bool = False
+    ) -> None:
         """Queue a learning pass for the resolution a manual completion saved (#1154).
+
+        ``relayed_by_agent`` marks a resolution an agent recorded on the user's
+        behalf: the pass is told it is unverified.
 
         Runs after the completion is written, so nothing here can undo Done: a
         read failure, a refused resolution or a queue failure is logged and the
@@ -3807,7 +3853,9 @@ class CiaoControlPlane:
 
         async def _queue() -> None:
             try:
-                self._enqueue_task_resolution(workspace, task_path, latest)
+                self._enqueue_task_resolution(
+                    workspace, task_path, latest, relayed_by_agent=relayed_by_agent
+                )
             except Exception:  # noqa: BLE001 — the completion already stands
                 logger.exception(
                     "tasks: could not queue a learning pass for task %s", task_id
@@ -3816,7 +3864,12 @@ class CiaoControlPlane:
         self._run_on_engine_loop(f"task-resolution-{task_id[:8]}", _queue)
 
     def _enqueue_task_resolution(
-        self, workspace: str, task_path: str, completion: Completion
+        self,
+        workspace: str,
+        task_path: str,
+        completion: Completion,
+        *,
+        relayed_by_agent: bool = False,
     ) -> str | None:
         """Hand one saved resolution to the memory pass queue (#1154)."""
         queued: str | None = self.pcm.enqueue_task_completion(
@@ -3825,6 +3878,7 @@ class CiaoControlPlane:
             completion_id=completion.id,
             resolution=completion.resolution,
             completed_at=completion.completed_at.isoformat(),
+            relayed_by_agent=relayed_by_agent,
         )
         return queued
 
@@ -5612,10 +5666,7 @@ class CiaoControlPlane:
         and must say why in the user's words: a missing reason is refused before
         anything is read or removed.
         """
-        if self._unattended_turn(principal):
-            raise ControlPlaneError(
-                "unattended_forbidden", "Task deletion requires an attended turn."
-            )
+        self._require_person_typed_turn(principal, "Task deletion")
         if not isinstance(reason, str) or not reason.strip():
             raise ControlPlaneError(
                 "invalid_task",
@@ -5650,10 +5701,8 @@ class CiaoControlPlane:
         user's ``reason``; ``move`` to done stays refused. Completion is
         attended-only, like deletion.
         """
-        if action == "complete" and self._unattended_turn(principal):
-            raise ControlPlaneError(
-                "unattended_forbidden", "Task completion requires an attended turn."
-            )
+        if action == "complete":
+            self._require_person_typed_turn(principal, "Task completion")
         return _ok(
             self.workspace_task_action(
                 self._workspace(principal),

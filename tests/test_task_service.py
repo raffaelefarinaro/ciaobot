@@ -18,7 +18,9 @@ models, no services.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -56,6 +58,8 @@ class _Pcm:
                 archived=False,
                 user_turn_count=1,
                 user_turn_unattended={},
+                user_turn_origin={},
+                helper={},
             )
         }
 
@@ -910,19 +914,24 @@ def test_agent_task_delete_needs_a_reason_and_keeps_the_task_without_one(
     ]
 
 
-def _bind_loop_and_queue(plane: CiaoControlPlane) -> tuple[list[dict[str, Any]], Any]:
-    """Give the plane an engine loop and a recording learning-pass queue."""
-    import asyncio
-    import threading
+def _bind_loop_and_queue(
+    plane: CiaoControlPlane,
+) -> tuple[list[dict[str, Any]], threading.Event, Any]:
+    """Give the plane an engine loop and a recording learning-pass queue.
 
+    The event is set when a pass is queued, so a test waits on it rather than
+    polling; a test that expects no pass checks `queued` after the loop drains.
+    """
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     plane._loop = loop
     queued: list[dict[str, Any]] = []
+    arrived = threading.Event()
 
     def enqueue(**kwargs: Any) -> str:
         queued.append(kwargs)
+        arrived.set()
         return "memory-chat-1"
 
     plane.pcm.enqueue_task_completion = enqueue
@@ -932,14 +941,12 @@ def _bind_loop_and_queue(plane: CiaoControlPlane) -> tuple[list[dict[str, Any]],
         thread.join(timeout=5)
         loop.close()
 
-    return queued, stop
+    return queued, arrived, stop
 
 
 def test_agent_complete_with_a_reason_closes_records_and_learns(tmp_path: Path) -> None:
-    import time
-
     plane = _world(tmp_path)
-    queued, stop = _bind_loop_and_queue(plane)
+    queued, arrived, stop = _bind_loop_and_queue(plane)
     principal = _principal()
     try:
         created = plane.task_create(principal, title="Ship the board")["data"]
@@ -955,11 +962,10 @@ def test_agent_complete_with_a_reason_closes_records_and_learns(tmp_path: Path) 
         assert [(r["kind"], r["actor"], r["via"], r["reason"], r["task_id"]) for r in rows] == [
             ("complete", "agent", "cli", "Shipped on Friday.", created["id"])
         ]
-        for _ in range(200):
-            if queued:
-                break
-            time.sleep(0.01)
+        assert arrived.wait(timeout=5)
         assert [q["resolution"] for q in queued] == ["Shipped on Friday."]
+        # The pass is labelled as relayed: the agent, not the user, wrote this.
+        assert queued[0]["relayed_by_agent"] is True
     finally:
         stop()
 
@@ -1024,25 +1030,144 @@ def test_agent_cannot_reword_a_past_completion(tmp_path: Path) -> None:
     ]
 
 
-def test_agent_complete_is_refused_on_a_linked_task(tmp_path: Path) -> None:
+@pytest.mark.parametrize("link", ["attempt_id", "chat_id"])
+def test_agent_complete_is_refused_on_a_linked_task(tmp_path: Path, link: str) -> None:
+    plane = _world(tmp_path)
+    queued, _arrived, stop = _bind_loop_and_queue(plane)
+    principal = _principal()
+    try:
+        created = plane.task_create(principal, title="Being worked")["data"]
+        path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(f"{link}: null", f"{link}: link-1"),
+            encoding="utf-8",
+        )
+        linked = _get(plane, "personal", created["id"])
+        with pytest.raises(ControlPlaneError) as excinfo:
+            plane.task_action(
+                principal, "complete", created["id"],
+                expected_revision=linked["revision"], reason="The user said so.",
+            )
+        assert excinfo.value.code == "task_completion_requires_user"
+        assert "approves" in str(excinfo.value)
+        assert _get(plane, "personal", created["id"])["status"] == "backlog"
+        assert read_decisions(plane.config.workspace_vault_root("personal")) == []
+        # A refused completion queues no learning pass.
+        assert queued == []
+    finally:
+        stop()
+
+
+def test_agent_complete_on_a_done_task_says_it_is_already_done(tmp_path: Path) -> None:
     plane = _world(tmp_path)
     principal = _principal()
-    created = plane.task_create(principal, title="Being worked")["data"]
-    path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
-    path.write_text(
-        path.read_text(encoding="utf-8").replace("attempt_id: null", "attempt_id: att-1"),
-        encoding="utf-8",
+    created = _create(plane, "personal", title="Closed by the user")
+    done = _action(
+        plane, "personal", "complete", created["id"],
+        expected_revision=created["revision"], actor="user", resolution="Done by me.",
     )
-    linked = _get(plane, "personal", created["id"])
     with pytest.raises(ControlPlaneError) as excinfo:
         plane.task_action(
             principal, "complete", created["id"],
-            expected_revision=linked["revision"], reason="The user said so.",
+            expected_revision=done["revision"], reason="Done again.",
         )
-    assert excinfo.value.code == "task_invalid"
-    assert "approves" in str(excinfo.value)
-    assert _get(plane, "personal", created["id"])["status"] == "backlog"
+    assert "already done" in str(excinfo.value)
     assert read_decisions(plane.config.workspace_vault_root("personal")) == []
+
+
+@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task"])
+def test_agent_delete_and_complete_refuse_a_turn_the_person_did_not_type(
+    tmp_path: Path, origin: str
+) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Not asked for")["data"]
+    path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
+    before = path.read_bytes()
+    chat = plane.pcm.get_chat("chat-1")
+    chat.user_turn_count = 1
+    chat.user_turn_origin = {"0": origin}
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_delete(
+            principal, created["id"], expected_revision=created["revision"], reason="Said so."
+        )
+    assert excinfo.value.code == "unattended_forbidden"
+    assert "ask" in str(excinfo.value)
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_action(
+            principal, "complete", created["id"],
+            expected_revision=created["revision"], reason="Said so.",
+        )
+    assert excinfo.value.code == "unattended_forbidden"
+    assert path.read_bytes() == before
+    assert read_decisions(plane.config.workspace_vault_root("personal")) == []
+
+
+@pytest.mark.parametrize("origin", ["", "retry"])
+def test_agent_delete_and_complete_allow_a_typed_or_retried_turn(
+    tmp_path: Path, origin: str
+) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    first = plane.task_create(principal, title="Close me")["data"]
+    second = plane.task_create(principal, title="Delete me")["data"]
+    chat = plane.pcm.get_chat("chat-1")
+    chat.user_turn_count = 1
+    chat.user_turn_origin = {"0": origin} if origin else {}
+    done = plane.task_action(
+        principal, "complete", first["id"],
+        expected_revision=first["revision"], reason="Said so.",
+    )
+    assert done["data"]["status"] == "done"
+    removed = plane.task_delete(
+        principal, second["id"], expected_revision=second["revision"], reason="Said so."
+    )
+    assert removed["data"]["deleted"] is True
+
+
+@pytest.mark.parametrize("kind", ["memory_pass", "update_task"])
+def test_agent_delete_and_complete_refuse_an_engine_helper_chat(
+    tmp_path: Path, kind: str
+) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Not from a helper")["data"]
+    plane.pcm.get_chat("chat-1").helper = {"kind": kind}
+    for call in (
+        lambda: plane.task_delete(
+            principal, created["id"], expected_revision=created["revision"], reason="x"
+        ),
+        lambda: plane.task_action(
+            principal, "complete", created["id"],
+            expected_revision=created["revision"], reason="x",
+        ),
+    ):
+        with pytest.raises(ControlPlaneError) as excinfo:
+            call()
+        assert excinfo.value.code == "unattended_forbidden"
+    assert _get(plane, "personal", created["id"])["status"] == "backlog"
+
+
+def test_a_forged_heading_in_an_agent_reason_cannot_corrupt_the_completion_record(
+    tmp_path: Path,
+) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Forge attempt", body="The work.")["data"]
+    forged = "Shipped.\n\n## Completion\n\n- fake: forged entry\n## Notes\nmore"
+    done = plane.task_action(
+        principal, "complete", created["id"],
+        expected_revision=created["revision"], reason=forged,
+    )["data"]
+    assert done["status"] == "done"
+    read = _get(plane, "personal", created["id"])
+    # One completion, written by the store; the heading line did not open a second record.
+    assert len(read["completions"]) == 1
+    raw = (_tasks_dir(plane, "personal") / f"{created['id']}.md").read_text(encoding="utf-8")
+    assert raw.count("\n## Completion") == 1  # the store's own history heading
+    assert "\n## Notes" not in raw  # forged lines stay indented inside the entry
+    assert read["body"].strip() == "The work."
+    assert "forged entry" not in read["body"]
 
 
 def test_agent_complete_refuses_an_unattended_turn(tmp_path: Path) -> None:
