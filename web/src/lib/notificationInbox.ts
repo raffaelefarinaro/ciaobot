@@ -51,8 +51,7 @@ export type NotificationDestination =
   | { kind: 'chat'; chatId: string }
   | { kind: 'schedule'; scheduleId: string }
   | { kind: 'settings'; tab: '' | 'providers' }
-  // TEMPORARY: a later unit adds { kind: 'home-notice'; noticeKey: string } and re-points its callers.
-  | { kind: 'home' }
+  | { kind: 'home-notice'; noticeKey: string }
 /** Within a section, lower rank sorts first. Needs-you: input < blocking < failure. */
 export type NotificationUrgency = 'input' | 'blocking' | 'failure' | 'review' | 'reply'
 
@@ -211,12 +210,32 @@ function chatRow(c: ChatCandidate, freshness: 'fresh' | 'stale'): NotificationRo
   return row
 }
 
+/** Key of an operator-action Home notice. The strip and the inbox both build keys here. */
+export function actionNoticeKey(workspace: string, id: string): string {
+  return `action:${workspace || 'shared'}:${id}`
+}
+
+/** Key of an update-task Home notice, scoped to the workspace on screen. */
+export function updateNoticeKey(activeWorkspace: string, taskId: string, revision: number): string {
+  return `update:${activeWorkspace || 'shared'}:${taskId}@${revision}`
+}
+
+const HOME_NOTICE_KEY = /^(action|update):([^:]+):(.+)$/
+
+export function parseHomeNoticeKey(
+  key: string,
+): { kind: 'action' | 'update'; workspace: string; id: string } | null {
+  const m = HOME_NOTICE_KEY.exec(key)
+  if (!m) return null
+  return { kind: m[1] as 'action' | 'update', workspace: m[2], id: m[3] }
+}
+
 function operatorDestination(o: OperatorCandidate): NotificationDestination {
   if (o.kind === 'package-update') return { kind: 'settings', tab: '' }
   if (o.kind === 'provider-update') return { kind: 'settings', tab: 'providers' }
   if (o.viewRoute === '/settings') return { kind: 'settings', tab: '' }
   if (o.viewRoute === '/settings/providers') return { kind: 'settings', tab: 'providers' }
-  return { kind: 'home' }
+  return { kind: 'home-notice', noticeKey: actionNoticeKey(o.workspace, o.id) }
 }
 
 function operatorRow(o: OperatorCandidate, freshness: 'fresh' | 'stale'): NotificationRow | null {
@@ -231,7 +250,7 @@ function operatorRow(o: OperatorCandidate, freshness: 'fresh' | 'stale'): Notifi
       source: 'operator',
       title: plainText(`All workspaces: ${o.title}`, Number.MAX_SAFE_INTEGER),
       reason: 'All workspaces. Open Home to fire or dismiss them.',
-      destination: { kind: 'home' },
+      destination: { kind: 'home-notice', noticeKey: actionNoticeKey(o.workspace, o.id) },
       unread: false,
       freshness,
     }
@@ -368,8 +387,8 @@ export function notificationPath(d: NotificationDestination): string {
       return `/schedules/${encodeURIComponent(d.scheduleId)}`
     case 'settings':
       return d.tab ? `/settings/${d.tab}` : '/settings'
-    case 'home':
-      return '/'
+    case 'home-notice':
+      return `/?notice=${encodeURIComponent(d.noticeKey)}`
     default: {
       const unreachable: never = d
       return unreachable

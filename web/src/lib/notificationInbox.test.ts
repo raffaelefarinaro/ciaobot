@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import {
+  actionNoticeKey,
   notificationAccessibleName,
   notificationBadgeText,
   notificationPath,
   projectNotificationInbox,
   operatorInScope,
+  parseHomeNoticeKey,
   scheduleDisplayName,
   type ChatCandidate,
   type OperatorCandidate,
   type ScheduleCandidate,
   type SourceSnapshot,
+  updateNoticeKey,
 } from './notificationInbox'
 
 function chat(o: Partial<ChatCandidate> & { chatId: string }): ChatCandidate {
@@ -247,15 +250,37 @@ describe('notificationInbox operator and automation sources', () => {
     ['provider-update', '', '/settings/providers'],
     ['other', '/settings', '/settings'],
     ['other', '/settings/providers', '/settings/providers'],
-    ['other', '', '/'],
-    ['other', '/schedules/x', '/'],
-    ['other', 'https://evil', '/'],
-    ['other', '//x', '/'],
-    ['other', '/api/x', '/'],
+    ['other', '', '/?notice=action%3Ashared%3Ax'],
+    ['other', '/schedules/x', '/?notice=action%3Ashared%3Ax'],
+    ['other', 'https://evil', '/?notice=action%3Ashared%3Ax'],
+    ['other', '//x', '/?notice=action%3Ashared%3Ax'],
+    ['other', '/api/x', '/?notice=action%3Ashared%3Ax'],
   ])('operator_destinations %s %s', (kind, viewRoute, path) => {
     const inbox = project3({ operators: [op({ id: 'x', kind, viewRoute })] })
     expect(notificationPath(inbox.rows[0].destination)).toBe(path)
-    if (path === '/') expect(inbox.rows[0].destination).toEqual({ kind: 'home' })
+    if (path.startsWith('/?notice=')) {
+      expect(inbox.rows[0].destination).toEqual({ kind: 'home-notice', noticeKey: 'action:shared:x' })
+    }
+  })
+
+  it('operator_home_notice_uses_the_workspace', () => {
+    const inbox = project3({ operators: [op({ id: 'x', kind: 'other', workspace: 'personal' })] })
+    expect(inbox.rows[0].destination).toEqual({ kind: 'home-notice', noticeKey: 'action:personal:x' })
+  })
+
+  it('notice_key_builders_and_parser', () => {
+    expect(actionNoticeKey('', 'x')).toBe('action:shared:x')
+    expect(actionNoticeKey('personal', 'x')).toBe('action:personal:x')
+    expect(updateNoticeKey('', 't', 2)).toBe('update:shared:t@2')
+    expect(parseHomeNoticeKey(actionNoticeKey('personal', 'x'))).toEqual({ kind: 'action', workspace: 'personal', id: 'x' })
+    expect(parseHomeNoticeKey(updateNoticeKey('work', 't', 2))).toEqual({ kind: 'update', workspace: 'work', id: 't@2' })
+    for (const bad of ['', 'foo:a:b', 'action::x', 'action:ws']) expect(parseHomeNoticeKey(bad)).toBeNull()
+  })
+
+  it('home_notice_path_encodes', () => {
+    expect(notificationPath({ kind: 'home-notice', noticeKey: 'action:shared:a&b#c/d' })).toBe(
+      '/?notice=action%3Ashared%3Aa%26b%23c%2Fd',
+    )
   })
 
   it('operator_reason_strips_markdown', () => {
@@ -286,7 +311,7 @@ describe('notificationInbox operator and automation sources', () => {
       source: 'operator',
       title: 'All workspaces: 2 reminders missed',
       reason: 'All workspaces. Open Home to fire or dismiss them.',
-      destination: { kind: 'home' },
+      destination: { kind: 'home-notice', noticeKey: 'action:shared:missed-schedules' },
     })
   })
 
@@ -413,7 +438,7 @@ describe('notificationInbox operator and automation sources', () => {
     expect(notificationPath({ kind: 'schedule', scheduleId: 'a b' })).toBe('/schedules/a%20b')
     expect(notificationPath({ kind: 'settings', tab: '' })).toBe('/settings')
     expect(notificationPath({ kind: 'settings', tab: 'providers' })).toBe('/settings/providers')
-    expect(notificationPath({ kind: 'home' })).toBe('/')
+    expect(notificationPath({ kind: 'home-notice', noticeKey: 'action:shared:x' })).toBe('/?notice=action%3Ashared%3Ax')
   })
 
   it('sources_report_three_keys_in_order', () => {

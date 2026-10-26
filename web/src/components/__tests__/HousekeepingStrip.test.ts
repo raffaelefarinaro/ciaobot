@@ -2,13 +2,23 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, nextTick } from 'vue'
 import HousekeepingStrip from '../HousekeepingStrip.vue'
 import HomeNoticeReopen from '../HomeNoticeReopen.vue'
-import { resetHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
+import { createMemoryHistory, createRouter } from 'vue-router'
+import { resetHomeNoticeWindows, useHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
+import { api } from '../../lib/api'
+import * as confirmModule from '../../lib/confirm'
+import { actionNoticeKey, updateNoticeKey } from '../../lib/notificationInbox'
+import { readyHealth } from '../../lib/sourceHealth'
+import { useProjectStore } from '../../stores/projects'
 import { useHousekeepingStore } from '../../stores/housekeeping'
-import type { OperatorAction } from '../../lib/types'
+import type { OperatorAction, UpdateTaskRow } from '../../lib/types'
+
+// The reveal request is module-level state shared by every mounted strip, so a
+// strip left mounted by an earlier test would answer a later test's request.
+enableAutoUnmount(afterEach)
 
 function action(overrides: Partial<OperatorAction> = {}): OperatorAction {
   return {
@@ -522,5 +532,230 @@ describe('a provider update tile', () => {
     await nextTick()
 
     expect(wrapper.get('.housekeeping-actions button').classes()).toContain('btn-primary')
+  })
+})
+
+
+function updateTask(overrides: Partial<UpdateTaskRow> = {}): UpdateTaskRow {
+  return {
+    id: 'review-legacy-rows',
+    revision: 1,
+    scope: 'workspace',
+    title: 'Review the rows your old notes left behind',
+    why: 'Rows retired into a folder no surface reads any more.',
+    since_version: '2.1.0',
+    status: 'offered',
+    applicability: 'applicable',
+    applicability_checked_at: '2026-09-01T10:00:00+00:00',
+    offered: true,
+    suppressed: false,
+    chat_id: '',
+    chat_live: false,
+    prompt_digest: '',
+    attempted_fingerprint: '',
+    updated_at: '',
+    ...overrides,
+  }
+}
+
+describe('notice reveal', () => {
+  const Empty = defineComponent({ template: '<div />' })
+  const UNAVAILABLE = 'This notice is no longer available'
+  const scrollIntoView = vi.fn()
+  let pinia: ReturnType<typeof createPinia>
+
+  beforeEach(() => {
+    resetHomeNoticeWindows()
+    pinia = createPinia()
+    setActivePinia(pinia)
+    scrollIntoView.mockReset()
+    Element.prototype.scrollIntoView = scrollIntoView
+    useProjectStore().activeWorkspace = 'personal'
+    const housekeeping = useHousekeepingStore()
+    vi.spyOn(housekeeping, 'init').mockImplementation(() => {})
+    vi.spyOn(housekeeping, 'refresh').mockResolvedValue(undefined)
+    vi.spyOn(housekeeping, 'refreshUpdateTasks').mockResolvedValue(undefined)
+    housekeeping.actionsHealth = readyHealth()
+  })
+
+  async function mountAt(url: string) {
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: Empty }] })
+    await router.push(url)
+    await router.isReady()
+    const wrapper = mount(HousekeepingStrip, { global: { plugins: [pinia, router] }, attachTo: document.body })
+    await flushPromises()
+    return { wrapper, router }
+  }
+
+  function noticeEl(key: string): HTMLElement | undefined {
+    return [...document.querySelectorAll<HTMLElement>('[data-home-notice-window]')].find(el => el.dataset.noticeKey === key)
+  }
+
+  function readyUpdates(rows: UpdateTaskRow[], workspace = 'personal') {
+    const store = useHousekeepingStore()
+    store.updateTasks = rows
+    store.updateTasksWorkspace = workspace
+    store.updateTasksHealth = readyHealth()
+  }
+
+  const q = (key: string) => `/?notice=${encodeURIComponent(key)}`
+
+  it('reveals_and_focuses_a_closed_action_notice', async () => {
+    const key = actionNoticeKey('personal', 'test-action')
+    useHousekeepingStore().actions = [action()]
+    const windows = useHomeNoticeWindows()
+    windows.close(key)
+    const { wrapper, router } = await mountAt(q(key))
+    expect(windows.isClosed(key)).toBe(false)
+    const el = noticeEl(key)!
+    expect(el).toBeTruthy()
+    expect(document.activeElement).toBe(el)
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(router.currentRoute.value.fullPath).toBe('/')
+    expect(wrapper.text()).not.toContain(UNAVAILABLE)
+    wrapper.unmount()
+  })
+
+  it('other_closed_notices_stay_closed', async () => {
+    const a = actionNoticeKey('personal', 'a')
+    const b = actionNoticeKey('personal', 'b')
+    useHousekeepingStore().actions = [action({ id: 'a' }), action({ id: 'b' })]
+    const windows = useHomeNoticeWindows()
+    windows.close(a)
+    windows.close(b)
+    const { wrapper } = await mountAt(q(a))
+    expect(windows.isClosed(a)).toBe(false)
+    expect(windows.isClosed(b)).toBe(true)
+    expect(noticeEl(b)).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('waits_for_source_ready', async () => {
+    const key = actionNoticeKey('personal', 'test-action')
+    const store = useHousekeepingStore()
+    store.actionsHealth = { ...readyHealth(), status: 'checking' }
+    store.actions = []
+    const windows = useHomeNoticeWindows()
+    const { wrapper } = await mountAt(q(key))
+    expect(wrapper.text()).not.toContain(UNAVAILABLE)
+    expect(windows.pendingReveal.value).toBe(key)
+    store.actions = [action()]
+    store.actionsHealth = readyHealth()
+    await flushPromises()
+    expect(windows.pendingReveal.value).toBe('')
+    expect(document.activeElement).toBe(noticeEl(key))
+    expect(wrapper.text()).not.toContain(UNAVAILABLE)
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['unknown action id', actionNoticeKey('personal', 'nope'), []],
+    ['wrong-workspace action', actionNoticeKey('work', 'x'), []],
+    ['malformed key', 'garbage', []],
+    ['dismissed update task', updateNoticeKey('personal', 'review-legacy-rows', 1), [updateTask({ status: 'dismissed' })]],
+    ['completed update task', updateNoticeKey('personal', 'review-legacy-rows', 1), [updateTask({ status: 'completed' })]],
+    ['not applicable update offer', updateNoticeKey('personal', 'review-legacy-rows', 1), [updateTask({ applicability: 'not_applicable' })]],
+  ])('unavailable_for_missing_keys %s', async (_name, key, tasks) => {
+    const store = useHousekeepingStore()
+    store.actions = [action({ id: 'x', workspace: 'personal' }), action({ id: 'other' })]
+    readyUpdates(tasks as UpdateTaskRow[])
+    const windows = useHomeNoticeWindows()
+    const closed = actionNoticeKey('personal', 'other')
+    windows.close(closed)
+    const { wrapper } = await mountAt(q(key as string))
+    expect(wrapper.get('.home-notice-unavailable').text()).toBe(UNAVAILABLE)
+    expect(windows.isClosed(closed)).toBe(true)
+    expect(windows.pendingReveal.value).toBe('')
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(document.body)
+    wrapper.unmount()
+  })
+
+  it('previous_workspace_update_key_cannot_target_new_workspace', async () => {
+    useProjectStore().activeWorkspace = 'work'
+    readyUpdates([updateTask()], 'work')
+    const windows = useHomeNoticeWindows()
+    const workKey = updateNoticeKey('work', 'review-legacy-rows', 1)
+    windows.close(workKey)
+    const { wrapper } = await mountAt(q(updateNoticeKey('personal', 'review-legacy-rows', 1)))
+    expect(wrapper.get('.home-notice-unavailable').text()).toBe(UNAVAILABLE)
+    expect(windows.isClosed(workKey)).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('reveals_update_task_notice', async () => {
+    const key = updateNoticeKey('personal', 'review-legacy-rows', 1)
+    readyUpdates([updateTask()])
+    const windows = useHomeNoticeWindows()
+    windows.close(key)
+    const { wrapper } = await mountAt(q(key))
+    expect(windows.isClosed(key)).toBe(false)
+    expect(document.activeElement).toBe(noticeEl(key))
+    wrapper.unmount()
+  })
+
+  it('waits_for_update_tasks_source', async () => {
+    const key = updateNoticeKey('personal', 'review-legacy-rows', 1)
+    const store = useHousekeepingStore()
+    const refreshUpdates = vi.mocked(store.refreshUpdateTasks)
+    const { wrapper } = await mountAt(q(key))
+    expect(wrapper.text()).not.toContain(UNAVAILABLE)
+    expect(refreshUpdates).toHaveBeenCalledTimes(1)
+    expect(refreshUpdates).toHaveBeenCalledWith('personal')
+    readyUpdates([updateTask()])
+    await flushPromises()
+    expect(refreshUpdates).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(noticeEl(key))
+    wrapper.unmount()
+  })
+
+  it('never_acts', async () => {
+    const key = actionNoticeKey('personal', 'test-action')
+    const store = useHousekeepingStore()
+    store.actions = [action({ run_label: 'Run', dismiss_label: 'Later', chat_prompt: 'x' })]
+    readyUpdates([updateTask()])
+    const spies = [
+      vi.spyOn(store, 'run'),
+      vi.spyOn(store, 'dismiss'),
+      vi.spyOn(store, 'startUpdateTask'),
+      vi.spyOn(store, 'dismissUpdateTask'),
+      vi.spyOn(api, 'post'),
+      vi.spyOn(confirmModule, 'askConfirm'),
+    ]
+    const { wrapper, router } = await mountAt(q(key))
+    const push = vi.spyOn(router, 'push')
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    expect(push).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/')
+    wrapper.unmount()
+  })
+
+  it('first_value_of_repeated_or_empty_query', async () => {
+    const a = actionNoticeKey('personal', 'a')
+    useHousekeepingStore().actions = [action({ id: 'a' })]
+    const windows = useHomeNoticeWindows()
+    const repeated = await mountAt(`/?notice=${encodeURIComponent(a)}&notice=b&keep=1#frag`)
+    expect(document.activeElement).toBe(noticeEl(a))
+    expect(repeated.router.currentRoute.value.fullPath).toBe('/?keep=1#frag')
+    repeated.wrapper.unmount()
+
+    const empty = await mountAt('/?notice=&keep=2')
+    expect(windows.pendingReveal.value).toBe('')
+    expect(empty.wrapper.text()).not.toContain(UNAVAILABLE)
+    expect(empty.router.currentRoute.value.fullPath).toBe('/?keep=2')
+    empty.wrapper.unmount()
+  })
+
+  it('data_notice_key_matches_lib_builder', async () => {
+    useHousekeepingStore().actions = [action({ id: 'a' }), action({ id: 'g', workspace: '' })]
+    readyUpdates([updateTask()])
+    const { wrapper } = await mountAt('/')
+    const keys = [...document.querySelectorAll<HTMLElement>('[data-home-notice-window]')].map(el => el.dataset.noticeKey)
+    expect(keys).toEqual(expect.arrayContaining([
+      actionNoticeKey('personal', 'a'),
+      actionNoticeKey('', 'g'),
+      updateNoticeKey('personal', 'review-legacy-rows', 1),
+    ]))
+    wrapper.unmount()
   })
 })
