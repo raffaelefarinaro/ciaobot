@@ -131,7 +131,7 @@ test.describe('placing cards with the mouse', () => {
       status: 'in_progress',
       placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
     })
-    expect(await titles(page, 'To do')).toEqual(['Book the venue', 'Send the invites'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Send the invites'])
   })
 
   test('Escape cancels a drag without a request', async ({ page }) => {
@@ -148,6 +148,35 @@ test.describe('placing cards with the mouse', () => {
     await expect(page.locator('.drag-overlay')).toHaveCount(0)
     expect(sent).toHaveLength(0)
     expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+  })
+})
+
+test.describe('the grip on a fine pointer', () => {
+  test.use({ viewport: { width: 1440, height: 900 } })
+
+  test('is hidden at rest, shown on hover and focus, and the hovered card is not dimmed', async ({ page }) => {
+    await open(page, 'task-reorder-hover')
+    const card = page.locator('.task-card', { hasText: 'Plan the offsite' })
+    const opacity = (loc: Locator) => loc.evaluate(el => getComputedStyle(el).opacity)
+    await page.mouse.move(0, 0)
+    await expect.poll(() => opacity(card.locator('.drag-grip'))).toBe('0')
+
+    await card.hover()
+    await expect.poll(() => opacity(card.locator('.drag-grip'))).toBe('1')
+    // The card and every ancestor up to the board draw at full strength.
+    const dimmed = await card.evaluate(el => {
+      const out: string[] = []
+      for (let e: Element | null = el; e && !e.classList.contains('task-lanes'); e = e.parentElement) {
+        if (getComputedStyle(e).opacity !== '1') out.push(`${e.className}: ${getComputedStyle(e).opacity}`)
+      }
+      return out
+    })
+    expect(dimmed).toEqual([])
+
+    await page.mouse.move(0, 0)
+    await expect.poll(() => opacity(card.locator('.drag-grip'))).toBe('0')
+    await card.locator('.task-open').focus()
+    await expect.poll(() => opacity(card.locator('.drag-grip'))).toBe('1')
   })
 })
 
