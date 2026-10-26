@@ -17,22 +17,13 @@
       class="chat-signal chat-signal--memory"
       title="Memory pass needs you"
       aria-label="Memory pass needs you"
-    >✦</span>
+    ><ActivityGlyph kind="run-failed" /></span>
     <span
       v-else-if="primarySignal === 'working'"
       class="chat-signal chat-signal--working"
-      title="Working"
-      aria-label="Working"
+      :title="workingTitle"
+      :aria-label="workingTitle"
     ><ActivityGlyph kind="working" /></span>
-    <span
-      v-else-if="primarySignal === 'agents'"
-      class="chat-signal chat-signal--agents"
-      :title="agentsTitle"
-      :aria-label="agentsTitle"
-    >
-      <ActivityGlyph kind="agent" />
-      <span v-if="density === 'card' && agentCount > 1" class="chat-signal-count">{{ agentCount }}</span>
-    </span>
     <span
       v-else-if="primarySignal === 'retry'"
       class="chat-signal chat-signal--retry"
@@ -40,7 +31,7 @@
       aria-label="Retry scheduled"
     >↻ retry</span>
     <!-- Not on the ladder: a run can outlive everything else on the row (a dev
-         server goes for hours), so it shows beside needs-you, working and agents
+         server goes for hours), so it shows beside needs-you and working
          instead of hiding behind them. -->
     <span
       v-if="runCount > 0"
@@ -105,9 +96,12 @@ const agentCount = computed(() => Math.max(
   Number(store.backgroundAgents[props.chatId] || 0),
   store.runningSubagentsFor(props.chatId).filter(sub => !isShellRow(sub)).length,
 ))
-const agentsTitle = computed(() =>
-  agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`,
-)
+// Subagents are the chat's work too: they show as working, not a mark of
+// their own, and only the label says who is doing it.
+const workingTitle = computed(() => {
+  if (working.value || agentCount.value === 0) return 'Working'
+  return agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`
+})
 // Tracked background command runs. One run is named, the way the composer's
 // run line names it, so hovering the row says what is going.
 const runs = computed(() => store.backgroundRuns[props.chatId] || [])
@@ -127,11 +121,10 @@ const memoryAttention = computed(() => store.memoryPassNeedsAttention(props.chat
 
 // Unread is a separate static notification eye. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'memory' | 'working' | 'agents' | 'retry' | null>(() => {
+const primarySignal = computed<'needs' | 'memory' | 'working' | 'retry' | null>(() => {
   if (needsInput.value) return 'needs'
   if (memoryAttention.value) return 'memory'
-  if (working.value) return 'working'
-  if (agentCount.value > 0) return 'agents'
+  if (working.value || agentCount.value > 0) return 'working'
   if (props.density === 'row' && retryPending.value) return 'retry'
   return null
 })
@@ -171,9 +164,9 @@ const intervalTitle = computed(() => {
 }
 
 .chat-signal--needs {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
   background: var(--accent);
 }
 
@@ -214,24 +207,19 @@ const intervalTitle = computed(() => {
   white-space: nowrap;
 }
 
-/* Working, agents and runs draw ActivityGlyph; the gap keeps a count clear of it. */
+/* Working and runs draw ActivityGlyph; the gap keeps a count clear of it. */
 .chat-signal--working,
-.chat-signal--agents,
 .chat-signal--runs {
   gap: var(--space-1);
 }
 
-/* Only shown for more than one agent or run, where the number is the point. */
+/* Only shown for more than one run, where the number is the point. */
 .chat-signal-count {
   color: var(--accent);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-weight: 700;
 }
-
-/* A run's count takes the accent like its diamond; the diamond's shape is what
-   says "run". */
-.chat-signal--runs .chat-signal-count { color: var(--accent); }
 
 /* A small mono tag, so it no longer shares the interval's ↻ glyph. */
 .chat-signal--retry {
@@ -243,14 +231,6 @@ const intervalTitle = computed(() => {
   padding: 0 5px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-xs);
-}
-
-/* A pass that stopped and needs the owner. The accent like every status mark;
-   the ✦ shape is what separates it from the working grid. */
-.chat-signal--memory {
-  color: var(--accent);
-  font-size: var(--text-sm);
-  line-height: 1;
 }
 
 /* An attribute of the chat, not a state, so it stays muted. */
