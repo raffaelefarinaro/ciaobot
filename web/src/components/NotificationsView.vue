@@ -1,12 +1,48 @@
 <script setup lang="ts">
+import { nextTick, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { useNotificationInboxStore } from '../stores/notificationInbox'
 import { notificationPath } from '../lib/notificationInbox'
+import type { NotificationRow } from '../lib/notificationInbox'
 import { formatRelative } from '../lib/time'
 import PaneHeader from './PaneHeader.vue'
 
 const emit = defineEmits<{ (e: 'open-sidebar'): void }>()
 
 const inbox = useNotificationInboxStore()
+const router = useRouter()
+
+const unavailable = ref(false)
+const opening = ref('')
+const noticeEl = ref<HTMLElement | null>(null)
+
+const EXACT_TARGETS = new Set(['chat', 'task', 'schedule'])
+
+// A row for one exact chat, task or schedule is re-read before it is opened, so
+// a target that vanished since the projection never opens a dead route. The read
+// is the owner's own coalesced refresh: no POST, no markRead. A failed read keeps
+// the row projected, so the click navigates and the destination reports its own
+// error; "gone" is only ever claimed from a successful read.
+async function open(row: NotificationRow, ev: MouseEvent) {
+  if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return
+  if (!EXACT_TARGETS.has(row.destination.kind)) return
+  ev.preventDefault()
+  if (opening.value) return
+  opening.value = row.key
+  unavailable.value = false
+  try {
+    await inbox.refresh([row.source])
+    if (inbox.rows.some((r) => r.key === row.key)) {
+      await router.push(notificationPath(row.destination))
+    } else {
+      unavailable.value = true
+      await nextTick()
+      noticeEl.value?.focus()
+    }
+  } finally {
+    opening.value = ''
+  }
+}
 </script>
 
 <template>
@@ -15,6 +51,15 @@ const inbox = useNotificationInboxStore()
 
     <div class="page-grid page-grid--single">
       <div class="page-main">
+        <p
+          v-if="unavailable"
+          ref="noticeEl"
+          tabindex="-1"
+          role="status"
+          data-testid="inbox-unavailable"
+          class="notif-unavailable"
+        >That item is no longer available. The list has been refreshed.</p>
+
         <p role="status" data-testid="inbox-summary" class="notif-summary">
           <template v-if="inbox.count > 0">
             {{ inbox.count }} {{ inbox.count === 1 ? 'item needs' : 'items need' }} a look.<template
@@ -66,6 +111,7 @@ const inbox = useNotificationInboxStore()
                   class="notif-row"
                   :class="{ 'notif-row--attention': row.section === 'needsYou' }"
                   :to="notificationPath(row.destination)"
+                  @click.capture="open(row, $event)"
                 >
                   <span class="notif-title">{{ row.title }}</span>
                   <span class="notif-reason">{{ row.reason }}</span>
@@ -97,6 +143,20 @@ const inbox = useNotificationInboxStore()
   margin: 0 0 12px;
   color: var(--fg2);
   font-size: var(--text-sm);
+}
+
+.notif-unavailable {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-xs);
+  color: var(--warning);
+  font-size: var(--text-sm);
+}
+
+.notif-unavailable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .notif-sources {

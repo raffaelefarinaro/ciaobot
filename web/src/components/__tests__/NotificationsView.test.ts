@@ -33,6 +33,8 @@ const checking: SourceHealth = { status: 'checking', lastSuccessAt: '', error: '
 interface Opts {
   chats?: Record<string, unknown>[]
   health?: SourceHealth
+  /** What `/api/chats?active_only=1` answers; defaults to `chats`. 'reject' fails the read. */
+  chatsRead?: Record<string, unknown>[] | 'reject'
 }
 
 function chat(id: string, overrides: Record<string, unknown> = {}) {
@@ -67,10 +69,22 @@ async function mountView(opts: Opts = {}) {
   useProposalsStore().loaded = true
   useVaultReviewStore().loadedWorkspace = 'personal'
 
+  vi.mocked(api.get).mockReset()
+  vi.mocked(api.get).mockImplementation(async (url: string) => {
+    if (url.startsWith('/api/chats')) {
+      if (opts.chatsRead === 'reject') throw new Error('offline')
+      return opts.chatsRead ?? opts.chats ?? []
+    }
+    if (url.startsWith('/api/tasks')) return { workspace: 'personal', tasks: [] }
+    return []
+  })
+
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/chat/:chatId', component: Empty },
+      { path: '/tasks/:taskId', component: Empty },
+      { path: '/schedules/:scheduleId', component: Empty },
       { path: '/', component: Empty },
     ],
   })
@@ -234,5 +248,90 @@ describe('NotificationsView', () => {
   it('row_controls_are_44px', () => {
     expect(source).toMatch(/\.notif-row\s*{[^}]*min-height: var\(--touch\)/)
     expect(source).toMatch(/\.notif-retry\s*{[^}]*min-height: var\(--touch\)/)
+  })
+})
+
+describe('opening a row', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.post).mockReset()
+    vi.mocked(api.patch).mockReset()
+    vi.mocked(api.del).mockReset()
+  })
+
+  const UNREAD = { last_activity_at: '2026-10-26T09:30:00Z' }
+
+  it('gone_chat_shows_unavailable_and_does_not_navigate', async () => {
+    const { wrapper, router, projects } = await mountView({ chats: [chat('a', UNREAD)], chatsRead: [] })
+    const markRead = vi.spyOn(projects, 'markRead')
+    await wrapper.find('.notif-row').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.fullPath).toBe('/')
+    expect(wrapper.find('[data-testid="inbox-unavailable"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="row-chat:a"]').exists()).toBe(false)
+    expect(api.post).not.toHaveBeenCalled()
+    expect(markRead).not.toHaveBeenCalled()
+  })
+
+  it('present_chat_navigates_after_a_refresh', async () => {
+    const { wrapper, router } = await mountView({ chats: [chat('a', UNREAD)] })
+    await wrapper.find('.notif-row').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(api.get)).toHaveBeenCalledWith('/api/chats?active_only=1')
+    expect(router.currentRoute.value.fullPath).toBe('/chat/a')
+    expect(wrapper.find('[data-testid="inbox-unavailable"]').exists()).toBe(false)
+  })
+
+  it('modified_click_is_not_intercepted', async () => {
+    const { wrapper } = await mountView({ chats: [chat('a', UNREAD)] })
+    vi.mocked(api.get).mockClear()
+    const ev = new MouseEvent('click', { ctrlKey: true, button: 0, bubbles: true, cancelable: true })
+    wrapper.find('.notif-row').element.dispatchEvent(ev)
+    await flushPromises()
+    expect(api.get).not.toHaveBeenCalled()
+    expect(ev.defaultPrevented).toBe(false)
+  })
+
+  it('non_exact_destination_navigates_directly', async () => {
+    setActivePinia(createPinia())
+    const housekeeping = useHousekeepingStore()
+    const { wrapper, router } = await mountView()
+    housekeeping.actions = [{
+      id: 'c1', kind: 'setup-check', severity: 20, title: 'Check the backup remote',
+      detail: 'Not set.', glyph: '', workspace: '', run_label: 'Run check', chat_label: '',
+      chat_prompt: '', view_label: '', view_route: '', blocking: false,
+    }] as never
+    await flushPromises()
+    const inbox = useNotificationInboxStore()
+    const refresh = vi.spyOn(inbox, 'refresh')
+    const link = wrapper.find('[data-testid="row-operator:shared:c1"] a')
+    expect(link.exists()).toBe(true)
+    vi.mocked(api.get).mockClear()
+    await link.trigger('click')
+    await flushPromises()
+    expect(refresh).not.toHaveBeenCalled()
+    expect(api.get).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(router.currentRoute.value.query.notice).toBe('action:shared:c1')
+  })
+
+  it('failed_refresh_still_navigates', async () => {
+    const { wrapper, router } = await mountView({ chats: [chat('a', UNREAD)], chatsRead: 'reject' })
+    await wrapper.find('.notif-row').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="inbox-unavailable"]').exists()).toBe(false)
+    expect(router.currentRoute.value.fullPath).toBe('/chat/a')
+  })
+
+  it('double_click_refreshes_once', async () => {
+    const { wrapper, router } = await mountView({ chats: [chat('a', UNREAD)] })
+    const inbox = useNotificationInboxStore()
+    const refresh = vi.spyOn(inbox, 'refresh')
+    const link = wrapper.find('.notif-row')
+    await link.trigger('click')
+    await link.trigger('click')
+    await flushPromises()
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(router.currentRoute.value.fullPath).toBe('/chat/a')
   })
 })

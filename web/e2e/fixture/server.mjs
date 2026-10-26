@@ -15,6 +15,10 @@
  *   POST /__fixture__/update-tasks                   give this session update tasks
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
  *   POST /__fixture__/terminal-offer { chat_id, command }  offer a suggested command
+ *   POST /__fixture__/inbox     { reset?, chats?, removeChats?, tasks?, schedules?,
+ *                                 removeSchedules?, actions?, events? }  move what the
+ *                               notification inbox reads, and push events frames
+ *   GET  /__fixture__/writes                         every non-GET /api/ request so far
  *
  * Workspace order is per session too: POST /api/workspaces/reorder stores a
  * permutation of the workspace names and GET /api/workspaces answers in it.
@@ -212,7 +216,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [] }
     sessions.set(id, state)
   }
   return state
@@ -250,14 +254,28 @@ function chatWithOffer(state, chat) {
   return { ...chat, terminal_offer: offerFor(state, chat.chat_id) }
 }
 
+/** The chats this session still has, with the inbox spec's patches merged in. */
+function liveChats(state) {
+  return CHATS
+    .filter(c => !state.removedChats.has(c.chat_id))
+    .map(c => ({ ...c, ...state.chatPatches.get(c.chat_id) }))
+}
+
+/** The schedules this session still has, with the inbox spec's patches merged in. */
+function liveSchedules(state) {
+  return SCHEDULES
+    .filter(s => !state.removedSchedules.has(s.schedule_id))
+    .map(s => ({ ...s, ...state.schedulePatches.get(s.schedule_id) }))
+}
+
 /** The chat list, with this session's offers on the rows. */
 function chatsWithOffers(state) {
-  return CHATS.map(chat => chatWithOffer(state, chat))
+  return liveChats(state).map(chat => chatWithOffer(state, chat))
 }
 
 /** One chat's row, with this session's offer on it. */
 function chatDetail(state, chatId) {
-  const chat = CHATS.find(c => c.chat_id === chatId)
+  const chat = liveChats(state).find(c => c.chat_id === chatId)
   if (!chat) return {}
   return chatWithOffer(state, chat)
 }
@@ -458,10 +476,15 @@ const GET_ROUTES = {
   // The chat list carries this session's suggested commands: a chat holds the
   // command the assistant suggested for it, or none.
   '/api/chats': (req) => chatsWithOffers(sessionOf(req)),
-  '/api/schedules': () => SCHEDULES,
+  '/api/schedules': (req) => liveSchedules(sessionOf(req)),
   '/api/subagents/running': () => ({ chats: {} }),
-  '/api/housekeeping': () => ({ actions: [] }),
-  '/api/tasks': () => ({ workspace: WORKSPACES[0].name, tasks: [TASK] }),
+  '/api/housekeeping': (req) => ({ actions: sessionOf(req).actions ?? [] }),
+  '/api/tasks': (req, url) => {
+    const state = sessionOf(req)
+    if (!state.tasksByWorkspace) return { workspace: WORKSPACES[0].name, tasks: [TASK] }
+    const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
+    return { workspace, tasks: state.tasksByWorkspace[workspace] ?? [] }
+  },
   // "After this update" is a second, per-workspace question, so it carries a
   // query string and cannot live in the exact-path table. A spec that needs the
   // section measured on screen opts in through POST /__fixture__/update-tasks;
@@ -746,6 +769,39 @@ const server = http.createServer(async (req, res) => {
       state.sockets.clear()
       return sendJson(res, { ok: true, dropped })
     }
+    if (pathname === '/__fixture__/inbox') {
+      // Move what the notification inbox reads, per session, and push events
+      // frames to every socket of the session: contexts that share one
+      // `e2e_session` cookie are the devices of one install.
+      const body = await readBody(req)
+      if (body?.reset) {
+        state.chatPatches.clear()
+        state.removedChats.clear()
+        state.tasksByWorkspace = null
+        state.schedulePatches.clear()
+        state.removedSchedules.clear()
+        state.actions = null
+      }
+      for (const [id, patch] of Object.entries(body?.chats ?? {})) {
+        state.chatPatches.set(id, { ...state.chatPatches.get(id), ...patch })
+      }
+      for (const id of body?.removeChats ?? []) state.removedChats.add(id)
+      for (const [workspace, rows] of Object.entries(body?.tasks ?? {})) {
+        state.tasksByWorkspace = { ...state.tasksByWorkspace, [workspace]: rows }
+      }
+      for (const [id, patch] of Object.entries(body?.schedules ?? {})) {
+        state.schedulePatches.set(id, { ...state.schedulePatches.get(id), ...patch })
+      }
+      for (const id of body?.removeSchedules ?? []) state.removedSchedules.add(id)
+      if (Array.isArray(body?.actions)) state.actions = body.actions
+      for (const frame of body?.events ?? []) {
+        for (const socket of state.sockets) socket.send(frame)
+      }
+      return sendJson(res, { ok: true, sockets: state.sockets.size })
+    }
+    if (pathname === '/__fixture__/writes') {
+      return sendJson(res, { writes: state.writes })
+    }
     if (pathname === '/__fixture__/ws-count') {
       return sendJson(res, { connections: state.connections, open: state.sockets.size })
     }
@@ -851,6 +907,19 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, handler ? handler(req, url) : {})
     }
     const body = await readBody(req)
+    const writer = sessionOf(req)
+    writer.writes.push({ method: req.method, path: pathname })
+    // Reading a chat: stamp it read and tell every device of the install.
+    const readMatch = req.method === 'POST' ? /^\/api\/chats\/([^/]+)\/read$/.exec(pathname) : null
+    if (readMatch) {
+      const chatId = decodeURIComponent(readMatch[1])
+      const chat = liveChats(writer).find(c => c.chat_id === chatId)
+      const now = new Date().toISOString()
+      const lastReadAt = chat && chat.last_activity_at > now ? chat.last_activity_at : now
+      writer.chatPatches.set(chatId, { ...writer.chatPatches.get(chatId), last_read_at: lastReadAt })
+      for (const socket of writer.sockets) socket.send({ type: 'chat_read', chat_id: chatId, last_read_at: lastReadAt })
+      return sendJson(res, { ok: true })
+    }
     // The dismissal of a suggested command: exactly `{terminal_offer:{expected_id}}`,
     // and only a PATCH carries one. Every other write keeps the behaviour it
     // had.

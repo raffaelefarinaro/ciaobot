@@ -1,4 +1,4 @@
-import { expect, type Page } from '@playwright/test'
+import { expect, type Browser, type BrowserContextOptions, type Page } from '@playwright/test'
 
 /**
  * Give this browser context its own slice of the fixture's mutable state, so a
@@ -104,4 +104,60 @@ export async function quiesce(page: Page, frames = 5): Promise<void> {
     w.__quiet.sig = sig
     return w.__quiet.n >= need
   }, frames, { polling: 'raf', timeout: 0 })
+}
+
+/** The notifications link in the expanded sidebar nav. */
+export const BELL = '.nav-links a[href="/notifications"]'
+/** The same link in the collapsed rail. */
+export const RAIL_BELL = 'a.sidebar-rail-bell'
+/** One inbox row. */
+export const ROWS = '.notif-row'
+
+/** What `POST /__fixture__/inbox` accepts; see the header of `fixture/server.mjs`. */
+export interface InboxSeed {
+  reset?: boolean
+  chats?: Record<string, Record<string, unknown>>
+  removeChats?: string[]
+  tasks?: Record<string, unknown[]>
+  schedules?: Record<string, Record<string, unknown>>
+  removeSchedules?: string[]
+  actions?: unknown[]
+  events?: unknown[]
+}
+
+/**
+ * Move what the notification inbox reads, and push any `events` frames to every
+ * socket of this session. `page.request` shares the context's cookie jar, so
+ * `isolate()` must have run first.
+ */
+export async function seedInbox(page: Page, seed: InboxSeed): Promise<void> {
+  const res = await page.request.post('/__fixture__/inbox', { data: seed })
+  expect(res.ok()).toBe(true)
+}
+
+/** Every non-GET `/api/` request this session has made, in order. */
+export async function fixtureWrites(page: Page): Promise<Array<{ method: string; path: string }>> {
+  const res = await page.request.get('/__fixture__/writes')
+  expect(res.ok()).toBe(true)
+  return (await res.json()).writes
+}
+
+/** The count a bell announces, from its accessible name: 0 for "none". */
+export async function bellCount(page: Page, selector = BELL): Promise<number> {
+  const label = (await page.locator(selector).first().getAttribute('aria-label')) ?? ''
+  const match = /Notifications, (\d+) items?/.exec(label)
+  if (match) return Number(match[1])
+  if (/none/.test(label)) return 0
+  throw new Error(`unrecognised bell label: ${label}`)
+}
+
+/**
+ * A second device of the same install: another browser context carrying the
+ * same fixture session id, so server-side events reach both.
+ */
+export async function secondDevice(browser: Browser, session: string, opts?: BrowserContextOptions): Promise<Page> {
+  const context = await browser.newContext(opts)
+  const page = await context.newPage()
+  await isolate(page, session)
+  return page
 }
