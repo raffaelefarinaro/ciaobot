@@ -69,7 +69,7 @@ web/
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /tasks,
                            /memory, /notifications, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
-                           CommandPaletteModal, FileViewerModal, and WebhookTriggers)
+                           CommandPaletteModal, FileViewerModal, NotificationsView (the inbox page), HomeNoticeWindow, and WebhookTriggers)
     components/*.css      stylesheets two panes share, each pulled in with
                            `<style scoped src>` (overviewSections.css, chatTrace.css,
                            titleShimmer.css)
@@ -95,15 +95,15 @@ web/
                            try/catch). The tag table is static data (`TAG_ROWS`), labelled through
                            `kindLabel`, and is cross-checked against the nightly and memory-pass prompts
                            in `ciao/stock/skills/ciao-memory/references/`
-    stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer, itemPeek), and store
+    stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer, itemPeek, notificationInbox), and store
                            modules (chatAnnotations) — see the ownership boundary below
                             `onboarding` owns lifecycle progress reads and revision-checked writes; onboarding
                             stages report their state to the presentation shell and never mutate progress directly.
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
                           useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices,
-                          useGwsAccounts)
-    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, etc.) — no Vue imports
+                          useGwsAccounts, useHomeNoticeWindows)
+    lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, notificationInbox, sourceHealth, updateTasks, etc.) — no Vue imports
 ```
 
 ## iOS PWA gotchas
@@ -540,6 +540,8 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - New PWA actions (state-changing routes) must be documented in `../PWA_API.md` → Agent recipes, or whitelisted in `../tests/test_pwa_api_docs.py`.
 - **The embedded terminal screen** (`lib/terminalRenderer.ts`) is a Vue-free primitive that owns one physical xterm bound to one session. The rules it keeps, and why: the session id is fixed at construction and there is no way to rebind it, because a screen that showed two sessions would be two histories at once; xterm's options object never leaves the module, so input is switched only by `setInputEnabled(boolean)` and starts off — a screen nobody has claimed sends nothing; a write is acknowledged only from xterm's own write callback, and the number it carries is the absolute end offset of the bytes just parsed, so a resume can use it and nothing else; a write that is still queued or in flight when the screen is disposed is **rejected, never resolved**, so a disposal never advances an acknowledged offset and the bytes come back on the next replay; the theme is read from the app's own tokens and resolved to the `rgb()`/`rgba()` values xterm can parse, and a `color-mix()` token is refused rather than passed on; one ResizeObserver, owned by the renderer, measures the screen and is disconnected on dispose. xterm and its fit addon are imported dynamically, so neither enters the bundle of a page that shows no terminal — Home's payload is unchanged by the primitive existing. The pane that shows a screen is not in this repository yet.
 
+- **The notification inbox is a derived view, not a source of truth.** `/notifications` (`components/NotificationsView.vue`) projects six sources, keyed `chats`, `operator`, `automations`, `proposals`, `revisit` and `updateTasks`. `chats` is the `projects` chat predicates plus `taskSignals` board review, and carries board-result and memory-insight rows; `operator` is `housekeeping.actions`, package and provider updates included, with `github-star` excluded; `automations` is `tasks.schedules` through `scheduleInWorkspace` and `scheduleNeedsAttention`; `proposals` and `revisit` (`vaultReview`) are one aggregate row each; `updateTasks` is `housekeeping.updateTasks` through the shared `lib/updateTasks.ts` predicate that Home's strip also uses. `stores/notificationInbox.ts` only adapts those owners and tracks health, and `lib/notificationInbox.ts` is the pure projection. The count is distinct rows, not messages: a chat that needs the user and is unread is one *Needs you* row with an unread marker, a board result owns its review row, and an automation incident suppresses its linked failed chat. `99+` is visual only; the accessible name carries the full number. Reading is not resolving: opening the inbox marks nothing read, opening a chat clears unread through the existing `chat_read` lifecycle, and a pending question or permission stays a row. There is no dismiss, snooze or mark-all-read; resolve at the source. Exact links go to `/chat/<id>`, `/tasks/<id>`, `/schedules/<id>`, `/memory/review?show=suggested|revisit`, `/settings` or `/settings/providers`, and to `/?notice=<key>` for other operator notices and update tasks. A chat, task or automation whose target has gone re-reads, shows *That item is no longer available* and navigates nowhere. Freshness is per source (`checking`, `ready`, `stale`, `unavailable`); the worst one is the overall status, and an empty list is all clear only when every source is `ready`. Retry calls the owners' read methods only. `init()` runs from `ChatLayout` after bootstrap and `dispose()` on unmount; it installs one focus/visibility listener with a 5-second throttle and a scoped set of watchers, has no timer, and rejects late work with a generation token after a workspace switch. A new source gets a key in `INBOX_SOURCES` and a builder in the store's snapshot table, is seeded in every all-clear test fixture, and never gets a mutation path.
+
 ## Testing
 
 - `npm test` runs vitest. This is where almost every test belongs.
@@ -570,6 +572,7 @@ establish:
 | `note-verification.spec.ts` | That a review row which defers to a pending verification proposal lands on the proposal *in focus*. The link sets a row id and navigates, the queue's rows arrive with a fetch, and the panel is still behind the review filter's `v-show` for the first frames — a `nextTick` reveal focuses a `display: none` element, which is a silent no-op that no unit test can see. Also the copy, which is the only place a reader learns a dismissal declines rather than verifies, and the 44px touch minimum on a disclosure that reports a whole note's before/after. |
 | `import-list.spec.ts` | That Memory → Import stays usable with a long listing at 390px. The controls a person has to reach — Review, Cancel, the confirmation — sit *below* the rows, and as a card on the map pane a 60-row listing pushed them thousands of pixels past the fold of a pane that does not scroll. `toBeInViewport` on a control at the bottom of that listing is the assertion jsdom cannot make. The two import routes are mocked in the spec rather than added to the fixture, so 60 synthetic sessions never enter shared fixture state. |
 | `terminal-renderer.spec.ts` | That the terminal screen really draws. The bytes are written to a real xterm, a keystroke reaches the shell only while input is enabled, a resize changes the window, and a disposed screen leaves nothing behind — no DOM, no listener, no console output. jsdom has no xterm, no layout and no font metrics, so the screen itself can only be judged in a browser. The spec drives the real renderer through a test-only page (`e2e/fixture/harness/`), built into its own tree by `npm run build:harness` and served by the fixture under `/__fixture__/harness/`; the production build writes to a different directory, so the PWA that ships can never carry it. |
+| `notification-inbox.spec.ts` | What a real browser decides for the inbox: a direct load keeps the shell and the bell; a second device's server-side `chat_read` converges over a real socket, and opening the inbox writes nothing; partial failure and stale rows are never all clear; a request still in flight across an A, B, A workspace round trip is rejected; an exact Home notice is revealed without running; a removed target shows *That item is no longer available* and stays; the collapsed-rail bell shows its count and partial ring; the 390px drawer closes on navigation with a 44px bell; and at 640px with a long hostile title nothing scrolls sideways, every link and button stays in the viewport, and reduced motion stops the view's animations. |
 
 The fixture serves an empty chat history by default. A spec that needs real
 turns to select opts in per session with `POST /__fixture__/transcript`, so the
@@ -579,7 +582,7 @@ proposal queue, the history ledger and the note graph all default to their empty
 or plain states, and a spec that needs a pending proposal, a dead one, or a
 settled verdict opts in. `POST /__fixture__/update-tasks` is the same opt-in for
 the "After this update" group, which is empty by default because the Home gap
-journey has to measure the sections around it.
+journey has to measure the sections around it. `POST /__fixture__/inbox` seeds or moves the chats, tasks, schedules, operator actions and socket frames the inbox reads, and `GET /__fixture__/writes` lists every non-GET `/api/` request the session has made. `POST /api/chats/<id>/read` now persists `last_read_at` and sends `chat_read` to every socket of the session, so two browser contexts sharing one `e2e_session` cookie behave as two devices.
 
 Everything else stays in vitest. Adding to this suite is a trade, not a free
 win: each spec is roughly a hundred times slower than the equivalent unit test
