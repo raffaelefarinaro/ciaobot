@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { routeLocationKey, routerKey } from 'vue-router'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
 import { askConfirm } from '../lib/confirm'
@@ -9,6 +10,7 @@ import HomeNoticeWindow from './HomeNoticeWindow.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
 import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
+import { actionNoticeKey, parseHomeNoticeKey, updateNoticeKey } from '../lib/notificationInbox'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
@@ -42,7 +44,7 @@ const scopedActions = computed(() => {
 const visibleActions = computed(() => scopedActions.value.filter(action => !noticeWindows.isClosed(actionKey(action))))
 
 function actionKey(action: OperatorAction): string {
-  return `action:${action.workspace || 'shared'}:${action.id}`
+  return actionNoticeKey(action.workspace, action.id)
 }
 
 const groups = computed(() => {
@@ -225,7 +227,7 @@ const visibleUpdateTasks = computed(() =>
 const openUpdateTasks = computed(() => visibleUpdateTasks.value.filter(task => !noticeWindows.isClosed(updateKey(task))))
 
 function updateKey(task: UpdateTaskRow): string {
-  return `update:${projectStore.activeWorkspace || 'shared'}:${taskKey(task)}`
+  return updateNoticeKey(projectStore.activeWorkspace, task.id, task.revision)
 }
 
 watch(
@@ -511,9 +513,125 @@ watch(
   (next, previous) => {
     if (next && next !== previous) {
       clearGroupStatus()
+      clearNoticeUnavailable()
       void housekeeping.refreshUpdateTasks(next)
     }
   },
+)
+
+// ── Reveal a notice from /?notice=<key> ─────────────────────────────────────
+//
+// The notification inbox links an operator or update notice here. The route
+// only ever reopens, scrolls to and focuses the notice: it never runs, starts,
+// dismisses or confirms anything. A key that does not name a notice drawn for
+// the workspace on screen says so and reveals nothing else.
+
+const NOTICE_KEY_MAX = 256
+const NOTICE_UNAVAILABLE_TTL_MS = 10_000
+const noticeUnavailable = ref(false)
+let noticeUnavailableTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearNoticeUnavailable(): void {
+  if (noticeUnavailableTimer !== null) {
+    clearTimeout(noticeUnavailableTimer)
+    noticeUnavailableTimer = null
+  }
+  noticeUnavailable.value = false
+}
+
+function showNoticeUnavailable(): void {
+  clearNoticeUnavailable()
+  noticeUnavailable.value = true
+  noticeUnavailableTimer = setTimeout(clearNoticeUnavailable, NOTICE_UNAVAILABLE_TTL_MS)
+}
+
+onBeforeUnmount(clearNoticeUnavailable)
+
+const noticeRoute = inject(routeLocationKey, null)
+const noticeRouter = inject(routerKey, null)
+
+function firstNoticeKey(raw: unknown): string {
+  const first = Array.isArray(raw) ? raw[0] : raw
+  return typeof first === 'string' && first.length <= NOTICE_KEY_MAX ? first : ''
+}
+
+watch(
+  () => noticeRoute?.query.notice,
+  async (raw) => {
+    if (!noticeRoute || raw === undefined) return
+    const key = firstNoticeKey(raw)
+    if (key) noticeWindows.requestReveal(key)
+    const { notice: _consumed, ...rest } = noticeRoute.query
+    void _consumed
+    const target = noticeRouter ?? (await import('../router')).router
+    await target.replace({ path: noticeRoute.path, query: rest, hash: noticeRoute.hash })
+  },
+  { immediate: true },
+)
+
+const revealDecision = computed<'none' | 'wait' | 'found' | 'missing'>(() => {
+  const key = noticeWindows.pendingReveal.value
+  if (!key) return 'none'
+  const parsed = parseHomeNoticeKey(key)
+  if (!parsed) return 'missing'
+  if (parsed.kind === 'action') {
+    if (housekeeping.actionsHealth.status === 'checking') return 'wait'
+    return scopedActions.value.some(a => actionKey(a) === key) ? 'found' : 'missing'
+  }
+  const active = projectStore.activeWorkspace
+  if (!active) return 'wait'
+  // A previous workspace's key can never target this workspace's row.
+  if (parsed.workspace !== active) return 'missing'
+  if (housekeeping.updateTasksWorkspace !== active || housekeeping.updateTasksHealth.status === 'checking') {
+    return 'wait'
+  }
+  return visibleUpdateTasks.value.some(t => updateKey(t) === key) ? 'found' : 'missing'
+})
+
+let updateRefreshRequestedFor = ''
+
+watch(
+  revealDecision,
+  async (decision) => {
+    const key = noticeWindows.pendingReveal.value
+    if (decision === 'wait') {
+      const active = projectStore.activeWorkspace
+      if (
+        active
+        && parseHomeNoticeKey(key)?.kind === 'update'
+        && housekeeping.updateTasksWorkspace !== active
+        && updateRefreshRequestedFor !== key
+      ) {
+        updateRefreshRequestedFor = key
+        void housekeeping.refreshUpdateTasks(active)
+      }
+      return
+    }
+    if (decision === 'missing') {
+      showNoticeUnavailable()
+      noticeWindows.clearReveal()
+      void housekeeping.refresh()
+      void housekeeping.refreshUpdateTasks()
+      return
+    }
+    if (decision !== 'found') return
+    clearNoticeUnavailable()
+    noticeWindows.reopen(key)
+    await nextTick()
+    if (noticeWindows.pendingReveal.value !== key) return
+    const el = [...document.querySelectorAll<HTMLElement>('[data-home-notice-window]')]
+      .find(candidate => candidate.dataset.noticeKey === key)
+    if (!el) {
+      showNoticeUnavailable()
+      noticeWindows.clearReveal()
+      return
+    }
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    el.scrollIntoView?.({ block: 'center', behavior: reducedMotion ? 'auto' : 'smooth' })
+    el.focus({ preventScroll: true })
+    noticeWindows.clearReveal()
+  },
+  { immediate: true, flush: 'post' },
 )
 </script>
 
@@ -526,6 +644,8 @@ watch(
     card sort above an unmissable one and would make "hide this" mean two
     different things in one list.
   -->
+  <p v-if="noticeUnavailable" class="home-notice-unavailable" role="status">This notice is no longer available</p>
+
   <section v-if="hasActions()" class="housekeeping" aria-label="Housekeeping actions">
     <template v-for="group in groups" :key="group.workspace || '_shared'">
       <p v-if="showHeadings" class="housekeeping-group">
@@ -538,6 +658,8 @@ watch(
          :class="{ 'housekeeping-tile--blocking': action.blocking }"
          :title="action.title"
          :notice-key="actionKey(action)"
+         :data-notice-key="actionKey(action)"
+         tabindex="-1"
          :blocking="action.blocking"
        >
        <div class="housekeeping-body">
@@ -635,6 +757,8 @@ watch(
        class="housekeeping-tile update-task"
        :title="task.title"
        :notice-key="updateKey(task)"
+       :data-notice-key="updateKey(task)"
+       tabindex="-1"
      >
        <div class="housekeeping-body">
          <div class="housekeeping-detail">{{ task.why }}</div>
@@ -714,6 +838,17 @@ watch(
 </template>
 
 <style scoped>
+.home-notice-unavailable {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+
+:deep(.home-notice-window:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* A blocking action is a precondition the install cannot get past on its own,
    so it reads as a warning rather than as one tile among several. Not a modal
    and not an app-wide lock: the one realistic cause is an uncommitted vault, and
