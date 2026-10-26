@@ -6,8 +6,10 @@ This is the storage contract for the shared workspace task board
 typed record, followed by a free Markdown body (description, links,
 acceptance criteria, result notes). The file is readable and editable by the
 user and by later typed agent/UI operations; the board is derived from these
-files, and there is no second source of truth — no index file, no ranking
-file, no cache.
+files: tasks stay the source of truth for membership, with no index and no
+cache. The one bookkeeping file is ``Workspace/task-order.json``
+(:mod:`ciao.task_order`), which holds only the manual sequence of each status
+column.
 
 The four rules everything else follows from:
 
@@ -82,7 +84,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Iterator, Literal, Union
@@ -96,6 +98,21 @@ from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import carry_mode
 from ciao.task_log import extract_log, strip_log
+from ciao.task_order import (
+    MAX_ORDER_BYTES,
+    ORDER_RELATIVE,
+    STATUSES,
+    Placement,
+    TaskOrder,
+    TaskOrderError,
+    apply_placement,
+    empty_order,
+    flatten,
+    parse_order,
+    reconcile,
+    remove_id,
+    render_order,
+)
 from ciao.task_resolution import (
     OPEN as COMPLETIONS_OPEN,
     Completion,
@@ -127,9 +144,6 @@ MAX_TASK_BYTES = 65536
 
 TASKS_RELATIVE = Path("Workspace") / "Tasks"
 """Vault-relative directory holding one ``<id>.md`` file per task."""
-
-STATUSES = ("backlog", "in_progress", "in_review", "done")
-"""Allowed ``status`` values, in board order. ``backlog`` is the *To do* column."""
 
 ASSIGNEES = ("user", "agent")
 """Allowed ``assignee`` values."""
@@ -201,7 +215,8 @@ class TaskBoardError(Exception):
 
     ``code`` is one of ``invalid_task``, ``unsupported_schema``,
     ``not_found``, ``revision_conflict``, ``unsafe_path``,
-    ``completion_requires_user``, ``bad_request`` or ``read_failed``:
+    ``completion_requires_user``, ``bad_request``, ``read_failed``,
+    ``order_conflict``, ``invalid_order`` or ``order_unreadable``:
 
     - ``invalid_task``: the file or the requested change does not satisfy
       the schema (bad enum, bad date, bad title, duplicate keys, alias or
@@ -220,6 +235,13 @@ class TaskBoardError(Exception):
       non-string ``resolution`` or ``attempt_id`` on ``update``).
     - ``read_failed``: store I/O failed (directory traversal, read, lock
       or write). Parse problems are ``invalid_task``, never this.
+    - ``order_conflict``: a placement's ``expected_version`` is not the task
+      order's current version; nothing was written.
+    - ``invalid_order``: a placement the order cannot honour (both anchors,
+      a self or foreign anchor, a placement without a status change).
+    - ``order_unreadable``: ``Workspace/task-order.json`` is malformed or
+      unsafe, so an operation that needs the manual order is refused. The file
+      is never repaired, overwritten or deleted by this store.
     """
 
     def __init__(self, code: str, message: str) -> None:
@@ -300,12 +322,39 @@ class TaskInvalidEntry:
 class TaskListResult:
     """The outcome of :meth:`TaskBoardStore.list`.
 
-    ``tasks`` holds the valid documents in board order; ``invalid`` holds
-    one entry per file that could not be read as a task.
+    ``tasks`` holds the valid documents in board order (the reconciled
+    manual order, see :mod:`ciao.task_order`); ``invalid`` holds one entry per
+    file that could not be read as a task. ``order`` is the reconciled
+    order, at version 0 when no order file exists. ``order_error`` is a plain
+    message when ``Workspace/task-order.json`` is unreadable; the board then
+    lists in baseline order and ``order.version`` is -1, which no client
+    version can match.
     """
 
     tasks: tuple[TaskDocument, ...]
     invalid: tuple[TaskInvalidEntry, ...]
+    order: TaskOrder
+    order_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _OrderState:
+    """The order file as read: its bytes, the parsed order, or why it is unusable.
+
+    ``raw`` is None when no file exists. ``error`` is the user-facing
+    message when the file is malformed or unsafe; ``stored`` is then None.
+    """
+
+    raw: bytes | None
+    stored: TaskOrder | None
+    error: str | None
+
+
+def _order_unreadable_message(detail: str) -> str:
+    return (
+        f"Task order file {ORDER_RELATIVE.as_posix()} is unreadable; "
+        f"fix or delete it to restore manual ordering: {detail}"
+    )
 
 
 # ── Small helpers ────────────────────────────────────────────────────
@@ -1388,9 +1437,34 @@ class TaskBoardStore:
         directory traversal failure raises ``read_failed`` rather than
         returning a partial clean result; per-file problems become
         ``invalid`` entries so no file ever vanishes into an empty-board
-        success. Valid tasks sort by ``(due is None, due, created_at,
-        id)``: dated tasks first, undated last, ties deterministic. No
-        second board, index or ranking file is read or written.
+        success. Tasks are ordered by the reconciled order of
+        :mod:`ciao.task_order`: status by status, each column in its stored
+        manual sequence with unlisted tasks appended in baseline order (dated
+        first, then title, then id). Reading never writes the order file. An
+        unreadable order file does not block the board: the list falls back to
+        baseline order and reports ``order_error``.
+        """
+        valid, invalid = self._scan()
+        state = self._order_state()
+        order = reconcile(state.stored, [document.record for document in valid])
+        if state.error is not None:
+            order = replace(order, version=-1)
+        rank = {task_id: index for index, task_id in enumerate(flatten(order))}
+        return TaskListResult(
+            tasks=tuple(sorted(valid, key=lambda document: rank[document.record.id])),
+            invalid=invalid,
+            order=order,
+            order_error=state.error,
+        )
+
+    def order(self) -> TaskOrder:
+        """The reconciled task order (version 0 without an order file)."""
+        return self.list().order
+
+    def _scan(self) -> tuple[tuple[TaskDocument, ...], tuple[TaskInvalidEntry, ...]]:
+        """Read every task file: the valid documents and the invalid entries.
+
+        Takes no lock, so write paths can call it while holding one.
         """
         tasks_dir = self._tasks_dir()
         self._check_tasks_dir_links()
@@ -1401,7 +1475,7 @@ class TaskBoardStore:
                 "read_failed", f"could not inspect task directory: {exc}"
             ) from None
         if not exists:
-            return TaskListResult(tasks=(), invalid=())
+            return (), ()
         try:
             if not tasks_dir.is_dir():
                 raise TaskBoardError("read_failed", "task directory is not a directory")
@@ -1453,16 +1527,8 @@ class TaskBoardStore:
                 valid.append(parse_task(raw, expected_id=stem))
             except TaskBoardError as exc:
                 refuse(name, exc.code, exc.message)
-        valid.sort(
-            key=lambda document: (
-                document.record.due is None,
-                document.record.due or "",
-                document.record.created_at,
-                document.record.id,
-            )
-        )
         invalid.sort(key=lambda entry: entry.relative_path)
-        return TaskListResult(tasks=tuple(valid), invalid=tuple(invalid))
+        return tuple(valid), tuple(invalid)
 
     # -- writes -----------------------------------------------------
 
@@ -1535,6 +1601,156 @@ class TaskBoardStore:
         finally:
             os.close(handle)
 
+    # -- order file -------------------------------------------------
+
+    def _order_path(self) -> Path:
+        return self._vault_root / ORDER_RELATIVE
+
+    def _read_order_raw(self) -> bytes | None:
+        """The order file's bytes, or None when it does not exist.
+
+        Opened without following links, regular files only, capped at
+        ``MAX_ORDER_BYTES``. Failures are ``unsafe_path`` / ``read_failed``.
+        """
+        import errno
+
+        self._check_tasks_dir_links()
+        path = self._order_path()
+        try:
+            if path.is_symlink():
+                raise TaskBoardError(
+                    "unsafe_path", f"{path.name} is a link; the order read follows no link"
+                )
+            fd = open_fd(path, os.O_RDONLY, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except TaskBoardError:
+            raise
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise TaskBoardError(
+                    "unsafe_path", f"{path.name} is a link; the order read follows no link"
+                ) from None
+            raise TaskBoardError("read_failed", f"could not open {path.name}: {exc}") from None
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise TaskBoardError("unsafe_path", f"{path.name} is not a regular file")
+                data = handle.read(MAX_ORDER_BYTES + 1)
+        except OSError as exc:
+            raise TaskBoardError("read_failed", f"could not read {path.name}: {exc}") from None
+        if len(data) > MAX_ORDER_BYTES:
+            raise TaskBoardError(
+                "read_failed", f"{path.name} is over the {MAX_ORDER_BYTES} byte limit"
+            )
+        return data
+
+    def _order_state(self) -> _OrderState:
+        """Read and parse the order file; an unusable file is reported, never raised."""
+        try:
+            raw = self._read_order_raw()
+        except TaskBoardError as exc:
+            return _OrderState(None, None, _order_unreadable_message(exc.message))
+        if raw is None:
+            return _OrderState(None, None, None)
+        try:
+            return _OrderState(raw, parse_order(raw), None)
+        except ValueError as exc:
+            return _OrderState(raw, None, _order_unreadable_message(str(exc)))
+
+    def _write_order(self, raw: bytes) -> None:
+        """Atomically replace the order file with *raw*.
+
+        The same staging pattern as :meth:`_atomic_write` with the order
+        file's own size cap, and no ``_changed()``: the public operation that
+        called this notifies once.
+        """
+        self._check_tasks_dir_links()
+        target = self._order_path()
+        if len(raw) > MAX_ORDER_BYTES:
+            raise TaskBoardError(
+                "invalid_task",
+                f"order write is {len(raw)} bytes, over the {MAX_ORDER_BYTES} limit",
+            )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+            )
+        except OSError as exc:
+            raise TaskBoardError("read_failed", f"could not stage order write: {exc}") from None
+        tmp = Path(tmp_name)
+        try:
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                replace_file(tmp, target)
+                self._fsync_dir(target.parent)
+            except OSError as exc:
+                raise TaskBoardError(
+                    "read_failed", f"order write failed and the prior file is unchanged: {exc}"
+                ) from None
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    def _restore_order(self, prior: bytes | None) -> None:
+        """Put the order file back as it was: the prior bytes, or no file."""
+        if prior is not None:
+            self._write_order(prior)
+            return
+        try:
+            self._order_path().unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise TaskBoardError(
+                "read_failed", f"could not remove the order file: {exc}"
+            ) from None
+        self._fsync_dir(self._order_path().parent)
+
+    def _restore_order_quietly(self, prior: bytes | None) -> None:
+        """Roll the order file back after a failed task write; never masks that failure."""
+        try:
+            self._restore_order(prior)
+        except TaskBoardError:
+            pass
+
+    def _planned_order(
+        self,
+        state: _OrderState,
+        task_id: str,
+        new_status: str,
+        placement: Placement | None,
+        *,
+        new_record_id: bool = False,
+    ) -> bytes | None:
+        """The order file bytes after moving *task_id*, or None to leave the file alone.
+
+        None when the file is unreadable and no placement was asked for: the
+        task still commits and reconcile shows it appended. An unreadable file
+        with a placement is ``order_unreadable``. Anchor and version problems
+        raise ``invalid_order`` / ``order_conflict`` before anything is written.
+        """
+        if state.error is not None:
+            if placement is not None:
+                raise TaskBoardError("order_unreadable", state.error)
+            return None
+        records = [document.record for document in self._scan()[0]]
+        known = {record.id for record in records}
+        if new_record_id:
+            known.add(task_id)
+        current = reconcile(state.stored, records)
+        try:
+            planned = apply_placement(current, task_id, new_status, placement, known_ids=known)
+        except TaskOrderError as exc:
+            raise TaskBoardError(exc.code, exc.message) from None
+        return render_order(planned)
+
     def create(
         self,
         *,
@@ -1599,7 +1815,18 @@ class TaskBoardStore:
                         "invalid_task",
                         "rendered task did not read back the requested values",
                     )
-                self._atomic_write(target, raw, existing=None)
+                state = self._order_state()
+                order_bytes = self._planned_order(
+                    state, task_id, "backlog", None, new_record_id=True
+                )
+                if order_bytes is not None:
+                    self._write_order(order_bytes)
+                try:
+                    self._atomic_write(target, raw, existing=None)
+                except BaseException:
+                    if order_bytes is not None:
+                        self._restore_order_quietly(state.raw)
+                    raise
                 return parsed
             raise TaskBoardError("read_failed", "could not mint a fresh task id")
 
@@ -1613,8 +1840,18 @@ class TaskBoardStore:
         actor: Actor,
         resolution: str | None = None,
         attempt_id: str = "",
+        placement: Placement | None = None,
     ) -> TaskDocument:
         """Apply managed field edits (and optionally a body) to one task.
+
+        A status change commits the task and its place in the destination
+        column together (#2086): the order file is written first and restored
+        if the task write fails, so a cross-column move is never half done.
+        Without ``placement`` the task is appended to the destination column;
+        with one, its ``expected_version`` must match (``order_conflict``) and
+        its anchors be valid (``invalid_order``). A ``placement`` on a write
+        that does not change the status is ``invalid_order``. Edits that keep
+        the status never move the task.
 
         The file is reread under the workspace lock and ``expected_revision``
         is rechecked immediately before the replacement: a stale revision
@@ -1696,6 +1933,12 @@ class TaskBoardStore:
             effective = self._plan_changes(document, dict(changes), actor, resolution)
             current_status = document.record.status
             patched_status = effective.get("status", current_status)
+            status_changes = patched_status != current_status
+            if placement is not None and not status_changes:
+                raise TaskBoardError(
+                    "invalid_order",
+                    "a placement is only valid on a write that changes the status",
+                )
             working = body
             if working is not None and working != document.body:
                 # A description save carries the description only. Strip any
@@ -1784,8 +2027,44 @@ class TaskBoardStore:
                     "revision_conflict",
                     "the task changed while the edit was being prepared; nothing was written",
                 )
-            self._atomic_write(path, new_raw, existing=path)
+            order_bytes: bytes | None = None
+            state: _OrderState | None = None
+            if status_changes:
+                state = self._order_state()
+                order_bytes = self._planned_order(
+                    state, task_id, str(patched_status), placement
+                )
+                if order_bytes is not None:
+                    self._write_order(order_bytes)
+            try:
+                self._atomic_write(path, new_raw, existing=path)
+            except BaseException:
+                if order_bytes is not None and state is not None:
+                    self._restore_order_quietly(state.raw)
+                raise
             return parse_task(new_raw, expected_id=task_id)
+
+    def reorder(self, task_id: str, *, placement: Placement) -> TaskOrder:
+        """Reposition one task inside its own status column and return the new order.
+
+        Needs no task revision and touches no task file, so task revisions are
+        unaffected. ``not_found`` when the task does not exist;
+        ``order_conflict`` on a stale ``expected_version``; ``invalid_order``
+        for bad anchors; ``order_unreadable`` when the order file is unusable.
+        """
+        _check_id(task_id)
+        if not isinstance(placement, Placement):
+            raise TaskBoardError("invalid_order", "reorder needs a placement")
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            document = self.get(task_id)
+            state = self._order_state()
+            order_bytes = self._planned_order(state, task_id, document.record.status, placement)
+            if order_bytes is None:  # unreachable: a placement on a bad file raised above
+                raise TaskBoardError("order_unreadable", state.error or "unreadable")
+            self._write_order(order_bytes)
+            new_order = parse_order(order_bytes)
+        self._changed()
+        return new_order
 
     def add_update(
         self,
@@ -2122,6 +2401,14 @@ class TaskBoardStore:
                     f"could not remove task {task_id}; the file is unchanged: {exc}",
                 ) from None
             self._fsync_dir(path.parent)
+            # Best effort: reconcile tolerates an orphan id, so a prune that
+            # cannot run never turns a completed delete into a failure.
+            state = self._order_state()
+            if state.stored is not None:
+                try:
+                    self._write_order(render_order(remove_id(state.stored, task_id)))
+                except TaskBoardError:
+                    pass
         self._changed()
 
     def _plan_changes(
