@@ -203,7 +203,7 @@ export function operatorInScope(actionWorkspace: string, activeWorkspace: string
   return !activeWorkspace || !actionWorkspace || actionWorkspace === activeWorkspace
 }
 
-/** The automation display name Home's At a glance used to compute. */
+/** Mirrors HomeReviewSummary.automationName. */
 export function scheduleDisplayName(s: { title: string; prompt: string; scheduleId: string }): string {
   const title = (s.title || '').trim()
   if (title) return title
