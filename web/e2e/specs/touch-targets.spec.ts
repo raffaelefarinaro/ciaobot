@@ -108,11 +108,11 @@ const KNOWN_TRIGGERS: Record<string, string[]> = {
 }
 // Triggers a surface may legitimately fail to click because another element
 // covers them. This was one whole-run cap of 3; each surface is now its own
-// test, so the cap is per surface and the caps sum to 1, never more than 3.
+// test, so the cap is per surface and the caps sum to 2, never more than 3.
 // The task editor opens as a modal over the board, so the board's "Show done
-// tasks" toggle behind it is covered by design. Every other surface must click
-// every trigger it tags.
-const MAX_SKIPPED: Record<string, number> = { '/tasks/0123456789abcdef0123456789abcdef': 1 }
+// tasks" toggle and the card's actions menu behind it are covered by design.
+// Every other surface must click every trigger it tags.
+const MAX_SKIPPED: Record<string, number> = { '/tasks/0123456789abcdef0123456789abcdef': 2 }
 
 /**
  * Measure every open `.field-info-panel`: report those whose box leaves the

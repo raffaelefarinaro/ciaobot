@@ -3,6 +3,8 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatSignals from '../ChatSignals.vue'
@@ -142,6 +144,7 @@ describe('ChatSignals', () => {
     }] as unknown as typeof taskStore.schedules
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
     expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Retry scheduled')
+    expect(wrapper.find('.chat-signal--retry').text()).toBe('↻ retry')
     expect(wrapper.find('.chat-signal--interval').classes()).toContain('stopped')
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
   })
@@ -153,6 +156,7 @@ describe('ChatSignals', () => {
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1' } })
     expect(wrapper.find('.chat-signal--unread').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--unread').attributes('aria-label')).toBe('Unread chat')
+    expect(wrapper.find('.chat-signal--unread svg').exists()).toBe(true)
     expect(wrapper.find('.chat-signal-count').exists()).toBe(false)
   })
 
@@ -240,5 +244,15 @@ describe('ChatSignals', () => {
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1' } })
     // .activity-glyph--working is the element ActivityGlyph's prefers-reduced-motion block targets.
     expect(wrapper.find('.activity-glyph--working').exists()).toBe(true)
+    expect(wrapper.findAll('.activity-glyph--working .activity-glyph-pixel--still')).toHaveLength(5)
+  })
+
+  it('keeps status glyphs off the semantic palette', () => {
+    const here = join(__dirname, '..')
+    for (const file of ['ChatSignals.vue', 'ActivityGlyph.vue']) {
+      const source = readFileSync(join(here, file), 'utf8')
+      expect(source).not.toContain('var(--error')
+      expect(source).not.toContain('var(--warning')
+    }
   })
 })
