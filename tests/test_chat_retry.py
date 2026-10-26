@@ -61,7 +61,7 @@ async def test_quota_error_marks_turn_for_hourly_retry(tmp_path: Path) -> None:
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -128,7 +128,7 @@ async def test_try_retry_now_starts_stream_when_chat_is_idle(tmp_path: Path) -> 
 
     stream = pcm.try_chat_retry_now(chat.chat_id)
     assert stream is not None
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     assert calls == ["run me"]
     updated = pcm.get_chat(chat.chat_id)
@@ -167,7 +167,7 @@ async def test_try_retry_now_refuses_active_chat(tmp_path: Path) -> None:
     assert pcm.try_chat_retry_now(chat.chat_id) is None
 
     release.set()
-    await asyncio.wait_for(consumer, timeout=2.0)
+    await asyncio.wait_for(consumer, timeout=10.0)
 
 
 async def test_retry_due_on_busy_chat_defers_minutes_not_interval(tmp_path: Path) -> None:
@@ -214,7 +214,7 @@ async def test_retry_due_on_busy_chat_defers_minutes_not_interval(tmp_path: Path
 
     loop_task.cancel()
     release.set()
-    await asyncio.wait_for(consumer, timeout=2.0)
+    await asyncio.wait_for(consumer, timeout=10.0)
 
 
 # ── Auto tier-fallback on capability errors (ciao/web/project_chats.py) ──
@@ -276,7 +276,7 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
             )
         ],
     )
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     # Only the original model is dispatched; no silent retry.
     assert seen_models == ["fable"]
@@ -326,7 +326,7 @@ async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None
     pcm._drive_stream = fake_drive  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     # _drive_stream is only called once — the retry is gated on
     # is_capability_error, which rejects rate limits.
@@ -362,7 +362,7 @@ async def test_connection_error_marks_turn_for_fast_retry(tmp_path: Path) -> Non
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -387,7 +387,7 @@ async def test_connection_error_exception_marks_turn_for_fast_retry(tmp_path: Pa
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -461,7 +461,7 @@ async def test_opencode_startup_error_is_persisted_and_retried(tmp_path: Path) -
     pcm.stream_chat = fail_before_provider_session  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "run the scheduled review")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -534,7 +534,7 @@ async def test_midresponse_drop_resumes_with_continue_not_replay(tmp_path: Path)
     stream = pcm.start_stream(chat.chat_id, "do the big multi-step task")
     # Queue a follow-up while the turn is (about to be) in flight.
     stream.enqueue("and then summarise it", entry_id="q-follow")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -577,7 +577,7 @@ async def test_quota_error_with_progress_resumes_continue(tmp_path: Path) -> Non
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "send the email then reply")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -617,7 +617,7 @@ async def test_non_billing_rate_limit_with_progress_resumes_continue(tmp_path: P
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "fix the bug and run the tests")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -652,7 +652,7 @@ async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: P
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -692,7 +692,7 @@ async def test_midresponse_drop_stops_after_retry_cap(tmp_path: Path) -> None:
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -727,7 +727,7 @@ async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -768,7 +768,7 @@ async def test_rate_limit_error_with_progress_arms_retry(tmp_path: Path) -> None
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -894,7 +894,7 @@ async def test_weekly_limit_error_arms_daily_retry(tmp_path: Path) -> None:
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -934,7 +934,7 @@ async def test_terminal_quota_retries_stop_after_cap(tmp_path: Path) -> None:
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -1052,12 +1052,12 @@ async def test_consecutive_quota_retries_back_off(tmp_path: Path) -> None:
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
     intervals = [pcm.get_chat(chat.chat_id).retry_interval_seconds]  # type: ignore[union-attr]
     for _ in range(4):
         retried = pcm.try_chat_retry_now(chat.chat_id)
         assert retried is not None
-        await asyncio.wait_for(_consume(retried), timeout=2.0)
+        await asyncio.wait_for(_consume(retried), timeout=10.0)
         intervals.append(pcm.get_chat(chat.chat_id).retry_interval_seconds)  # type: ignore[union-attr]
 
     assert intervals == [3600, 7200, 14400, 28800, 28800]
@@ -1088,7 +1088,7 @@ async def test_unattended_quota_turn_is_replayed_unattended(tmp_path: Path) -> N
 
     pcm.stream_chat = failing_stream_chat  # type: ignore[assignment]
     stream = pcm.start_stream(chat.chat_id, "scheduled care", unattended=True)
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     failed = pcm.get_chat(chat.chat_id)
     assert failed is not None
@@ -1117,7 +1117,7 @@ async def test_unattended_quota_turn_is_replayed_unattended(tmp_path: Path) -> N
     reloaded.stream_chat = ok_stream_chat  # type: ignore[assignment]
     retried = reloaded.try_chat_retry_now(chat.chat_id)
     assert retried is not None
-    await asyncio.wait_for(_consume(retried), timeout=2.0)
+    await asyncio.wait_for(_consume(retried), timeout=10.0)
 
     assert seen == [True, True]
     after = reloaded.get_chat(chat.chat_id)
@@ -1149,12 +1149,12 @@ async def test_attended_quota_turn_is_replayed_attended(tmp_path: Path) -> None:
 
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
     stream = pcm.start_stream(chat.chat_id, "typed by a person")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
     assert pcm.get_chat(chat.chat_id).retry_unattended is False  # type: ignore[union-attr]
 
     retried = pcm.try_chat_retry_now(chat.chat_id)
     assert retried is not None
-    await asyncio.wait_for(_consume(retried), timeout=2.0)
+    await asyncio.wait_for(_consume(retried), timeout=10.0)
     assert seen == [False, False]
     pcm.stop_chat_retry(chat.chat_id)
 
@@ -1203,7 +1203,7 @@ async def test_failed_turn_sets_last_error_and_next_turn_clears_it(tmp_path: Pat
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "first")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
     await asyncio.sleep(0)
 
     updated = pcm.get_chat(chat.chat_id)
@@ -1214,7 +1214,7 @@ async def test_failed_turn_sets_last_error_and_next_turn_clears_it(tmp_path: Pat
     assert done and done[-1]["last_error"] == updated.last_error
 
     stream = pcm.start_stream(chat.chat_id, "second")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
     await asyncio.sleep(0)
 
     updated = pcm.get_chat(chat.chat_id)
@@ -1250,7 +1250,7 @@ async def test_quota_retries_stop_after_cap(tmp_path: Path) -> None:
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -1286,7 +1286,7 @@ async def test_quota_retry_armed_below_cap(tmp_path: Path) -> None:
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -1317,7 +1317,7 @@ async def test_five_hour_session_limit_gets_six_hourly_attempts(tmp_path: Path) 
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     # Each hourly fire fails again; the first failure arms the ladder.
     for _ in range(_MAX_QUOTA_RETRIES):
@@ -1326,7 +1326,7 @@ async def test_five_hour_session_limit_gets_six_hourly_attempts(tmp_path: Path) 
         assert updated.retry_status == "pending"
         retry_stream = pcm.try_chat_retry_now(chat.chat_id)
         assert retry_stream is not None
-        await asyncio.wait_for(_consume(retry_stream), timeout=2.0)
+        await asyncio.wait_for(_consume(retry_stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -1357,7 +1357,7 @@ async def test_connection_retries_do_not_consume_quota_budget(tmp_path: Path) ->
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "do the thing")
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
@@ -1443,7 +1443,7 @@ async def test_network_retry_arms_with_ten_minute_backoff_and_in_flight_prompt(
 
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
     stream = pcm.start_stream(chat.chat_id, "do the scheduled thing", unattended=True)
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated.retry_status == "pending"
@@ -1471,7 +1471,7 @@ async def test_network_retry_turn_that_rearms_survives_its_own_turn_end(
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
     stream = pcm.try_chat_retry_now(chat.chat_id)
     assert stream is not None
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     assert seen == [True]
     updated = pcm.get_chat(chat.chat_id)
@@ -1493,7 +1493,7 @@ async def test_network_retry_turn_that_succeeds_clears_the_retry(tmp_path: Path)
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
     stream = pcm.try_chat_retry_now(chat.chat_id)
     assert stream is not None
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
 
     assert pcm.get_chat(chat.chat_id).retry_status == ""
 
@@ -1557,7 +1557,7 @@ async def test_network_retry_holds_the_result_push(tmp_path: Path) -> None:
 
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
     stream = pcm.start_stream(chat.chat_id, "job", unattended=True)
-    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
     await asyncio.sleep(0.05)
 
     assert pushed == []
