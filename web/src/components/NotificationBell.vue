@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useNotificationInboxStore } from '../stores/notificationInbox'
 import NotificationInboxList from './NotificationInboxList.vue'
+import { useInboxOpenRequests } from '../composables/useInboxPopover'
 
 defineOptions({ inheritAttrs: false })
 
@@ -103,6 +104,13 @@ function onNavigate() {
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onPointerDown, true)
   window.removeEventListener('resize', place)
+})
+
+// Home's narrow summary asks for the inbox; only the bell that is on screen
+// answers (the pane-header one on phones, the sidebar one otherwise).
+const openRequests = useInboxOpenRequests()
+watch(openRequests, () => {
+  if (buttonEl.value?.offsetParent !== null) open()
 })
 
 defineExpose({ open, close })

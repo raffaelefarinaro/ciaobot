@@ -6,7 +6,10 @@ import { notificationPath } from '../lib/notificationInbox'
 import type { NotificationRow } from '../lib/notificationInbox'
 import { formatRelative } from '../lib/time'
 
-withDefaults(defineProps<{ density?: 'popover' | 'sheet' }>(), { density: 'popover' })
+withDefaults(defineProps<{ density?: 'popover' | 'sheet'; showSummary?: boolean }>(), {
+  density: 'popover',
+  showSummary: true,
+})
 const emit = defineEmits<{ navigate: [] }>()
 
 const inbox = useNotificationInboxStore()
@@ -60,7 +63,7 @@ async function open(row: NotificationRow, ev: MouseEvent) {
       class="notif-unavailable"
     >That item is no longer available. The list has been refreshed.</p>
 
-    <p role="status" data-testid="inbox-summary" class="notif-summary">
+    <p v-if="showSummary" role="status" data-testid="inbox-summary" class="notif-summary">
       <template v-if="inbox.count > 0">
         {{ inbox.count }} {{ inbox.count === 1 ? 'item needs' : 'items need' }} a look.<template
           v-if="inbox.overall !== 'ready'"

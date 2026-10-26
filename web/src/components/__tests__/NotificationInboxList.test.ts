@@ -31,6 +31,7 @@ const checking: SourceHealth = { status: 'checking', lastSuccessAt: '', error: '
 
 interface Opts {
   density?: 'popover' | 'sheet'
+  showSummary?: boolean
   chats?: Record<string, unknown>[]
   health?: SourceHealth
   /** What `/api/chats?active_only=1` answers; defaults to `chats`. 'reject' fails the read. */
@@ -90,7 +91,10 @@ async function mountView(opts: Opts = {}) {
   })
   await router.push('/')
   const wrapper = mount(NotificationInboxList, {
-    props: opts.density ? { density: opts.density } : {},
+    props: {
+      ...(opts.density ? { density: opts.density } : {}),
+      ...(opts.showSummary === undefined ? {} : { showSummary: opts.showSummary }),
+    },
     global: { plugins: [router] },
   })
   await flushPromises()
@@ -350,5 +354,13 @@ describe('opening a row', () => {
     const sheet = await mountView({ chats: [chat('a', UNREAD)], density: 'sheet' })
     expect(sheet.wrapper.classes()).toContain('notif-inbox--sheet')
     expect(source).toMatch(/\.notif-inbox--sheet \.notif-row\s*{[^}]*min-height:\s*52px/)
+  })
+
+  it('summary_hidden_when_show_summary_false', async () => {
+    const shown = await mountView({ chats: [chat('a', UNREAD)] })
+    expect(shown.wrapper.find('[data-testid="inbox-summary"]').exists()).toBe(true)
+    const hidden = await mountView({ chats: [chat('a', UNREAD)], showSummary: false })
+    expect(hidden.wrapper.find('[data-testid="inbox-summary"]').exists()).toBe(false)
+    expect(hidden.wrapper.find('.notif-row').exists()).toBe(true)
   })
 })

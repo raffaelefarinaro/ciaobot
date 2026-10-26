@@ -110,7 +110,7 @@
                     <HomeNoticeReopen />
                     <HousekeepingStrip />
                   </template>
-                  <HomeReviewSummary />
+                  <HomeGlance />
                 </div>
               </div>
             </div>
@@ -239,7 +239,7 @@
                     <HomeNoticeReopen />
                     <HousekeepingStrip />
                   </template>
-                  <HomeReviewSummary />
+                  <HomeGlance />
                 </div>
               </div>
             </div>
@@ -345,7 +345,7 @@ const ItemPeekHost = defineAsyncComponent(() => import('./ItemPeekHost.vue'))
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
-import HomeReviewSummary from './HomeReviewSummary.vue'
+import HomeGlance from './HomeGlance.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
 import HomeSetupCard from './HomeSetupCard.vue'
 import HomeOnboardingResume from './HomeOnboardingResume.vue'
@@ -1804,9 +1804,12 @@ onBeforeUnmount(() => {
 }
 
 /* Notices scroll away, the glance stays. */
-.home-rail > :deep(.home-review-summary) {
+.home-rail > :deep(.home-glance) {
   position: sticky;
   top: var(--space-2);
+  /* The inbox list can outgrow the pane; scroll it rather than pin it past the fold. */
+  max-height: calc(100dvh - var(--space-4));
+  overflow-y: auto;
 }
 
 /* Keyed to the pane, not the viewport: with the resizable sidebar open, a
@@ -1821,8 +1824,10 @@ onBeforeUnmount(() => {
     padding: var(--space-5) var(--page-gutter) var(--space-4);
   }
 
-  .home-rail > :deep(.home-review-summary) {
+  .home-rail > :deep(.home-glance) {
     position: static;
+    max-height: none;
+    overflow: visible;
   }
 }
 

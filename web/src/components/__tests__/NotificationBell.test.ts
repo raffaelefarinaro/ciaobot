@@ -7,6 +7,7 @@ import type { VueWrapper } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import NotificationBell from '../NotificationBell.vue'
+import { requestInboxOpen } from '../../composables/useInboxPopover'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { useHousekeepingStore } from '../../stores/housekeeping'
@@ -251,5 +252,17 @@ describe('NotificationBell', () => {
     window.dispatchEvent(new Event('resize'))
     await flushPromises()
     expect(dialog()).toBeNull()
+  })
+
+  it('opens_on_request_only_when_visible', async () => {
+    await mountBell({ chats: 1 })
+    // jsdom has no layout, so offsetParent is null: a hidden bell ignores requests.
+    requestInboxOpen()
+    await flushPromises()
+    expect(dialog()).toBeNull()
+    Object.defineProperty(bellButton(), 'offsetParent', { configurable: true, get: () => document.body })
+    requestInboxOpen()
+    await flushPromises()
+    expect(dialog()).not.toBeNull()
   })
 })
