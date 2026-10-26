@@ -54,4 +54,16 @@ describe('router', () => {
     await router.push('/tasks')
     expect(router.currentRoute.value.name).toBe('tasks')
   })
+
+  it('addresses_notifications_inside_the_shell', async () => {
+    const router = makeRouter()
+    await router.push('/notifications')
+    expect(router.currentRoute.value.name).toBe('notifications')
+  })
+
+  it('notifications_requires_auth', () => {
+    const record = routes.find((r) => r.path === '/notifications')
+    expect(record?.meta?.requiresAuth).toBe(true)
+    expect(typeof (record as { component: unknown }).component).toBe('function')
+  })
 })
