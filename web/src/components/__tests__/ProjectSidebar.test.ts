@@ -8,6 +8,7 @@ import { nextTick } from 'vue'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ProjectSidebar from '../ProjectSidebar.vue'
+import NotificationBell from '../NotificationBell.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
@@ -549,6 +550,27 @@ describe('ProjectSidebar global new chat', () => {
             : el.classList.contains('toggle-btn') ? 'toggle' : '',
     ).filter(Boolean)
     expect(order).toEqual(['history', 'divider', 'bell', 'divider', 'toggle'])
+    wrapper.unmount()
+  })
+
+  it('expanded_bell_navigate_emits_chat_selected', async () => {
+    const wrapper = await mountSidebar('chat')
+    wrapper.findComponent(NotificationBell).vm.$emit('navigate')
+    expect(wrapper.emitted('chat-selected')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('collapsed_bell_navigate_emits_chat_selected', async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div />' } }] })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: true, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    wrapper.findComponent(NotificationBell).vm.$emit('navigate')
+    expect(wrapper.emitted('chat-selected')).toHaveLength(1)
     wrapper.unmount()
   })
 

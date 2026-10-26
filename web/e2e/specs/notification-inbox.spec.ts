@@ -102,9 +102,9 @@ test.describe('notification inbox', () => {
         .locator('[data-testid="row-chat:alpha-chat-2"]'),
     ).toBeVisible()
     const box = (await dialog.boundingBox())!
-    const bellBox = (await page.locator(BELL).boundingBox())!
+    const sidebarBox = (await page.locator('aside.sidebar').boundingBox())!
     expect(box.width).toBeCloseTo(380, 0)
-    expect(box.x).toBeGreaterThanOrEqual(bellBox.x + bellBox.width)
+    expect(box.x).toBeGreaterThanOrEqual(sidebarBox.x + sidebarBox.width + 7)
     await page.screenshot({ path: test.info().outputPath('inbox-expanded.png') })
 
     // Escape closes the popover and stays on the page: ChatLayout's Escape-to-Home
@@ -500,8 +500,8 @@ test.describe('notification inbox', () => {
     const dialog = page.getByRole('dialog', { name: 'Notifications' })
     await expect(dialog).toBeVisible()
     await expect(page.locator(SUMMARY)).toBeVisible()
-    const railBox = (await rail.boundingBox())!
-    expect((await dialog.boundingBox())!.x).toBeGreaterThanOrEqual(railBox.x + railBox.width)
+    const sidebarBox = (await page.locator('aside.sidebar').boundingBox())!
+    expect((await dialog.boundingBox())!.x).toBeGreaterThanOrEqual(sidebarBox.x + sidebarBox.width + 7)
     await page.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)
     await expect(rail).toBeFocused()

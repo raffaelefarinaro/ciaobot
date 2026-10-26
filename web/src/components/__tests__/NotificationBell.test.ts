@@ -39,7 +39,7 @@ function chat(id: string) {
 
 let wrapper: VueWrapper | null = null
 
-async function mountBell(opts: { chats?: number; health?: SourceHealth; variant?: 'popover' | 'sheet' } = {}) {
+async function mountBell(opts: { chats?: number; health?: SourceHealth; variant?: 'popover' | 'sheet' } = {}, host?: HTMLElement) {
   const projects = useProjectStore()
   const taskSignals = useTaskSignalsStore()
   projects.projects = [{ project_id: 'p1', name: 'General', workspace: 'personal' }] as never
@@ -72,7 +72,7 @@ async function mountBell(opts: { chats?: number; health?: SourceHealth; variant?
   await router.push('/')
   wrapper = mount(NotificationBell, {
     props: opts.variant ? { variant: opts.variant } : {},
-    attachTo: document.body,
+    attachTo: host ?? document.body,
     global: { plugins: [router] },
   })
   await flushPromises()
@@ -189,6 +189,66 @@ describe('NotificationBell', () => {
     expect(backdrop).not.toBeNull()
     expect(dialog()?.classList.contains('notif-popover--sheet')).toBe(true)
     backdrop.click()
+    await flushPromises()
+    expect(dialog()).toBeNull()
+  })
+
+  it('popover_anchors_to_the_sidebar_edge', async () => {
+    const aside = document.createElement('aside')
+    aside.className = 'sidebar'
+    document.body.appendChild(aside)
+    vi.spyOn(aside, 'getBoundingClientRect').mockReturnValue({ right: 300, left: 0, top: 0, bottom: 0, width: 300, height: 0, x: 0, y: 0, toJSON: () => ({}) })
+    const { wrapper: w } = await mountBell({ chats: 1 }, aside)
+    void w
+    ;(wrapper!.vm as unknown as { open: () => void }).open()
+    await flushPromises()
+    expect(dialog()!.style.getPropertyValue('--nb-left')).toBe('308px')
+  })
+
+  it('escape_on_a_non_focusable_child_does_not_reach_the_document', async () => {
+    await mountBell({ chats: 1 })
+    const outer = vi.fn()
+    document.addEventListener('keydown', outer)
+    bellButton().click()
+    await flushPromises()
+    const child = dialog()!.querySelector('.notif-summary')!
+    child.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushPromises()
+    document.removeEventListener('keydown', outer)
+    expect(outer).not.toHaveBeenCalled()
+    expect(dialog()).toBeNull()
+  })
+
+  it('focusing_outside_closes_the_dialog', async () => {
+    await mountBell({ chats: 1 })
+    const other = document.createElement('button')
+    document.body.appendChild(other)
+    bellButton().click()
+    await flushPromises()
+    expect(dialog()).not.toBeNull()
+    other.focus()
+    await flushPromises()
+    expect(dialog()).toBeNull()
+  })
+
+  it('escape_on_the_active_element_after_open_returns_focus_to_bell', async () => {
+    await mountBell({ chats: 1 })
+    ;(wrapper!.vm as unknown as { open: () => void }).open()
+    await flushPromises()
+    expect(dialog()!.contains(document.activeElement)).toBe(true)
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    await flushPromises()
+    expect(dialog()).toBeNull()
+    expect(document.activeElement).toBe(bellButton())
+  })
+
+  it('zero_size_bell_closes_on_resize_but_still_opens', async () => {
+    await mountBell({ chats: 1, variant: 'sheet' })
+    // jsdom lays nothing out, so every rect is zero: opening must still work.
+    bellButton().click()
+    await flushPromises()
+    expect(dialog()).not.toBeNull()
+    window.dispatchEvent(new Event('resize'))
     await flushPromises()
     expect(dialog()).toBeNull()
   })

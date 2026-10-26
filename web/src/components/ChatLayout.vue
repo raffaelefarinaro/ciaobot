@@ -681,7 +681,7 @@ const viewShortcutsActive = computed(() =>
 )
 // The chat-only chords are inert on the full-screen views that own the keyboard
 // themselves. `1`–`9` keep switching workspaces from all of them: they are gated
-// on `viewShortcutsActive`, which the board and the inbox do not exclude.
+// on `viewShortcutsActive`, which the board does not exclude.
 const shortcutsActive = computed(() =>
   viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
 )

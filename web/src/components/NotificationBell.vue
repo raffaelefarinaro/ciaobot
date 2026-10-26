@@ -26,14 +26,23 @@ const WIDTH = 380
 function place() {
   const rect = buttonEl.value?.getBoundingClientRect()
   if (!rect) return
+  // A bell hidden by a breakpoint (the header bell past 768px) has no box: its
+  // open dialog has nothing to point at, so it closes. Opening calls this before
+  // `isOpen` is set, so it never trips here.
+  if (isOpen.value && rect.width === 0 && rect.height === 0) {
+    close()
+    return
+  }
   if (props.variant === 'sheet') {
     pos.value = { top: rect.bottom + 6, left: GAP }
     return
   }
   const width = Math.min(WIDTH, window.innerWidth - 2 * GAP)
+  // Beside the sidebar, not the button, so the collapse control stays reachable.
+  const anchor = buttonEl.value?.closest('aside.sidebar')?.getBoundingClientRect() ?? rect
   pos.value = {
     top: Math.max(GAP, rect.top),
-    left: Math.max(GAP, Math.min(rect.right + GAP, window.innerWidth - width - GAP)),
+    left: Math.max(GAP, Math.min(anchor.right + GAP, window.innerWidth - width - GAP)),
   }
 }
 
@@ -77,6 +86,13 @@ function onKeydown(ev: KeyboardEvent) {
   ev.stopPropagation()
   ev.preventDefault()
   close(true)
+}
+
+function onFocusout(ev: FocusEvent) {
+  const next = ev.relatedTarget as Node | null
+  if (!next) return
+  if (dialogEl.value?.contains(next) || buttonEl.value?.contains(next)) return
+  close()
 }
 
 function onNavigate() {
@@ -123,7 +139,9 @@ defineExpose({ open, close })
       class="notif-popover"
       :class="`notif-popover--${variant}`"
       :style="style"
+      tabindex="-1"
       @keydown="onKeydown"
+      @focusout="onFocusout"
     >
       <header class="notif-popover-head">
         <h2 ref="headingEl" tabindex="-1" class="notif-popover-title">Notifications</h2>
@@ -225,6 +243,8 @@ defineExpose({ open, close })
   color: var(--fg);
   box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 38%);
 }
+
+.notif-popover:focus { outline: none; }
 
 .notif-popover--sheet {
   right: 8px;
