@@ -4040,6 +4040,15 @@ def test_an_entry_edit_preview_is_byte_exact_to_the_accept(
     assert "The landlord is Bianchi" in (vault / _ENTRY_NOTE).read_text(encoding="utf-8")
 
 
+def test_an_entry_row_carries_the_bullet_it_is_about(tmp_path: Path) -> None:
+    """Two verdicts on two bullets of one note must not render as the same row."""
+    config, _proposal, entry = _entry_edit_vault(tmp_path)
+    row = _accept_kind_row(_client(config), "note_edit")
+
+    assert row["note_edit"]["entry"] == _ENTRY_PLAIN[entry.start : entry.end].strip()
+    assert "Via Verdi 12, third floor" in row["note_edit"]["entry"]
+
+
 def test_accepting_an_entry_edit_uses_the_note_receipt_and_the_entry(
     tmp_path: Path,
 ) -> None:
