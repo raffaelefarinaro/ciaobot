@@ -137,7 +137,7 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--working').attributes('aria-label')).toBe('2 agents running')
   })
 
-  it('renders interval and retry modifiers with their accessible labels', () => {
+  it('renders the schedule clock and the retry alert with their accessible labels', () => {
     const { store, taskStore } = seed()
     store.chats[0].retry = { status: 'pending' } as never
     taskStore.schedules = [{
@@ -148,10 +148,24 @@ describe('ChatSignals', () => {
       enabled: false,
     }] as unknown as typeof taskStore.schedules
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
-    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Retry scheduled')
-    expect(wrapper.find('.chat-signal--retry').text()).toBe('↻ retry')
-    expect(wrapper.find('.chat-signal--interval').classes()).toContain('stopped')
+    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Run failed, retry scheduled')
+    expect(wrapper.find('.chat-signal--retry .activity-glyph--run-failed').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--schedule .schedule-glyph').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--schedule').classes()).toContain('stopped')
+    expect(wrapper.find('.chat-signal--schedule').attributes('aria-label')).toBe('An automation attached to this chat (paused)')
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
+  })
+
+  it('shows the schedule clock for a chat bound to a daily automation too', () => {
+    const { taskStore } = seed()
+    taskStore.schedules = [
+      { schedule_id: 'sched-1', frequency: 'daily', web_chat_id: 'chat-1', enabled: true },
+      { schedule_id: 'sched-2', frequency: 'interval', interval_minutes: 10, web_chat_id: 'chat-1', enabled: false },
+    ] as unknown as typeof taskStore.schedules
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    const clock = wrapper.find('.chat-signal--schedule')
+    expect(clock.classes()).not.toContain('stopped')
+    expect(clock.attributes('aria-label')).toBe('2 automations running in this chat')
   })
 
   it('marks an unread chat for attention without adding a count', () => {
