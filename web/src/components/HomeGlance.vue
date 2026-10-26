@@ -37,7 +37,10 @@ const summary = computed(() => {
   const parts = inbox.sections
     .filter((s) => s.rows.length > 0)
     .map((s) => `${s.title} ${s.rows.length}`)
-  if (parts.length > 0) return parts.join(' · ')
+  if (parts.length > 0) {
+    const partial = inbox.overall === 'stale' || inbox.overall === 'unavailable'
+    return partial ? `${parts.join(' · ')} · Some sources could not be checked` : parts.join(' · ')
+  }
   if (inbox.allClear) return 'Nothing to review.'
   return inbox.overall === 'checking' ? 'Checking your sources...' : 'Some sources could not be checked.'
 })

@@ -29,10 +29,13 @@ test.describe('workbench layout', () => {
     expect(rail!.x).toBeGreaterThan(surface!.x + surface!.width)
 
     // Rows, not a card grid: At a glance is the inbox, so each of its rows
-    // spans the rail's width. The fixture's alpha workspace always has at least
-    // the memory proposals row.
+    // spans the rail's width. The alpha fixture yields two: the memory
+    // proposals and alpha-chat-7's blocking memory pass. The fixture's one
+    // automation (`alpha-daily-brief`, `last_status: 'ok'`) is healthy, and an
+    // active automation is not news, so it is not a row.
     const rows = page.locator('.home-glance .notif-row')
-    await expect(rows.first()).toBeVisible()
+    await expect(rows).toHaveCount(2)
+    await expect(page.locator('.home-glance [data-testid="row-schedule:alpha-daily-brief"]')).toHaveCount(0)
     for (const row of await rows.all()) {
       const box = await row.boundingBox()
       expect(box!.width).toBeGreaterThan(rail!.width - 2)

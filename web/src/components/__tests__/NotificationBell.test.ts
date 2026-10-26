@@ -256,11 +256,14 @@ describe('NotificationBell', () => {
 
   it('opens_on_request_only_when_visible', async () => {
     await mountBell({ chats: 1 })
-    // jsdom has no layout, so offsetParent is null: a hidden bell ignores requests.
+    const rect = (r: Partial<DOMRect>) => ({ x: 0, y: 0, toJSON: () => ({}), ...r }) as DOMRect
+    const spy = vi.spyOn(bellButton(), 'getBoundingClientRect')
+    // Laid out but translated off screen (the drawer's rail bell on a phone).
+    spy.mockReturnValue(rect({ left: -50, right: -10, top: 10, bottom: 40, width: 40, height: 30 }))
     requestInboxOpen()
     await flushPromises()
     expect(dialog()).toBeNull()
-    Object.defineProperty(bellButton(), 'offsetParent', { configurable: true, get: () => document.body })
+    spy.mockReturnValue(rect({ left: 10, right: 50, top: 10, bottom: 40, width: 40, height: 30 }))
     requestInboxOpen()
     await flushPromises()
     expect(dialog()).not.toBeNull()

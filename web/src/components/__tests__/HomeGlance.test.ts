@@ -113,4 +113,11 @@ describe('HomeGlance', () => {
     expect(list.find('[data-testid="row-chat:a"]').exists()).toBe(true)
     expect(list.find('[data-testid="inbox-summary"]').exists()).toBe(false)
   })
+
+  it('narrow_summary_flags_unchecked_sources', async () => {
+    const wrapper = await mountGlance([chat('a', NEEDS)])
+    useProjectStore().chatsHealth = { status: 'stale', lastSuccessAt: '2026-10-26T10:00:00.000Z', error: 'x' }
+    await flushPromises()
+    expect(wrapper.get('.home-glance-summary').text()).toBe('Needs you 1 · Some sources could not be checked')
+  })
 })

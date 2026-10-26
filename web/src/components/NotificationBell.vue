@@ -106,11 +106,21 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', place)
 })
 
+// `offsetParent` is not enough: the collapsed rail's bell inside the phone drawer
+// is laid out but translated off screen.
+function onScreen(el: HTMLElement | null): boolean {
+  if (!el) return false
+  const r = el.getBoundingClientRect()
+  return r.width > 0 && r.height > 0
+    && r.right > 0 && r.left < window.innerWidth && r.bottom > 0 && r.top < window.innerHeight
+    && getComputedStyle(el).visibility !== 'hidden'
+}
+
 // Home's narrow summary asks for the inbox; only the bell that is on screen
 // answers (the pane-header one on phones, the sidebar one otherwise).
 const openRequests = useInboxOpenRequests()
 watch(openRequests, () => {
-  if (buttonEl.value?.offsetParent !== null) open()
+  if (onScreen(buttonEl.value)) open()
 })
 
 defineExpose({ open, close })

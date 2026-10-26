@@ -1808,7 +1808,8 @@ onBeforeUnmount(() => {
   position: sticky;
   top: var(--space-2);
   /* The inbox list can outgrow the pane; scroll it rather than pin it past the fold. */
-  max-height: calc(100dvh - var(--space-4));
+  /* Less the pane header, which sits above the rail. */
+  max-height: calc(100dvh - 61px - var(--safe-top) - var(--space-4));
   overflow-y: auto;
 }
 

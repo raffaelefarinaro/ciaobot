@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, ref } from 'vue'
+import { nextTick, ref, useId } from 'vue'
 import { useRouter } from 'vue-router'
 import { useNotificationInboxStore } from '../stores/notificationInbox'
 import { notificationPath } from '../lib/notificationInbox'
@@ -11,6 +11,8 @@ withDefaults(defineProps<{ density?: 'popover' | 'sheet'; showSummary?: boolean 
   showSummary: true,
 })
 const emit = defineEmits<{ navigate: [] }>()
+// Home's list and the popover can be on the page together.
+const uid = useId()
 
 const inbox = useNotificationInboxStore()
 const router = useRouter()
@@ -104,8 +106,8 @@ async function open(row: NotificationRow, ev: MouseEvent) {
     </ul>
 
     <template v-for="section in inbox.sections" :key="section.section">
-      <section v-if="section.rows.length > 0" :aria-labelledby="`notif-h-${section.section}`" class="notif-section">
-        <h3 :id="`notif-h-${section.section}`">
+      <section v-if="section.rows.length > 0" :aria-labelledby="`${uid}-h-${section.section}`" class="notif-section">
+        <h3 :id="`${uid}-h-${section.section}`">
           {{ section.title }} <span class="notif-section-count">{{ section.rows.length }}</span>
         </h3>
         <ul class="notif-list">
