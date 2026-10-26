@@ -445,6 +445,28 @@ def test_release_smoke_installs_the_engine_instead_of_the_app() -> None:
     assert "--pattern install.sh --pattern install-engine.sh" in workflow
 
 
+def test_release_smoke_finishes_the_setup_wizard_and_is_bounded() -> None:
+    # A fresh macOS install blocks on the browser setup wizard (#2021), so a
+    # smoke run that only pipes install.sh into sh waits for a click nobody
+    # makes (#2164: the v1.7.0 run hung for 90 minutes). The step must run the
+    # public one-liner in the background and finish the wizard over HTTP.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "release-smoke.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "timeout-minutes:" in workflow, "release-smoke.yml has no job timeout"
+    assert "/api/setup-status" in workflow
+    assert "/api/setup/finish" in workflow
+    assert "RUNNER_TEMP" in workflow
+    # Still the documented one-liner, not a hand-rolled install.
+    assert "| sh -s -- --version \"$VERSION\"" in workflow
+    assert "/download/v${VERSION}/install.sh" in workflow
+    # The sign-in URL is a credential and stays out of the job log.
+    assert "Open Ciaobot: ).*#\\1[redacted]" in workflow
+    # The later steps follow the workspace the wizard chose.
+    assert '"$SMOKE_WORKSPACE/.env"' in workflow
+
+
 def test_first_party_install_command_stays_install_sh() -> None:
     # The public one-liner did not change name in the transition release (#651):
     # install.sh installs the engine now, so every existing link and every
