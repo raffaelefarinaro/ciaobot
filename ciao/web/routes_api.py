@@ -132,6 +132,7 @@ from ciao.web.project_chats import (
     ChatPinConflictError,
     ChatInfo,
     ProjectChatManager,
+    ProjectOrderError,
     TerminalOfferConflictError,
 )
 from ciao.web.routes_helpers import (
@@ -1727,13 +1728,33 @@ async def reorder_projects(request: Request) -> JSONResponse:
     """Persist a drag-reordered project sequence for one workspace."""
     pcm = request.app.state.project_chat_manager
     body = await request.json()
-    workspace = body.get("workspace") or ""
-    ordered_ids = body.get("order")
-    if not workspace or not isinstance(ordered_ids, list):
+    workspace = body.get("workspace") if isinstance(body, dict) else None
+    ordered_ids = body.get("order") if isinstance(body, dict) else None
+    expected = body.get("expected_order") if isinstance(body, dict) else None
+    if (
+        not isinstance(workspace, str)
+        or not workspace
+        or not isinstance(ordered_ids, list)
+        or not all(isinstance(pid, str) for pid in ordered_ids)
+        or not isinstance(expected, list)
+        or not all(isinstance(pid, str) for pid in expected)
+    ):
         return JSONResponse(
-            {"error": "workspace and order[] are required"}, status_code=400
+            {
+                "error": "workspace, order[] and expected_order[] are required",
+                "code": "project_order_invalid",
+            },
+            status_code=400,
         )
-    projects = pcm.reorder_projects(workspace, [str(pid) for pid in ordered_ids])
+    try:
+        projects = pcm.reorder_projects(workspace, ordered_ids, expected)
+    except ProjectOrderError as exc:
+        if exc.code == "project_order_conflict":
+            return JSONResponse(
+                {"error": str(exc), "code": exc.code, "order": exc.current},
+                status_code=409,
+            )
+        return JSONResponse({"error": str(exc), "code": exc.code}, status_code=400)
     return JSONResponse([p.to_dict() for p in projects])
 
 

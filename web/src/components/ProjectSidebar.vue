@@ -1640,12 +1640,13 @@ function onProjectDrop(target: ProjectInfo) {
   const draggedId = dragProjectId.value
   onProjectDragEnd()
   if (!draggedId || draggedId === target.project_id) return
-  const ids = store.workspaceProjects.map(p => p.project_id)
+  const expected = store.reorderableProjects.map(p => p.project_id)
+  const ids = [...expected]
   const from = ids.indexOf(draggedId)
   const to = ids.indexOf(target.project_id)
   if (from < 0 || to < 0 || from === to) return
   ids.splice(to, 0, ids.splice(from, 1)[0])
-  void store.reorderProjects(ids)
+  void store.reorderProjects(ids, expected)
 }
 
 function onProjectDragEnd() {

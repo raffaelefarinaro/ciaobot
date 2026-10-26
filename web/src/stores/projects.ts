@@ -11,7 +11,7 @@ import {
   reloadWhenServerReady,
   restartMessageForDisplay,
 } from '../lib/serverRestart'
-import { errorMessage } from '../lib/errorMessage'
+import { apiErrorMessage, errorMessage, errorPayload } from '../lib/errorMessage'
 import { nextBackgroundableCalls, type BackgroundableCalls } from '../lib/moveToBackground'
 import { applyKeyboardSettings, useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { applyAppearanceSettings } from '../composables/useAppearanceSettings'
@@ -1015,6 +1015,18 @@ export const useProjectStore = defineStore('projects', () => {
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
   )
 
+  // The projects a drag can move: General and the auto-managed projects stay
+  // where the server pins them.
+  const reorderableProjects = computed(() => workspaceProjects.value.filter(p => !p.is_auto))
+
+  // Bumps when the project order or membership changes from outside a
+  // reorder this store has in flight, so the sidebar can cancel a drag.
+  const projectOrderEpoch = ref(0)
+  let reorderInFlight = false
+  function bumpProjectOrderEpoch() {
+    if (!reorderInFlight) projectOrderEpoch.value += 1
+  }
+
   const workspaceOptions = computed<WorkspaceInfo[]>(() => {
     if (workspaces.value.length) return workspaces.value
     const names = Array.from(new Set(projects.value.map(p => p.workspace).filter(Boolean)))
@@ -1994,6 +2006,7 @@ export const useProjectStore = defineStore('projects', () => {
         ? workspaceResponse.provider_options
         : [{ value: 'claude', label: 'Claude' }]
       projects.value = p
+      bumpProjectOrderEpoch()
       // Keep an archived deep link's prefetched history through reconciliation.
       if (initialDetail) await initialDetail
       reconcileActiveChats(c, listReadStart)
@@ -2648,6 +2661,7 @@ export const useProjectStore = defineStore('projects', () => {
     // already pushed this project into the list, so skip the duplicate.
     const exists = projects.value.some(x => x.project_id === p.project_id)
     if (!exists) projects.value.push(p)
+    bumpProjectOrderEpoch()
     return p
   }
 
@@ -2659,17 +2673,63 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // Persist a drag-reordered project sequence for the active workspace.
-  // Optimistically rewrites local `order` so the sidebar reflects the drop
-  // instantly; the server echoes a `projects_reordered` event that reconciles.
-  async function reorderProjects(orderedIds: string[]) {
+  // `orderedIds` is the new sequence of the reorderable projects and
+  // `expectedIds` the sequence the caller saw before the drag: the server
+  // rejects the write when either side has moved. The new order is applied at
+  // once, using the slots the same ids occupied (as the server does); on any
+  // failure the previous values come back and the list is refetched.
+  async function reorderProjects(
+    orderedIds: string[],
+    expectedIds: string[],
+  ): Promise<{ ok: true } | { ok: false; conflict: boolean; message: string }> {
+    const workspace = activeWorkspace.value
+    const previous = projects.value.map(p => [p.project_id, p.order] as const)
+    const byId = new Map(projects.value.map(p => [p.project_id, p]))
+    const slots = orderedIds
+      .map(pid => byId.get(pid)?.order)
+      .filter((order): order is number => order !== undefined)
+      .sort((a, b) => a - b)
+    // The first slot must not tie with a pinned row that sorts at or before it.
+    const pinnedOrders = projects.value
+      .filter(p => p.workspace === workspace && p.is_auto && !orderedIds.includes(p.project_id))
+      .map(p => p.order)
+    if (slots.length) slots[0] = Math.max(slots[0], ...pinnedOrders.filter(o => o <= slots[0]).map(o => o + 1))
+    // Strictly increasing, so projects that tie on `order` still keep the drag.
+    for (let i = 1; i < slots.length; i++) slots[i] = Math.max(slots[i], slots[i - 1] + 1)
     orderedIds.forEach((pid, index) => {
-      const p = projects.value.find(x => x.project_id === pid)
-      if (p) p.order = index
+      const p = byId.get(pid)
+      if (p && slots[index] !== undefined) p.order = slots[index]
     })
-    await api.post('/api/projects/reorder', {
-      workspace: activeWorkspace.value,
-      order: orderedIds,
-    })
+    reorderInFlight = true
+    try {
+      await api.post('/api/projects/reorder', {
+        workspace,
+        order: orderedIds,
+        expected_order: expectedIds,
+      })
+      return { ok: true }
+    } catch (e) {
+      const restore = new Map(previous)
+      projects.value.forEach(p => {
+        const order = restore.get(p.project_id)
+        if (order !== undefined) p.order = order
+      })
+      const conflict = errorPayload(e)?.code === 'project_order_conflict'
+      try {
+        projects.value = await api.get<ProjectInfo[]>('/api/projects')
+      } catch {
+        // The restored snapshot stands until the next refresh.
+      }
+      return {
+        ok: false,
+        conflict,
+        message: conflict
+          ? 'The project order changed elsewhere. It has been refreshed; try the move again.'
+          : apiErrorMessage(e, 'Could not save the project order.'),
+      }
+    } finally {
+      reorderInFlight = false
+    }
   }
 
   // Deliberate delete: drop any draft riding along with these chats now, so
@@ -2686,6 +2746,7 @@ export const useProjectStore = defineStore('projects', () => {
     const activeChatProject = activeChat.value?.project_id
     const report = await api.del<ProjectDeleteReport>(`/api/projects/${projectId}?delete_vault=1`)
     projects.value = projects.value.filter(p => p.project_id !== projectId)
+    bumpProjectOrderEpoch()
     clearDraftsForProject(projectId)
     // The project's chats go with it, and so do the commands they offered.
     clearTerminalOffersForProjects(new Set([projectId]))
@@ -2707,6 +2768,7 @@ export const useProjectStore = defineStore('projects', () => {
       note: closure.note,
     })
     projects.value = projects.value.filter(p => p.project_id !== projectId)
+    bumpProjectOrderEpoch()
     clearDraftsForProject(projectId)
     // The completed project's chats go with it, and so do their commands.
     clearTerminalOffersForProjects(new Set([projectId]))
@@ -4611,6 +4673,7 @@ export const useProjectStore = defineStore('projects', () => {
     const known = new Set(fresh.map(p => p.project_id))
     const dropped = projects.value.filter(p => !known.has(p.project_id)).map(p => p.project_id)
     projects.value = fresh
+    bumpProjectOrderEpoch()
     if (dropped.length) {
       const gone = new Set(dropped)
       dropped.forEach(clearDraftsForProject)
@@ -5020,6 +5083,7 @@ export const useProjectStore = defineStore('projects', () => {
       case 'project_created': {
         const exists = projects.value.some(p => p.project_id === msg.project.project_id)
         if (!exists) projects.value.push(msg.project)
+        bumpProjectOrderEpoch()
         break
       }
       case 'project_updated': {
@@ -5038,6 +5102,7 @@ export const useProjectStore = defineStore('projects', () => {
         // offered.
         clearTerminalOffersForProjects(new Set([msg.project_id]))
         projects.value = projects.value.filter(p => p.project_id !== msg.project_id)
+        bumpProjectOrderEpoch()
         chats.value = chats.value.filter(c => c.project_id !== msg.project_id)
         if (selectedChatId) {
           disconnectWs(selectedChatId)
@@ -5056,6 +5121,7 @@ export const useProjectStore = defineStore('projects', () => {
           const next = orderMap.get(p.project_id)
           if (next !== undefined) p.order = next
         })
+        bumpProjectOrderEpoch()
         break
       }
       case 'workspaces_changed': {
@@ -6926,7 +6992,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, reorderWorkspaces, updateWorkspace,
     archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
     workspaceRegistryRevision, refreshWorkspaceRegistry,
-    createProject, updateProject, reorderProjects, deleteProject, completeProject,
+    createProject, updateProject, reorderProjects, reorderableProjects, projectOrderEpoch, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
