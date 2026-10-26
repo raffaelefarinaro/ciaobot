@@ -768,6 +768,16 @@ describe('ProjectSidebar update badge', () => {
     wrapper.unmount()
   })
 
+  it('the Automations failure mark is the alert glyph', async () => {
+    seedWorkspaces()
+    useTaskStore().schedules = [scheduleIn('personal', { last_status: 'error' })]
+    const wrapper = await mountSidebar()
+    await nextTick()
+    const alert = wrapper.get('a[href="/schedules"] .nav-item-alert')
+    expect(alert.find('.activity-glyph--run-failed').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('warns for a missing-chat schedule in the active workspace even when disabled', async () => {
     seedWorkspaces()
     useTaskStore().schedules = [

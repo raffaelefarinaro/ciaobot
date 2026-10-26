@@ -1,10 +1,13 @@
-import { computed, reactive } from 'vue'
+import { computed, reactive, readonly, ref } from 'vue'
 
 // Presentation only. Durable dismissals still belong to the housekeeping and
 // device-setup owners. Keeping this in memory lets a closed window stay closed
 // while navigating away from Home, but a reload offers unfinished work again.
 const closed = reactive(new Set<string>())
 const available = reactive(new Map<string, string[]>())
+// Module-level so a strip remount (Home alerts move between the main column and
+// the rail) does not lose a reveal that is still waiting for its source rows.
+const pendingReveal = ref('')
 
 const closedCount = computed(() => {
   const keys = new Set([...available.values()].flat())
@@ -17,6 +20,10 @@ export function useHomeNoticeWindows() {
     isClosed: (key: string) => closed.has(key),
     close: (key: string) => { closed.add(key) },
     reopenAll: () => { closed.clear() },
+    reopen: (key: string) => closed.delete(key),
+    pendingReveal: readonly(pendingReveal),
+    requestReveal: (key: string) => { pendingReveal.value = key },
+    clearReveal: () => { pendingReveal.value = '' },
     setAvailable: (owner: string, keys: string[]) => { available.set(owner, keys) },
     clearAvailable: (owner: string) => { available.delete(owner) },
   }
@@ -26,4 +33,5 @@ export function useHomeNoticeWindows() {
 export function resetHomeNoticeWindows() {
   closed.clear()
   available.clear()
+  pendingReveal.value = ''
 }

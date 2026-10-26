@@ -226,9 +226,13 @@ environment variable or operation changes, so the protocol stays `2`.
 `run-move` shares `ChildController`, so it takes the same pre-check.
 Replacing a revision-2 or revision-3 host (both are accepted as superseded;
 revision 2 is dropped one release after revision 4 ships) changes the signed
-bytes, so it needs the same
-reapproval as any host upgrade; the release walk must still check whether the
-folder grant survives it.
+bytes, so it needs the same reapproval as any host upgrade, and that includes
+the folder grant: on the v1.7.0 release walk (2026-10-26, macOS 27.0.1) a
+revision 3 → 4 replacement over a workspace in `~/Documents` showed the
+"Ciaobot Server would like to access files in your Documents folder" prompt
+again, and the engine started once it was allowed. A host upgrade therefore
+always means one new folder prompt for a workspace in Desktop, Documents or
+Downloads.
 
 Revision 3 adds the three usage strings the prompt was missing
 (#1659): `NSDesktopFolderUsageDescription`,
@@ -237,9 +241,8 @@ Revision 3 adds the three usage strings the prompt was missing
 Server, and says the access is scoped to a workspace the user chose. Adding them
 changed the signed bytes, which is why the host revision moved to 3 and why the
 installer can now replace a revision-2 host instead of refusing it (see
-`docs/SERVER_HOST_CONTRACT.md`). Not yet verified: whether the folder grant
-survives a host revision (a re-signed bundle). Check it in the release walk of
-the next host revision.
+`docs/SERVER_HOST_CONTRACT.md`). The folder grant does not survive a host
+revision (see revision 4 above).
 
 ## Tests
 

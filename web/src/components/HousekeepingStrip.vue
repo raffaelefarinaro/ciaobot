@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { routeLocationKey, routerKey } from 'vue-router'
 import { useHousekeepingStore } from '../stores/housekeeping'
 import { useProjectStore } from '../stores/projects'
 import { askConfirm } from '../lib/confirm'
@@ -9,6 +10,8 @@ import HomeNoticeWindow from './HomeNoticeWindow.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
 import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
+import { hasLiveAttempt, visibleUpdateTasks as filterVisibleUpdateTasks } from '../lib/updateTasks'
+import { actionNoticeKey, parseHomeNoticeKey, updateNoticeKey } from '../lib/notificationInbox'
 
 const housekeeping = useHousekeepingStore()
 const projectStore = useProjectStore()
@@ -42,7 +45,7 @@ const scopedActions = computed(() => {
 const visibleActions = computed(() => scopedActions.value.filter(action => !noticeWindows.isClosed(actionKey(action))))
 
 function actionKey(action: OperatorAction): string {
-  return `action:${action.workspace || 'shared'}:${action.id}`
+  return actionNoticeKey(action.workspace, action.id)
 }
 
 const groups = computed(() => {
@@ -191,41 +194,13 @@ async function openChat(action: OperatorAction): Promise<void> {
 // reverses it, can be reopened from Settings, and must never be drawn as done
 // before a completion check has actually said so.
 
-/** The lifecycles where an attempt exists: a chat was opened, is waiting on the
- *  operator, or did not get going. Every state question below turns on this one
- *  list, because it is the difference between "nobody has started this" and
- *  "somebody already did". */
-const LIVE_ATTEMPT_STATES: string[] = ['in_progress', 'waiting_review', 'failed']
-
-/** The rows Home puts in front of the operator.
- *
- * Three kinds of thing survive, and everything else is somebody else's history:
- *
- *  - a task the operator already decided about is not news. `dismissed` is
- *    hidden in this scope (and reopenable from Settings → Overview → Update task history),
- *    and `completed` is a verdict a completion check reached rather than
- *    something to re-offer.
- *  - an offer that *applies* here is new work, and so is one nobody could rule
- *    on yet (`unknown`): a detector that has not run has not established that
- *    there is nothing to do.
- *  - a live attempt (`in_progress`, `waiting_review`, `failed`) always stays.
- *    Its chat is open or needs a decision, which is not a thing to hide.
- *
- * What is deliberately gone is an offer the detector says does *not* apply.
- * Every install ships the whole catalog, so drawing those would put a permanent
- * "nothing to do" card on the Home of everyone who does not need the task — and
- * an install with no work would no longer have an empty Home. */
-const visibleUpdateTasks = computed(() =>
-  housekeeping.updateTasks.filter((task) => {
-    if (task.status === 'completed' || task.status === 'dismissed') return false
-    if (LIVE_ATTEMPT_STATES.includes(task.status)) return true
-    return task.applicability !== 'not_applicable'
-  }),
-)
+// Which update tasks Home shows, and what counts as a live attempt, live in
+// lib/updateTasks.ts so the inbox applies the identical rule.
+const visibleUpdateTasks = computed(() => filterVisibleUpdateTasks(housekeeping.updateTasks))
 const openUpdateTasks = computed(() => visibleUpdateTasks.value.filter(task => !noticeWindows.isClosed(updateKey(task))))
 
 function updateKey(task: UpdateTaskRow): string {
-  return `update:${projectStore.activeWorkspace || 'shared'}:${taskKey(task)}`
+  return updateNoticeKey(projectStore.activeWorkspace, task.id, task.revision)
 }
 
 watch(
@@ -342,7 +317,7 @@ function startLabel(task: UpdateTaskRow): string {
  * its chat" link, which is precisely the wrong thing to do to somebody whose
  * work is running. */
 function canStart(task: UpdateTaskRow): boolean {
-  if (LIVE_ATTEMPT_STATES.includes(task.status)) return true
+  if (hasLiveAttempt(task.status)) return true
   return task.applicability === 'applicable'
 }
 
@@ -511,9 +486,125 @@ watch(
   (next, previous) => {
     if (next && next !== previous) {
       clearGroupStatus()
+      clearNoticeUnavailable()
       void housekeeping.refreshUpdateTasks(next)
     }
   },
+)
+
+// ── Reveal a notice from /?notice=<key> ─────────────────────────────────────
+//
+// The notification inbox links an operator or update notice here. The route
+// only ever reopens, scrolls to and focuses the notice: it never runs, starts,
+// dismisses or confirms anything. A key that does not name a notice drawn for
+// the workspace on screen says so and reveals nothing else.
+
+const NOTICE_KEY_MAX = 256
+const NOTICE_UNAVAILABLE_TTL_MS = 10_000
+const noticeUnavailable = ref(false)
+let noticeUnavailableTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearNoticeUnavailable(): void {
+  if (noticeUnavailableTimer !== null) {
+    clearTimeout(noticeUnavailableTimer)
+    noticeUnavailableTimer = null
+  }
+  noticeUnavailable.value = false
+}
+
+function showNoticeUnavailable(): void {
+  clearNoticeUnavailable()
+  noticeUnavailable.value = true
+  noticeUnavailableTimer = setTimeout(clearNoticeUnavailable, NOTICE_UNAVAILABLE_TTL_MS)
+}
+
+onBeforeUnmount(clearNoticeUnavailable)
+
+const noticeRoute = inject(routeLocationKey, null)
+const noticeRouter = inject(routerKey, null)
+
+function firstNoticeKey(raw: unknown): string {
+  const first = Array.isArray(raw) ? raw[0] : raw
+  return typeof first === 'string' && first.length <= NOTICE_KEY_MAX ? first : ''
+}
+
+watch(
+  () => noticeRoute?.query.notice,
+  async (raw) => {
+    if (!noticeRoute || raw === undefined) return
+    const key = firstNoticeKey(raw)
+    if (key) noticeWindows.requestReveal(key)
+    const { notice: _consumed, ...rest } = noticeRoute.query
+    void _consumed
+    const target = noticeRouter ?? (await import('../router')).router
+    await target.replace({ path: noticeRoute.path, query: rest, hash: noticeRoute.hash })
+  },
+  { immediate: true },
+)
+
+const revealDecision = computed<'none' | 'wait' | 'found' | 'missing'>(() => {
+  const key = noticeWindows.pendingReveal.value
+  if (!key) return 'none'
+  const parsed = parseHomeNoticeKey(key)
+  if (!parsed) return 'missing'
+  if (parsed.kind === 'action') {
+    if (housekeeping.actionsHealth.status === 'checking') return 'wait'
+    return scopedActions.value.some(a => actionKey(a) === key) ? 'found' : 'missing'
+  }
+  const active = projectStore.activeWorkspace
+  if (!active) return 'wait'
+  // A previous workspace's key can never target this workspace's row.
+  if (parsed.workspace !== active) return 'missing'
+  if (housekeeping.updateTasksWorkspace !== active || housekeeping.updateTasksHealth.status === 'checking') {
+    return 'wait'
+  }
+  return visibleUpdateTasks.value.some(t => updateKey(t) === key) ? 'found' : 'missing'
+})
+
+let updateRefreshRequestedFor = ''
+
+watch(
+  revealDecision,
+  async (decision) => {
+    const key = noticeWindows.pendingReveal.value
+    if (decision === 'wait') {
+      const active = projectStore.activeWorkspace
+      if (
+        active
+        && parseHomeNoticeKey(key)?.kind === 'update'
+        && housekeeping.updateTasksWorkspace !== active
+        && updateRefreshRequestedFor !== key
+      ) {
+        updateRefreshRequestedFor = key
+        void housekeeping.refreshUpdateTasks(active)
+      }
+      return
+    }
+    if (decision === 'missing') {
+      showNoticeUnavailable()
+      noticeWindows.clearReveal()
+      void housekeeping.refresh()
+      void housekeeping.refreshUpdateTasks()
+      return
+    }
+    if (decision !== 'found') return
+    clearNoticeUnavailable()
+    noticeWindows.reopen(key)
+    await nextTick()
+    if (noticeWindows.pendingReveal.value !== key) return
+    const el = [...document.querySelectorAll<HTMLElement>('[data-home-notice-window]')]
+      .find(candidate => candidate.dataset.noticeKey === key)
+    if (!el) {
+      showNoticeUnavailable()
+      noticeWindows.clearReveal()
+      return
+    }
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+    el.scrollIntoView?.({ block: 'center', behavior: reducedMotion ? 'auto' : 'smooth' })
+    el.focus({ preventScroll: true })
+    noticeWindows.clearReveal()
+  },
+  { immediate: true, flush: 'post' },
 )
 </script>
 
@@ -526,6 +617,8 @@ watch(
     card sort above an unmissable one and would make "hide this" mean two
     different things in one list.
   -->
+  <p v-if="noticeUnavailable" class="home-notice-unavailable" role="status">This notice is no longer available</p>
+
   <section v-if="hasActions()" class="housekeeping" aria-label="Housekeeping actions">
     <template v-for="group in groups" :key="group.workspace || '_shared'">
       <p v-if="showHeadings" class="housekeeping-group">
@@ -538,6 +631,8 @@ watch(
          :class="{ 'housekeeping-tile--blocking': action.blocking }"
          :title="action.title"
          :notice-key="actionKey(action)"
+         :data-notice-key="actionKey(action)"
+         tabindex="-1"
          :blocking="action.blocking"
        >
        <div class="housekeeping-body">
@@ -635,6 +730,8 @@ watch(
        class="housekeeping-tile update-task"
        :title="task.title"
        :notice-key="updateKey(task)"
+       :data-notice-key="updateKey(task)"
+       tabindex="-1"
      >
        <div class="housekeeping-body">
          <div class="housekeeping-detail">{{ task.why }}</div>
@@ -714,6 +811,17 @@ watch(
 </template>
 
 <style scoped>
+.home-notice-unavailable {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+
+:deep(.home-notice-window:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* A blocking action is a precondition the install cannot get past on its own,
    so it reads as a warning rather than as one tile among several. Not a modal
    and not an app-wide lock: the one realistic cause is an uncommitted vault, and
