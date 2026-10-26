@@ -254,12 +254,11 @@ test.describe('touch targets', () => {
   })
 
   for (const [route, ready] of POPUP_SURFACES) {
-  test(`controls inside menus and dialogs on ${route} are at least 44×44 on touch`, async ({ page }) => {
-    const small: string[] = []
-    const panels: string[] = []
-    const opened: string[] = []
-    const skipped: string[] = []
-    {
+    test(`controls inside menus and dialogs on ${route} are at least 44×44 on touch`, async ({ page }) => {
+      const small: string[] = []
+      const panels: string[] = []
+      const opened: string[] = []
+      const skipped: string[] = []
       await boot(page, route, ready)
       await quiesce(page)
       let count = await tagTriggers(page)
@@ -299,14 +298,13 @@ test.describe('touch targets', () => {
           count = await tagTriggers(page)
         }
       }
-    }
-    for (const known of KNOWN_TRIGGERS[route] ?? []) {
-      expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened on ${route}; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
-    }
-    expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED[route] ?? 0)
-    expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
-    expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
-  })
+      for (const known of KNOWN_TRIGGERS[route] ?? []) {
+        expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened on ${route}; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
+      }
+      expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED[route] ?? 0)
+      expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
+      expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
+    })
   }
 
   test('the workspace reorder handle and Move up / Move down are at least 44×44 on touch', async ({ page }) => {
