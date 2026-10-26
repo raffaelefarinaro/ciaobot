@@ -5,8 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
-import NotificationsView from '../NotificationsView.vue'
-import source from '../NotificationsView.vue?raw'
+import NotificationInboxList from '../NotificationInboxList.vue'
+import source from '../NotificationInboxList.vue?raw'
 import { useNotificationInboxStore } from '../../stores/notificationInbox'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
@@ -23,7 +23,6 @@ vi.mock('../../lib/api', () => ({
 }))
 
 const Empty = defineComponent({ template: '<div />' })
-const PaneHeader = defineComponent({ template: '<header />' })
 
 const AT = '2026-10-26T10:00:00.000Z'
 const stale: SourceHealth = { status: 'stale', lastSuccessAt: AT, error: 'x' }
@@ -31,6 +30,7 @@ const unavailable: SourceHealth = { status: 'unavailable', lastSuccessAt: '', er
 const checking: SourceHealth = { status: 'checking', lastSuccessAt: '', error: '' }
 
 interface Opts {
+  density?: 'popover' | 'sheet'
   chats?: Record<string, unknown>[]
   health?: SourceHealth
   /** What `/api/chats?active_only=1` answers; defaults to `chats`. 'reject' fails the read. */
@@ -89,14 +89,15 @@ async function mountView(opts: Opts = {}) {
     ],
   })
   await router.push('/')
-  const wrapper = mount(NotificationsView, {
-    global: { plugins: [router], stubs: { PaneHeader } },
+  const wrapper = mount(NotificationInboxList, {
+    props: opts.density ? { density: opts.density } : {},
+    global: { plugins: [router] },
   })
   await flushPromises()
   return { wrapper, router, projects, taskSignals, inbox: useNotificationInboxStore() }
 }
 
-describe('NotificationsView', () => {
+describe('NotificationInboxList', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.mocked(api.post).mockReset()
@@ -333,5 +334,21 @@ describe('opening a row', () => {
     await flushPromises()
     expect(refresh).toHaveBeenCalledTimes(1)
     expect(router.currentRoute.value.fullPath).toBe('/chat/a')
+  })
+
+  it('emits_navigate_after_opening_a_row', async () => {
+    const { wrapper, router } = await mountView({ chats: [chat('a', UNREAD)] })
+    await wrapper.find('.notif-row').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.fullPath).toBe('/chat/a')
+    expect(wrapper.emitted('navigate')).toHaveLength(1)
+  })
+
+  it('sheet_density_rows_are_52px', async () => {
+    const popover = await mountView({ chats: [chat('a', UNREAD)] })
+    expect(popover.wrapper.classes()).toContain('notif-inbox--popover')
+    const sheet = await mountView({ chats: [chat('a', UNREAD)], density: 'sheet' })
+    expect(sheet.wrapper.classes()).toContain('notif-inbox--sheet')
+    expect(source).toMatch(/\.notif-inbox--sheet \.notif-row\s*{[^}]*min-height:\s*52px/)
   })
 })

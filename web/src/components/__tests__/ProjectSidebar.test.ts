@@ -8,6 +8,7 @@ import { nextTick } from 'vue'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import ProjectSidebar from '../ProjectSidebar.vue'
+import NotificationBell from '../NotificationBell.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
@@ -538,6 +539,48 @@ describe('ProjectSidebar global new chat', () => {
       global: { plugins: [router] },
     })
   }
+
+  it('expanded_brand_row_has_bell_between_history_and_collapse', async () => {
+    const wrapper = await mountSidebar('chat')
+    const row = wrapper.get('.sidebar-brand-row').element
+    const order = Array.from(row.children).map((el) =>
+      el.classList.contains('sidebar-history') ? 'history'
+        : el.classList.contains('history-divider') ? 'divider'
+          : el.classList.contains('notif-bell') ? 'bell'
+            : el.classList.contains('toggle-btn') ? 'toggle' : '',
+    ).filter(Boolean)
+    expect(order).toEqual(['history', 'divider', 'bell', 'divider', 'toggle'])
+    wrapper.unmount()
+  })
+
+  it('expanded_bell_navigate_emits_chat_selected', async () => {
+    const wrapper = await mountSidebar('chat')
+    wrapper.findComponent(NotificationBell).vm.$emit('navigate')
+    expect(wrapper.emitted('chat-selected')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('collapsed_bell_navigate_emits_chat_selected', async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div />' } }] })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: true, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    wrapper.findComponent(NotificationBell).vm.$emit('navigate')
+    expect(wrapper.emitted('chat-selected')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('no_notifications_destination_row', async () => {
+    const wrapper = await mountSidebar('chat')
+    const hrefs = wrapper.findAll('.nav-links a').map((a) => a.attributes('href'))
+    expect(hrefs).not.toContain('/notifications')
+    expect(wrapper.find('.nav-links').text()).not.toContain('Notifications')
+    wrapper.unmount()
+  })
 
   it('offers one New chat above the tree, opening the shared picker', async () => {
     const { pendingNewChat } = await import('../../lib/newChat')

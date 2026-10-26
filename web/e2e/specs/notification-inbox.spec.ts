@@ -1,6 +1,8 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test'
 import {
   BELL,
+  HEADER_BELL,
+  INBOX_DIALOG,
   RAIL_BELL,
   ROWS,
   activeWorkspaceButton,
@@ -9,6 +11,7 @@ import {
   fixtureWrites,
   horizontalOverflow,
   isolate,
+  openInbox,
   quiesce,
   secondDevice,
   seedInbox,
@@ -18,8 +21,8 @@ import {
  * Why this is a browser test and not a vitest one.
  *
  * The inbox is a projection over owner stores, and every claim worth making
- * about it is about the real app around it: the shell it sits in on a direct
- * load, the rail and the drawer that hold its bell, a second device whose
+ * about it is about the real app around it: the popover that opens beside the
+ * sidebar, the rail and the pane header that hold its bell, a second device whose
  * server-side `chat_read` arrives over a real socket, a request that is still
  * in flight when the workspace changes, and a link whose target vanished
  * between the projection and the click. jsdom has no shell, no socket and no
@@ -31,7 +34,7 @@ import {
  */
 test.use({ viewport: { width: 1440, height: 900 } })
 
-const SUMMARY = '[data-testid="inbox-summary"]'
+const SUMMARY = `${INBOX_DIALOG} [data-testid="inbox-summary"]`
 const row = (page: Page, key: string) => page.locator(`[data-testid="row-${key}"]`)
 
 /**
@@ -87,24 +90,34 @@ test.beforeEach(async ({ page }, ti) => {
 })
 
 test.describe('notification inbox', () => {
-  test('direct_load_keeps_the_shell', async ({ page }) => {
+  test('bell_opens_inbox_popover_and_escape_closes', async ({ page }) => {
     await seedInbox(page, { chats: { 'alpha-chat-2': REPLY } })
-    await boot(page, '/notifications', SUMMARY)
+    await boot(page, '/tasks', '.task-card')
 
-    await expect(page.locator('.nav-links')).toBeVisible()
-    await expect(page.locator(BELL)).toHaveClass(/nav-item--active/)
-    await expect(page).toHaveTitle(/notifications/i)
+    const dialog = await openInbox(page)
+    await expect(page.locator(BELL)).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.locator(SUMMARY)).toBeVisible()
     await expect(
-      page.locator('section', { has: page.getByRole('heading', { name: /New replies/ }) })
+      dialog.locator('section', { has: page.getByRole('heading', { name: /New replies/ }) })
         .locator('[data-testid="row-chat:alpha-chat-2"]'),
     ).toBeVisible()
+    const box = (await dialog.boundingBox())!
+    const sidebarBox = (await page.locator('aside.sidebar').boundingBox())!
+    expect(box.width).toBeCloseTo(380, 0)
+    expect(box.x).toBeGreaterThanOrEqual(sidebarBox.x + sidebarBox.width + 7)
     await page.screenshot({ path: test.info().outputPath('inbox-expanded.png') })
 
-    await page.reload()
-    await expect(page.locator(SUMMARY)).toBeVisible()
-    await expect(page.locator('.nav-links')).toBeVisible()
-    await expect(page.locator(BELL)).toHaveClass(/nav-item--active/)
-    await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toBeVisible()
+    // Escape closes the popover and stays on the page: ChatLayout's Escape-to-Home
+    // does not fire.
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    await expect(page.locator(BELL)).toBeFocused()
+    await expect(page).toHaveURL(/\/tasks$/)
+
+    await page.locator(BELL).click()
+    await expect(dialog).toBeVisible()
+    await page.mouse.click(box.x + box.width + 20, box.y + 20)
+    await expect(dialog).toHaveCount(0)
   })
 
   test('arrival_on_another_view_updates_the_badge', async ({ page }) => {
@@ -123,10 +136,10 @@ test.describe('notification inbox', () => {
     })
     await expect.poll(() => bellCount(page)).toBe(base + 1)
 
-    await page.locator(BELL).click()
+    const dialog = await openInbox(page)
     await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toBeVisible()
     await expect(
-      page.locator('section', { has: page.getByRole('heading', { name: /New replies/ }) })
+      dialog.locator('section', { has: page.getByRole('heading', { name: /New replies/ }) })
         .locator('[data-testid="row-chat:alpha-chat-2"]'),
     ).toBeVisible()
   })
@@ -140,8 +153,11 @@ test.describe('notification inbox', () => {
           'alpha-chat-2': { ...REPLY, pending_permission: PERM },
         },
       })
-      await boot(page, '/notifications', SUMMARY)
-      await boot(b, '/notifications', SUMMARY)
+      await boot(page)
+      await boot(b)
+      for (const p of [page, b]) {
+        await openInbox(p)
+      }
       for (const p of [page, b]) {
         for (const id of ['alpha-chat-1', 'alpha-chat-2']) {
           await expect(row(p, UNREAD_ROW(id))).toBeVisible()
@@ -166,6 +182,7 @@ test.describe('notification inbox', () => {
       const bBefore = await bellCount(b)
       await row(page, UNREAD_ROW('alpha-chat-1')).locator(ROWS).click()
       await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+      await expect(page.getByRole('dialog', { name: 'Notifications' })).toHaveCount(0)
       await expect.poll(async () =>
         (await fixtureWrites(page)).filter((w) => w.path === '/api/chats/alpha-chat-1/read'),
       ).toEqual([{ method: 'POST', path: '/api/chats/alpha-chat-1/read' }])
@@ -174,13 +191,13 @@ test.describe('notification inbox', () => {
 
       // A opens chat-2, which also needs a permission answer. Read is not resolved.
       const bAfter = await bellCount(b)
-      await page.locator(BELL).click()
-      await expect(page).toHaveURL(/\/notifications$/)
+      await openInbox(page)
       await row(page, UNREAD_ROW('alpha-chat-2')).locator(ROWS).click()
       await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
       await expect(row(b, UNREAD_ROW('alpha-chat-2')).getByText('Unread')).toHaveCount(0)
       await expect(
-        b.locator('section', { has: b.getByRole('heading', { name: /Needs you/ }) })
+        b.getByRole('dialog', { name: 'Notifications' })
+          .locator('section', { has: b.getByRole('heading', { name: /Needs you/ }) })
           .locator('[data-testid="row-chat:alpha-chat-2"]'),
       ).toBeVisible()
       expect(await bellCount(b)).toBe(bAfter)
@@ -200,7 +217,8 @@ test.describe('notification inbox', () => {
       tasks: { alpha: [REVIEW_TASK] },
       schedules: { 'alpha-daily-brief': FAILING_SCHEDULE },
     })
-    await boot(page, '/notifications', SUMMARY)
+    await boot(page)
+    await openInbox(page)
     await expect(row(page, TASK_ROW)).toBeVisible()
     await expect(row(page, 'schedule:alpha-daily-brief')).toBeVisible()
     const base = await bellCount(page)
@@ -223,28 +241,30 @@ test.describe('notification inbox', () => {
 
   test('partial_failure_is_never_all_clear', async ({ page }) => {
     await page.route('**/api/schedules', (r) => r.fulfill({ status: 500, body: '{}' }))
-    await boot(page, '/notifications', SUMMARY)
+    await boot(page)
     await page.keyboard.press('3')
     await expect(activeWorkspaceButton(page)).toContainText('Gamma')
+    await openInbox(page)
 
     await expect(page.locator('[data-testid="inbox-empty-unavailable"]')).toBeVisible()
     await expect(page.locator('[data-testid="inbox-empty-clear"]')).toHaveCount(0)
     await expect(page.locator('[data-testid="source-automations"]'))
       .toContainText('Automations: could not be checked.')
     await expect(page.locator(BELL)).toHaveAttribute('aria-label', /Some sources could not be fully checked$/)
-    await expect(page.locator('.nav-item-alert--partial').first()).toBeVisible()
+    await expect(page.locator(`${BELL} .notif-bell-ring`)).toBeVisible()
 
     await page.unroute('**/api/schedules')
     await page.getByRole('button', { name: 'Retry checking Automations' }).click()
     await expect(page.locator('[data-testid="inbox-empty-clear"]')).toHaveText("You're all caught up.")
     await expect(page.locator('[data-testid="source-automations"]')).toHaveCount(0)
-    await expect(page.locator('.nav-item-alert--partial')).toHaveCount(0)
+    await expect(page.locator(`${BELL} .notif-bell-ring`)).toHaveCount(0)
     await expect(page.locator(BELL)).toHaveAttribute('aria-label', 'Notifications, none')
   })
 
   test('stale_rows_are_retained_and_marked', async ({ page }) => {
     await seedInbox(page, { chats: { 'alpha-chat-2': REPLY } })
-    await boot(page, '/notifications', SUMMARY)
+    await boot(page)
+    await openInbox(page)
     await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toBeVisible()
 
     await page.route('**/api/chats*', (r) => r.fulfill({ status: 500, body: '{}' }))
@@ -263,7 +283,8 @@ test.describe('notification inbox', () => {
   })
 
   test('offline_and_reconnect', async ({ page, request }, ti) => {
-    await boot(page, '/notifications', SUMMARY)
+    await boot(page)
+    await openInbox(page)
     const headers = { cookie: `e2e_session=${session(ti)}` }
     const connections = async () =>
       (await (await request.get('/__fixture__/ws-count', { headers })).json()).connections as number
@@ -286,7 +307,8 @@ test.describe('notification inbox', () => {
       tasks: { alpha: [REVIEW_TASK] },
       chats: { 'alpha-chat-2': REPLY, 'beta-chat-2': REPLY },
     })
-    await boot(page, '/notifications', SUMMARY)
+    await boot(page)
+    await openInbox(page)
     await expect(row(page, TASK_ROW)).toBeVisible()
     await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toBeVisible()
 
@@ -332,7 +354,8 @@ test.describe('notification inbox', () => {
       chats: { 'alpha-chat-2': REPLY },
       tasks: { alpha: [REVIEW_TASK] },
     })
-    await boot(page, '/notifications', SUMMARY)
+    await boot(page)
+    await openInbox(page)
     await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toBeVisible()
     await expect(row(page, TASK_ROW)).toBeVisible()
     const base = await bellCount(page)
@@ -344,7 +367,7 @@ test.describe('notification inbox', () => {
     await row(page, UNREAD_ROW('alpha-chat-2')).locator(ROWS).click()
     await expect(notice).toBeVisible()
     await expect(notice).toBeFocused()
-    await expect(page).toHaveURL(/\/notifications$/)
+    await expect(page).toHaveURL(/\/$/)
     await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toHaveCount(0)
     await expect.poll(() => bellCount(page)).toBeLessThan(base)
     expect((await fixtureWrites(page)).some((w) => w.path === '/api/chats/alpha-chat-2/read')).toBe(false)
@@ -358,7 +381,7 @@ test.describe('notification inbox', () => {
     await row(page, TASK_ROW).locator(ROWS).click()
     await expect(notice).toBeVisible()
     await expect(notice).toBeFocused()
-    await expect(page).toHaveURL(/\/notifications$/)
+    await expect(page).toHaveURL(/\/$/)
     await expect(row(page, TASK_ROW)).toHaveCount(0)
     expect(await writes(page)).toEqual([])
   })
@@ -396,7 +419,7 @@ test.describe('notification inbox', () => {
     await expect(update).toHaveCount(0)
 
     // An SPA navigation, so the in-memory closed set survives: local X is not a dismissal.
-    await page.locator(BELL).click()
+    await openInbox(page)
     const operatorRow = row(page, 'operator:shared:e2e-check')
     const updateRow = row(page, 'update-task:alpha:review-legacy-rows@1')
     await expect(operatorRow).toBeVisible()
@@ -408,7 +431,7 @@ test.describe('notification inbox', () => {
     await expect(action).toBeFocused()
     await expect(update).toHaveCount(0)
 
-    await page.locator(BELL).click()
+    await openInbox(page)
     await updateRow.locator(ROWS).click()
     await expect(page).toHaveURL((u) => u.pathname === '/' && !u.search.includes('notice'))
     await expect(update).toBeVisible()
@@ -439,7 +462,8 @@ test.describe('notification inbox', () => {
         })
       }, variant)
       await seedInbox(page, { chats: { 'alpha-chat-2': REPLY } })
-      await boot(page, '/notifications', SUMMARY)
+      await boot(page)
+      await openInbox(page)
 
       await expect(row(page, UNREAD_ROW('alpha-chat-2'))).toBeVisible()
       await expect(row(page, UNREAD_ROW('alpha-chat-2')).getByText('Unread')).toHaveCount(1)
@@ -467,15 +491,20 @@ test.describe('notification inbox', () => {
     await expect(rail).toBeVisible()
     await expect(rail).toHaveAttribute('aria-label', label!)
     await expect(rail).toHaveAttribute('title', 'Notifications')
-    await expect(page.locator('.sidebar-rail-bell-count')).toHaveText(String(count))
+    await expect(page.locator(`${RAIL_BELL} .notif-bell-count`)).toHaveText(String(count))
     await page.screenshot({ path: test.info().outputPath('inbox-collapsed.png') })
 
     await rail.focus()
     await expect(rail).toBeFocused()
     await page.keyboard.press('Enter')
-    await expect(page).toHaveURL(/\/notifications$/)
+    const dialog = page.getByRole('dialog', { name: 'Notifications' })
+    await expect(dialog).toBeVisible()
     await expect(page.locator(SUMMARY)).toBeVisible()
-    await expect(page.locator(RAIL_BELL)).toBeVisible()
+    const sidebarBox = (await page.locator('aside.sidebar').boundingBox())!
+    expect((await dialog.boundingBox())!.x).toBeGreaterThanOrEqual(sidebarBox.x + sidebarBox.width + 7)
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    await expect(rail).toBeFocused()
     await expect(page.locator('.nav-links')).not.toBeVisible()
   })
 
@@ -489,39 +518,34 @@ test.describe('notification inbox', () => {
       await seedInbox(page, { chats: { 'alpha-chat-2': REPLY } })
       await page.route('**/api/schedules', (r) => r.fulfill({ status: 500, body: '{}' }))
       await boot(page)
-      const open = page.locator('button.header-hamburger[aria-label="Open sidebar"]').first()
-      const bell = page.locator(BELL)
-      const drawerClosed = async () => {
-        await expect(page).toHaveURL(/\/notifications$/)
-        await expect(page.locator('.chat-layout.sidebar-open')).toHaveCount(0)
-        await expect(page.locator('.sidebar-backdrop')).toHaveCount(0)
-        await expect(page.locator(SUMMARY)).toBeVisible()
-      }
-
-      await open.click()
-      await expect(page.locator('.chat-layout.sidebar-open')).toHaveCount(1)
-      await expect(page.locator('.sidebar-backdrop')).toBeVisible()
+      const bell = page.locator(HEADER_BELL)
+      await expect(bell).toBeVisible()
       expect((await bell.boundingBox())!.height).toBeGreaterThanOrEqual(44)
-      await bell.click()
-      await drawerClosed()
 
-      // The keyboard path gets the same result.
-      await page.goto('/')
-      await expect(open).toBeVisible()
-      await open.click()
-      await expect(page.locator('.chat-layout.sidebar-open')).toHaveCount(1)
-      await bell.focus()
-      await page.keyboard.press('Enter')
-      await drawerClosed()
+      const dialog = await openInbox(page, HEADER_BELL)
+      await expect(dialog).toHaveClass(/notif-popover--sheet/)
+      await expect(page.locator('.notif-backdrop')).toBeVisible()
+      const sheet = (await dialog.boundingBox())!
+      expect(sheet.x).toBeCloseTo(8, 0)
+      expect(sheet.width).toBeCloseTo(390 - 16, 0)
+      await expect(page.locator(SUMMARY)).toBeVisible()
 
       await quiesce(page)
       expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
-      for (const sel of [ROWS, '.notif-retry']) {
-        const box = await page.locator(sel).first().boundingBox()
-        expect(box, sel).not.toBeNull()
-        expect(box!.height, sel).toBeGreaterThanOrEqual(44)
-      }
+      const box = await page.locator(ROWS).first().boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.height).toBeGreaterThanOrEqual(52)
+      const retry = await page.locator('.notif-retry').first().boundingBox()
+      expect(retry).not.toBeNull()
+      expect(retry!.height).toBeGreaterThanOrEqual(44)
       await page.screenshot({ path: test.info().outputPath('inbox-mobile.png') })
+
+      // Following a row closes the sheet; the drawer was never open.
+      await row(page, UNREAD_ROW('alpha-chat-2')).locator(ROWS).click()
+      await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
+      await expect(dialog).toHaveCount(0)
+      await expect(page.locator('.notif-backdrop')).toHaveCount(0)
+      await expect(page.locator('.chat-layout.sidebar-open')).toHaveCount(0)
     } finally {
       await page.context().close()
     }
@@ -530,19 +554,22 @@ test.describe('notification inbox', () => {
   test('long_titles_zoom_and_reduced_motion', async ({ page }) => {
     const evil = `${'x'.repeat(200)}<img src=x onerror=1>&"'`
     await seedInbox(page, { chats: { 'alpha-chat-2': { ...REPLY, title: evil } } })
-    await boot(page, '/notifications', SUMMARY)
+    await boot(page)
+    // Below 768px the sidebar is a rail and the pane header carries the bell, so
+    // the inbox opens as the full-width sheet.
+    await page.setViewportSize({ width: 640, height: 450 })
+    await openInbox(page, HEADER_BELL)
     const r = row(page, UNREAD_ROW('alpha-chat-2'))
     await expect(r).toBeVisible()
     await expect(r.locator('img')).toHaveCount(0)
     await expect(r.locator('.notif-title')).toHaveText(evil)
 
-    await page.setViewportSize({ width: 640, height: 450 })
     await expect(r).toBeVisible()
     await quiesce(page)
     const { overflow, culprits } = await horizontalOverflow(page)
     expect(overflow, `scrolls sideways; widest: ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
     const viewportWidth = 640
-    for (const el of await page.locator('.notifications-view a, .notifications-view button').all()) {
+    for (const el of await page.locator(`${INBOX_DIALOG} a, ${INBOX_DIALOG} button`).all()) {
       const box = await el.boundingBox()
       expect(box!.x).toBeGreaterThanOrEqual(0)
       expect(box!.x + box!.width).toBeLessThanOrEqual(viewportWidth + 1)
@@ -556,12 +583,12 @@ test.describe('notification inbox', () => {
         const t = a.effect?.getComputedTiming()
         const target = (a.effect as KeyframeEffect | null)?.target
         return t !== undefined && Number.isFinite(t.endTime) && a.playState === 'running'
-          && !!target && !!(target as Element).closest('.notifications-view')
+          && !!target && !!(target as Element).closest('[role="dialog"]')
       }).length,
     )
     expect(running).toBe(0)
 
-    await expect(page.getByRole('link', { name: /^Notifications, \d+ items?/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Notifications, \d+ items?/ }).first()).toBeVisible()
     await expect(page.locator(SUMMARY)).toHaveAttribute('role', 'status')
     await expect(page.getByRole('status').filter({ hasText: /items? needs? a look/ })).toBeVisible()
   })

@@ -49,6 +49,10 @@
       <div v-if="$slots.actions" class="header-actions" :key="activeBgAgents">
         <slot name="actions" />
       </div>
+      <!-- Phones only: the sidebar (and its bell) is a drawer there. The drawer
+           is already closed while this header is visible, so a followed row has
+           nothing to close. -->
+      <NotificationBell class="header-bell" variant="sheet" />
     </div>
   </header>
 </template>
@@ -56,6 +60,7 @@
 <script setup lang="ts">
 import { computed, useSlots } from 'vue'
 import BrandMark from './BrandMark.vue'
+import NotificationBell from './NotificationBell.vue'
 import { useHistoryNav } from '../composables/useHistoryNav'
 
 const props = withDefaults(defineProps<{
@@ -264,6 +269,12 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
   flex-shrink: 0;
 }
 .header-lead { display: none; }
+/* Matches ChatLayout's `isMobile` (innerWidth < 768). The class lands on the
+   bell's button, a child root, so it is reached through :deep. */
+.header-trail :deep(.header-bell) { display: none; }
+@media (max-width: 767px) {
+  .header-trail :deep(.header-bell) { display: inline-flex; }
+}
 .header-back,
 .header-hamburger {
   display: none;

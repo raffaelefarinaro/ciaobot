@@ -17,7 +17,6 @@ function makeRouter() {
       { path: '/chat/:chatId', component: Empty },
       { path: '/project/:projectId', component: Empty },
       { path: '/tasks', component: Empty },
-      { path: '/notifications', component: Empty },
     ],
   })
 }
@@ -76,23 +75,6 @@ describe('useHistoryNav', () => {
     await router.push('/')
     expect(nav.canBack.value).toBe(true)
     expect(nav.backLabel.value).toBe('Back to Tasks')
-  })
-
-  it('notifications_label', async () => {
-    const pinia = createPinia()
-    setActivePinia(pinia)
-    const store = useProjectStore()
-    store.workspaces = [{ name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' }]
-
-    const router = makeRouter()
-    await router.push('/notifications')
-    let nav!: ReturnType<typeof useHistoryNav>
-    mount(defineComponent({ setup() { nav = useHistoryNav(); return () => h('div') } }), {
-      global: { plugins: [router, pinia] },
-    })
-
-    await router.push('/')
-    expect(nav.backLabel.value).toBe('Back to Notifications')
   })
 
   it('stays inert without a router', () => {

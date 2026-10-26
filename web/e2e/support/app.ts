@@ -1,4 +1,4 @@
-import { expect, type Browser, type BrowserContextOptions, type Page } from '@playwright/test'
+import { expect, type Browser, type BrowserContextOptions, type Locator, type Page } from '@playwright/test'
 
 /**
  * Give this browser context its own slice of the fixture's mutable state, so a
@@ -106,12 +106,28 @@ export async function quiesce(page: Page, frames = 5): Promise<void> {
   }, frames, { polling: 'raf', timeout: 0 })
 }
 
-/** The notifications link in the expanded sidebar nav. */
-export const BELL = '.nav-links a[href="/notifications"]'
-/** The same link in the collapsed rail. */
-export const RAIL_BELL = 'a.sidebar-rail-bell'
+/** The notifications bell in the expanded sidebar's brand row. */
+export const BELL = '.sidebar-brand-row .notif-bell'
+/** The same bell in the collapsed rail. */
+export const RAIL_BELL = '.sidebar-history-rail .notif-bell'
+/** The bell in the pane header, which only shows below 768px. */
+export const HEADER_BELL = '.header-trail .notif-bell'
+/** The inbox popover (or sheet) a bell opens. */
+export const INBOX_DIALOG = '[role="dialog"][aria-label="Notifications"]'
 /** One inbox row. */
 export const ROWS = '.notif-row'
+
+/**
+ * Open the inbox from the bell the viewport shows, and wait for its dialog.
+ * Pass `bell` to name one: at phone width the header bell is the visible one.
+ */
+export async function openInbox(page: Page, bell?: string): Promise<Locator> {
+  const trigger = bell ? page.locator(bell) : page.getByRole('button', { name: /^Notifications/ })
+  await trigger.click()
+  const dialog = page.getByRole('dialog', { name: 'Notifications' })
+  await expect(dialog).toBeVisible()
+  return dialog
+}
 
 /** What `POST /__fixture__/inbox` accepts; see the header of `fixture/server.mjs`. */
 export interface InboxSeed {
