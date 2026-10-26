@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { boot, isolate, quiesce } from '../support/app'
 
 const READY = '.project-header'
 const NOTES = 'alpha-notes'
@@ -156,7 +156,7 @@ test.describe('sidebar project reordering on a phone', () => {
     const grip = group.locator('.drag-grip')
     await expect(grip).toBeVisible()
     // The drawer slides in: measure once it has stopped.
-    await expect.poll(async () => (await grip.boundingBox())!.x).toBeGreaterThan(0)
+    await quiesce(page)
     const box = (await grip.boundingBox())!
     const cx = box.x + box.width / 2
     const cy = box.y + box.height / 2
