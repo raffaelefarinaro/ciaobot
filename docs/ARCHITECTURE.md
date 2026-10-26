@@ -368,7 +368,8 @@ web/                           Vue 3 PWA frontend.
                                a module; splitting it into a second Pinia store instead would change
                                what consumers see.
                                `notificationInbox.ts` is the inbox's adapter. It owns no data: it reads `projects`,
-                               `taskSignals`, `housekeeping`, `tasks`, `proposals` and `vaultReview`, owns the
+                               `taskSignals`, `housekeeping` and `tasks` (not `proposals` or `vaultReview`: memory
+                               suggestions and notes to revisit are not inbox content), owns the
                                init/dispose lifecycle that `ChatLayout` drives, and no store imports it, so the
                                dependency runs one way.
   src/lib/                     Helpers (API client, formatters, etc.). Pure, and free of Vue imports:

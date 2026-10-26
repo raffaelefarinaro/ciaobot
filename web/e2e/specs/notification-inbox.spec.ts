@@ -28,8 +28,8 @@ import {
  * between the projection and the click. jsdom has no shell, no socket and no
  * layout, so it can say none of that.
  *
- * Alpha is not empty by default (a proposals row, and alpha-chat-7's memory
- * pass is blocking), so alpha assertions are relative to a baseline or name a
+ * Alpha is not empty by default (alpha-chat-7's memory pass is blocking;
+ * memory suggestions and notes to revisit are not inbox content), so alpha assertions are relative to a baseline or name a
  * row by its key. Gamma has no default rows and hosts the zero-state tests.
  */
 test.use({ viewport: { width: 1440, height: 900 } })
@@ -169,7 +169,7 @@ test.describe('notification inbox', () => {
       // Two barriers before anything is sampled or broadcast. Both events sockets
       // are open, so A's read cannot be broadcast to a device that is not yet
       // listening. And every source has answered on both devices: the chat rows
-      // are drawn before the proposals read lands, so a count sampled earlier
+      // are drawn before the slower sources land, so a count sampled earlier
       // misses that row and then looks one too high once it arrives.
       await expect.poll(async () =>
         (await (await page.request.get('/__fixture__/ws-count')).json()).open,
