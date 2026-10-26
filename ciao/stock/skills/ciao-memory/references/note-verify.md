@@ -51,7 +51,7 @@ A note's `updated:` is one date for every fact in it, so a whole-note verdict wo
 7. Call `ciao note verify --payload-file <file>`. The reply gains `scope: "entry"`. A `needs_review` entry verdict queues a `replace_entry`, `restamp_entry` or `retire_entry` proposal, whose accept changes or removes exactly that span and is undone from History like any other note write.
 8. Re-read the note. The revision in the plan is the note as it stood when the worklist was computed, so a second `stale_entry` of the same note, or a `stale_note` item for a note you just wrote an entry of, comes back `conflict`. One bullet per note is the honest yield; the rest wait for a plan built against the note as it now is.
 
-A `still_valid` on an entry with no `[verified:]` stamp comes back `needs_review` rather than stamping one, because writing a date nobody checked invents a verification.
+A `still_valid` on an entry with no `[verified:]` stamp adds one, on the same evidence a re-stamp needs (complete coverage and a citation naming the note); without that evidence it is recorded `unverified` and nothing is written. An entry whose stamp is unreadable (`[verified 2024-01-05]`, an impossible day) comes back `needs_review` with a `restamp_entry` repair.
 
 ```json
 {
