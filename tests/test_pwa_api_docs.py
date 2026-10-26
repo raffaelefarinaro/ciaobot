@@ -8,6 +8,7 @@ from pathlib import Path
 # in PWA_API.md → Agent recipes. Each entry needs a one-line reason so future
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
+    "/api/tasks/{task_id}/order": "drag/menu reorder; signed session only, no agent verb, acts as the user",
     "/api/onboarding": "browser-only resumable lifecycle progress; signed session, no settings/readiness writes",
     "/api/onboarding/interview": "browser-only explicit first-run interview; signed session, creates only the interview chat",
     "/api/onboarding/complete": "browser-only onboarding completion; signed session, no host actions",
