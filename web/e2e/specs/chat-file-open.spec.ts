@@ -76,14 +76,15 @@ test('Home loads chat and file code only when the user needs it', async ({ page 
     const asset = new URL(`../../../ciao/web/static${path}`, import.meta.url)
     return total + gzipSync(readFileSync(asset)).byteLength
   }, 0)
-  // 260,000 bytes (~254 KiB) since 2026-10-22. The guard was 250,000, set when
-  // the page-load work landed; readable model labels (#1782) and the header
-  // naming work took Home from 249,9xx to 250,411, and a budget with no
-  // headroom fails on every feature that adds a byte. This keeps the same
-  // level of the guard with room for roughly one more small feature. Current
-  // build measures 256,357 compressed bytes; raise only with a measurement,
-  // not to silence a regression.
-  expect(compressedHomeBytes).toBeLessThan(260_000)
+  // 270,000 bytes (~264 KiB) since 2026-10-26. It was 260,000 from 2026-10-22,
+  // before that 250,000, set when the page-load work landed. The notification
+  // inbox bell (#2077) is on every page, so its store and projection ship in
+  // the shell chunk Home loads: origin/develop measured 257,553 compressed
+  // bytes without it and this build measures 263,694, so the inbox costs about
+  // 6.1 KB. None of it is optional (the bell count must work on every page,
+  // and the row view is already a lazy chunk), which leaves roughly 6 KB of
+  // headroom. Raise only with a measurement, not to silence a regression.
+  expect(compressedHomeBytes).toBeLessThan(270_000)
   await page.screenshot({ path: testInfo.outputPath('home.png'), fullPage: true })
 
   await boot(page, '/chat/alpha-chat-1', COMPOSER)
