@@ -18,9 +18,19 @@ describe('ActivityGlyph', () => {
       expect(wrapper.text()).toBe(text)
     }
 
-    const working = mount(ActivityGlyph, { props: { kind: 'working' } })
-    expect(working.findAll('.activity-glyph-pixel')).toHaveLength(9)
-    expect(working.findAll('.activity-glyph-pixel--still')).toHaveLength(5)
+    // Every running kind is the same 3x3 grid; the reduced-motion frame
+    // (the --still cells) is what tells them apart without motion.
+    const stills: Array<[ActivityGlyphKind, number[]]> = [
+      ['working', [0, 2, 4, 6, 8]],
+      ['agent', [2, 4]],
+      ['run', [1, 3, 5, 7]],
+    ]
+    for (const [kind, lit] of stills) {
+      const pixels = mount(ActivityGlyph, { props: { kind } }).findAll('.activity-glyph-pixel')
+      expect(pixels).toHaveLength(9)
+      const still = pixels.flatMap((p, i) => (p.classes('activity-glyph-pixel--still') ? [i] : []))
+      expect(still, kind).toEqual(lit)
+    }
     expect(mount(ActivityGlyph, { props: { kind: 'run-failed' } }).find('svg').exists()).toBe(true)
     expect(mount(ActivityGlyph, { props: { kind: 'run' } }).find('svg').exists()).toBe(false)
     expect(mount(ActivityGlyph, { props: { kind: 'agent' } }).find('svg').exists()).toBe(false)

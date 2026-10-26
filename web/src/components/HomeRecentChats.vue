@@ -1274,8 +1274,9 @@ defineExpose({ onArrow })
 }
 
 /* A pass blocked on the owner and a pass that stopped with work left both take
-   the accent; the words, not the colour, tell them apart. Both are rows you are meant to
-   act on, so neither reads as the muted background chatter an in-flight row is.
+   the accent; the words, not the colour, tell them apart. Both are rows you are
+   meant to act on, so neither reads as the muted background chatter an
+   in-flight row is.
    One rule per phase, so nothing has to win a specificity fight to colour a
    row correctly. */
 .home-chat-item--insight-needsYou .home-chat-tidy-note {

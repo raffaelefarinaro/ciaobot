@@ -181,7 +181,6 @@ const intervalTitle = computed(() => {
    shape carries the meaning, because a workspace accent can sit next to the
    semantic error red. */
 .chat-signal--unread {
-  display: inline-flex;
   color: var(--accent);
 }
 
