@@ -2524,6 +2524,17 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Fine pointers take prototype A's 36px row. The header's controls keep their
    44px boxes (negative margins); only the row's own padding shrinks. */
+/* The grip sits in the row on a coarse pointer; a pinned row has none, so a
+   spacer of the grip's width (and the flex gap after it) keeps its chevron and
+   name aligned with the rows that do. */
+@media (pointer: coarse) {
+  .project-header.is-system::before {
+    content: '';
+    flex: none;
+    width: 20px;
+  }
+}
+
 @media (pointer: fine) {
   .project-header {
     min-height: 36px;

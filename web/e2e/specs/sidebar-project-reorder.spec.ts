@@ -168,6 +168,11 @@ test.describe('sidebar project reordering on a phone', () => {
     )
     expect(hit).toBe(NOTES)
 
+    // Pinned General has no grip; its chevron still lines up with the rows that do.
+    const chevronLeft = (id: string) =>
+      page.locator(`[data-project-id="${id}"] .project-icon`).evaluate((el) => el.getBoundingClientRect().left)
+    expect(Math.abs((await chevronLeft('alpha-general')) - (await chevronLeft(NOTES)))).toBeLessThanOrEqual(1)
+
     const requested = page.waitForRequest(
       (request) => request.method() === 'POST' && request.url().endsWith('/api/projects/reorder'),
     )
