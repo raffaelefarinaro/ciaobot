@@ -3602,6 +3602,59 @@ describe('optimistic user bubble reconciliation', () => {
     expect(userMsgs[0].turn_index).toBe(1)
   })
 
+  // #1663: a transcript-fallback history serves the user row with no
+  // turn_index, so the optimistic bubble cannot pair by index. The reload must
+  // still leave exactly one bubble. The flat shape takes the replace path; the
+  // envelope rows carry real absolute indexes (`i`) so the index-addressed
+  // merge and its text pairing run, not the wholesale window adoption.
+  test('loadMessages keeps one bubble when a flat fallback row has no turn_index', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-fallback-dup-flat'
+    store.messages[chatId] = [
+      { role: 'user', content: 'earlier', timestamp: '2026-10-20T11:00:00Z' },
+      { role: 'assistant', content: 'earlier reply', timestamp: '' },
+      { role: 'user', content: 'Still working?', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'earlier', sent_at: '2026-10-20T11:00:00Z' },
+      { role: 'assistant', content: 'earlier reply', sent_at: '' },
+      { role: 'user', content: 'Still working?', sent_at: '2026-10-20T12:08:41Z' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'Still working?',
+    )
+    expect(userMsgs.length).toBe(1)
+  })
+
+  test('loadMessages merges an envelope fallback row without turn_index onto the optimistic bubble', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-fallback-dup-envelope'
+    store.messages[chatId] = [
+      { i: 0, role: 'user', content: 'earlier', timestamp: '2026-10-20T11:00:00Z' },
+      { i: 1, role: 'assistant', content: 'earlier reply', timestamp: '' },
+      { role: 'user', content: 'Still working?', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'earlier', sent_at: '2026-10-20T11:00:00Z' },
+        { i: 1, role: 'assistant', content: 'earlier reply', sent_at: '' },
+        { i: 2, role: 'user', content: 'Still working?', sent_at: '2026-10-20T12:08:41Z' },
+      ],
+      total: 3, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    const userMsgs = msgs.filter(m => m.role === 'user' && m.content === 'Still working?')
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].i).toBe(2)
+    expect(msgs.map(m => m.i)).toEqual([0, 1, 2])
+  })
+
   test('loadMessages background reload does not wipe the optimistic bubble on a still-empty server window', async () => {
     // Regression for "first message can vanish on new chats": a background
     // reload (the 15s poll, say) landing before the first turn persisted
@@ -8214,6 +8267,173 @@ describe('running subagent poll', () => {
       await vi.advanceTimersByTimeAsync(60_000)
       const pollsAfterDeadline = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
       expect(pollsAfterDeadline).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('running-row reconciliation while the engine count is zero', () => {
+  // The engine count (`backgroundAgents`, from chat_subagents_ready) and the
+  // cheap running list (/api/subagents/running) are separate owners. A row the
+  // list names while the count is 0 on an idle chat used to start nothing: the
+  // full-list poll was gated on the count alone and the running poll only
+  // started on a working edge.
+  const row = { agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }
+  let running: Record<string, unknown[]>
+  const calls = (suffix: string) => apiGet.mock.calls.filter(c => String(c[0]).endsWith(suffix)).length
+  function mockEndpoints(): void {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
+      if (path === '/api/chats/c1/subagents') return Promise.resolve([{ ...row, messages: [] }])
+      return Promise.resolve([])
+    })
+  }
+
+  beforeEach(() => {
+    running = { c1: [row] }
+    mockEndpoints()
+  })
+
+  test('known running rows keep an idle active chat refreshing when the event count is zero', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.backgroundAgents.c1).toBeUndefined()
+      expect(store.isStreaming).toBe(false)
+
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(calls('/subagents')).toBeGreaterThan(0)
+      expect(calls('/api/subagents/running')).toBeGreaterThan(0)
+      // The engine count is never written from the cheap list.
+      expect(store.backgroundAgents.c1).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('running-row discovery immediately refreshes the full active list once', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      apiGet.mockClear()
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
+      expect(store.subagents.c1).toHaveLength(1)
+
+      // A second refresh that still lists the row is not a new discovery.
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('completion and disposal stop both polls', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(4000)
+
+      running = {}
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(store.runningSubagents.c1).toBeUndefined()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+
+      // Disposal while rows are still known.
+      running = { c1: [row] }
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(4000)
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a failed running request does not clear the known rows or stop the poll', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      await store.refreshRunningSubagents()
+      apiGet.mockImplementation((path: string) =>
+        path === '/api/subagents/running' ? Promise.reject(new Error('offline')) : Promise.resolve([]))
+      await vi.advanceTimersByTimeAsync(8000)
+      expect(store.runningSubagents.c1).toHaveLength(1)
+
+      mockEndpoints()
+      running = {}
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(store.runningSubagents.c1).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a dedicated subagent view does not trigger full-list polling', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      store.setSubagentViewActive('c1')
+      apiGet.mockClear()
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(calls('/api/chats/c1/subagents')).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('rows for another chat do not poll the active chat', async () => {
+    vi.useFakeTimers()
+    try {
+      running = { other: [row] }
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      apiGet.mockClear()
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(calls('/api/chats/c1/subagents')).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('late old responses do not restore completed agents', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      const pending: Array<(v: unknown) => void> = []
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
+        if (path === '/api/chats/c1/subagents') return new Promise(resolve => pending.push(resolve))
+        return Promise.resolve([])
+      })
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(pending.length).toBeGreaterThanOrEqual(2)
+      const last = pending.length - 1
+      pending[last]([{ ...row, status: 'completed', messages: [] }])
+      await vi.advanceTimersByTimeAsync(0)
+      pending[0]([{ ...row, status: 'running', messages: [] }])
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.subagents.c1?.[0]?.status).toBe('completed')
     } finally {
       vi.useRealTimers()
     }
