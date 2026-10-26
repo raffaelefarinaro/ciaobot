@@ -10,6 +10,7 @@ import HomeNoticeWindow from './HomeNoticeWindow.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
 import { useCommandCopy } from '../composables/useCommandCopy'
 import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
+import { hasLiveAttempt, visibleUpdateTasks as filterVisibleUpdateTasks } from '../lib/updateTasks'
 import { actionNoticeKey, parseHomeNoticeKey, updateNoticeKey } from '../lib/notificationInbox'
 
 const housekeeping = useHousekeepingStore()
@@ -193,37 +194,9 @@ async function openChat(action: OperatorAction): Promise<void> {
 // reverses it, can be reopened from Settings, and must never be drawn as done
 // before a completion check has actually said so.
 
-/** The lifecycles where an attempt exists: a chat was opened, is waiting on the
- *  operator, or did not get going. Every state question below turns on this one
- *  list, because it is the difference between "nobody has started this" and
- *  "somebody already did". */
-const LIVE_ATTEMPT_STATES: string[] = ['in_progress', 'waiting_review', 'failed']
-
-/** The rows Home puts in front of the operator.
- *
- * Three kinds of thing survive, and everything else is somebody else's history:
- *
- *  - a task the operator already decided about is not news. `dismissed` is
- *    hidden in this scope (and reopenable from Settings → Overview → Update task history),
- *    and `completed` is a verdict a completion check reached rather than
- *    something to re-offer.
- *  - an offer that *applies* here is new work, and so is one nobody could rule
- *    on yet (`unknown`): a detector that has not run has not established that
- *    there is nothing to do.
- *  - a live attempt (`in_progress`, `waiting_review`, `failed`) always stays.
- *    Its chat is open or needs a decision, which is not a thing to hide.
- *
- * What is deliberately gone is an offer the detector says does *not* apply.
- * Every install ships the whole catalog, so drawing those would put a permanent
- * "nothing to do" card on the Home of everyone who does not need the task — and
- * an install with no work would no longer have an empty Home. */
-const visibleUpdateTasks = computed(() =>
-  housekeeping.updateTasks.filter((task) => {
-    if (task.status === 'completed' || task.status === 'dismissed') return false
-    if (LIVE_ATTEMPT_STATES.includes(task.status)) return true
-    return task.applicability !== 'not_applicable'
-  }),
-)
+// Which update tasks Home shows, and what counts as a live attempt, live in
+// lib/updateTasks.ts so the inbox applies the identical rule.
+const visibleUpdateTasks = computed(() => filterVisibleUpdateTasks(housekeeping.updateTasks))
 const openUpdateTasks = computed(() => visibleUpdateTasks.value.filter(task => !noticeWindows.isClosed(updateKey(task))))
 
 function updateKey(task: UpdateTaskRow): string {
@@ -344,7 +317,7 @@ function startLabel(task: UpdateTaskRow): string {
  * its chat" link, which is precisely the wrong thing to do to somebody whose
  * work is running. */
 function canStart(task: UpdateTaskRow): boolean {
-  if (LIVE_ATTEMPT_STATES.includes(task.status)) return true
+  if (hasLiveAttempt(task.status)) return true
   return task.applicability === 'applicable'
 }
 
