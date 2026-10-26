@@ -38,7 +38,7 @@
       class="chat-signal chat-signal--retry"
       title="Retry scheduled"
       aria-label="Retry scheduled"
-    >↻</span>
+    >↻ retry</span>
     <!-- Not on the ladder: a run can outlive everything else on the row (a dev
          server goes for hours), so it shows beside needs-you, working and agents
          instead of hiding behind them. -->
@@ -59,14 +59,19 @@
       :aria-label="intervalTitle"
     >↻</span>
 
-    <!-- Not beside needs-you: that dot already asks for the chat to be
+    <!-- Not beside needs-you: that mark already asks for the chat to be
          opened, and a second one next to it reads as a stutter. -->
     <span
       v-if="unread && primarySignal !== 'needs'"
       class="chat-signal chat-signal--unread"
       title="Unread chat"
       aria-label="Unread chat"
-    />
+    >
+      <svg width="14" height="9" viewBox="0 0 16 10" aria-hidden="true">
+        <path d="M1 5C4 .8 12 .8 15 5C12 9.2 4 9.2 1 5Z" fill="none" stroke="currentColor" stroke-width="1.6" />
+        <circle cx="8" cy="5" r="2.2" fill="currentColor" />
+      </svg>
+    </span>
   </span>
 </template>
 
@@ -120,7 +125,7 @@ const unread = computed(() => store.chatUnread(props.chatId) > 0)
 // so it must outrank the "still going" signals that are not asking anything.
 const memoryAttention = computed(() => store.memoryPassNeedsAttention(props.chatId))
 
-// Unread is a separate static notification dot. The per-chat value is binary,
+// Unread is a separate static notification eye. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
 const primarySignal = computed<'needs' | 'memory' | 'working' | 'agents' | 'retry' | null>(() => {
   if (needsInput.value) return 'needs'
@@ -166,20 +171,18 @@ const intervalTitle = computed(() => {
 }
 
 .chat-signal--needs {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
   background: var(--accent);
 }
 
-/* Unread is a notification state rather than workspace activity, so it keeps
-   the semantic error color instead of inheriting the workspace accent. */
+/* Unread is an eye in the row's accent, still: status takes the accent and
+   shape carries the meaning, because a workspace accent can sit next to the
+   semantic error red. */
 .chat-signal--unread {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--error, #f44336);
-  box-shadow: 0 0 4px var(--error, #f44336);
+  display: inline-flex;
+  color: var(--accent);
 }
 
 /* Card headings top-align their row so a two-line title can wrap, which
@@ -227,31 +230,39 @@ const intervalTitle = computed(() => {
   font-weight: 700;
 }
 
-/* A run is neutral (it is not the accent's "live turn"), and so is its count. */
-.chat-signal--runs .chat-signal-count { color: var(--fg2); }
+/* A run's count takes the accent like its diamond; the diamond's shape is what
+   says "run". */
+.chat-signal--runs .chat-signal-count { color: var(--accent); }
 
+/* A small mono tag, so it no longer shares the interval's ↻ glyph. */
 .chat-signal--retry {
-  color: var(--warning);
-  font-size: var(--text-lg);
-  font-weight: 700;
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 16px;
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
 }
 
-/* A pass that stopped and needs the owner. The warning colour, not the accent:
-   the accent pulse below already means "your turn is live", and a glyph that
-   borrows it would say the opposite of what this says. */
+/* A pass that stopped and needs the owner. The accent like every status mark;
+   the ✦ shape is what separates it from the working grid. */
 .chat-signal--memory {
-  color: var(--warning);
+  color: var(--accent);
   font-size: var(--text-sm);
   line-height: 1;
 }
 
+/* An attribute of the chat, not a state, so it stays muted. */
 .chat-signal--interval {
-  color: var(--accent);
+  color: var(--fg3);
   font-size: var(--text-lg);
-  font-weight: 700;
+  font-weight: 400;
 }
 
+/* Paused must still differ from running without colour. */
 .chat-signal--interval.stopped {
-  color: var(--fg3);
+  opacity: 0.55;
 }
 </style>
