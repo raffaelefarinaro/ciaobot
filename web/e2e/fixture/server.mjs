@@ -13,11 +13,15 @@
  *   GET  /__fixture__/ws-count                       sockets opened so far
  *   POST /__fixture__/transcript                     give this session a chat history
  *   POST /__fixture__/update-tasks                   give this session update tasks
+ *   POST /__fixture__/projects  { projects: [...] }  replace this session's project list
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
  *   POST /__fixture__/terminal-offer { chat_id, command }  offer a suggested command
  *
  * Workspace order is per session too: POST /api/workspaces/reorder stores a
  * permutation of the workspace names and GET /api/workspaces answers in it.
+ * Project order works the same way: POST /api/projects/reorder checks
+ * `expected_order` against the session's reorderable projects (409
+ * `project_order_conflict` when it differs) and GET /api/projects answers in it.
  */
 import http from 'node:http'
 import fs from 'node:fs'
@@ -195,6 +199,28 @@ function orderedWorkspaces(state) {
   return state.workspaceOrder.map(name => WORKSPACES.find(w => w.name === name))
 }
 
+/**
+ * Apply a project reorder the way the engine does: `expected_order` must equal
+ * the workspace's current reorderable sequence and `order` must be a
+ * permutation of it. The reordered projects take the slots they already held.
+ */
+function reorderProjects(state, body) {
+  const projects = state.projects || PROJECTS.map(p => ({ ...p }))
+  const reorderable = projects
+    .filter(p => p.workspace === body?.workspace && !p.is_auto && p.kind !== 'memory')
+    .sort((a, b) => a.order - b.order)
+  const ids = reorderable.map(p => p.project_id)
+  const same = (a, b) => Array.isArray(a) && a.length === b.length && a.every((id, i) => id === b[i])
+  if (!same(body?.expected_order, ids)) return { status: 409, body: { code: 'project_order_conflict', error: 'project order changed' } }
+  if (!Array.isArray(body.order) || new Set(body.order).size !== ids.length || !body.order.every(id => ids.includes(id))) {
+    return { status: 400, body: { error: 'order must list every reorderable project exactly once' } }
+  }
+  const slots = reorderable.map(p => p.order)
+  body.order.forEach((id, i) => { projects.find(p => p.project_id === id).order = slots[i] })
+  state.projects = projects
+  return { status: 200, body: { ok: true } }
+}
+
 /** Store a reorder when `order` is exactly a permutation of the workspace names. */
 function reorderWorkspaces(state, order) {
   const names = WORKSPACES.map(w => w.name)
@@ -212,7 +238,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, projects: null }
     sessions.set(id, state)
   }
   return state
@@ -454,7 +480,7 @@ const GET_ROUTES = {
   }),
   '/api/workspaces': (req) => workspacesPayload(sessionOf(req)),
   // /api/projects, /api/chats and /api/schedules are bare arrays, not envelopes.
-  '/api/projects': () => PROJECTS,
+  '/api/projects': (req) => sessionOf(req).projects || PROJECTS,
   // The chat list carries this session's suggested commands: a chat holds the
   // command the assistant suggested for it, or none.
   '/api/chats': (req) => chatsWithOffers(sessionOf(req)),
@@ -774,6 +800,13 @@ const server = http.createServer(async (req, res) => {
               : TRANSCRIPT
       return sendJson(res, { ok: true, turns: state.transcript.length })
     }
+    if (pathname === '/__fixture__/projects') {
+      // A spec that needs a long or differently shaped sidebar supplies the
+      // project list; every other spec keeps the fixture's own.
+      const body = await readBody(req)
+      state.projects = Array.isArray(body?.projects) ? body.projects : null
+      return sendJson(res, { ok: true })
+    }
     if (pathname === '/__fixture__/update-tasks') {
       // Opt this session into having "After this update" on Home. Per session
       // for the same reason the transcript is: the section must appear for the
@@ -861,6 +894,10 @@ const server = http.createServer(async (req, res) => {
       }
       state.appearance.revision = `a${Number(state.appearance.revision.slice(1)) + 1}`
       return sendJson(res, state.appearance)
+    }
+    if (req.method === 'POST' && pathname === '/api/projects/reorder') {
+      const answer = reorderProjects(sessionOf(req), body)
+      return sendJson(res, answer.body, answer.status)
     }
     if (req.method === 'POST' && pathname === '/api/workspaces/reorder') {
       const state = sessionOf(req)
