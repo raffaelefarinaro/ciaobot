@@ -131,6 +131,17 @@ describe('NotificationsView', () => {
     expect(wrapper.find('[data-testid="inbox-empty-clear"]').exists()).toBe(false)
   })
 
+  it('source_status_list_absent_when_all_ready', async () => {
+    const { wrapper } = await mountView({ chats: [chat('a', { last_error: 'x' })] })
+    expect(wrapper.find('ul[aria-label="Source status"]').exists()).toBe(false)
+  })
+
+  it('source_status_list_present_when_any_not_ready', async () => {
+    const { wrapper } = await mountView({ health: stale })
+    expect(wrapper.find('ul[aria-label="Source status"]').exists()).toBe(true)
+    expect(wrapper.find('.notif-retry').exists()).toBe(true)
+  })
+
   it('unavailable_first_load_is_not_all_clear', async () => {
     const un = await mountView({ health: unavailable })
     expect(un.wrapper.find('[data-testid="inbox-empty-unavailable"]').exists()).toBe(true)
