@@ -9328,3 +9328,89 @@ describe('reorderWorkspaces', () => {
     expect(store.activeWorkspace).toBe('beta')
   })
 })
+
+describe('reorderProjects', () => {
+  const proj = (id: string, order: number, extra: Record<string, unknown> = {}) => ({
+    project_id: id, name: id, workspace: 'personal', context: '', created_at: '', order, vault_folder: '', ...extra,
+  })
+  const orderOf = (store: ReturnType<typeof useProjectStore>) =>
+    store.projects.map(p => [p.project_id, p.order])
+
+  function seed(store: ReturnType<typeof useProjectStore>) {
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      proj('general', 0, { name: 'General', is_auto: true }),
+      proj('a', 1),
+      proj('cli', 3, { name: 'Claude Code CLI', is_auto: true }),
+      proj('b', 4),
+    ] as typeof store.projects
+  }
+
+  test('sends order and expected_order and reuses the existing slots', async () => {
+    const store = useProjectStore()
+    seed(store)
+    apiPost.mockResolvedValue([])
+
+    const result = await store.reorderProjects(['b', 'a'], ['a', 'b'])
+
+    expect(result).toEqual({ ok: true })
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/reorder', {
+      workspace: 'personal',
+      order: ['b', 'a'],
+      expected_order: ['a', 'b'],
+    })
+    expect(orderOf(store)).toEqual([['general', 0], ['a', 4], ['cli', 3], ['b', 1]])
+    expect(store.reorderableProjects.map(p => p.project_id)).toEqual(['b', 'a'])
+  })
+
+  test('restores the previous order and refetches when the server answers 409', async () => {
+    const store = useProjectStore()
+    seed(store)
+    const conflict = Object.assign(new Error('conflict'), {
+      status: 409,
+      payload: { error: 'stale', code: 'project_order_conflict', order: ['b', 'a'] },
+    })
+    apiPost.mockRejectedValue(conflict)
+    const fresh = [proj('general', 0, { name: 'General', is_auto: true }), proj('b', 1), proj('a', 2)]
+    apiGet.mockImplementation(async (path: string) => (path === '/api/projects' ? fresh : {}))
+
+    const result = await store.reorderProjects(['b', 'a'], ['a', 'b'])
+
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.conflict).toBe(true)
+    expect(apiGet).toHaveBeenCalledWith('/api/projects')
+    expect(orderOf(store)).toEqual([['general', 0], ['b', 1], ['a', 2]])
+  })
+
+  test('restores on network failure and returns the message', async () => {
+    const store = useProjectStore()
+    seed(store)
+    apiPost.mockRejectedValue(new Error('offline'))
+    apiGet.mockRejectedValue(new Error('offline'))
+
+    const result = await store.reorderProjects(['b', 'a'], ['a', 'b'])
+
+    expect(result).toEqual({ ok: false, conflict: false, message: 'offline' })
+    expect(orderOf(store)).toEqual([['general', 0], ['a', 1], ['cli', 3], ['b', 4]])
+  })
+
+  test('projects_reordered from another device bumps projectOrderEpoch; our own in-flight reorder does not', async () => {
+    const store = useProjectStore()
+    seed(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    const reordered = { data: JSON.stringify({ type: 'projects_reordered', workspace: 'personal', order: ['general', 'b', 'a'] }) }
+    const before = store.projectOrderEpoch
+
+    events.onmessage?.(reordered)
+    expect(store.projectOrderEpoch).toBe(before + 1)
+
+    let resolvePost: (value: unknown) => void = () => {}
+    apiPost.mockImplementation(() => new Promise(resolve => { resolvePost = resolve }))
+    const pending = store.reorderProjects(['a', 'b'], ['b', 'a'])
+    events.onmessage?.(reordered)
+    expect(store.projectOrderEpoch).toBe(before + 1)
+    resolvePost([])
+    await pending
+  })
+})

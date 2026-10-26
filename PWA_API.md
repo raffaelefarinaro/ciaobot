@@ -47,7 +47,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/projects` | List projects. Each carries `repo_path` and `repo`: `{path, branch, dirty, missing, instructions}` or `null` when unlinked. `instructions` is `{name, chars}` for the AGENTS.md (CLAUDE.md when there is no AGENTS.md) that code mode injects, `chars` being the injected text's length after the 20,000-character cap, or `null` when there is none or the folder is missing |
 | POST | `/api/projects` | Create project. Optional `repo_path` links a local git checkout (absolute path to its top level; 400 with the reason otherwise) |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks). DELETE accepts `?delete_vault=1` (`"true"` also): the vault-backed project's folder under `projects/active/<folder>/` is removed and the inbound links to its notes are stripped first. Without the flag a vault-backed project is refused (400). Returns `{"ok": bool, "vault_entry_removed": bool, "removed_notes": int, "removed_files": int, "edited_backlinks": [str]}` |
-| POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder) |
+| POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder). Body `{workspace, order, expected_order}`; 400 `project_order_invalid` or 409 `project_order_conflict` (with the current `order`) |
 | POST | `/api/projects/{project_id}/complete` | Close a vault-backed project. Body `{"outcome": "completed"\|"stopped", "note": "..."}`; both fields optional (`completed` and an empty note when omitted). The note is written into the project document before the folder moves to `completed/`. Chats are archived. Open tasks stay on the board |
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
@@ -586,12 +586,15 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/proje
 # Candidate checkouts for the picker (read-only).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/repos/candidates"
 
-# Reorder — pass the full top-to-bottom sequence of project ids for one
-# workspace. Omitted ids keep their relative order after the listed ones;
-# `General` is always pinned first regardless of where it appears.
+# Reorder — `order` is the new top-to-bottom sequence of the workspace's
+# reorderable projects and must be an exact permutation of them (400
+# `project_order_invalid` for a missing, unknown, foreign, pinned or duplicate
+# id). General and auto-managed projects are not in the list. `expected_order`
+# is the sequence you last saw; when it is stale the call fails with 409
+# `project_order_conflict` and the current `order`, and nothing changes.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/reorder" \
   -H 'content-type: application/json' \
-  -d '{"workspace":"personal","order":["proj-b","proj-a"]}'
+  -d '{"workspace":"personal","order":["proj-b","proj-a"],"expected_order":["proj-a","proj-b"]}'
 
 # Complete (vault-backed only) — moves the vault folder to projects/completed/ and deletes the PWA project.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/$PID/complete"

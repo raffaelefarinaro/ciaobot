@@ -472,6 +472,21 @@ def _title_prompt(user_text: str, assistant_text: str) -> str:
 # ── Data models ──────────────────────────────────────────────────────────
 
 
+class ProjectOrderError(ValueError):
+    """A project reorder was refused.
+
+    ``code`` is ``project_order_invalid`` (the id list is not an exact
+    permutation of the reorderable projects) or ``project_order_conflict``
+    (the caller's ``expected_order`` is stale). ``current`` is the
+    reorderable sequence at the time of the refusal.
+    """
+
+    def __init__(self, message: str, code: str, current: list[str]) -> None:
+        super().__init__(message)
+        self.code = code
+        self.current = current
+
+
 @dataclass(slots=True)
 class ProjectInfo:
     project_id: str
@@ -2966,36 +2981,64 @@ class ProjectChatManager:
         })
         return project
 
-    def reorder_projects(
-        self, workspace: str, ordered_ids: list[str]
-    ) -> list[ProjectInfo]:
-        """Persist a new sidebar order for *workspace*'s projects.
+    def reorderable_project_ids(self, workspace: str) -> list[str]:
+        """Ids of *workspace*'s drag-reorderable projects, in sidebar order.
 
-        ``ordered_ids`` is the desired top-to-bottom sequence. Projects in the
-        workspace that are omitted keep their existing relative order after the
-        listed ones. Each project's ``order`` is rewritten to its final index
-        so the ``workspaceProjects`` sort (order, then name) reflects the drag.
-        Ids for other workspaces or unknown ids are ignored.
+        General and the Claude Code CLI project are pinned, and the hidden
+        Memory project is app-owned, so none of them is reorderable.
         """
-        ws_projects = [p for p in self._projects.values() if p.workspace == workspace]
-        by_id = {p.project_id: p for p in ws_projects}
-        seen: set[str] = set()
-        sequence: list[ProjectInfo] = []
-        for pid in ordered_ids:
-            project = by_id.get(pid)
-            if project is not None and pid not in seen:
-                sequence.append(project)
-                seen.add(pid)
-        # Anything not named stays, in its current order, after the listed set.
-        for project in sorted(ws_projects, key=lambda p: (p.order, p.name)):
-            if project.project_id not in seen:
-                sequence.append(project)
-        # General is auto-managed and re-pinned to order 0 at every boot
-        # (_ensure_defaults); keep it first here so a reorder doesn't snap back.
-        sequence.sort(key=lambda p: p.name != "General")
-        for index, project in enumerate(sequence):
-            project.order = index
+        return [p.project_id for p in self._reorderable_projects(workspace)]
+
+    def _reorderable_projects(self, workspace: str) -> list[ProjectInfo]:
+        return sorted(
+            (
+                p
+                for p in self._projects.values()
+                if p.workspace == workspace and not p.is_auto and p.kind != "memory"
+            ),
+            key=lambda p: (p.order, p.name),
+        )
+
+    def reorder_projects(
+        self,
+        workspace: str,
+        ordered_ids: list[str],
+        expected_order: list[str],
+    ) -> list[ProjectInfo]:
+        """Persist a new sidebar order for *workspace*'s reorderable projects.
+
+        ``ordered_ids`` must be an exact permutation of the reorderable ids
+        (a missing, unknown, foreign, pinned or duplicate id raises
+        ``project_order_invalid``). ``expected_order`` is the sequence the
+        caller observed; when it no longer matches, ``project_order_conflict``
+        is raised and nothing changes. The reorderable projects take the
+        ``order`` slots they occupied before, in the new sequence, so pinned
+        rows keep their own values. Returns every project of the workspace in
+        ``(order, name)`` order.
+        """
+        reorderables = self._reorderable_projects(workspace)
+        current = [p.project_id for p in reorderables]
+        if len(set(ordered_ids)) != len(ordered_ids) or sorted(ordered_ids) != sorted(current):
+            raise ProjectOrderError(
+                "order must list each reorderable project exactly once",
+                "project_order_invalid",
+                current,
+            )
+        if expected_order != current:
+            raise ProjectOrderError(
+                "the project order changed since it was loaded",
+                "project_order_conflict",
+                current,
+            )
+        by_id = {p.project_id: p for p in reorderables}
+        slots = sorted(p.order for p in reorderables)
+        for slot, pid in zip(slots, ordered_ids):
+            by_id[pid].order = slot
         self._save()
+        sequence = sorted(
+            (p for p in self._projects.values() if p.workspace == workspace),
+            key=lambda p: (p.order, p.name),
+        )
         self._events.publish({
             "type": "projects_reordered",
             "workspace": workspace,
