@@ -17,6 +17,8 @@
 // in "Needs you", with the unread flag as an indicator on it. It never also
 // appears under "New replies", so the count is distinct rows, not signals.
 
+import { isVisibleUpdateTask } from './updateTasks'
+
 export type NotificationSection = 'needsYou' | 'toReview' | 'newReplies'
 export const SECTION_ORDER: readonly NotificationSection[] = ['needsYou', 'toReview', 'newReplies']
 export const SECTION_TITLES: Record<NotificationSection, string> = {
@@ -27,7 +29,7 @@ export const SECTION_TITLES: Record<NotificationSection, string> = {
 
 export type SourceStatus = 'checking' | 'ready' | 'stale' | 'unavailable'
 /** Sources the inbox requires. Later units append keys here; a key with no snapshot counts as 'checking'. */
-export const INBOX_SOURCES = ['chats', 'operator', 'automations', 'proposals', 'revisit'] as const
+export const INBOX_SOURCES = ['chats', 'operator', 'automations', 'proposals', 'revisit', 'updateTasks'] as const
 export type NotificationSourceKey = typeof INBOX_SOURCES[number]
 export const SOURCE_LABELS: Record<NotificationSourceKey, string> = {
   chats: 'Chats',
@@ -35,6 +37,7 @@ export const SOURCE_LABELS: Record<NotificationSourceKey, string> = {
   automations: 'Automations',
   proposals: 'Memory suggestions',
   revisit: 'Notes to revisit',
+  updateTasks: 'Update tasks',
 }
 
 export interface SourceSnapshot {
@@ -53,6 +56,7 @@ export type NotificationKind =
   | 'proposals-review'
   | 'revisit-review'
   | 'memory-attention'
+  | 'update-task'
 /** The two memory review queues the inbox links to (`/memory/review?show=`). */
 export type ReviewQueue = 'suggested' | 'revisit'
 export type NotificationDestination =
@@ -140,6 +144,22 @@ export interface MemoryInsightCandidate {
   timestamp: string
 }
 
+/** An update task for the workspace on screen (`housekeeping.updateTasks`). */
+export interface UpdateTaskCandidate {
+  id: string
+  revision: number
+  workspace: string
+  title: string
+  status: string
+  applicability: string
+  /** '' unless chat_live AND the chat exists locally and is not archived. Never a dead remembered chat. */
+  chatId: string
+  chatLive: boolean
+  /** Only ever true when chatId !== ''. */
+  chatNeedsInput: boolean
+  chatFailed: boolean
+}
+
 export interface NotificationInboxInput {
   /** Workspace on screen; scopes row keys. '' keys as 'shared'. */
   workspace?: string
@@ -150,6 +170,7 @@ export interface NotificationInboxInput {
   proposalCount?: number
   revisitCount?: number
   memoryInsights?: readonly MemoryInsightCandidate[]
+  updateTasks?: readonly UpdateTaskCandidate[]
   sources: readonly SourceSnapshot[]
 }
 
@@ -393,6 +414,44 @@ function memoryInsightRow(m: MemoryInsightCandidate, freshness: 'fresh' | 'stale
   return row
 }
 
+function updateTaskRow(t: UpdateTaskCandidate, freshness: 'fresh' | 'stale'): NotificationRow | null {
+  if (!isVisibleUpdateTask(t)) return null
+  // A live question or permission: the chat row owns it.
+  if (t.chatNeedsInput) return null
+  // Ordinary work is not a notification.
+  if (t.status === 'in_progress' && !t.chatFailed) return null
+
+  const failure = t.status === 'failed' || (t.status === 'in_progress' && t.chatFailed)
+  const offeredUnknown = t.status === 'offered' && t.applicability === 'unknown'
+  let reason: string
+  if (t.status === 'failed') reason = 'The last attempt did not get going.'
+  else if (t.status === 'in_progress') reason = 'Its chat failed.'
+  else if (t.status === 'waiting_review') {
+    reason = t.chatLive
+      ? 'Its chat is open and waiting for you to decide what to do with it.'
+      : 'Its chat was archived or deleted. Open the notice to start a new one.'
+  } else if (offeredUnknown) reason = 'Not yet known whether this applies here. Open it to check again.'
+  else reason = 'New since this update.'
+
+  return {
+    key: `update-task:${t.workspace || 'shared'}:${t.id}@${t.revision}`,
+    kind: 'update-task',
+    section: failure ? 'needsYou' : 'toReview',
+    urgency: failure ? 'failure' : 'review',
+    source: 'updateTasks',
+    title: plainText(offeredUnknown ? `Check applicability: ${t.title}` : t.title, Number.MAX_SAFE_INTEGER),
+    reason,
+    destination: { kind: 'home-notice', noticeKey: updateNoticeKey(t.workspace, t.id, t.revision) },
+    unread: false,
+    freshness,
+  }
+}
+
+/** The failed chat of an incident, and its unread-result twin. A live question or a delegated wait is not one. */
+function isIncidentTwin(c: ChatCandidate): boolean {
+  return !c.needsInput && (c.failed || !c.needsYou)
+}
+
 function compareRows(section: NotificationSection): (a: NotificationRow, b: NotificationRow) => number {
   if (section === 'newReplies') {
     return (a, b) => {
@@ -469,6 +528,14 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     passChatIds.add(m.passChatId)
   }
 
+  const updateTaskChatIds = new Set<string>()
+  for (const t of input.updateTasks ?? []) {
+    const row = updateTaskRow(t, freshnessOf('updateTasks'))
+    if (!row) continue
+    add(row)
+    if (t.chatId) updateTaskChatIds.add(t.chatId)
+  }
+
   for (const c of input.chats) {
     // The unread result of a delegated task is the same item as its review row.
     // A live question, a failure or a delegated wait stays.
@@ -476,7 +543,8 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     if (passChatIds.has(c.chatId)) continue
     // The failed chat of an incident, and its unread-result twin, are the same
     // problem as the schedule row. A live question or a delegated wait stays.
-    if (c.scheduleId && incidentSchedules.has(c.scheduleId) && !c.needsInput && (c.failed || !c.needsYou)) continue
+    if (c.scheduleId && incidentSchedules.has(c.scheduleId) && isIncidentTwin(c)) continue
+    if (updateTaskChatIds.has(c.chatId) && isIncidentTwin(c)) continue
     add(chatRow(c, freshnessOf('chats')))
   }
 
