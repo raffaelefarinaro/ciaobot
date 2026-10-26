@@ -1075,3 +1075,299 @@ describe('ProjectSidebar accessible context menus', () => {
     wrapper.unmount()
   })
 })
+
+describe('ProjectSidebar project ordering', () => {
+  const ROW = 40
+  const base = {
+    workspace: 'personal', context: '', created_at: '2026-07-29T00:00:00Z', vault_folder: '',
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', () => 1)
+    vi.stubGlobal('cancelAnimationFrame', () => undefined)
+    Element.prototype.scrollIntoView = vi.fn()
+    setActivePinia(createPinia())
+    const store = useProjectStore()
+    store.workspaces = [{
+      name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '',
+    }]
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      { ...base, project_id: 'p-gen', name: 'General', order: 0, is_auto: true },
+      { ...base, project_id: 'p-a', name: 'Alpha', order: 1, is_auto: false },
+      { ...base, project_id: 'p-b', name: 'Bravo', order: 2, is_auto: false },
+      { ...base, project_id: 'p-c', name: 'Charlie', order: 3, is_auto: false },
+    ]
+    store.chats = ['one', 'two'].map(n => ({
+      chat_id: `chat-${n}`, project_id: 'p-a', title: `Chat ${n}`, model: 'sonnet',
+      provider: 'claude', mode: 'default', session_id: `s-${n}`,
+      created_at: '2026-07-29T00:00:00Z', archived: false,
+    }))
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+  })
+
+  // jsdom has no layout: lay the list out from the DOM as it is right now
+  // (collapsed source 0, placeholder one row, a group one row plus its chats).
+  function layOut(wrapper: ReturnType<typeof mount>): HTMLElement {
+    const list = wrapper.get('.project-list').element as HTMLElement
+    list.setPointerCapture = vi.fn()
+    list.releasePointerCapture = vi.fn()
+    list.hasPointerCapture = vi.fn(() => true)
+    list.getBoundingClientRect = () => new DOMRect(0, 0, 200, 1000)
+    const rectOf = (el: HTMLElement) => {
+      let top = 0
+      for (const child of Array.from(list.children) as HTMLElement[]) {
+        const height = child.classList.contains('drag-source')
+          ? 0
+          : ROW * (1 + child.querySelectorAll('.chat-item').length)
+        if (child === el) return new DOMRect(0, top, 200, height)
+        top += height
+      }
+      return new DOMRect(0, 0, 0, 0)
+    }
+    const patch = () => {
+      list.querySelectorAll<HTMLElement>('.project-group, .drag-placeholder').forEach(el => {
+        el.getBoundingClientRect = () => rectOf(el)
+      })
+    }
+    patch()
+    new MutationObserver(patch).observe(list, { childList: true })
+    return list
+  }
+
+  function pointer(type: string, y: number): PointerEvent {
+    return new PointerEvent(type, {
+      clientX: 20, clientY: y, pointerId: 1, isPrimary: true, button: 0, bubbles: true,
+    })
+  }
+
+  const grip = (id: string) =>
+    document.body.querySelector<HTMLElement>(`.project-list [data-drag-handle="${id}"]`)!
+  const order = () =>
+    Array.from(document.body.querySelectorAll<HTMLElement>('.project-list > [data-project-id]'))
+      .map(el => el.dataset.projectId)
+  const live = () => document.body.querySelector('[role="status"][aria-live="polite"].sr-only')!.textContent
+
+  async function drag(id: string, ys: number[], release = true) {
+    grip(id).dispatchEvent(pointer('pointerdown', 50))
+    const list = document.body.querySelector('.project-list')!
+    for (const y of ys) {
+      list.dispatchEvent(pointer('pointermove', y))
+      await nextTick()
+    }
+    if (release) list.dispatchEvent(pointer('pointerup', ys[ys.length - 1]))
+  }
+
+  async function setup() {
+    const wrapper = await mountSidebar()
+    const list = layOut(wrapper)
+    return { wrapper, list }
+  }
+
+  it('drags a project by its grip and commits one reorder call with expected_order', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper } = await setup()
+    await drag('p-a', [60, 200])
+    await flushPromises()
+    expect(reorder).toHaveBeenCalledTimes(1)
+    expect(reorder).toHaveBeenCalledWith(['p-b', 'p-c', 'p-a'], ['p-a', 'p-b', 'p-c'])
+    wrapper.unmount()
+  })
+
+  it('an expanded project moves with its chats as one group', async () => {
+    const { wrapper, list } = await setup()
+    await drag('p-a', [60, 200], false)
+    const overlay = document.body.querySelector('.drag-overlay')!
+    expect(overlay.querySelectorAll('.chat-item')).toHaveLength(2)
+    expect(list.querySelector('.drag-placeholder')).not.toBeNull()
+    expect(list.style.getPropertyValue('--drag-item-height')).toBe(`${ROW * 3}px`)
+    wrapper.unmount()
+  })
+
+  it('General and auto projects have no grip and are never displaced; dropping above them clamps to the first reorderable slot', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper } = await setup()
+    expect(grip('p-gen')).toBeNull()
+    expect(wrapper.get('[data-project-id="p-gen"] .project-header').attributes('data-drag-row')).toBeUndefined()
+    await drag('p-c', [150, 5], false)
+    expect(order()[0]).toBe('p-gen')
+    document.body.querySelector('.project-list')!.dispatchEvent(pointer('pointerup', 5))
+    await flushPromises()
+    expect(reorder).toHaveBeenCalledWith(['p-c', 'p-a', 'p-b'], ['p-a', 'p-b', 'p-c'])
+    wrapper.unmount()
+  })
+
+  it('Escape, pointercancel and a release outside the list cancel with no request', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper, list } = await setup()
+    await drag('p-a', [60, 200], false)
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await nextTick()
+    expect(document.body.querySelector('.drag-overlay')).toBeNull()
+    await drag('p-a', [60, 200], false)
+    list.dispatchEvent(new Event('pointercancel', { bubbles: true }))
+    await nextTick()
+    expect(document.body.querySelector('.drag-overlay')).toBeNull()
+    await drag('p-a', [60, 5000], false)
+    list.dispatchEvent(pointer('pointerup', 5000))
+    await flushPromises()
+    expect(reorder).not.toHaveBeenCalled()
+    expect(order()).toEqual(['p-gen', 'p-a', 'p-b', 'p-c'])
+    wrapper.unmount()
+  })
+
+  it('a completed drag does not toggle or open the project', async () => {
+    const store = useProjectStore()
+    vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper } = await setup()
+    const chevron = wrapper.get('[data-project-id="p-a"] .project-icon')
+    const before = chevron.attributes('aria-expanded')
+    await drag('p-a', [60, 200])
+    chevron.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    await nextTick()
+    expect(wrapper.get('[data-project-id="p-a"] .project-icon').attributes('aria-expanded')).toBe(before)
+    wrapper.unmount()
+  })
+
+  it('chat-to-project native drop still moves the chat and highlights the target header', async () => {
+    const store = useProjectStore()
+    const moveChat = vi.spyOn(store, 'moveChat').mockResolvedValue({ ...store.chats[0], project_id: 'p-b' })
+    const { wrapper } = await setup()
+    const dataTransfer = { effectAllowed: '', setData: vi.fn() }
+    const start = new Event('dragstart', { bubbles: true })
+    Object.defineProperty(start, 'dataTransfer', { value: dataTransfer })
+    wrapper.get('.chat-item').element.dispatchEvent(start)
+    const target = wrapper.get('[data-project-id="p-b"] .project-header')
+    await target.trigger('dragover')
+    expect(target.classes()).toContain('drag-over')
+    await target.trigger('drop')
+    await flushPromises()
+    expect(moveChat).toHaveBeenCalledWith('chat-one', 'p-b')
+    wrapper.unmount()
+  })
+
+  it('keyboard pickup, arrow down, drop commits; Escape cancels; focus stays on the grip', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper } = await setup()
+    const key = (k: string) => grip('p-a').dispatchEvent(
+      new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }),
+    )
+    grip('p-a').focus()
+    key(' ')
+    await nextTick()
+    key('ArrowDown')
+    await nextTick()
+    expect(order()).toEqual(['p-gen', 'p-b', 'p-a', 'p-c'])
+    expect(wrapper.get('[data-project-id="p-a"]').classes()).toContain('drag-lifted')
+    key('Escape')
+    await flushPromises()
+    expect(order()).toEqual(['p-gen', 'p-a', 'p-b', 'p-c'])
+    expect(reorder).not.toHaveBeenCalled()
+    key('Enter')
+    await nextTick()
+    key('ArrowDown')
+    await nextTick()
+    key(' ')
+    await flushPromises()
+    expect(reorder).toHaveBeenCalledTimes(1)
+    expect(reorder).toHaveBeenCalledWith(['p-b', 'p-a', 'p-c'], ['p-a', 'p-b', 'p-c'])
+    expect(document.activeElement).toBe(grip('p-a'))
+    wrapper.unmount()
+  })
+
+  it('Move up and Move down menu items work and are disabled at the boundaries for reorderable projects, and absent for pinned ones', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper } = await setup()
+    const openMenu = async (id: string) => {
+      wrapper.get(`[data-project-id="${id}"] .project-header`).element.dispatchEvent(
+        new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }),
+      )
+      await flushPromises()
+    }
+    const item = (name: string) =>
+      Array.from(document.body.querySelectorAll<HTMLButtonElement>('[data-reka-menu-content] button'))
+        .find(b => b.textContent?.trim() === name)
+    const closeMenu = async () => {
+      document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+      await flushPromises()
+    }
+    await openMenu('p-gen')
+    expect(document.body.querySelector('[data-reka-menu-content]')).toBeNull()
+    await openMenu('p-a')
+    expect(item('Move up')!.disabled).toBe(true)
+    expect(item('Move down')!.disabled).toBe(false)
+    await closeMenu()
+    await openMenu('p-c')
+    expect(item('Move up')!.disabled).toBe(false)
+    expect(item('Move down')!.disabled).toBe(true)
+    item('Move up')!.click()
+    await flushPromises()
+    expect(reorder).toHaveBeenCalledWith(['p-a', 'p-c', 'p-b'], ['p-a', 'p-b', 'p-c'])
+    wrapper.unmount()
+  })
+
+  it('failed save restores order, announces, and keeps focus', async () => {
+    const store = useProjectStore()
+    vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: false, conflict: false, message: 'Disk full.' })
+    const toast = vi.spyOn(store, 'pushErrorToast').mockReturnValue({} as ReturnType<typeof store.pushErrorToast>)
+    const { wrapper } = await setup()
+    await drag('p-a', [60, 200])
+    await flushPromises()
+    expect(order()).toEqual(['p-gen', 'p-a', 'p-b', 'p-c'])
+    expect(live()).toBe('Could not save the project order. Disk full.')
+    expect(toast).toHaveBeenCalledWith('Could not save the project order', 'Disk full.')
+    expect(document.activeElement).toBe(grip('p-a'))
+    wrapper.unmount()
+  })
+
+  it('409 conflict refreshes via the store and shows a retry message', async () => {
+    const store = useProjectStore()
+    const message = 'The project order changed elsewhere. It has been refreshed; try the move again.'
+    vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: false, conflict: true, message })
+    vi.spyOn(store, 'pushErrorToast').mockReturnValue({} as ReturnType<typeof store.pushErrorToast>)
+    const { wrapper } = await setup()
+    await drag('p-a', [60, 200])
+    await flushPromises()
+    expect(live()).toBe(`Could not save the project order. ${message}`)
+    wrapper.unmount()
+  })
+
+  it('projectOrderEpoch change during a drag cancels it with a polite message', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper, list } = await setup()
+    await drag('p-a', [60, 200], false)
+    store.projectOrderEpoch += 1
+    await nextTick()
+    expect(document.body.querySelector('.drag-overlay')).toBeNull()
+    list.dispatchEvent(pointer('pointerup', 200))
+    await flushPromises()
+    expect(reorder).not.toHaveBeenCalled()
+    expect(live()).toBe('Projects were reordered elsewhere, so your move was cancelled.')
+    wrapper.unmount()
+  })
+
+  it('workspace switch during a drag cancels', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper, list } = await setup()
+    await drag('p-a', [60, 200], false)
+    store.activeWorkspace = 'other'
+    await nextTick()
+    expect(document.body.querySelector('.drag-overlay')).toBeNull()
+    list.dispatchEvent(pointer('pointerup', 200))
+    await flushPromises()
+    expect(reorder).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
