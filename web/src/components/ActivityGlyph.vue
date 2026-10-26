@@ -11,14 +11,18 @@
       <rect x="7.2" y="4.6" width="1.6" height="4.4" class="activity-glyph-knock" />
       <rect x="7.2" y="10" width="1.6" height="1.6" class="activity-glyph-knock" />
     </svg>
+    <template v-else-if="kind === 'run'">
+      <i class="activity-glyph-ring"></i>
+      <i class="activity-glyph-orbit"></i>
+    </template>
     <template v-else>
       <i
-        v-for="(order, cell) in PIXEL_GRIDS[kind].chase"
+        v-for="(order, cell) in WORKING_CHASE"
         :key="cell"
         class="activity-glyph-pixel"
         :class="{
           'activity-glyph-pixel--fixed': order < 0,
-          'activity-glyph-pixel--still': PIXEL_GRIDS[kind].still.includes(cell),
+          'activity-glyph-pixel--still': cell % 2 === 0,
         }"
         :style="{ '--i': order }"
       ></i>
@@ -29,22 +33,17 @@
 <script setup lang="ts">
 // One mark per kind of live work, all in the row's accent: shape and motion
 // carry the meaning, never hue, because an accent preset can sit next to any
-// semantic colour. Running work is a 3x3 pixel grid whose lit pixel chases the
-// perimeter: a working turn (or its subagents) over a dim grid, a background
-// run as a lit hub with one pixel orbiting it and nothing else drawn.
-// Anything that wants the owner (a question, a failure, a stuck pass) is a
-// filled alert triangle, still.
+// semantic colour. A working turn (or its subagents) is a 3x3 pixel grid whose
+// lit pixel chases the perimeter; a background run is a ring with one dot
+// orbiting it. Anything that wants the owner (a question, a failure, a stuck
+// pass) is a filled alert triangle, still.
 // Decorative only: the caller owns the accessible name.
 export type ActivityGlyphKind = 'working' | 'run' | 'alert'
 defineProps<{ kind: ActivityGlyphKind }>()
 
-// Per kind, the chase step of each of the 9 cells in row-major order (-1 never
-// animates: the dim centre of `working`, the lit hub of `run`), and the cells
-// lit in the frozen reduced-motion frame.
-const PIXEL_GRIDS = {
-  working: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [0, 2, 4, 6, 8] },
-  run: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [2, 4] },
-} satisfies Record<Exclude<ActivityGlyphKind, 'alert'>, { chase: number[]; still: number[] }>
+// Chase step of each of the 9 grid cells in row-major order; -1 is the dim
+// centre, which never animates. The even cells are the reduced-motion checker.
+const WORKING_CHASE = [0, 1, 2, 7, -1, 3, 6, 5, 4]
 </script>
 
 <style scoped>
@@ -57,18 +56,14 @@ const PIXEL_GRIDS = {
   line-height: 1;
 }
 
-/* Running work: a 3x3 pixel grid, one lit pixel chasing a path through it
-   and leaving a short tail. The kinds differ in rest level and hub. */
-.activity-glyph--working,
-.activity-glyph--run {
+/* A working turn: a 3x3 pixel grid, one lit pixel chasing the perimeter and
+   leaving a short tail over a dim grid. */
+.activity-glyph--working {
   --pixel-rest: 0.18;
   display: inline-grid;
   grid-template-columns: repeat(3, 3px);
   gap: 1px;
 }
-
-/* A background run: no grid, just a lit hub and the pixel orbiting it. */
-.activity-glyph--run { --pixel-rest: 0; }
 
 .activity-glyph-pixel {
   width: 3px;
@@ -80,7 +75,32 @@ const PIXEL_GRIDS = {
 }
 
 .activity-glyph-pixel--fixed { animation: none; }
-.activity-glyph--run .activity-glyph-pixel--fixed { opacity: 1; }
+
+/* A background run: a ring with a satellite dot orbiting it. */
+.activity-glyph--run {
+  width: 10px;
+  height: 10px;
+}
+
+.activity-glyph-ring {
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.activity-glyph-orbit {
+  position: absolute;
+  top: -2.5px;
+  left: calc(50% - 2px);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform-origin: 2px 7.5px;
+  animation: activity-glyph-orbit 1.6s linear infinite;
+}
 
 /* The alert: a filled triangle with a knocked-out "!". */
 .activity-glyph--alert { color: var(--accent); }
@@ -92,13 +112,18 @@ const PIXEL_GRIDS = {
   70%, 100% { opacity: var(--pixel-rest); }
 }
 
+@keyframes activity-glyph-orbit {
+  to { transform: rotate(360deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .activity-glyph-pixel {
+  .activity-glyph-pixel,
+  .activity-glyph-orbit {
     animation: none;
   }
 
-  /* Frozen into a shape per kind, never a bare dot: the working grid a
-     checker, the run its hub and satellite. */
+  /* Frozen into a shape, never a bare dot: the working grid a checker, the
+     run its ring with the satellite at the top. */
   .activity-glyph-pixel--still { opacity: 1; }
 }
 </style>
