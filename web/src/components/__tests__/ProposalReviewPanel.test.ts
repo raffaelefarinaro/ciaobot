@@ -1059,7 +1059,7 @@ describe('talk about it', () => {
     wrapper.unmount()
   })
 
-  it('swaps talk about it for a link back to the open chat, keeping the decision buttons', async () => {
+  it('names the chat after the proposal and shows a live discussion band, keeping the decision buttons', async () => {
     // The toast is the only other way back into the chat, and it fades. The row
     // still needs a decision, so review and dismiss stay where they were.
     localStorage.removeItem('ciao:proposal-discuss-links')
@@ -1082,14 +1082,27 @@ describe('talk about it', () => {
       .trigger('click')
     await flushPromises()
 
+    // Every discussion used to be "Proposal review"; the title names this one.
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/p-work/chats', expect.objectContaining({
+      title: 'Discuss: Remember the thing',
+    }))
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat'])
-    await wrapper
-      .findAll('.pr-actions button')
-      .find((b) => b.text() === 'Open chat')!
-      .trigger('click')
+    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first'])
+    const band = wrapper.find('.pr-discussion')
+    expect(band.exists()).toBe(true)
+    expect(band.classes()).toContain('pr-discussion--idle')
+    await band.find('.pr-discussion-open').trigger('click')
     await flushPromises()
     expect(switchChat).toHaveBeenCalledWith('chat-d')
+
+    // A working chat says so in words, with the live glyph.
+    const working = vi.spyOn(projects, 'chatIsWorking').mockReturnValue(true)
+    projects.chats = [...projects.chats]
+    await flushPromises()
+    expect(wrapper.find('.pr-discussion').classes()).toContain('pr-discussion--working')
+    expect(wrapper.find('.pr-discussion').text()).toContain('Discussing now')
+    expect(wrapper.find('.pr-discussion .activity-glyph--working').exists()).toBe(true)
+    working.mockRestore()
 
     // A reload mounts before the chat list arrives; the link must survive that.
     wrapper.unmount()
@@ -1100,7 +1113,8 @@ describe('talk about it', () => {
     projects.chats = chats
     await flushPromises()
     expect(reloaded.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat'])
+      .toEqual(['Review', 'Dismiss', 'Edit first'])
+    expect(reloaded.find('.pr-discussion').exists()).toBe(true)
     await testArchiveDropsLink(reloaded)
   })
 
@@ -1111,6 +1125,7 @@ describe('talk about it', () => {
     await flushPromises()
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
       .toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss'])
+    expect(wrapper.find('.pr-discussion').exists()).toBe(false)
     wrapper.unmount()
   }
 })
@@ -1150,6 +1165,36 @@ describe('a note edit row', () => {
       ...over,
     })
   }
+
+  it('titles an entry verdict by its own bullet, so two entries of one note differ', async () => {
+    // Two `restamp_entry` rows on one note used to read identically: same path,
+    // same sentence, different digest. The bullet is what a person decides on.
+    const entryRow = (id: string, entry: string) => editRow({
+      id,
+      text: `notes/office.md — restamp_entry (rev 85a7, entry ${id}): no stamp`,
+      note_edit: { operation: 'restamp_entry', can_accept: false, reason: 'no stamp', entry } as never,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+      return Promise.resolve({ rows: [
+        entryRow('e1', '- **SDC-33356** ([Update anchors](https://x.test/1)) is the seed. [verified: 2026-10-22]'),
+        entryRow('e2', '- **SDC-33655** blocks the language side'),
+      ] })
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const titles = wrapper.findAll('.pr-row-title').map(t => t.text())
+    expect(titles).toEqual([
+      'SDC-33356 (Update anchors) is the seed.',
+      'SDC-33655 blocks the language side',
+    ])
+    expect(wrapper.find('.pr-row-meta').text()).toContain('in office.md')
+    // The consequence is said once, on the change line, not again under it.
+    const body = wrapper.find('.pr-row').text()
+    expect(body.split('Marks this one entry as checked again today').length - 1).toBe(1)
+    wrapper.unmount()
+  })
 
   it('offers no editor, because the accept ignores the wording entirely', async () => {
     // The replacement text is the verification's, read from the sidecar. An

@@ -1814,6 +1814,8 @@ export interface ProposalRow {
     receipt_id: string
     can_accept: boolean
     reason: string
+    /** The bullet an entry operation is about, as filed; empty for a whole-note edit. */
+    entry?: string
   }
   /** A `skill` row: the versioned record the queue owns, not a bullet.
    *

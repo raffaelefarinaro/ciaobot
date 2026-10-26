@@ -517,17 +517,16 @@ class EntryVerificationResult:
     message: str = ""
 
 
+_UNUSABLE_ENTRY_STAMP = (
+    "the entry carries a [verified:] stamp that cannot be read as a date, so "
+    "re-stamping it would decide what that token meant; nothing was written"
+)
+
 _RETIRE_REASON = (
     "retirement is a human decision: an entry is never deleted unattended, so the "
     "judgement is returned for review and the span is removed only if a person "
     "accepts it"
 )
-
-_NO_ENTRY_STAMP = (
-    "the entry carries no [verified:] stamp to re-stamp, and adding one to an "
-    "entry nobody cited would be a claim rather than a check"
-)
-
 
 def _unknown_outcome(request: EntryVerificationRequest) -> str:
     """Why this request names an outcome this version does not know, else ``""``."""
@@ -597,14 +596,12 @@ def plan_entry_verification(
     names the note, every row a citation, the caller planning against text that is
     still there) is the same rule, checked by the same predicates.
 
-    The one genuinely new branch is a ``still_valid`` re-stamp, which is
-    refused when the entry carries no usable stamp to replace. 726-B can always
-    add a frontmatter ``updated:`` to a note that lacks one; it declines to
-    because a note's frontmatter is structure, whereas an entry's stamp is a
-    claim *about that entry*, and writing one nobody checked is exactly the
-    invention this whole path exists to prevent. A note-level ``still_valid``
-    whose entry has no stamp therefore comes back ``needs_review``, which is where
-    an uncitable judgement goes anyway.
+    The one genuinely new branch is a ``still_valid`` re-stamp of an entry that
+    carries no stamp yet. An entry's stamp is a claim *about that entry*, so it
+    is written only once the same evidence a re-stamp needs is there — complete
+    coverage and a citation naming the note — and then it is written: the fact
+    *was* checked, and sending it to a person instead filed a proposal per
+    unstamped bullet that asked them to confirm a check that had already passed.
     """
     outcome = str(request.outcome or "").strip()
     unknown = _unknown_outcome(request)
@@ -639,8 +636,9 @@ def _plan_still_valid(
     connector gets, because "nobody checked it" is not "it is still true".
 
     ``entry`` is the entry as the note holds it now, and its ``stamp`` is the
-    thing being replaced. An entry with no usable stamp is ``needs_review`` rather
-    than a stamp written onto it: see :func:`plan_entry_verification`.
+    thing being replaced — or, on an entry with no stamp at all, added, which is
+    the same :func:`stamp_entry` write: see :func:`plan_entry_verification`. An
+    unreadable stamp is a claim already on the line, so its repair is proposed.
     """
     if request.coverage != COVERAGE_COMPLETE:
         return EntryVerificationPlan(
@@ -663,14 +661,18 @@ def _plan_still_valid(
             "",
             _missing_evidence_reason(request),
         )
-    if entry.stamp is None or not entry.stamp.valid:
+    if entry.stamp is not None and not entry.stamp.valid:
+        # The line already makes a claim nobody can read (a near-miss spelling,
+        # an impossible day). Replacing it decides what the author meant, so a
+        # person sees the repair. A *missing* stamp has no such question and is
+        # simply added below.
         return EntryVerificationPlan(
             PROPOSE,
             NEEDS_REVIEW,
             STILL_VALID,
             "",
             today.isoformat(),
-            _NO_ENTRY_STAMP,
+            _UNUSABLE_ENTRY_STAMP,
         )
     # A second stamp-shaped token earlier on the opening line is prose about a
     # date as far as this module reads it, and the writer leaves it alone — so
@@ -791,8 +793,8 @@ def _new_check(
     The reason is the caller's when the recorded outcome is the one it asked for,
     and the rule's own when the rule declined it — 726-B's rule, applied at the
     same place, for the same reason. A *downgrade* is one spelling of that: a
-    ``still_valid`` on an entry with no stamp, or one whose line carries a
-    second stamp-shaped token, keeps the outcome the caller asked for and is
+    ``still_valid`` on an entry whose stamp is unreadable, or whose line carries
+    a second stamp-shaped token, keeps the outcome the caller asked for and is
     still not what the caller got, so what the row has to say is why the rule
     would not do it. The agent's own summary of its re-check would read as the
     rule's answer to a question it never gave.

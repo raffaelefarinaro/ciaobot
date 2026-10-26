@@ -15,6 +15,8 @@ import ProposalHistoryList from './ProposalHistoryList.vue'
 import DecisionReason from './DecisionReason.vue'
 import { MEMORY_REASON_CHIPS } from '../lib/memoryDecisionReasons'
 import { cleanReason } from '../lib/decisionReasons'
+import { DISCUSSION_WORDS, discussionChatTitle, discussionState, entryExcerpt, type DiscussionState } from '../lib/proposalDiscussion'
+import ActivityGlyph from './ActivityGlyph.vue'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
@@ -435,6 +437,17 @@ async function openChat(chatId: string) {
 async function openDiscussion(row: ProposalRow) {
   const chat = discussionChat(row)
   if (chat) await openChat(chat.chat_id)
+}
+
+/** Where this row's discussion stands, read from the same signals Home uses. */
+function rowDiscussionState(row: ProposalRow): DiscussionState | null {
+  const chat = discussionChat(row)
+  if (!chat) return null
+  return discussionState({
+    working: projectStore.chatIsWorking(chat.chat_id),
+    needsYou: projectStore.chatNeedsYou(chat.chat_id),
+    unread: projectStore.chatUnread(chat.chat_id) > 0,
+  })
 }
 
 function linkedChatId(rowId: string): string | undefined {
@@ -962,7 +975,22 @@ function rowTitle(row: ProposalRow): string {
   if (isSkill(row)) {
     return (row.problem || row.title || row.text).trim() || row.text
   }
-  return row.text
+  // An entry verdict's own text names the note and an entry digest, so two
+  // bullets of one note read as the same row. The bullet is what is decided on.
+  const entry = isNoteEdit(row) ? entryExcerpt(row.note_edit?.entry ?? '') : ''
+  return entry || row.text
+}
+
+/** The note an entry-level row is about, by file name, for the meta line. */
+function entryNote(row: ProposalRow): string {
+  if (!isNoteEdit(row) || !row.note_edit?.entry || !row.target) return ''
+  return pathLeaf(row.target)
+}
+
+/** The consequence line repeats the change line's qualifier on a row that has
+ * no preview, which printed the same sentence twice. */
+function consequenceShown(row: ProposalRow): boolean {
+  return !(rowChange(row).label && changeQualifier(row) === rowConsequence(row))
 }
 
 /** Split text on `backtick` spans so they can render as inline code. */
@@ -1414,11 +1442,12 @@ async function discuss(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, 'Proposal review', reviewHelper(row.id))
+    const title = discussionChatTitle(rowTitle(row))
+    const chat = await openWorkspaceChatInBackground(row.workspace, title, reviewHelper(row.id))
     if (!chat) return
     linkDiscussion([row.id], chat.chat_id)
     projectStore.sendMessage(chat.chat_id, discussPrompt(row))
-    pushBackgroundToast(chat.chat_id, 'Discussion in background', 'Proposal review — click to open the chat')
+    pushBackgroundToast(chat.chat_id, 'Discussion in background', `${title} — click to open the chat`)
   } finally {
     chatBusy.value = false
   }
@@ -1491,7 +1520,8 @@ async function batchDiscuss() {
   if (!rows.length || chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(projectStore.activeWorkspace, 'Proposal review', reviewHelper(...rows.map(row => row.id)))
+    const title = discussionChatTitle(rows.length === 1 ? rowTitle(rows[0]) : '', rows.length)
+    const chat = await openWorkspaceChatInBackground(projectStore.activeWorkspace, title, reviewHelper(...rows.map(row => row.id)))
     if (!chat) return
     linkDiscussion(rows.map(row => row.id), chat.chat_id)
     const lines = rows.map((r, i) => `${i + 1}. [${r.kind}] ${r.text}`).join('\n')
@@ -1502,7 +1532,7 @@ async function batchDiscuss() {
         'or should be dropped. Do not edit any region or move any file until I ' +
         'decide.\n\n' + DISCUSS_RESOLUTION,
     )
-    pushBackgroundToast(chat.chat_id, 'Discussion in background', `${rows.length} proposals — click to open the chat`)
+    pushBackgroundToast(chat.chat_id, 'Discussion in background', `${title} — click to open the chat`)
   } finally {
     chatBusy.value = false
   }
@@ -1794,6 +1824,7 @@ watch(
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
               <template v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</template>
               <template v-if="row.decider"> · decide: {{ row.decider }}</template>
+              <template v-if="entryNote(row)"> · in <span class="pr-meta-note" :title="row.target">{{ entryNote(row) }}</span></template>
             </p>
             <p v-if="row.decide_reason" class="pr-row-reason">Why: {{ row.decide_reason }}</p>
             <div class="pr-row-top">
@@ -1837,8 +1868,12 @@ watch(
               </template>
               <!-- No preview yet (or none to be had): what keeping it does, in
                    words, until the server says exactly. -->
-              <p v-else class="pr-row-sub" :title="rowSubtitle(row)">
-                {{ rowConsequence(row) }}
+              <p
+                v-else-if="consequenceShown(row) || store.isPreviewLoading(row.id) || store.previewErrors[row.id] || (row.leak_warning && !rowChange(row).label)"
+                class="pr-row-sub"
+                :title="rowSubtitle(row)"
+              >
+                <template v-if="consequenceShown(row)">{{ rowConsequence(row) }}</template>
                 <span v-if="store.isPreviewLoading(row.id)" class="pr-checking" role="status"> · checking what it changes…</span>
                 <template v-else-if="store.previewErrors[row.id]">
                   <span class="pr-preview-error"> · could not read the destination.</span>
@@ -1872,6 +1907,30 @@ watch(
               </div>
               <p v-if="rowReason(row)" class="pr-row-reason">{{ rowReason(row) }}</p>
             </template>
+
+            <!-- A discussion chat for this row: its state in words with the
+                 live glyph, and the one way into it. The row stays queued, so
+                 the band sits under what is being discussed rather than in
+                 place of the row's actions. -->
+            <div
+              v-if="rowDiscussionState(row)"
+              class="pr-discussion"
+              :class="`pr-discussion--${rowDiscussionState(row)}`"
+              role="status"
+            >
+              <span class="pr-discussion-state">
+                <ActivityGlyph v-if="rowDiscussionState(row) === 'working'" kind="working" />
+                <span v-else class="pr-discussion-dot" aria-hidden="true" />
+                <span class="pr-discussion-word">{{ DISCUSSION_WORDS[rowDiscussionState(row)!] }}</span>
+                <span class="pr-discussion-chat" :title="discussionChat(row)!.title">{{ discussionChat(row)!.title }}</span>
+              </span>
+              <button
+                type="button"
+                class="pr-discussion-open"
+                :aria-label="`Open the discussion chat ${discussionChat(row)!.title}`"
+                @click="openDiscussion(row)"
+              >Open chat &rarr;</button>
+            </div>
           </div>
 
           <!-- The decision card: "Edit first", or a row with no preview yet.
@@ -2004,8 +2063,7 @@ watch(
                   @click="reconcileFirst(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : 'Check first' }}</button>
                 <button v-if="!editingPreview && isEditable(row)" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
-                <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
-                <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+                <button v-if="!discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
                 <button type="button" class="btn-small btn-chip" data-pr-action="dismiss-card" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
                 <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
               </div>
@@ -2083,8 +2141,7 @@ watch(
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
-            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
-            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
 
           <!-- A skill proposal is a change to a skill that already exists: read
@@ -2108,8 +2165,7 @@ watch(
               @click="implementSkill(row)"
             >{{ store.isBusy(row.id) ? 'starting…' : 'Improve skill' }}</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
-            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open discussion</button>
-            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
 
           <!-- Linked: a refused accept spawned a merge chat that is still active,
@@ -2157,8 +2213,7 @@ watch(
               data-pr-action="edit"
               @click="editFirst(row)"
             >Edit first</button>
-            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
-            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
           </template>
         </li>
@@ -2801,7 +2856,7 @@ watch(
 .pr-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
 }
 
 .pr-row--busy {
@@ -2889,6 +2944,93 @@ watch(
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: 0.86em;
+}
+
+/* A live discussion about this row: the Task board's agent band, as a strip
+   under the fact. The state is the word and the glyph's shape first; the tint
+   only reinforces it, so a working chat reads from across the list. */
+.pr-discussion {
+  --band-tone: var(--fg3);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  max-width: 72ch;
+  margin-top: var(--space-2);
+  padding: 6px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+.pr-discussion--working {
+  --band-tone: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.pr-discussion--reply {
+  --band-tone: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.pr-discussion--needs-you {
+  --band-tone: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+.pr-discussion-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  /* A basis rather than `auto`, so a long chat title ellipsizes beside the
+     action instead of pushing it onto a second line. */
+  flex: 1 1 12rem;
+}
+.pr-discussion-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--band-tone);
+}
+.pr-discussion--idle .pr-discussion-dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.5px var(--fg3);
+}
+.pr-discussion-word {
+  flex: none;
+  color: var(--fg);
+  font-weight: 600;
+}
+.pr-discussion--idle .pr-discussion-word { color: var(--fg2); font-weight: 500; }
+.pr-discussion-chat {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-discussion-chat::before { content: "· "; }
+.pr-discussion-open {
+  flex: none;
+  margin-inline-start: auto;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pr-discussion-open:hover { text-decoration: underline; text-underline-offset: 3px; }
+.pr-discussion-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+@media (pointer: coarse) {
+  .pr-discussion-open { min-height: var(--touch); }
+}
+
+.pr-meta-note {
+  color: var(--fg2);
 }
 
 .pr-row-sub {
