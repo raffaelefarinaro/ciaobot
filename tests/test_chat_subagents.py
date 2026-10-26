@@ -606,6 +606,40 @@ def test_opencode_subagent_detail_reads_only_that_child(tmp_path: Path) -> None:
     assert [entry["agent_id"] for entry in rows] == ["ses_child_b"]
 
 
+def test_opencode_live_child_status_is_not_inferred_from_historical_rows(
+    tmp_path: Path,
+) -> None:
+    """``/session/active`` decides which child is running; history alone does not.
+
+    A child the live server reports active is running. A child with an open
+    assistant message (no ``completed`` time) but absent from the active map of
+    the live server is a historical row and must read as completed (#1664).
+    """
+    client, recorder = _opencode_client(tmp_path)
+    original_get = recorder.get
+
+    async def get(path: str, *, params=None):
+        if path == "/api/session/active":
+            return _OpencodeResponse({"data": {"ses_child_a": {"type": "running"}}})
+        if path == "/api/session/ses_child_b/message":
+            return _OpencodeResponse({
+                "data": [{"info": {"role": "assistant", "time": {"created": 1}}, "parts": []}],
+                "cursor": {"previous": None, "next": None},
+            })
+        return await original_get(path, params=params)
+
+    recorder.get = get  # type: ignore[method-assign]
+
+    rows = {
+        row["agent_id"]: row for row in client.get("/api/chats/chat-1/subagents").json()
+    }
+
+    assert rows["ses_child_a"]["status"] == "running"
+    assert rows["ses_child_b"]["status"] == "completed"
+    # Metadata-only list read: no child history was fetched to decide this.
+    assert not [path for path in recorder.get_calls if path.endswith("/message")]
+
+
 # --- Empty / banner-only ResultEvent guards ----------------------------------
 
 
