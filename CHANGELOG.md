@@ -1,5 +1,64 @@
 # Changelog
 
+## v1.7.0 - 2026-10-26
+
+**Heads up:**
+- **Session insights are always on** ([#1889](https://github.com/raffaelefarinaro/ciaobot/issues/1889)). The Settings toggle and `CIAO_INSIGHTS_DISABLED` are gone, so an install that had turned insights off now runs the memory pass when a chat is archived. Pick the model that runs it in Settings → Overview.
+- **Theme and font size are now shared by every device** ([#1896](https://github.com/raffaelefarinaro/ciaobot/issues/1896)). They used to be set per browser; the first browser you open after updating keeps its current values for all of them. Change them in Settings → Appearance.
+- **Settings moved.** Settings is split into a Ciaobot group (General, Appearance, Access & devices, Providers, Advanced) and a workspace group (Overview, Skills, Subagents, Commands, MCP servers). Models & providers is now Providers, and Workspaces left the Settings list: use the workspace switcher → Manage workspaces ([#1879](https://github.com/raffaelefarinaro/ciaobot/issues/1879)).
+- **The global Google Workspace card is gone** ([#1907](https://github.com/raffaelefarinaro/ciaobot/issues/1907)). A Google account is now linked per workspace in Settings → Overview; accounts no workspace links are no longer health-checked.
+- **Agents can no longer complete or delete a task on their own** ([#2068](https://github.com/raffaelefarinaro/ciaobot/issues/2068), [#2069](https://github.com/raffaelefarinaro/ciaobot/issues/2069)). They need you to ask for it and must give a reason, which shows on the task.
+- **Updating the Ciaobot Server host (macOS)** ([#1642](https://github.com/raffaelefarinaro/ciaobot/issues/1642)). This release replaces the host with revision 4. Because the app is ad-hoc signed, macOS may ask you to approve Accessibility and Automation again, and possibly the Documents, Desktop or Downloads folder prompt if your workspace lives there. Approve them once after the update.
+
+### New features
+- **First-run setup:** a new install opens a guided setup (Location, Runtime, Access & memory, Care, Finish) in the browser. It asks for your main folder first, then the AI tool and an explicit model, file access separately from approval mode, when Workspace care should run and how memory is handled, and ends with an honest summary and a first task. Leave setup at any point and resume it from Home; each new workspace gets its own setup. The macOS and Windows installers now hand over to it on a fresh machine.
+- **Browser terminal:** open a real shell on the computer running Ciaobot from any chat or project, from a laptop or a phone. It docks beside the chat like a pinned file, has session tabs, and shows Esc, Tab, Ctrl+C, Ctrl+D and arrow keys on touch screens. It needs only your signed-in session, and it is not sandboxed by File access.
+- **Suggested commands:** when the assistant wants you to run something (a login, an install), it shows a "Suggested command — review before running" card you can copy into the terminal. Settings → MCP servers now has a command builder, per-CLI tabs and Run in terminal.
+- **Memory handover:** Workspace care records what it would do with each proposed memory or profile fact, and Settings → Overview shows how often that matches your own decisions. Switch handover to Dismiss and accept to let it settle those itself, and undo any of its decisions from History, which shows predicted against actual. Setup offers it for a new workspace; existing workspaces keep their choice.
+- **Reasons for decisions:** accepting or dismissing a memory proposal, and completing, deleting or closing a task, asks for an optional "why". The weekly Workspace care run distils your reasons into review rules that the memory pass and task delegation then follow.
+- **Settings → Overview:** per-workspace Google account (one row and a Connect dialog), Workspace health, and a Chats and models card with this workspace's model, thinking level, permission mode and insights model.
+- **Appearance:** Settings → Appearance sets theme, font size, text contrast, body font (System, Serif or Mono) and your own background and text colours with a contrast check. Four more workspace accent presets sit behind a + swatch.
+- **Reorder workspaces:** drag them in Manage workspaces; the order drives the switcher and the 1-9 shortcuts.
+- **System prompt in Chat details:** Ciaobot's own system prompt now appears under Always loaded.
+
+### Improvements
+- `ciao service start` now waits until the engine is actually up and reports a taken port or macOS folder denial, instead of saying it started ([#1714](https://github.com/raffaelefarinaro/ciaobot/issues/1714), [#1938](https://github.com/raffaelefarinaro/ciaobot/issues/1938)).
+- The composer shows background commands as one "N shells" count, like "N agents", with each one's name and age in the popover.
+- Chats linked to a task by hand now show the task link in Chat details and the task badge in the sidebar and Home, without implying an agent is working on it.
+- Model pickers, including Settings, show readable names such as "GPT-5.6 Luna"; the technical id stays in the tooltip and in search.
+- A failed turn's Switch model or Continue with... now retries immediately with the model you pick, and a retried turn appears as a collapsed "Retry started" notice with the original request behind a disclosure.
+- Chat details separates context usage from loaded files, collapses Always loaded, and shows branch details at full width; on a narrow pane the details button sits in the header.
+- Chat references like `chat-1a2b3c4d` link to that conversation's title, and a URL written in backticks is clickable.
+- Completing a task or closing a project is one action with an optional note, in the chat rail, the archive dialog and the closure sheet.
+- Proposal review tells entries apart (each row names its bullet and note), shows a live band for an open Discuss chat, and titles those chats "Discuss: ...". Verified entries that only lack a stamp are stamped instead of filed for review.
+- The sidebar gives each signal one colour role, uses a compact code badge and clearer glyphs (code mode, tasks, shell runs), and lets project names use the room their idle buttons left.
+- Queued-message chips are compact, with Steer all in a header row.
+- Memory has a "How memory works" explainer.
+- Google setup shows only the next step and labels its account fields; the workspace editor and setup reminder are tidier.
+- Workspace-only file access no longer blocks `ciao gws`, `gh` (its config is readable) or the `ciao` CLI's own workspace state, and it hides other Google accounts' secrets from the agent's shell ([#1945](https://github.com/raffaelefarinaro/ciaobot/issues/1945), [#1959](https://github.com/raffaelefarinaro/ciaobot/issues/1959), [#1961](https://github.com/raffaelefarinaro/ciaobot/issues/1961), [#1968](https://github.com/raffaelefarinaro/ciaobot/issues/1968)).
+- Setup no longer creates Git history until you ask for it, and unattended memory backup stays off on a new install until you turn it on.
+- The installer adds `~/.local/bin` to your shell profile so `ciao` is found; pass `--no-modify-path` to skip it (macOS, Linux).
+- Scheduled turns that hit a quota or connection error retry less often (1, 2, 4, then 8 hours) and stay unattended; Workspace care chats no longer trigger their own memory pass.
+- Stricter checks on the engine's own surface: scheme-aware origin check, request-size limits on `/api` that leave uploads alone, settings routes that only accept their own keys, and a credential-path guard that also covers nested paths and `.env.*` files.
+
+### Bug fixes
+- A resend or reconnect could run a message twice or show it twice: a resend of a queued, steered or sent-now message started a second turn, a duplicate echo cleared the live answer, a message deferred over a dead socket showed two bubbles, and a turn that died before reaching the provider duplicated your next message and lost its own ([#1715](https://github.com/raffaelefarinaro/ciaobot/issues/1715), [#1716](https://github.com/raffaelefarinaro/ciaobot/issues/1716), [#1794](https://github.com/raffaelefarinaro/ciaobot/issues/1794), [#1861](https://github.com/raffaelefarinaro/ciaobot/issues/1861)).
+- A Claude connection that hung while starting was never retried and the turn simply timed out ([#1860](https://github.com/raffaelefarinaro/ciaobot/issues/1860)).
+- Running background subagents did not show until you reopened the panel, and the composer counted OpenCode background shells as agents ([#1664](https://github.com/raffaelefarinaro/ciaobot/issues/1664), [#2044](https://github.com/raffaelefarinaro/ciaobot/issues/2044)).
+- Per-turn numbers were wrong or missing: the context meter vanished after a reload, an archived chat lost each turn's usage, model and duration, a stopped turn showed 0 in / 0 out, and OpenCode chats counted their tokens several times over ([#1992](https://github.com/raffaelefarinaro/ciaobot/issues/1992), [#2052](https://github.com/raffaelefarinaro/ciaobot/issues/2052), [#2053](https://github.com/raffaelefarinaro/ciaobot/issues/2053)).
+- OpenCode shell commands such as `ciao file surface` never added files to the chat's Files list ([#2030](https://github.com/raffaelefarinaro/ciaobot/issues/2030)).
+- `ciao` was "command not found" after install on a shell without `~/.local/bin` on its PATH ([#1741](https://github.com/raffaelefarinaro/ciaobot/issues/1741)).
+- Ciaobot could not be installed on Windows on Arm; the engine now runs as x64 there ([#2058](https://github.com/raffaelefarinaro/ciaobot/issues/2058)).
+- Moving a workspace into Documents could roll back after a two-minute wait with no explanation; macOS access denial is now detected and reported (macOS) ([#1756](https://github.com/raffaelefarinaro/ciaobot/issues/1756)).
+- Stopping Ciaobot Server while it was starting could still launch the engine (macOS) ([#1642](https://github.com/raffaelefarinaro/ciaobot/issues/1642)).
+- Settings → Workspace health stayed on "Scanning workspace health..." when you opened Settings directly ([#1748](https://github.com/raffaelefarinaro/ciaobot/issues/1748)).
+- A deleted vault-backed project that failed part-way could restore links to notes that were already gone ([#1713](https://github.com/raffaelefarinaro/ciaobot/issues/1713)).
+- Links to local files that Ciaobot refuses to open looked clickable but did nothing; they are now plain text, or open the file through the engine.
+- The chat details button covered the transcript on a phone, and moving focus off a queued message opened the keyboard on narrow screens ([#2031](https://github.com/raffaelefarinaro/ciaobot/issues/2031), [#1867](https://github.com/raffaelefarinaro/ciaobot/issues/1867)).
+- A scheduled turn retried after an error was replayed as if you had sent it, which queued a memory pass ([#2035](https://github.com/raffaelefarinaro/ciaobot/issues/2035)).
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.6.1...v1.7.0)
+
 ## v1.6.1 - 2026-10-21
 
 ### New features
