@@ -284,7 +284,7 @@ describe('ChatLayout', () => {
       expect(wrapper.find('.home-main .housekeeping').exists()).toBe(false)
       const rail = wrapper.get('.home-rail').html()
       expect(rail.indexOf('class="housekeeping"')).toBeGreaterThan(-1)
-      expect(rail.indexOf('class="housekeeping"')).toBeLessThan(rail.indexOf('home-review-summary'))
+      expect(rail.indexOf('class="housekeeping"')).toBeLessThan(rail.indexOf('home-glance'))
       wrapper.unmount()
     })
 

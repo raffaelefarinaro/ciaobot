@@ -28,12 +28,14 @@ test.describe('workbench layout', () => {
     expect(rail).not.toBeNull()
     expect(rail!.x).toBeGreaterThan(surface!.x + surface!.width)
 
-    // Rows, not a card grid: each row spans the rail's width. Up-to-date
-    // queues drop out. The fixture's one automation (`alpha-daily-brief`,
-    // `last_status: 'ok'`) is healthy, and an active automation is not news,
-    // so only proposals remain.
-    const rows = page.locator('.home-review-item')
-    await expect(rows).toHaveCount(1)
+    // Rows, not a card grid: At a glance is the inbox, so each of its rows
+    // spans the rail's width. The alpha fixture yields two: the memory
+    // proposals and alpha-chat-7's blocking memory pass. The fixture's one
+    // automation (`alpha-daily-brief`, `last_status: 'ok'`) is healthy, and an
+    // active automation is not news, so it is not a row.
+    const rows = page.locator('.home-glance .notif-row')
+    await expect(rows).toHaveCount(2)
+    await expect(page.locator('.home-glance [data-testid="row-schedule:alpha-daily-brief"]')).toHaveCount(0)
     for (const row of await rows.all()) {
       const box = await row.boundingBox()
       expect(box!.width).toBeGreaterThan(rail!.width - 2)
@@ -103,8 +105,8 @@ test.describe('workbench layout', () => {
     expect(main.names).toContain('home-intake')
     expect(main.names).not.toContain('update-tasks')
     expect(rail.names).toContain('update-tasks')
-    expect(rail.names).toContain('home-review-summary')
-    expect(rail.names.indexOf('update-tasks')).toBeLessThan(rail.names.indexOf('home-review-summary'))
+    expect(rail.names).toContain('home-glance')
+    expect(rail.names.indexOf('update-tasks')).toBeLessThan(rail.names.indexOf('home-glance'))
     // Every boundary is the one token, not just the two ends being equal, which
     // a leftover section margin in the middle would still pass.
     for (const column of [main, rail]) {
@@ -181,7 +183,7 @@ test.describe('workbench layout', () => {
 
     const form = (await page.locator('.home-intake-form').boundingBox())!
     const group = (await page.locator('.update-tasks').boundingBox())!
-    const glance = (await page.locator('.home-review-summary').boundingBox())!
+    const glance = (await page.locator('.home-glance').boundingBox())!
     expect(group.x).toBeGreaterThan(form.x + form.width)
     expect(group.y).toBeLessThan(glance.y)
 
