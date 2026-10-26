@@ -2742,11 +2742,9 @@ class CiaoControlPlane:
             raise ControlPlaneError(
                 "chat_archived", "Cannot offer a terminal command in an archived chat."
             )
-        if self._unattended_turn(principal):
-            raise ControlPlaneError(
-                "unattended_forbidden",
-                "A suggested terminal command requires an attended turn.",
-            )
+        # Not just "not scheduled": a webhook or task turn runs with nobody
+        # watching, and its payload must not put a command in front of the user.
+        self._require_person_typed_turn(principal, "A suggested terminal command")
         try:
             normalized = normalize_terminal_offer(command)
         except TerminalOfferError as exc:
@@ -5701,6 +5699,9 @@ class CiaoControlPlane:
         user's ``reason``; ``move`` to done stays refused. Completion is
         attended-only, like deletion.
         """
+        # The callee strips the verb, so the gate must see the same verb: a
+        # padded " complete" would otherwise skip it and still complete.
+        action = str(action or "").strip()
         if action == "complete":
             self._require_person_typed_turn(principal, "Task completion")
         return _ok(

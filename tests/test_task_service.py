@@ -1103,6 +1103,26 @@ def test_agent_delete_and_complete_refuse_a_turn_the_person_did_not_type(
     assert read_decisions(plane.config.workspace_vault_root("personal")) == []
 
 
+@pytest.mark.parametrize("action", [" complete", "complete\n", "\tcomplete "])
+def test_agent_complete_with_a_padded_action_still_needs_a_typed_turn(
+    tmp_path: Path, action: str
+) -> None:
+    """The callee strips the verb, so the gate must see the stripped verb too (#2075)."""
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Not asked for")["data"]
+    chat = plane.pcm.get_chat("chat-1")
+    chat.user_turn_count = 1
+    chat.user_turn_origin = {"0": "webhook"}
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_action(
+            principal, action, created["id"],
+            expected_revision=created["revision"], reason="Said so.",
+        )
+    assert excinfo.value.code == "unattended_forbidden"
+    assert _get(plane, "personal", created["id"])["status"] == "backlog"
+
+
 @pytest.mark.parametrize("origin", ["", "retry"])
 def test_agent_delete_and_complete_allow_a_typed_or_retried_turn(
     tmp_path: Path, origin: str
