@@ -1321,16 +1321,27 @@ def test_host_stop_during_startup_launches_nothing(host_binary: Path, tmp_path: 
                 )
                 time.sleep(delay)
                 forked_before = _host_forked(queue.control(None, 8, 0))
+                stopped_at = time.monotonic()
                 host.send_signal(signal.SIGTERM)
-                # A fork within a few milliseconds of the stop was already under
-                # way (spawning takes about a millisecond). A launch that ignored
-                # the stop waits for the event loop, tens of milliseconds later.
-                racing = queue.control(None, 8, 0.005)
+                # A fork soon after the stop may come from a launch decided just
+                # before it: the host polls its stop queue, then spawns, and a
+                # contended runner can preempt it between the two for a whole
+                # scheduler slice. Spawning takes about a millisecond on an idle
+                # Mac, but a 5 ms window failed a loaded macOS CI runner (#2156).
+                # The exact ordering, a stop pending at the decision means no
+                # fork, is proved by test_host_startup_stop_precedes_child_launch;
+                # this sweep only checks the shipped binary against real startup
+                # timing, so it gives a racing launch one scheduler slice plus
+                # margin.
+                racing = queue.control(None, 8, 0.05)
                 forked_racing = _host_forked(racing)
                 events: list[Any] = list(racing)
+                forked_after = None
                 while not any(event.fflags & select.KQ_NOTE_EXIT for event in events):
                     batch = queue.control(None, 8, 45)
                     assert batch, "host did not exit after a startup stop"
+                    if forked_after is None and _host_forked(batch):
+                        forked_after = time.monotonic() - stopped_at
                     events.extend(batch)
                 code = host.wait(timeout=5)
             finally:
@@ -1340,7 +1351,10 @@ def test_host_stop_during_startup_launches_nothing(host_binary: Path, tmp_path: 
                 # Killed before the handlers existed, or launched before the stop.
                 continue
             handled += 1
-            assert not _host_forked(events), f"a child was launched after a stop at {delay}s"
+            assert not _host_forked(events), (
+                f"a child was launched after a stop at {delay}s "
+                f"(fork seen {forked_after}s after the stop)"
+            )
     finally:
         time.sleep(0.2)
         if pids.exists():

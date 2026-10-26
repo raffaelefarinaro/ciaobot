@@ -141,6 +141,7 @@ async function open(row: NotificationRow, ev: MouseEvent) {
 
 .notif-summary {
   margin: 0 0 12px;
+  padding-top: var(--space-4);
   color: var(--fg2);
   font-size: var(--text-sm);
 }

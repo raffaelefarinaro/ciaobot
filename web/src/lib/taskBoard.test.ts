@@ -25,7 +25,6 @@ import {
   matchesProjectFilter,
   openTaskCount,
   readableTasks,
-  sortTasks,
   statusCounts,
   taskApiErrorMessage,
   taskDetailFrom,
@@ -40,7 +39,7 @@ import {
   taskRowsFrom,
   toTaskListRow,
 } from './taskBoard'
-import type { Task } from './types'
+import type { Task, TaskOrder } from './types'
 
 /** The day the fixtures' `updated_at` falls on, so Done keeps them. */
 const FIXTURE_DAY = new Date('2026-03-01T12:00:00Z')
@@ -217,29 +216,40 @@ describe('taskLanes', () => {
   })
 })
 
-describe('sortTasks', () => {
-  it('leads with the dated work, by date, and sinks the undated below it', () => {
-    const sorted = sortTasks([
-      task({ id: 'late', title: 'Late', due: '2026-04-01' }),
-      task({ id: 'none', title: 'Undated' }),
-      task({ id: 'soon', title: 'Soon', due: '2026-03-02' }),
-    ])
-    expect(sorted.map((t) => t.id)).toEqual(['soon', 'late', 'none'])
+describe('taskLanes order', () => {
+  const order = (backlog: string[], done: string[] = []): TaskOrder => ({
+    version: 1,
+    sequences: { backlog, in_progress: [], in_review: [], done },
   })
 
-  it('breaks ties by title, so the same rows always draw in the same order', () => {
-    const sorted = sortTasks([
-      task({ id: 'b', title: 'Beta' }),
-      task({ id: 'a', title: 'Alpha' }),
-    ])
-    expect(sorted.map((t) => t.title)).toEqual(['Alpha', 'Beta'])
+  it('applies the server sequence over due dates', () => {
+    const rows = [
+      task({ id: 'soon', due: '2026-03-02' }),
+      task({ id: 'none' }),
+      task({ id: 'late', due: '2026-04-01' }),
+    ]
+    const lanes = taskLanes(rows, { status: 'all', now: FIXTURE_DAY, order: order(['none', 'late', 'soon']) })
+    expect(lanes[0]!.tasks.map((t) => t.id)).toEqual(['none', 'late', 'soon'])
   })
 
-  it('does not mutate the list it was handed', () => {
-    const rows = [task({ id: 'late', due: '2026-04-01' }), task({ id: 'soon', due: '2026-03-02' })]
-    const before = rows.map((t) => t.id)
-    sortTasks(rows)
-    expect(rows.map((t) => t.id)).toEqual(before)
+  it('keeps Done today vs Show all on the same sequence', () => {
+    const rows = [
+      task({ id: 'x', status: 'done', completed_at: '2026-03-01T10:00:00+00:00' }),
+      task({ id: 'y', status: 'done', completed_at: '2026-03-01T11:00:00+00:00' }),
+      task({ id: 'old', status: 'done', completed_at: '2026-02-01T11:00:00+00:00' }),
+    ]
+    const seq = order([], ['y', 'old', 'x'])
+    const today = taskLanes(rows, { status: 'all', now: FIXTURE_DAY, order: seq }).find((l) => l.status === 'done')!
+    const all = taskLanes(rows, { status: 'done', now: FIXTURE_DAY, order: seq })[0]!
+    expect(today.tasks.map((t) => t.id)).toEqual(['y', 'x'])
+    expect(all.tasks.map((t) => t.id)).toEqual(['y', 'old', 'x'])
+  })
+
+  it('single status filter uses that status sequence', () => {
+    const rows = [task({ id: 'a' }), task({ id: 'b' }), task({ id: 'c', status: 'in_review' })]
+    const lanes = taskLanes(rows, { status: 'backlog', now: FIXTURE_DAY, order: order(['b', 'a']) })
+    expect(lanes).toHaveLength(1)
+    expect(lanes[0]!.tasks.map((t) => t.id)).toEqual(['b', 'a'])
   })
 })
 

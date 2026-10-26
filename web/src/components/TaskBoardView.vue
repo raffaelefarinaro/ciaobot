@@ -4,10 +4,13 @@
  *
  * Four fixed columns — To do, In progress, In review, Done — side by side at every
  * width. A narrow pane scrolls them sideways inside the board; the page itself does
- * not scroll sideways. A card is dragged to another lane, or moved one lane over with
- * Shift+←/→ while its title has focus, at any width. The editor's status control is
- * the path a screen reader and a phone use: a card carries no status control of its
- * own, because its column already says where it is.
+ * not scroll sideways. A card is placed by its grip (`useDragSort`: pointer, touch and
+ * Space/Enter pickup with the arrow keys), by Move up / Move down in its menu, or moved
+ * one lane over with Shift+←/→ while its title has focus, at any width. A drop writes
+ * once: a same-lane move is a reorder, a cross-lane move one status change with its
+ * placement, and a drop on Done opens the resolution sheet and writes nothing until it
+ * is confirmed. The editor's status control stays the path for a plain status change: a
+ * card carries no status control of its own, because its column already says where it is.
  *
  * Every write goes through `stores/taskBoard.ts` at the `revision` this pane read,
  * so a board drawn from an older read gets the server's 409 with its rows intact
@@ -42,6 +45,9 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, 
 import { routeLocationKey, routerKey } from 'vue-router'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
+import DragGrip from './DragGrip.vue'
+import { useDragSort, type DragCommit, type DragScope } from '../composables/useDragSort'
+import { canStep, placementAnchors, type PlacementAnchors } from '../lib/taskOrder'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
 import { useTaskBoardStore, type TaskChanges } from '../stores/taskBoard'
@@ -188,6 +194,7 @@ watch(() => taskSignals.tasks, () => {
 // with a worse outcome — its confirm would launch a turn in the workspace that
 // was left, described by a task the new one has never seen.
 watch(workspace, () => {
+  drag.cancel()
   closeCreate()
   resetResolution()
   void closeDetail({ discard: true })
@@ -233,7 +240,7 @@ const filteredEmpty = computed(
 )
 
 const lanes = computed(() =>
-  taskLanes(filtered.value, { status: statusFilter.value }),
+  taskLanes(filtered.value, { status: statusFilter.value, order: board.order }),
 )
 /**
  * Whether the four status lanes are drawn (no status filter), which is where drag
@@ -367,74 +374,160 @@ function heldDescription(task: Task | null): TaskDetail | null {
 const busyTaskId = ref('')
 
 /**
- * Move one card to another column.
+ * Move one card to another column; `true` when the write landed or, for Done, the
+ * resolution sheet opened for it.
  *
  * Moving *to* Done is the completion gesture, which is why it goes to `complete`
  * rather than through the status field: the store enforces completion as the
- * signed-in user's own act.
+ * signed-in user's own act. `anchors` place the card in the destination; Done holds
+ * them in `pendingDonePlacement` until the sheet is confirmed, and none appends.
  */
-async function moveTo(task: Task, next: TaskStatus) {
-  if (next === task.status || busyTaskId.value === task.id) return
+async function moveTo(task: Task, next: TaskStatus, anchors?: PlacementAnchors | null): Promise<boolean> {
+  if (next === task.status || busyTaskId.value === task.id) return false
   const revision = board.revisionOf(task.id)
   board.clearError()
-  if (!revision) return
+  if (!revision) return false
   if (next === 'done') {
+    pendingDonePlacement.value = anchors ?? null
     openResolution(task, 'complete')
-    return
+    return true
   }
   busyTaskId.value = task.id
-  await board.update(workspace.value, task.id, revision, { status: next })
+  const saved = await board.update(workspace.value, task.id, revision, { status: next }, undefined, anchors ?? undefined)
   busyTaskId.value = ''
   // A refused write means the record moved on, so re-read rather than leave the
-  // user holding a conflict they can only clear by switching workspace.
-  if (board.error) load()
+  // user holding a conflict they can only clear by switching workspace. A
+  // placement write has already re-read.
+  if (board.error && !anchors) load()
+  return saved !== null
 }
 
-// ── Drag between columns ──────────────────────────────────────────────────
+// ── Placing a card ────────────────────────────────────────────────────────
 //
-// Pointer only, and only while the four columns are drawn. Stacked groups use
-// the editor's status controls. The id rides in the component rather than read
-// back from `dataTransfer`, which browsers hide until the drop.
+// One engine (`useDragSort`) serves the grip's pointer and keyboard drags and the
+// menu's Move up / Move down. Each drawn lane is a scope; with Done collapsed its
+// tab is one more, append-only. A gesture ends in `commitDrag`: one write, which
+// the store serialises and rolls back, never a local reorder.
 
-const dragTaskId = ref('')
-const dropStatus = ref<TaskStatus | ''>('')
+/** The collapsed Done tab's scope, where a drop completes the card and appends. It shares the
+ *  id of the Done lane, which is never drawn at the same time. */
+const DONE_TAB_SCOPE = 'done'
+/** Where a card dropped on Done waits for the sheet's confirmation; `null` appends. */
+const pendingDonePlacement = ref<PlacementAnchors | null>(null)
+const lanesEl = ref<HTMLElement | null>(null)
+const laneEls = new Map<string, HTMLElement>()
+const doneTabEl = ref<HTMLElement | null>(null)
+/** The view's own live text; it wins over the engine's so a failed save is not overwritten. */
+const placementMessage = ref('')
+/** Set while one of this view's own writes is in flight, so its echo cannot cancel it. */
+let placing = false
 
-const dragTask = computed(() => tasks.value.find((task) => task.id === dragTaskId.value) ?? null)
+function setLaneEl(status: string, el: unknown): void {
+  if (el instanceof HTMLElement) laneEls.set(status, el)
+  else laneEls.delete(status)
+}
 
-function onDragStart(task: Task, event: DragEvent) {
-  if (!columnsShown.value) { event.preventDefault(); return }
-  dragTaskId.value = task.id
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    // Firefox starts no drag without data.
-    event.dataTransfer.setData('text/plain', task.title)
+const taskById = computed(() => new Map(tasks.value.map((task) => [task.id, task])))
+
+function laneIds(status: string): string[] {
+  return lanes.value.find((lane) => lane.status === status)?.tasks.map((task) => task.id) ?? []
+}
+
+function dragScopes(): DragScope[] {
+  const scopes: DragScope[] = boardLanes.value.map((lane) => ({
+    id: lane.status,
+    el: () => laneEls.get(lane.status) ?? null,
+  }))
+  if (columnsShown.value && !doneShown.value && doneLane.value) {
+    scopes.push({ id: DONE_TAB_SCOPE, el: () => doneTabEl.value, positional: false })
+  }
+  return scopes
+}
+
+function focusGrip(id: string): void {
+  void nextTick(() => {
+    lanesEl.value?.querySelector<HTMLElement>(`[data-drag-handle="${CSS.escape(id)}"]`)?.focus()
+  })
+}
+
+async function commitDrag(commit: DragCommit): Promise<boolean> {
+  const task = taskById.value.get(commit.id)
+  if (!task) return false
+  const dest = commit.toScope as TaskStatus
+  const anchors = placementAnchors(laneIds(dest), commit.id, commit.index)
+  placing = true
+  placementMessage.value = ''
+  try {
+    if (commit.toScope === commit.fromScope) {
+      const result = await board.reorder(workspace.value, commit.id, anchors, board.order.version)
+      if (result.ok) return true
+      placementMessage.value = result.conflict
+        ? `Could not save the new order. ${result.message}`
+        : 'Could not save the new order.'
+      focusGrip(commit.id)
+      return false
+    }
+    if (dest === 'done') {
+      // The card is not done until the sheet is confirmed: nothing is written, and
+      // the tab has no position, so completing from it appends.
+      const viaTab = !boardLanes.value.some((lane) => lane.status === 'done')
+      const opened = await moveTo(task, 'done', viaTab ? null : anchors)
+      if (opened) placementMessage.value = `Confirm to mark ${task.title} done and finish the move.`
+      return opened
+    }
+    const moved = await moveTo(task, dest, anchors)
+    if (!moved) {
+      placementMessage.value = 'Could not save the new order.'
+      focusGrip(commit.id)
+    }
+    return moved
+  } finally {
+    placing = false
   }
 }
 
-function onDragEnd() {
-  dragTaskId.value = ''
-  dropStatus.value = ''
+const drag = useDragSort({
+  root: lanesEl,
+  scopes: dragScopes,
+  itemIds: laneIds,
+  itemEl: (id) => lanesEl.value?.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"]`) ?? null,
+  canDrag: () => !board.saving && !board.orderError && !resolutionOpen.value && !busyTaskId.value,
+  label: (id) => taskById.value.get(id)?.title ?? 'task',
+  scopeLabel: (scope) => lanes.value.find((lane) => lane.status === scope)?.label ?? 'Done',
+  onCommit: commitDrag,
+  get horizontalScopes() { return columnsShown.value },
+})
+
+const liveMessage = computed(() => placementMessage.value || drag.announcement.value)
+watch(() => drag.drag.value?.id, (id) => { if (id) placementMessage.value = '' })
+
+/** The entries a lane draws: its cards in preview order, and `null` for the engine's placeholder. */
+function laneEntries(status: string): Array<{ task: Task | null }> {
+  return drag.entriesFor(status).flatMap((entry): Array<{ task: Task | null }> => {
+    if (entry.kind === 'placeholder') return [{ task: null }]
+    const task = taskById.value.get(entry.id)
+    return task ? [{ task }] : []
+  })
 }
 
-function onDragOver(status: TaskStatus | null, event: DragEvent) {
-  const task = dragTask.value
-  if (!columnsShown.value || !task || !status || status === task.status) return
-  event.preventDefault()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-  dropStatus.value = status
+const orderNotice = computed(() => board.orderError)
+
+function stepDisabled(task: Task, direction: -1 | 1): boolean {
+  return Boolean(board.orderError) || board.saving || !canStep(laneIds(task.status), task.id, direction)
 }
 
-function onDragLeave(status: TaskStatus | null, event: DragEvent) {
-  const into = event.relatedTarget as Node | null
-  if (into && (event.currentTarget as HTMLElement).contains(into)) return
-  if (dropStatus.value === status) dropStatus.value = ''
+function stepTask(task: Task, direction: 'up' | 'down'): void {
+  void drag.move(task.id, task.status, direction)
 }
 
-function onDrop(status: TaskStatus | null) {
-  const task = dragTask.value
-  onDragEnd()
-  if (columnsShown.value && task && status) void moveTo(task, status)
-}
+// A drag is a preview of the list it was started on; when that list changes under
+// it, or the user leaves, it ends without a write.
+onBeforeUnmount(() => drag.cancel())
+watch([() => board.remoteChangeEpoch, () => taskSignals.tasks], () => {
+  if (!drag.drag.value || placing) return
+  drag.cancel()
+  placementMessage.value = 'The board changed, so your move was cancelled.'
+})
 
 /**
  * The keyboard's drag: Shift+←/→ on a focused card moves it one column over.
@@ -1114,6 +1207,7 @@ function closeResolution() {
 }
 
 function resetResolution() {
+  pendingDonePlacement.value = null
   resolutionOpen.value = false
   resolutionTaskId.value = ''
   resolutionDraft.value = ''
@@ -1167,6 +1261,7 @@ async function submitResolution() {
       : await board.complete(
         workspace.value, task.id, revision, text,
         isReviewReady(task) ? cleanReason(resolutionReason.value) : undefined,
+        pendingDonePlacement.value ?? undefined,
       )
   } finally {
     resolutionBusy.value = false
@@ -1557,6 +1652,7 @@ async function closeDetail(options: { discard?: boolean } = {}) {
  */
 const router = inject(routerKey, null)
 const currentRoute = inject(routeLocationKey, null)
+watch(() => currentRoute?.fullPath, () => drag.cancel())
 const routeTaskId = computed(() => {
   const id = currentRoute?.params.taskId
   return typeof id === 'string' ? id : ''
@@ -1953,6 +2049,10 @@ const today = localDateKey()
             </ul>
           </section>
 
+          <!-- The order file could not be read: cards keep their status moves but
+               cannot be placed, and the grips and Move up / Move down say why. -->
+          <p v-if="orderNotice" class="task-action-error task-order-notice" role="status">{{ orderNotice }}</p>
+
           <!-- 4 · a filter hides a non-empty set. -->
           <div v-if="filteredEmpty" class="task-filtered-empty">
             <p class="hint">
@@ -1974,19 +2074,18 @@ const today = localDateKey()
                at full width. -->
           <div
             v-else
+            ref="lanesEl"
             class="task-lanes"
             :class="lanes.length > 1 ? 'task-lanes--columns' : 'task-lanes--list'"
           >
             <section
               v-for="lane in boardLanes"
               :key="lane.status || 'all'"
+              :ref="(el) => setLaneEl(lane.status, el)"
               class="task-lane"
-              :class="{ 'task-lane--drop': lane.status && dropStatus === lane.status }"
+              :class="{ 'task-lane--drop': drag.drag.value?.toScope === lane.status }"
               :aria-label="lane.label"
               :data-lane="lane.status || undefined"
-              @dragover="onDragOver(lane.status, $event)"
-              @dragleave="onDragLeave(lane.status, $event)"
-              @drop.prevent="onDrop(lane.status)"
             >
               <h3 class="task-lane-head">
                 <span class="task-lane-label">{{ lane.label }}</span>
@@ -2001,21 +2100,27 @@ const today = localDateKey()
                   >Hide</button>
                 </span>
               </h3>
-              <p v-if="!lane.tasks.length" class="task-lane-empty">
-                {{ dragTask && lane.status && dragTask.status !== lane.status ? 'Drop here.' : lane.status === 'done' && lane.earlierDone ? 'Nothing done today.' : 'Nothing here.' }}
+              <p v-if="!laneEntries(lane.status).length" class="task-lane-empty">
+                {{ drag.drag.value && drag.drag.value.toScope !== lane.status ? 'Drop here.' : lane.status === 'done' && lane.earlierDone ? 'Nothing done today.' : 'Nothing here.' }}
               </p>
-              <ul v-else class="task-cards">
+              <!-- One element per entry, never a fragment: TransitionGroup moves its
+                   direct children, and the engine's placeholder shares that shape. -->
+              <TransitionGroup v-else tag="ul" name="drag-reorder" class="task-cards">
                 <li
-                  v-for="task in lane.tasks"
-                  :key="task.id"
-                  class="task-card"
-                  :class="{ 'task-card--dragging': dragTaskId === task.id, 'task-card--done': task.status === 'done' }"
-                  :data-task-id="task.id"
-                  :draggable="columnsShown && busyTaskId !== task.id ? 'true' : 'false'"
-                  @click="openDetail(task)"
-                  @dragstart="onDragStart(task, $event)"
-                  @dragend="onDragEnd"
+                  v-for="{ task } in laneEntries(lane.status)"
+                  :key="task?.id ?? 'drag-placeholder'"
+                  :class="task ? {
+                    'task-card': true,
+                    'task-card--done': task.status === 'done',
+                    'drag-source': drag.isSource(task.id),
+                    'drag-lifted': drag.isLifted(task.id),
+                  } : 'drag-placeholder'"
+                  :data-task-id="task?.id"
+                  :data-drag-row="task ? '' : undefined"
+                  :aria-hidden="task ? undefined : 'true'"
+                  @click="task && openDetail(task)"
                 >
+                  <template v-if="task">
                   <div class="task-card-head">
                     <!-- Done is the one gesture every card offers, so it is the
                          card's own checkbox rather than a button in a row of them.
@@ -2035,7 +2140,7 @@ const today = localDateKey()
                     </span>
                     <!-- The title as it reads, with any URL in it a real link. The
                          button that opens the card is the keyboard's way in (and
-                         the drag's), kept out of sight: a link cannot live inside
+                         Shift+←/→'s), kept out of sight: a link cannot live inside
                          a button, and the card's own click opens it for a pointer. -->
                     <p class="task-title" :aria-hidden="titleHasLinks(task) ? undefined : 'true'">
                       <template v-for="(segment, i) in titleSegments(task.title)" :key="i">
@@ -2061,7 +2166,14 @@ const today = localDateKey()
                     >{{ task.title }}</button>
                     <!-- The run-managing gestures live in a menu, so the card never
                          sets Stop or Detach beside the way to open its chat. -->
-                    <DropdownMenuRoot v-if="task.attempt_id || task.chat_id" :modal="false">
+                    <DragGrip
+                      :id="task.id"
+                      :label="`Reorder ${task.title}`"
+                      :disabled="Boolean(orderNotice)"
+                      :title="orderNotice || undefined"
+                      v-bind="drag.gripHandlers(task.id, task.status)"
+                    />
+                    <DropdownMenuRoot :modal="false">
                       <DropdownMenuTrigger as-child>
                         <button
                           type="button"
@@ -2098,6 +2210,24 @@ const today = localDateKey()
                               <button type="button" :disabled="busyTaskId === task.id" @click.stop="actOnAttempt(task, 'detach')">Detach</button>
                             </DropdownMenuItem>
                           </template>
+                          <DropdownMenuItem as-child :disabled="stepDisabled(task, -1)">
+                            <button
+                              type="button"
+                              :disabled="stepDisabled(task, -1)"
+                              :aria-disabled="stepDisabled(task, -1)"
+                              :title="orderNotice || undefined"
+                              @click.stop="stepTask(task, 'up')"
+                            >Move up</button>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem as-child :disabled="stepDisabled(task, 1)">
+                            <button
+                              type="button"
+                              :disabled="stepDisabled(task, 1)"
+                              :aria-disabled="stepDisabled(task, 1)"
+                              :title="orderNotice || undefined"
+                              @click.stop="stepTask(task, 'down')"
+                            >Move down</button>
+                          </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenuPortal>
                     </DropdownMenuRoot>
@@ -2160,8 +2290,9 @@ const today = localDateKey()
                       @click.stop="bandAction(task)!.run()"
                     >{{ bandAction(task)!.label }} &rarr;</button>
                   </div>
+                  </template>
                 </li>
-              </ul>
+              </TransitionGroup>
               <button
                 v-if="lane.earlierDone"
                 type="button"
@@ -2172,14 +2303,12 @@ const today = localDateKey()
             <button
               v-if="columnsShown && !doneShown && doneLane"
               type="button"
+              ref="doneTabEl"
               class="task-done-toggle"
-              :class="{ 'task-done-toggle--drop': dropStatus === 'done' }"
+              :class="{ 'task-done-toggle--drop': drag.drag.value?.toScope === DONE_TAB_SCOPE }"
               :aria-expanded="false"
               :aria-label="doneTabLabel"
               @click="showDone"
-              @dragover="onDragOver('done', $event)"
-              @dragleave="onDragLeave('done', $event)"
-              @drop.prevent="onDrop('done')"
             >
               <span class="task-done-toggle-label">Done</span>
               <span class="badge badge--muted">{{ doneLane.tasks.length }}</span>
@@ -2195,6 +2324,7 @@ const today = localDateKey()
             {{ board.error }}
             <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
           </p>
+          <div class="sr-only" role="status" aria-live="polite">{{ liveMessage }}</div>
         </template>
       </div>
     </div>
@@ -2975,6 +3105,8 @@ const today = localDateKey()
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
   padding: var(--space-1) var(--space-1) var(--space-6);
+  /* The engine sets the picked-up card's height here while a drag is active. */
+  --drag-item-height: 0px;
 }
 /* One lane width at every pane width (no stretching, no 85% switch): a narrow
    pane scrolls the board sideways, a wide one leaves room after the last lane.
@@ -3104,8 +3236,44 @@ const today = localDateKey()
   --task-check-center: 8px;
 }
 .task-card:hover { border-color: var(--border-strong); }
-.task-lanes--columns .task-card[draggable='true'] { cursor: grab; }
-.task-card--dragging { opacity: 0.4; }
+/* The grip sits in the head before the actions menu. It lines up with the title's
+   first line; on touch its box is the full 44px target, drawn over the title's end
+   so the head's width is the same as with a small one. */
+.task-card .drag-grip { margin-top: 8px; }
+@media (pointer: coarse) {
+  .task-card .drag-grip {
+    width: var(--touch);
+    height: var(--touch);
+    margin: 0 0 0 calc(20px - var(--touch));
+  }
+  .task-card .drag-grip::after { display: none; }
+}
+/* The picked-up card: the engine collapses it while its overlay stands in, and
+   the placeholder holds the drop position at the card's height. */
+.task-card.drag-source {
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+.drag-placeholder {
+  height: var(--drag-item-height);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+.drag-reorder-move { transition: transform 120ms var(--ease); }
+/* A card picked up by keyboard stays in place, outlined and lifted like an open menu. */
+.task-card.drag-lifted {
+  outline: 1px solid var(--border-strong);
+  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 38%);
+}
+/* The overlay is a clone of the card in <body>; the engine styles its position. */
+.task-card.drag-overlay { cursor: grabbing; }
+@media (prefers-reduced-motion: reduce) {
+  .drag-reorder-move { transition: none; }
+}
 .task-card--done .task-title { color: var(--fg2); }
 /* The card's Done. A round box rather than a square one: it reads as "tick
    this off", not as a form field. The hit area is the full touch target; the
