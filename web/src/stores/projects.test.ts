@@ -3602,6 +3602,36 @@ describe('optimistic user bubble reconciliation', () => {
     expect(userMsgs[0].turn_index).toBe(1)
   })
 
+  // #1663: a transcript-fallback history serves the user row with no
+  // turn_index, so the optimistic bubble cannot pair by index. The reload must
+  // still leave exactly one bubble, in both the flat and the envelope shape.
+  test.each([
+    ['flat', (rows: unknown[]) => rows],
+    ['envelope', (rows: unknown[]) => ({
+      items: rows, total: rows.length, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })],
+  ])('loadMessages keeps one bubble when a %s fallback row has no turn_index', async (_shape, wrap) => {
+    const store = useProjectStore()
+    const chatId = 'chat-fallback-dup'
+    store.messages[chatId] = [
+      { role: 'user', content: 'earlier', timestamp: '2026-10-20T11:00:00Z' },
+      { role: 'assistant', content: 'earlier reply', timestamp: '' },
+      { role: 'user', content: 'Still working?', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue(wrap([
+      { role: 'user', content: 'earlier', sent_at: '2026-10-20T11:00:00Z' },
+      { role: 'assistant', content: 'earlier reply', sent_at: '' },
+      { role: 'user', content: 'Still working?', sent_at: '2026-10-20T12:08:41Z' },
+    ]))
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'Still working?',
+    )
+    expect(userMsgs.length).toBe(1)
+  })
+
   test('loadMessages background reload does not wipe the optimistic bubble on a still-empty server window', async () => {
     // Regression for "first message can vanish on new chats": a background
     // reload (the 15s poll, say) landing before the first turn persisted
