@@ -9363,6 +9363,17 @@ describe('reorderProjects', () => {
     expect(store.reorderableProjects.map(p => p.project_id)).toEqual(['b', 'a'])
   })
 
+  test('a drag sticks when the local order values tie', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.projects = [proj('a', 5), proj('b', 5), proj('c', 5)] as typeof store.projects
+    apiPost.mockResolvedValue([])
+
+    await store.reorderProjects(['c', 'a', 'b'], ['a', 'b', 'c'])
+
+    expect(store.workspaceProjects.map(p => p.project_id)).toEqual(['c', 'a', 'b'])
+  })
+
   test('restores the previous order and refetches when the server answers 409', async () => {
     const store = useProjectStore()
     seed(store)

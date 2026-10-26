@@ -3031,7 +3031,12 @@ class ProjectChatManager:
                 current,
             )
         by_id = {p.project_id: p for p in reorderables}
+        # Slots must be strictly increasing: projects that share an order
+        # value (after a deletion, or from loaded data) would otherwise
+        # re-sort by name and undo the drag.
         slots = sorted(p.order for p in reorderables)
+        for index in range(1, len(slots)):
+            slots[index] = max(slots[index], slots[index - 1] + 1)
         for slot, pid in zip(slots, ordered_ids):
             by_id[pid].order = slot
         self._save()

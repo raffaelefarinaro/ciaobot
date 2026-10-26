@@ -218,3 +218,25 @@ def test_reorder_route_returns_the_workspace_list(route_client) -> None:
 
     assert response.status_code == 200
     assert [p["name"] for p in response.json()] == ["General", "Beta", "Alpha"]
+
+
+def test_reorder_with_duplicate_order_values_sticks(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    a = pcm.create_project("Alpha", workspace="personal")
+    b = pcm.create_project("Beta", workspace="personal")
+    c = pcm.create_project("Gamma", workspace="personal")
+    for project in (a, b, c):
+        project.order = 5
+    general = _general(pcm)
+    general_order = general.order
+
+    result = pcm.reorder_projects(
+        "personal", [c.project_id, a.project_id, b.project_id], _ids(pcm)
+    )
+
+    assert [p.project_id for p in result if p.project_id != general.project_id] == [
+        c.project_id, a.project_id, b.project_id,
+    ]
+    assert _ids(pcm) == [c.project_id, a.project_id, b.project_id]
+    assert len({a.order, b.order, c.order}) == 3
+    assert general.order == general_order

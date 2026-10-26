@@ -2676,6 +2676,8 @@ export const useProjectStore = defineStore('projects', () => {
       .map(pid => byId.get(pid)?.order)
       .filter((order): order is number => order !== undefined)
       .sort((a, b) => a - b)
+    // Strictly increasing, so projects that tie on `order` still keep the drag.
+    for (let i = 1; i < slots.length; i++) slots[i] = Math.max(slots[i], slots[i - 1] + 1)
     orderedIds.forEach((pid, index) => {
       const p = byId.get(pid)
       if (p && slots[index] !== undefined) p.order = slots[index]
