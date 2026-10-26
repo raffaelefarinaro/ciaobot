@@ -27,6 +27,8 @@ import { useProjectStore } from './projects'
 import { useTaskSignalsStore } from './taskSignals'
 import { useHousekeepingStore } from './housekeeping'
 import { useTaskStore } from './tasks'
+import { useProposalsStore } from './proposals'
+import { useVaultReviewStore } from './vaultReview'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { isMemoryPassChat } from '../lib/memoryPass'
 import {
@@ -37,10 +39,12 @@ import {
 } from '../lib/notificationInbox'
 import type {
   ChatCandidate,
+  MemoryInsightCandidate,
   NotificationSourceKey,
   OperatorCandidate,
   ScheduleCandidate,
   SourceSnapshot,
+  TaskReviewCandidate,
 } from '../lib/notificationInbox'
 import { checkingHealth } from '../lib/sourceHealth'
 import type { SourceHealth } from '../lib/sourceHealth'
@@ -77,6 +81,8 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
   const taskSignals = useTaskSignalsStore()
   const housekeeping = useHousekeepingStore()
   const tasks = useTaskStore()
+  const proposals = useProposalsStore()
+  const vaultReview = useVaultReviewStore()
 
   const generation = ref(0)
   const initialized = ref(false)
@@ -88,6 +94,9 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
   // The tasks store keeps no timestamp, so the adapter stamps list replacements.
   // The stamp only advances while initialized (the watcher lives in init()'s scope).
   const schedulesStampedAt = ref('')
+  // Same for the two memory queues. '' until the first load after init().
+  const proposalsStampedAt = ref('')
+  const revisitStampedAt = ref('')
   let lastFocusRefreshAt = 0
   let scope: EffectScope | null = null
   let removeListeners: (() => void) | null = null
@@ -107,6 +116,14 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       const unread = projects.chatUnread(id) > 0
       // Perf only: the projection would emit no row for a chat with no flag.
       if (!needsInput && !failed && !needsYou && !unread) continue
+      // Only an unread-only chat can be the duplicate result of a review task.
+      let reviewTaskId = ''
+      if (unread && !needsYou) {
+        const task = taskSignals.taskForChat(chat)
+        if (task && taskSignals.chatHoldsTask(chat, task) && taskSignals.isAwaitingReview(task)) {
+          reviewTaskId = task.id
+        }
+      }
       out.push({
         chatId: id,
         title: chat.title,
@@ -120,6 +137,7 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
         pendingQuestion: projects.chatPendingQuestion(id) ?? '',
         snippet: projects.chatLastSnippet(id) ?? '',
         scheduleId: chat.schedule_id ?? '',
+        reviewTaskId,
       })
     }
     return out
@@ -154,6 +172,35 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       })),
   )
 
+  // inReview is [] unless the loaded workspace is the active one.
+  const reviewTaskCandidates = computed<TaskReviewCandidate[]>(() =>
+    taskSignals.inReview(projects.activeWorkspace).map((t) => ({ taskId: t.id, title: t.title })),
+  )
+
+  const proposalCount = computed(() => proposals.scopedRows(projects.activeWorkspace).length)
+
+  const revisitCount = computed(() =>
+    vaultReview.loadedWorkspace === projects.activeWorkspace ? vaultReview.candidates.length : 0,
+  )
+
+  const memoryInsightCandidates = computed<MemoryInsightCandidate[]>(() => {
+    const workspace = projects.activeWorkspace
+    const out: MemoryInsightCandidate[] = []
+    for (const r of projects.memoryInsightRows) {
+      if (!r.blocking || !r.passChatId) continue
+      if (projects.projectFor(r.passChatId)?.workspace !== workspace) continue
+      out.push({
+        sourceChatId: r.sourceChatId,
+        passChatId: r.passChatId,
+        title: r.title,
+        phase: r.phase as MemoryInsightCandidate['phase'],
+        question: r.question,
+        timestamp: r.timestamp,
+      })
+    }
+    return out
+  })
+
   // One entry per source; a missing key is a compile error once INBOX_SOURCES grows.
   const SNAPSHOT_BUILDERS: Record<RefreshSourceKey, () => SourceSnapshot> = {
     chats: () => {
@@ -178,9 +225,23 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       else status = 'ready'
       return { source: 'automations', status, lastSuccessAt: schedulesStampedAt.value }
     },
+    proposals: () => {
+      let status: SourceSnapshot['status']
+      if (!proposals.loaded && !proposals.loadError) status = 'checking'
+      else if (proposals.loadError) status = proposals.loaded ? 'stale' : 'unavailable'
+      else status = 'ready'
+      return { source: 'proposals', status, lastSuccessAt: proposalsStampedAt.value }
+    },
+    revisit: () => {
+      const hasCurrent = !!projects.activeWorkspace && vaultReview.loadedWorkspace === projects.activeWorkspace
+      let status: SourceSnapshot['status']
+      if (hasCurrent) status = vaultReview.loadError ? 'stale' : 'ready'
+      else status = vaultReview.loadError ? 'unavailable' : 'checking'
+      return { source: 'revisit', status, lastSuccessAt: revisitStampedAt.value }
+    },
   }
 
-  const REFRESHERS: Record<RefreshSourceKey, (workspace: string) => Promise<unknown>> = {
+  const REFRESHERS: Record<RefreshSourceKey, (workspace: string) => unknown> = {
     // Never succeeded means the whole bootstrap failed, so re-run fetchAll
     // (projects and workspaces are needed for membership). fetchAll rejections
     // are swallowed by allSettled.
@@ -192,6 +253,13 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     // Both owners record their own failure; neither throws or needs an interval here.
     operator: () => housekeeping.refresh(),
     automations: () => tasks.fetchSchedules().catch(() => {}),
+    // Cheap by design: GET /api/vault/review regenerates candidates from the
+    // vault, so a healthy source never re-reads on focus. A failure or a scope
+    // that never loaded does, which is what the Retry button needs. Neither
+    // fetch is forced, and both join a read already in flight.
+    proposals: () => ((proposals.loaded && !proposals.loadError) ? undefined : proposals.fetch()),
+    revisit: (ws) =>
+      ((vaultReview.loadedWorkspace === ws && !vaultReview.loadError) ? undefined : vaultReview.fetch(ws)),
   }
 
   const snapshots = computed<SourceSnapshot[]>(() =>
@@ -200,9 +268,14 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
 
   const inbox = computed(() =>
     projectNotificationInbox({
+      workspace: projects.activeWorkspace,
       chats: chatCandidates.value,
       operators: operatorCandidates.value,
       schedules: scheduleCandidates.value,
+      reviewTasks: reviewTaskCandidates.value,
+      proposalCount: proposalCount.value,
+      revisitCount: revisitCount.value,
+      memoryInsights: memoryInsightCandidates.value,
       sources: snapshots.value,
     }),
   )
@@ -277,6 +350,12 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       watch(() => projects.activeWorkspace, resetInflight, { flush: 'sync' })
       // Shallow on purpose: an in-place push is not a load.
       watch(() => tasks.schedules, () => { schedulesStampedAt.value = new Date().toISOString() }, { flush: 'sync' })
+      watch(() => proposals.rows, () => { proposalsStampedAt.value = new Date().toISOString() }, { flush: 'sync' })
+      watch(
+        () => [vaultReview.candidates, vaultReview.loadedWorkspace],
+        () => { revisitStampedAt.value = new Date().toISOString() },
+        { flush: 'sync' },
+      )
     })
     window.addEventListener('focus', onFocusOrVisible)
     document.addEventListener('visibilitychange', onFocusOrVisible)
@@ -305,6 +384,10 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     chatCandidates,
     operatorCandidates,
     scheduleCandidates,
+    reviewTaskCandidates,
+    proposalCount,
+    revisitCount,
+    memoryInsightCandidates,
     snapshots,
     inbox,
     rows,

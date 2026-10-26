@@ -9,6 +9,8 @@ import {
   parseHomeNoticeKey,
   scheduleDisplayName,
   type ChatCandidate,
+  type MemoryInsightCandidate,
+  type TaskReviewCandidate,
   type OperatorCandidate,
   type ScheduleCandidate,
   type SourceSnapshot,
@@ -35,6 +37,8 @@ const READY: SourceSnapshot[] = [
   { source: 'chats', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
   { source: 'operator', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
   { source: 'automations', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
+  { source: 'proposals', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
+  { source: 'revisit', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
 ]
 
 function project(chats: ChatCandidate[], sources: SourceSnapshot[] = READY) {
@@ -185,6 +189,8 @@ const READY3: SourceSnapshot[] = [
   { source: 'chats', status: 'ready', lastSuccessAt: 'x' },
   { source: 'operator', status: 'ready', lastSuccessAt: 'x' },
   { source: 'automations', status: 'ready', lastSuccessAt: 'x' },
+  { source: 'proposals', status: 'ready', lastSuccessAt: 'x' },
+  { source: 'revisit', status: 'ready', lastSuccessAt: 'x' },
 ]
 
 function op(o: Partial<OperatorCandidate> & { id: string }): OperatorCandidate {
@@ -441,14 +447,145 @@ describe('notificationInbox operator and automation sources', () => {
     expect(notificationPath({ kind: 'home-notice', noticeKey: 'action:shared:x' })).toBe('/?notice=action%3Ashared%3Ax')
   })
 
-  it('sources_report_three_keys_in_order', () => {
+  it('sources_five_keys_in_order', () => {
     const missing = project3({ sources: [{ source: 'chats', status: 'ready', lastSuccessAt: 'x' }] })
     expect(missing.sources.map((s) => [s.source, s.status, s.label])).toEqual([
       ['chats', 'ready', 'Chats'],
       ['operator', 'checking', 'Settings'],
       ['automations', 'checking', 'Automations'],
+      ['proposals', 'checking', 'Memory suggestions'],
+      ['revisit', 'checking', 'Notes to revisit'],
     ])
     expect(missing.allClear).toBe(false)
     expect(project3({}).allClear).toBe(true)
+  })
+})
+
+function inboxWith(o: {
+  chats?: ChatCandidate[]
+  reviewTasks?: TaskReviewCandidate[]
+  proposalCount?: number
+  revisitCount?: number
+  memoryInsights?: MemoryInsightCandidate[]
+  sources?: SourceSnapshot[]
+  workspace?: string
+}) {
+  return projectNotificationInbox({
+    workspace: o.workspace ?? 'personal',
+    chats: o.chats ?? [],
+    reviewTasks: o.reviewTasks,
+    proposalCount: o.proposalCount,
+    revisitCount: o.revisitCount,
+    memoryInsights: o.memoryInsights,
+    sources: o.sources ?? READY,
+  })
+}
+
+function insight(o: Partial<MemoryInsightCandidate> & { sourceChatId: string }): MemoryInsightCandidate {
+  return {
+    passChatId: `pass-${o.sourceChatId}`, title: 'Source', phase: 'needsYou', question: '',
+    timestamp: '', ...o,
+  }
+}
+
+describe('notificationInbox review, queue and memory rows', () => {
+  it('task_review_row', () => {
+    const inbox = inboxWith({ reviewTasks: [{ taskId: 'a b', title: 'Ship it' }] })
+    expect(inbox.rows).toHaveLength(1)
+    const r = inbox.rows[0]
+    expect(r.key).toBe('task:personal:a b')
+    expect(r.kind).toBe('task-review')
+    expect(r.title).toBe('Ship it')
+    expect(r.reason).toBe('The agent says it is done. Approve or send it back.')
+    expect(r.section).toBe('toReview')
+    expect(r.source).toBe('chats')
+    expect(r.destination).toEqual({ kind: 'task', taskId: 'a b' })
+    expect(notificationPath(r.destination)).toBe('/tasks/a%20b')
+    expect(r.timestamp).toBeUndefined()
+  })
+
+  it('task_review_suppresses_only_unread_result_chat', () => {
+    const reviewTasks = [{ taskId: 't1', title: 'T' }]
+    const base = { title: 'Result', unread: true, reviewTaskId: 't1' }
+    const chatKeys = (c: ChatCandidate) =>
+      inboxWith({ reviewTasks, chats: [c] }).rows.map((r) => r.key).filter((k) => k.startsWith('chat:'))
+    expect(chatKeys(chat({ chatId: 'x', ...base }))).toEqual([])
+    expect(chatKeys(chat({ chatId: 'x', ...base, needsInput: true, needsYou: true }))).toEqual(['chat:x'])
+    expect(chatKeys(chat({ chatId: 'x', ...base, failed: true }))).toEqual(['chat:x'])
+    expect(chatKeys(chat({ chatId: 'x', ...base, needsYou: true }))).toEqual(['chat:x'])
+    expect(chatKeys(chat({ chatId: 'x', ...base, reviewTaskId: 'other' }))).toEqual(['chat:x'])
+  })
+
+  it('proposals_and_revisit_are_one_row_each_with_real_count', () => {
+    const inbox = inboxWith({ proposalCount: 3, revisitCount: 1 })
+    const by = (k: string) => inbox.rows.find((r) => r.key === k)!
+    expect(by('proposals:personal').reason).toBe('3 suggested memories are waiting to accept, edit, or reject.')
+    expect(by('proposals:personal').title).toBe('Memory proposals')
+    expect(by('proposals:personal').source).toBe('proposals')
+    expect(by('revisit:personal').reason).toBe('1 note needs a freshness or duplication decision.')
+    expect(by('revisit:personal').title).toBe('Notes to revisit')
+    expect(by('revisit:personal').source).toBe('revisit')
+    const one = inboxWith({ proposalCount: 1, revisitCount: 2 })
+    expect(one.rows.find((r) => r.key === 'proposals:personal')!.reason).toContain('1 suggested memory is')
+    expect(one.rows.find((r) => r.key === 'revisit:personal')!.reason).toContain('2 notes need')
+    expect(inboxWith({ proposalCount: 0, revisitCount: 0 }).rows).toEqual([])
+  })
+
+  it('review_destinations_match_review_path', () => {
+    expect(notificationPath({ kind: 'review', filter: 'suggested' })).toBe('/memory/review?show=suggested')
+    expect(notificationPath({ kind: 'review', filter: 'revisit' })).toBe('/memory/review?show=revisit')
+  })
+
+  it('memory_insight_rows', () => {
+    const inbox = inboxWith({
+      memoryInsights: [
+        insight({ sourceChatId: 's1', title: 'Plan', question: 'Keep this?', timestamp: '2026-10-01T09:00:00+00:00' }),
+        insight({ sourceChatId: 's2', title: 'Notes', phase: 'attention' }),
+        insight({ sourceChatId: 's3', title: 'Bare' }),
+      ],
+      chats: [chat({ chatId: 'pass-s1', needsInput: true, needsYou: true })],
+    })
+    const by = (k: string) => inbox.rows.find((r) => r.key === k)!
+    expect(by('memory:s1').urgency).toBe('input')
+    expect(by('memory:s1').title).toBe('Memory update: Plan')
+    expect(by('memory:s1').reason).toBe('Keep this?')
+    expect(by('memory:s1').timestamp).toBe('2026-10-01T09:00:00+00:00')
+    expect(by('memory:s1').destination).toEqual({ kind: 'chat', chatId: 'pass-s1' })
+    expect(by('memory:s2').urgency).toBe('failure')
+    expect(by('memory:s2').reason).toBe('The memory update needs attention')
+    expect(by('memory:s3').reason).toBe('The memory update is waiting for your answer or approval')
+    expect(inbox.sections[0].rows.map((r) => r.key)).toEqual(['memory:s3', 'memory:s1', 'memory:s2'])
+    expect(inbox.rows.some((r) => r.key === 'chat:pass-s1')).toBe(false)
+  })
+
+  it('review_rows_follow_their_source_freshness', () => {
+    const sources = READY.map((s) => (s.source === 'proposals' ? { ...s, status: 'stale' as const } : s))
+    const inbox = inboxWith({
+      sources,
+      proposalCount: 2,
+      revisitCount: 2,
+      reviewTasks: [{ taskId: 't', title: 'T' }],
+    })
+    const by = (k: string) => inbox.rows.find((r) => r.key === k)!
+    expect(by('proposals:personal').freshness).toBe('stale')
+    expect(by('revisit:personal').freshness).toBe('fresh')
+    expect(by('task:personal:t').freshness).toBe('fresh')
+  })
+
+  it('count_is_distinct_rows_with_new_sources', () => {
+    const inbox = inboxWith({
+      reviewTasks: [{ taskId: 't', title: 'T' }],
+      proposalCount: 5,
+      revisitCount: 5,
+      memoryInsights: [insight({ sourceChatId: 's' })],
+      chats: [chat({ chatId: 'u', unread: true })],
+    })
+    expect(inbox.count).toBe(5)
+    expect(inbox.rows).toHaveLength(5)
+  })
+
+  it('keys_use_shared_for_empty_workspace', () => {
+    const inbox = inboxWith({ workspace: '', proposalCount: 1, reviewTasks: [{ taskId: 't', title: 'T' }] })
+    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['proposals:shared', 'task:shared:t'])
   })
 })

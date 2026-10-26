@@ -27,12 +27,14 @@ export const SECTION_TITLES: Record<NotificationSection, string> = {
 
 export type SourceStatus = 'checking' | 'ready' | 'stale' | 'unavailable'
 /** Sources the inbox requires. Later units append keys here; a key with no snapshot counts as 'checking'. */
-export const INBOX_SOURCES = ['chats', 'operator', 'automations'] as const
+export const INBOX_SOURCES = ['chats', 'operator', 'automations', 'proposals', 'revisit'] as const
 export type NotificationSourceKey = typeof INBOX_SOURCES[number]
 export const SOURCE_LABELS: Record<NotificationSourceKey, string> = {
   chats: 'Chats',
   operator: 'Settings',
   automations: 'Automations',
+  proposals: 'Memory suggestions',
+  revisit: 'Notes to revisit',
 }
 
 export interface SourceSnapshot {
@@ -47,11 +49,19 @@ export type NotificationKind =
   | 'operator-action'
   | 'missed-schedules'
   | 'automation-attention'
+  | 'task-review'
+  | 'proposals-review'
+  | 'revisit-review'
+  | 'memory-attention'
+/** The two memory review queues the inbox links to (`/memory/review?show=`). */
+export type ReviewQueue = 'suggested' | 'revisit'
 export type NotificationDestination =
   | { kind: 'chat'; chatId: string }
   | { kind: 'schedule'; scheduleId: string }
   | { kind: 'settings'; tab: '' | 'providers' }
   | { kind: 'home-notice'; noticeKey: string }
+  | { kind: 'task'; taskId: string }
+  | { kind: 'review'; filter: ReviewQueue }
 /** Within a section, lower rank sorts first. Needs-you: input < blocking < failure. */
 export type NotificationUrgency = 'input' | 'blocking' | 'failure' | 'review' | 'reply'
 
@@ -83,6 +93,11 @@ export interface ChatCandidate {
   snippet: string
   /** The schedule that produced this chat ('' or absent when none). */
   scheduleId?: string
+  /**
+   * Id of the awaiting-review task whose CURRENT attempt this unread-only chat
+   * holds, else '' or absent. Adapter: set only when unread and not needsYou.
+   */
+  reviewTaskId?: string
 }
 
 export interface OperatorCandidate {
@@ -109,10 +124,32 @@ export interface ScheduleCandidate {
   needsAttention: boolean
 }
 
+/** A board task whose agent finished and waits for Approve (`taskSignals.inReview`). */
+export interface TaskReviewCandidate {
+  taskId: string
+  title: string
+}
+
+/** A blocking memory-insight row (`projects.memoryInsightRows`, blocking only). */
+export interface MemoryInsightCandidate {
+  sourceChatId: string
+  passChatId: string
+  title: string
+  phase: 'needsYou' | 'attention'
+  question: string
+  timestamp: string
+}
+
 export interface NotificationInboxInput {
+  /** Workspace on screen; scopes row keys. '' keys as 'shared'. */
+  workspace?: string
   chats: readonly ChatCandidate[]
   operators?: readonly OperatorCandidate[]
   schedules?: readonly ScheduleCandidate[]
+  reviewTasks?: readonly TaskReviewCandidate[]
+  proposalCount?: number
+  revisitCount?: number
+  memoryInsights?: readonly MemoryInsightCandidate[]
   sources: readonly SourceSnapshot[]
 }
 
@@ -294,6 +331,68 @@ function automationRow(s: ScheduleCandidate, freshness: 'fresh' | 'stale'): Noti
   }
 }
 
+function taskReviewRow(t: TaskReviewCandidate, ws: string, freshness: 'fresh' | 'stale'): NotificationRow {
+  return {
+    key: `task:${ws}:${t.taskId}`,
+    kind: 'task-review',
+    section: 'toReview',
+    urgency: 'review',
+    source: 'chats',
+    title: plainText(t.title, Number.MAX_SAFE_INTEGER),
+    reason: 'The agent says it is done. Approve or send it back.',
+    destination: { kind: 'task', taskId: t.taskId },
+    unread: false,
+    freshness,
+  }
+}
+
+function queueRow(
+  queue: ReviewQueue,
+  count: number,
+  ws: string,
+  freshness: 'fresh' | 'stale',
+): NotificationRow {
+  const proposals = queue === 'suggested'
+  return {
+    key: `${proposals ? 'proposals' : 'revisit'}:${ws}`,
+    kind: proposals ? 'proposals-review' : 'revisit-review',
+    section: 'toReview',
+    urgency: 'review',
+    source: proposals ? 'proposals' : 'revisit',
+    title: proposals ? 'Memory proposals' : 'Notes to revisit',
+    reason: proposals
+      ? `${count} suggested ${count === 1 ? 'memory is' : 'memories are'} waiting to accept, edit, or reject.`
+      : `${count} ${count === 1 ? 'note needs' : 'notes need'} a freshness or duplication decision.`,
+    destination: { kind: 'review', filter: queue },
+    unread: false,
+    freshness,
+  }
+}
+
+function memoryInsightRow(m: MemoryInsightCandidate, freshness: 'fresh' | 'stale'): NotificationRow {
+  const needsYou = m.phase === 'needsYou'
+  const row: NotificationRow = {
+    key: `memory:${m.sourceChatId}`,
+    kind: 'memory-attention',
+    section: 'needsYou',
+    urgency: needsYou ? 'input' : 'failure',
+    source: 'chats',
+    title: plainText(`Memory update: ${m.title}`, Number.MAX_SAFE_INTEGER),
+    reason: plainText(
+      needsYou
+        ? m.question || 'The memory update is waiting for your answer or approval'
+        : 'The memory update needs attention',
+      REASON_MAX,
+    ),
+    destination: { kind: 'chat', chatId: m.passChatId },
+    unread: false,
+    freshness,
+  }
+  const ts = m.timestamp.trim()
+  if (ts) row.timestamp = ts
+  return row
+}
+
 function compareRows(section: NotificationSection): (a: NotificationRow, b: NotificationRow) => number {
   if (section === 'newReplies') {
     return (a, b) => {
@@ -354,7 +453,27 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     incidentSchedules.add(s.scheduleId)
   }
 
+  const ws = input.workspace || 'shared'
+  const reviewedTaskIds = new Set<string>()
+  for (const t of input.reviewTasks ?? []) {
+    add(taskReviewRow(t, ws, freshnessOf('chats')))
+    reviewedTaskIds.add(t.taskId)
+  }
+  const proposalCount = input.proposalCount ?? 0
+  if (proposalCount > 0) add(queueRow('suggested', proposalCount, ws, freshnessOf('proposals')))
+  const revisitCount = input.revisitCount ?? 0
+  if (revisitCount > 0) add(queueRow('revisit', revisitCount, ws, freshnessOf('revisit')))
+  const passChatIds = new Set<string>()
+  for (const m of input.memoryInsights ?? []) {
+    add(memoryInsightRow(m, freshnessOf('chats')))
+    passChatIds.add(m.passChatId)
+  }
+
   for (const c of input.chats) {
+    // The unread result of a delegated task is the same item as its review row.
+    // A live question, a failure or a delegated wait stays.
+    if (c.reviewTaskId && reviewedTaskIds.has(c.reviewTaskId) && !c.needsYou && !c.needsInput && !c.failed) continue
+    if (passChatIds.has(c.chatId)) continue
     // The failed chat of an incident, and its unread-result twin, are the same
     // problem as the schedule row. A live question or a delegated wait stays.
     if (c.scheduleId && incidentSchedules.has(c.scheduleId) && !c.needsInput && (c.failed || !c.needsYou)) continue
@@ -389,6 +508,11 @@ export function notificationPath(d: NotificationDestination): string {
       return d.tab ? `/settings/${d.tab}` : '/settings'
     case 'home-notice':
       return `/?notice=${encodeURIComponent(d.noticeKey)}`
+    case 'task':
+      return `/tasks/${encodeURIComponent(d.taskId)}`
+    // Mirrors stores/memoryMap.reviewPath (a store, so not importable here).
+    case 'review':
+      return `/memory/review?show=${d.filter}`
     default: {
       const unreachable: never = d
       return unreachable

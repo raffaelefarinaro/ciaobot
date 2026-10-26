@@ -10,6 +10,8 @@ import { useTerminalStore } from '../../stores/terminal'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { useItemPeekStore } from '../../stores/itemPeek'
 import { useTaskStore } from '../../stores/tasks'
+import { useProposalsStore } from '../../stores/proposals'
+import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useNotificationInboxStore } from '../../stores/notificationInbox'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
@@ -3294,6 +3296,8 @@ describe('ChatLayout chat route without a catalog entry', () => {
       vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
       useHousekeepingStore().actionsHealth = { status: 'ready', lastSuccessAt: '2026-08-12T10:00:00.000Z', error: '' }
       useTaskStore().schedulesLoaded = true
+      useProposalsStore().loaded = true
+      useVaultReviewStore().loadedWorkspace = 'personal'
       vi.spyOn(store, 'fetchAll').mockImplementation(async () => {
         store.projects = [{
           project_id: 'project-1', name: 'General', workspace: 'personal',
