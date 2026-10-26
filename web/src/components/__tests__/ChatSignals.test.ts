@@ -42,6 +42,12 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--needs').exists()).toBe(true)
     expect(wrapper.text()).toContain('needs you')
     expect(wrapper.find('.chat-signal--needs').attributes('aria-label')).toBe('Needs your answer')
+    expect(wrapper.find('.activity-glyph--alert').exists()).toBe(false)
+
+    // At row density needs-you is the alert triangle, the one mark for "wants you".
+    const row = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(row.find('.chat-signal--needs .activity-glyph--alert').exists()).toBe(true)
+    expect(row.find('.chat-signal-label').exists()).toBe(false)
   })
 
   // Working is the transcript's own activity pulse now, with no text label: the
@@ -77,12 +83,12 @@ describe('ChatSignals', () => {
     expect(many.find('.chat-signal--runs').attributes('aria-label')).toBe('3 background runs')
   })
 
-  it('shows the run marker beside the agents chip when a chat has both', () => {
+  it('shows the run marker beside the working mark of a chat whose agents run', () => {
     const { store } = seed()
     store.backgroundAgents = { 'chat-1': 1 }
     store.backgroundRuns = { 'chat-1': [run('r1'), run('r2')] }
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(wrapper.find('.chat-signal--agents .activity-glyph--agent').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--working .activity-glyph--working').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--runs').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--runs .chat-signal-count').text()).toBe('2')
   })
@@ -103,18 +109,24 @@ describe('ChatSignals', () => {
     expect(working.find('.chat-signal--runs').attributes('aria-label')).toBe('Background run: Clone rizzo-flow')
   })
 
-  it('shows a count only when more than one agent is running', () => {
+  // Subagents are the chat's work: no mark of their own, just working, with
+  // the label naming them.
+  it('shows running agents as working, named only in the label', () => {
     const { store } = seed()
     store.backgroundAgents = { 'chat-1': 3 }
     const many = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(many.find('.chat-signal--agents').exists()).toBe(true)
-    expect(many.find('.chat-signal-count').text()).toBe('3')
-    expect(many.find('.chat-signal--agents').attributes('aria-label')).toBe('3 agents running')
+    expect(many.find('.chat-signal--working .activity-glyph--working').exists()).toBe(true)
+    expect(many.find('.chat-signal-count').exists()).toBe(false)
+    expect(many.find('.chat-signal--working').attributes('aria-label')).toBe('3 agents running')
 
     store.backgroundAgents = { 'chat-1': 1 }
     const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(one.find('.chat-signal-count').exists()).toBe(false)
-    expect(one.find('.chat-signal--agents').attributes('aria-label')).toBe('1 agent running')
+    expect(one.find('.chat-signal--working').attributes('aria-label')).toBe('1 agent running')
+
+    store.projectStreaming = { 'chat-1': true }
+    const turn = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(turn.findAll('.activity-glyph--working')).toHaveLength(1)
+    expect(turn.find('.chat-signal--working').attributes('aria-label')).toBe('Working')
   })
 
   // The poll and the watcher tick on different clocks, so a row must not read
@@ -128,11 +140,10 @@ describe('ChatSignals', () => {
       ],
     }
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(wrapper.find('.chat-signal--agents').attributes('aria-label')).toBe('2 agents running')
-    expect(wrapper.find('.chat-signal-count').text()).toBe('2')
+    expect(wrapper.find('.chat-signal--working').attributes('aria-label')).toBe('2 agents running')
   })
 
-  it('renders interval and retry modifiers with their accessible labels', () => {
+  it('renders the schedule clock and the retry alert with their accessible labels', () => {
     const { store, taskStore } = seed()
     store.chats[0].retry = { status: 'pending' } as never
     taskStore.schedules = [{
@@ -143,10 +154,24 @@ describe('ChatSignals', () => {
       enabled: false,
     }] as unknown as typeof taskStore.schedules
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
-    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Retry scheduled')
-    expect(wrapper.find('.chat-signal--retry').text()).toBe('↻ retry')
-    expect(wrapper.find('.chat-signal--interval').classes()).toContain('stopped')
+    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Run failed, retry scheduled')
+    expect(wrapper.find('.chat-signal--retry .activity-glyph--alert').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--schedule .schedule-glyph').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--schedule').classes()).toContain('stopped')
+    expect(wrapper.find('.chat-signal--schedule').attributes('aria-label')).toBe('An automation attached to this chat (paused)')
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
+  })
+
+  it('shows the schedule clock for a chat bound to a daily automation too', () => {
+    const { taskStore } = seed()
+    taskStore.schedules = [
+      { schedule_id: 'sched-1', frequency: 'daily', web_chat_id: 'chat-1', enabled: true },
+      { schedule_id: 'sched-2', frequency: 'interval', interval_minutes: 10, web_chat_id: 'chat-1', enabled: false },
+    ] as unknown as typeof taskStore.schedules
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    const clock = wrapper.find('.chat-signal--schedule')
+    expect(clock.classes()).not.toContain('stopped')
+    expect(clock.attributes('aria-label')).toBe('2 automations running in this chat')
   })
 
   it('marks an unread chat for attention without adding a count', () => {
@@ -200,6 +225,8 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--memory').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--memory').attributes('aria-label')).toBe('Memory pass needs you')
     expect(wrapper.find('.chat-signal--memory').attributes('title')).toBe('Memory pass needs you')
+    // Stuck memory is a failure like any other: the alert triangle, not a glyph of its own.
+    expect(wrapper.find('.chat-signal--memory .activity-glyph--alert').exists()).toBe(true)
   })
 
   it('leaves the memory chip off a pass that is still running or done', () => {

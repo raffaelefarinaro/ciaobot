@@ -50,7 +50,7 @@ describe('ComposerActivity', () => {
   it('counts agents and shells, naming a single run only in its tooltip', () => {
     const one = mountBar({ agentCount: 1 })
     expect(one.get('.composer-activity-seg--agents').text()).toBe('1 agent')
-    expect(one.get('.composer-activity-seg--agents').find('.activity-glyph--agent').exists()).toBe(true)
+    expect(one.get('.composer-activity-seg--agents').find('.activity-glyph--working').exists()).toBe(true)
     one.unmount()
 
     const two = mountBar({ agentCount: 2, runs: [run('r1', 'ITTA preview', 319_000)] })
@@ -80,7 +80,7 @@ describe('ComposerActivity', () => {
     const seg = failed.get('.composer-activity-seg--outcome')
     expect(seg.classes()).toContain('composer-activity-seg--error')
     expect(seg.get('.composer-activity-label').text()).toBe('uv sync failed (exit 1)')
-    expect(seg.find('.activity-glyph--run-failed').exists()).toBe(true)
+    expect(seg.find('.activity-glyph--alert').exists()).toBe(true)
     await seg.trigger('click')
     expect(failed.emitted('open-details')).toHaveLength(1)
     failed.unmount()

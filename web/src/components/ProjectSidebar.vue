@@ -201,7 +201,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Automations</span>
-            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="run-failed" /></span>
+            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="alert" /></span>
           </router-link>
           <router-link
             to="/memory"
@@ -302,7 +302,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Settings</span>
-            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="run-failed" /></span>
+            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="alert" /></span>
           </router-link>
         </nav>
 
@@ -381,7 +381,7 @@
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span class="schedule-time">{{ oneOffWhen(s) }}</span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
               </router-link>
             </div>
           </div>
@@ -417,7 +417,7 @@
                   class="spinner-dot"
                   title="This automation is working"
                 />
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
               </router-link>
             </div>
         </div>
@@ -441,7 +441,7 @@
                   class="spinner-dot"
                   title="This automation is working"
                 />
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
               </router-link>
             </div>
           </div>

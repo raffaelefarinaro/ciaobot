@@ -1345,7 +1345,7 @@
               :to="subagentPath(chat.chat_id, sub.agent_id)"
               class="rail-item chat-rail-agent"
             >
-              <ActivityGlyph kind="agent" />
+              <ActivityGlyph kind="working" />
               <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
               <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
               <span class="chat-rail-agent-arrow" aria-hidden="true">→</span>

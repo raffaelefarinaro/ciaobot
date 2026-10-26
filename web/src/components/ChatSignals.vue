@@ -11,36 +11,30 @@
       aria-label="Needs your answer"
     >
       <span v-if="density === 'card'" class="chat-signal-label">needs you</span>
+      <ActivityGlyph v-else kind="alert" />
     </span>
     <span
       v-else-if="primarySignal === 'memory'"
       class="chat-signal chat-signal--memory"
       title="Memory pass needs you"
       aria-label="Memory pass needs you"
-    >✦</span>
+    ><ActivityGlyph kind="alert" /></span>
     <span
       v-else-if="primarySignal === 'working'"
       class="chat-signal chat-signal--working"
-      title="Working"
-      aria-label="Working"
+      :title="workingTitle"
+      :aria-label="workingTitle"
     ><ActivityGlyph kind="working" /></span>
-    <span
-      v-else-if="primarySignal === 'agents'"
-      class="chat-signal chat-signal--agents"
-      :title="agentsTitle"
-      :aria-label="agentsTitle"
-    >
-      <ActivityGlyph kind="agent" />
-      <span v-if="density === 'card' && agentCount > 1" class="chat-signal-count">{{ agentCount }}</span>
-    </span>
+    <!-- A retry only exists because a run failed, so it is the failure mark;
+         the label says a retry is queued. -->
     <span
       v-else-if="primarySignal === 'retry'"
       class="chat-signal chat-signal--retry"
-      title="Retry scheduled"
-      aria-label="Retry scheduled"
-    >↻ retry</span>
+      title="Run failed, retry scheduled"
+      aria-label="Run failed, retry scheduled"
+    ><ActivityGlyph kind="alert" /></span>
     <!-- Not on the ladder: a run can outlive everything else on the row (a dev
-         server goes for hours), so it shows beside needs-you, working and agents
+         server goes for hours), so it shows beside needs-you and working
          instead of hiding behind them. -->
     <span
       v-if="runCount > 0"
@@ -52,12 +46,13 @@
       <span v-if="density === 'card' && runCount > 1" class="chat-signal-count">{{ runCount }}</span>
     </span>
     <span
-      v-if="intervalSummary"
-      class="chat-signal chat-signal--interval"
-      :class="{ stopped: !intervalSummary.running }"
-      :title="intervalTitle"
-      :aria-label="intervalTitle"
-    >↻</span>
+      v-if="scheduleSummary"
+      class="chat-signal chat-signal--schedule"
+      :class="{ stopped: !scheduleSummary.running }"
+      role="img"
+      :title="scheduleTitle"
+      :aria-label="scheduleTitle"
+    ><ScheduleGlyph /></span>
 
     <!-- Not beside needs-you: that mark already asks for the chat to be
          opened, and a second one next to it reads as a stutter. -->
@@ -83,6 +78,7 @@ import type { WorkspaceAccent } from '../lib/workspaceColors'
 import { backgroundRunLabel } from '../lib/backgroundRuns'
 import { isShellRow } from '../lib/subagentIds'
 import ActivityGlyph from './ActivityGlyph.vue'
+import ScheduleGlyph from './ScheduleGlyph.vue'
 
 const props = withDefaults(defineProps<{
   chatId: string
@@ -105,9 +101,12 @@ const agentCount = computed(() => Math.max(
   Number(store.backgroundAgents[props.chatId] || 0),
   store.runningSubagentsFor(props.chatId).filter(sub => !isShellRow(sub)).length,
 ))
-const agentsTitle = computed(() =>
-  agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`,
-)
+// Subagents are the chat's work too: they show as working, not a mark of
+// their own, and only the label says who is doing it.
+const workingTitle = computed(() => {
+  if (working.value || agentCount.value === 0) return 'Working'
+  return agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`
+})
 // Tracked background command runs. One run is named, the way the composer's
 // run line names it, so hovering the row says what is going.
 const runs = computed(() => store.backgroundRuns[props.chatId] || [])
@@ -127,27 +126,25 @@ const memoryAttention = computed(() => store.memoryPassNeedsAttention(props.chat
 
 // Unread is a separate static notification eye. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'memory' | 'working' | 'agents' | 'retry' | null>(() => {
+const primarySignal = computed<'needs' | 'memory' | 'working' | 'retry' | null>(() => {
   if (needsInput.value) return 'needs'
   if (memoryAttention.value) return 'memory'
-  if (working.value) return 'working'
-  if (agentCount.value > 0) return 'agents'
+  if (working.value || agentCount.value > 0) return 'working'
   if (props.density === 'row' && retryPending.value) return 'retry'
   return null
 })
 
-// Interval automations bound to this chat -- the "this chat re-runs itself"
-// marker. Distinct from a time-of-day schedule, which is not a property of the
-// chat in the same way.
-const intervalSummary = computed(
-  () => taskStore.intervalsByChat.get(props.chatId) || null,
+// Automations bound to this chat, of any cadence -- the "this chat runs on a
+// schedule" clock, an attribute like the task and code marks.
+const scheduleSummary = computed(
+  () => taskStore.schedulesByChat.get(props.chatId) || null,
 )
-const intervalTitle = computed(() => {
-  if (!intervalSummary.value) return ''
-  const label = intervalSummary.value.count > 1
-    ? `${intervalSummary.value.count} interval automations`
-    : 'An interval automation'
-  return intervalSummary.value.running
+const scheduleTitle = computed(() => {
+  if (!scheduleSummary.value) return ''
+  const label = scheduleSummary.value.count > 1
+    ? `${scheduleSummary.value.count} automations`
+    : 'An automation'
+  return scheduleSummary.value.running
     ? `${label} running in this chat`
     : `${label} attached to this chat (paused)`
 })
@@ -170,13 +167,6 @@ const intervalTitle = computed(() => {
   line-height: 1;
 }
 
-.chat-signal--needs {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  background: var(--accent);
-}
-
 /* Unread is an eye in the row's accent, still: status takes the accent and
    shape carries the meaning, because a workspace accent can sit next to the
    semantic error red. */
@@ -196,8 +186,8 @@ const intervalTitle = computed(() => {
    deliberately: the pill shape reads as a count badge, and counts mean something
    else in this vocabulary. */
 .chat-signals--card .chat-signal--needs {
-  width: auto;
   min-height: 20px;
+  background: var(--accent);
   padding: 0 var(--space-2);
   border-radius: var(--radius-xs);
   color: var(--bg);
@@ -214,14 +204,13 @@ const intervalTitle = computed(() => {
   white-space: nowrap;
 }
 
-/* Working, agents and runs draw ActivityGlyph; the gap keeps a count clear of it. */
+/* Working and runs draw ActivityGlyph; the gap keeps a count clear of it. */
 .chat-signal--working,
-.chat-signal--agents,
 .chat-signal--runs {
   gap: var(--space-1);
 }
 
-/* Only shown for more than one agent or run, where the number is the point. */
+/* Only shown for more than one run, where the number is the point. */
 .chat-signal-count {
   color: var(--accent);
   font-family: var(--font-mono);
@@ -229,39 +218,14 @@ const intervalTitle = computed(() => {
   font-weight: 700;
 }
 
-/* A run's count takes the accent like its diamond; the diamond's shape is what
-   says "run". */
-.chat-signal--runs .chat-signal-count { color: var(--accent); }
-
-/* A small mono tag, so it no longer shares the interval's ↻ glyph. */
-.chat-signal--retry {
-  color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 400;
-  line-height: 16px;
-  padding: 0 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-}
-
-/* A pass that stopped and needs the owner. The accent like every status mark;
-   the ✦ shape is what separates it from the working grid. */
-.chat-signal--memory {
-  color: var(--accent);
-  font-size: var(--text-sm);
-  line-height: 1;
-}
-
-/* An attribute of the chat, not a state, so it stays muted. */
-.chat-signal--interval {
+/* An attribute of the chat, not a state, so it stays muted like the task and
+   code marks. */
+.chat-signal--schedule {
   color: var(--fg3);
-  font-size: var(--text-lg);
-  font-weight: 400;
 }
 
 /* Paused must still differ from running without colour. */
-.chat-signal--interval.stopped {
+.chat-signal--schedule.stopped {
   opacity: 0.55;
 }
 </style>

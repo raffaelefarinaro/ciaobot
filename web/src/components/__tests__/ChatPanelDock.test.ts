@@ -235,7 +235,7 @@ describe('ChatPanel automation origin', () => {
     expect(agent.props('to')).toBe('/chat/chat-1/subagent/a1')
     expect(agent.text()).toContain('Explore repo layout')
     expect(agent.text()).toContain('Explore')
-    expect(agent.findComponent({ name: 'ActivityGlyph' }).props('kind')).toBe('agent')
+    expect(agent.findComponent({ name: 'ActivityGlyph' }).props('kind')).toBe('working')
     const runs = rail.findComponent({ name: 'BackgroundRunRows' })
     expect(runs.exists()).toBe(true)
     expect(agent.element.compareDocumentPosition(runs.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()

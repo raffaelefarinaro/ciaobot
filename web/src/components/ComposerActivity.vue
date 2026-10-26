@@ -19,7 +19,7 @@
         :aria-controls="popoverId"
         @click="toggle('agents', $event)"
       >
-        <ActivityGlyph kind="agent" />
+        <ActivityGlyph kind="working" />
         <span v-if="compact" class="composer-activity-count">{{ agentCount }}</span>
         <span v-else class="composer-activity-label">{{ agentsLabel }}</span>
       </button>
@@ -47,7 +47,7 @@
         :aria-label="`Background run: ${outcome.text}. Show in Chat details`"
         @click="openDetails"
       >
-        <ActivityGlyph :kind="outcome.tone === 'error' ? 'run-failed' : 'run'" />
+        <ActivityGlyph :kind="outcome.tone === 'error' ? 'alert' : 'run'" />
         <span v-if="!compact" class="composer-activity-label">{{ outcome.text }}</span>
       </button>
     </div>
@@ -79,7 +79,7 @@
           :to="subagentPath(chatId, sub.agent_id)"
           @click="close(false)"
         >
-          <ActivityGlyph kind="agent" />
+          <ActivityGlyph kind="working" />
           <span class="composer-activity-pop-label">{{ subagentLabel(sub) }}</span>
           <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
         </router-link>

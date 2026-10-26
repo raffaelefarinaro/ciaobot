@@ -1,7 +1,7 @@
 <template>
   <span class="activity-glyph" :class="`activity-glyph--${kind}`" aria-hidden="true">
     <svg
-      v-if="kind === 'run-failed'"
+      v-if="kind === 'alert'"
       width="12"
       height="11"
       viewBox="0 0 16 14"
@@ -29,22 +29,22 @@
 <script setup lang="ts">
 // One mark per kind of live work, all in the row's accent: shape and motion
 // carry the meaning, never hue, because an accent preset can sit next to any
-// semantic colour. Running work is a 3x3 pixel grid whose lit pixel chases a
-// path: a working turn chases the whole perimeter of a dim grid, a subagent is
-// a lit hub with one pixel orbiting it, a run is a dim diamond (the four edge
-// cells) traced in turn. Something broke is a filled alert triangle, still.
+// semantic colour. Running work is a 3x3 pixel grid whose lit pixel chases the
+// perimeter: a working turn (or its subagents) over a dim grid, a background
+// run as a lit hub with one pixel orbiting it and nothing else drawn.
+// Anything that wants the owner (a question, a failure, a stuck pass) is a
+// filled alert triangle, still.
 // Decorative only: the caller owns the accessible name.
-export type ActivityGlyphKind = 'working' | 'agent' | 'run' | 'run-failed'
+export type ActivityGlyphKind = 'working' | 'run' | 'alert'
 defineProps<{ kind: ActivityGlyphKind }>()
 
 // Per kind, the chase step of each of the 9 cells in row-major order (-1 never
-// animates: the dim centre of `working`, the lit hub of `agent`, an empty cell
-// of `run`), and the cells lit in the frozen reduced-motion frame.
+// animates: the dim centre of `working`, the lit hub of `run`), and the cells
+// lit in the frozen reduced-motion frame.
 const PIXEL_GRIDS = {
   working: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [0, 2, 4, 6, 8] },
-  agent: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [2, 4] },
-  run: { chase: [-1, 0, -1, 3, -1, 1, -1, 2, -1], still: [1, 3, 5, 7] },
-} satisfies Record<Exclude<ActivityGlyphKind, 'run-failed'>, { chase: number[]; still: number[] }>
+  run: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [2, 4] },
+} satisfies Record<Exclude<ActivityGlyphKind, 'alert'>, { chase: number[]; still: number[] }>
 </script>
 
 <style scoped>
@@ -58,22 +58,17 @@ const PIXEL_GRIDS = {
 }
 
 /* Running work: a 3x3 pixel grid, one lit pixel chasing a path through it
-   and leaving a short tail. The kinds differ in path, rest level and hub. */
+   and leaving a short tail. The kinds differ in rest level and hub. */
 .activity-glyph--working,
-.activity-glyph--agent,
 .activity-glyph--run {
   --pixel-rest: 0.18;
-  --pixel-step: 0.15s;
   display: inline-grid;
   grid-template-columns: repeat(3, 3px);
   gap: 1px;
 }
 
-/* A subagent: no grid, just a lit hub and the pixel orbiting it. */
-.activity-glyph--agent { --pixel-rest: 0; }
-
-/* A shell run: four steps round the diamond, so each takes twice as long. */
-.activity-glyph--run { --pixel-step: 0.3s; }
+/* A background run: no grid, just a lit hub and the pixel orbiting it. */
+.activity-glyph--run { --pixel-rest: 0; }
 
 .activity-glyph-pixel {
   width: 3px;
@@ -81,15 +76,14 @@ const PIXEL_GRIDS = {
   background: var(--accent);
   opacity: var(--pixel-rest);
   animation: activity-glyph-chase 1.2s linear infinite;
-  animation-delay: calc(var(--i) * var(--pixel-step) - 1.2s);
+  animation-delay: calc(var(--i) * 0.15s - 1.2s);
 }
 
 .activity-glyph-pixel--fixed { animation: none; }
-.activity-glyph--agent .activity-glyph-pixel--fixed { opacity: 1; }
-.activity-glyph--run .activity-glyph-pixel--fixed { opacity: 0; }
+.activity-glyph--run .activity-glyph-pixel--fixed { opacity: 1; }
 
-/* Failure is a filled alert triangle with a knocked-out "!". */
-.activity-glyph--run-failed { color: var(--accent); }
+/* The alert: a filled triangle with a knocked-out "!". */
+.activity-glyph--alert { color: var(--accent); }
 .activity-glyph-knock { fill: var(--on-accent); }
 
 @keyframes activity-glyph-chase {
@@ -104,7 +98,7 @@ const PIXEL_GRIDS = {
   }
 
   /* Frozen into a shape per kind, never a bare dot: the working grid a
-     checker, the agent its hub and satellite, the run a full diamond. */
+     checker, the run its hub and satellite. */
   .activity-glyph-pixel--still { opacity: 1; }
 }
 </style>
