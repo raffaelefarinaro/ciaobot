@@ -3604,25 +3604,22 @@ describe('optimistic user bubble reconciliation', () => {
 
   // #1663: a transcript-fallback history serves the user row with no
   // turn_index, so the optimistic bubble cannot pair by index. The reload must
-  // still leave exactly one bubble, in both the flat and the envelope shape.
-  test.each([
-    ['flat', (rows: unknown[]) => rows],
-    ['envelope', (rows: unknown[]) => ({
-      items: rows, total: rows.length, offset: 0, limit: 50, hasMore: false, nextOffset: null,
-    })],
-  ])('loadMessages keeps one bubble when a %s fallback row has no turn_index', async (_shape, wrap) => {
+  // still leave exactly one bubble. The flat shape takes the replace path; the
+  // envelope rows carry real absolute indexes (`i`) so the index-addressed
+  // merge and its text pairing run, not the wholesale window adoption.
+  test('loadMessages keeps one bubble when a flat fallback row has no turn_index', async () => {
     const store = useProjectStore()
-    const chatId = 'chat-fallback-dup'
+    const chatId = 'chat-fallback-dup-flat'
     store.messages[chatId] = [
       { role: 'user', content: 'earlier', timestamp: '2026-10-20T11:00:00Z' },
       { role: 'assistant', content: 'earlier reply', timestamp: '' },
       { role: 'user', content: 'Still working?', timestamp: '', turn_index: undefined },
     ]
-    apiGet.mockResolvedValue(wrap([
+    apiGet.mockResolvedValue([
       { role: 'user', content: 'earlier', sent_at: '2026-10-20T11:00:00Z' },
       { role: 'assistant', content: 'earlier reply', sent_at: '' },
       { role: 'user', content: 'Still working?', sent_at: '2026-10-20T12:08:41Z' },
-    ]))
+    ])
 
     await store.loadMessages(chatId)
 
@@ -3630,6 +3627,32 @@ describe('optimistic user bubble reconciliation', () => {
       m => m.role === 'user' && m.content === 'Still working?',
     )
     expect(userMsgs.length).toBe(1)
+  })
+
+  test('loadMessages merges an envelope fallback row without turn_index onto the optimistic bubble', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-fallback-dup-envelope'
+    store.messages[chatId] = [
+      { i: 0, role: 'user', content: 'earlier', timestamp: '2026-10-20T11:00:00Z' },
+      { i: 1, role: 'assistant', content: 'earlier reply', timestamp: '' },
+      { role: 'user', content: 'Still working?', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'earlier', sent_at: '2026-10-20T11:00:00Z' },
+        { i: 1, role: 'assistant', content: 'earlier reply', sent_at: '' },
+        { i: 2, role: 'user', content: 'Still working?', sent_at: '2026-10-20T12:08:41Z' },
+      ],
+      total: 3, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    const userMsgs = msgs.filter(m => m.role === 'user' && m.content === 'Still working?')
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].i).toBe(2)
+    expect(msgs.map(m => m.i)).toEqual([0, 1, 2])
   })
 
   test('loadMessages background reload does not wipe the optimistic bubble on a still-empty server window', async () => {
