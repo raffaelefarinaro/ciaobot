@@ -8,6 +8,7 @@
  */
 
 import { apiErrorMessage, errorPayload } from './errorMessage'
+import { orderTasks } from './taskOrder'
 import type {
   Task,
   TaskAttempt,
@@ -16,6 +17,7 @@ import type {
   TaskCompletion,
   TaskDetail,
   TaskInvalidRow,
+  TaskOrder,
   TaskRow,
   TaskStatus,
   TaskUpdate,
@@ -663,24 +665,6 @@ export function matchesDueFilter(task: Task, filter: TaskDueFilter, today: strin
 
 // ── Ordering ──────────────────────────────────────────────────────────────
 
-/**
- * One column's order: the dated work by date, then the undated, then by title.
- *
- * A board's question is "what is next", and a due date is the only field that
- * answers it, so it leads. Undated work sinks below every dated card instead of
- * sorting as infinitely overdue, and the title breaks ties so the order does not
- * shift between two renders of the same rows.
- */
-export function sortTasks(tasks: Task[]): Task[] {
-  return [...tasks].sort((a, b) => {
-    const aDue = isDueDate(a.due)
-    const bDue = isDueDate(b.due)
-    if (aDue !== bDue) return aDue ? -1 : 1
-    if (aDue && bDue && a.due !== b.due) return a.due < b.due ? -1 : 1
-    return a.title.localeCompare(b.title) || a.id.localeCompare(b.id)
-  })
-}
-
 /** One lane of the board: a fixed column, or the one list a filter narrowed it to. */
 export interface TaskLane {
   /** The status this lane draws on either layout. */
@@ -748,20 +732,21 @@ export function formatCompletedAt(completedAt: string | null): string {
  */
 export function taskLanes(
   tasks: Task[],
-  options: { status: TaskStatus | 'all'; now?: Date },
+  options: { status: TaskStatus | 'all'; now?: Date; order?: TaskOrder },
 ): TaskLane[] {
   const now = options.now ?? new Date()
+  const sequenceOf = (status: TaskStatus): readonly string[] => options.order?.sequences[status] ?? []
   if (options.status === 'all') {
     return TASK_COLUMNS.map((column) => {
       const lane = tasks.filter((task) => task.status === column.status)
       const { kept, earlierDone } = column.status === 'done'
         ? withDoneToday(lane, now)
         : { kept: lane, earlierDone: 0 }
-      return { status: column.status, label: column.label, tasks: sortTasks(kept), earlierDone }
+      return { status: column.status, label: column.label, tasks: orderTasks(kept, sequenceOf(column.status)), earlierDone }
     })
   }
   const kept = tasks.filter((task) => task.status === options.status)
-  return [{ status: options.status, label: taskStatusLabel(options.status), tasks: sortTasks(kept), earlierDone: 0 }]
+  return [{ status: options.status, label: taskStatusLabel(options.status), tasks: orderTasks(kept, sequenceOf(options.status)), earlierDone: 0 }]
 }
 
 /** The board's counts per status, unreadable files excluded. */

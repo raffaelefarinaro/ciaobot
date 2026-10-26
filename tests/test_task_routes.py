@@ -44,6 +44,7 @@ from ciao.web.routes_tasks import (
     task_get,
     task_link_chat,
     task_list,
+    task_order,
     task_resolution_review,
     task_update,
 )
@@ -201,6 +202,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             Route("/api/tasks", task_list, methods=["GET"]),
             Route("/api/tasks", task_create, methods=["POST"]),
             Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+            Route("/api/tasks/{task_id}/order", task_order, methods=["POST"]),
             Route(
                 "/api/tasks/{task_id}/resolution-review",
                 task_resolution_review,
@@ -1721,3 +1723,164 @@ def test_task_rows_carry_created_by_null_for_a_user_filed_task(world) -> None:
     assert [row["created_by"] for row in listed] == [None]
     got = client.get(f"/api/tasks/{created['id']}?workspace=personal", cookies=cookies).json()["task"]
     assert got["created_by"] is None
+
+
+# ── Task order (#2087) ───────────────────────────────────────────────────
+
+
+def _board_order(client: TestClient, cookies: dict[str, str], workspace: str = "personal") -> dict:
+    return client.get(f"/api/tasks?workspace={workspace}", cookies=cookies).json()
+
+
+def test_list_returns_order_sequences(world) -> None:
+    client, cookies, _config, _pcm = world
+    first = _create(client, cookies, title="Alpha")
+    second = _create(client, cookies, title="Beta")
+    payload = _board_order(client, cookies)
+    assert payload["order_error"] is None
+    assert payload["order"]["version"] >= 0
+    assert payload["order"]["sequences"] == {
+        "backlog": [first["id"], second["id"]],
+        "in_progress": [],
+        "in_review": [],
+        "done": [],
+    }
+    assert [row["id"] for row in payload["tasks"]] == [first["id"], second["id"]]
+
+
+def test_patch_with_placement_200_and_order_in_response(world) -> None:
+    client, cookies, _config, _pcm = world
+    first = _create(client, cookies, title="Alpha")
+    second = _create(client, cookies, title="Beta")
+    base = _board_order(client, cookies)["order"]["version"]
+    response = client.patch(
+        f"/api/tasks/{second['id']}",
+        json={
+            "workspace": "personal",
+            "expected_revision": second["revision"],
+            "status": "in_progress",
+            "placement": {"before_id": None, "after_id": None, "expected_order_version": base},
+        },
+        cookies=cookies,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["task"]["status"] == "in_progress"
+    assert body["order_error"] is None
+    assert body["order"]["version"] == base + 1
+    assert body["order"]["sequences"]["in_progress"] == [second["id"]]
+    assert body["order"]["sequences"]["backlog"] == [first["id"]]
+
+
+def test_patch_placement_malformed_400(world) -> None:
+    client, cookies, _config, _pcm = world
+    first = _create(client, cookies, title="Alpha")
+    second = _create(client, cookies, title="Beta")
+    base = _board_order(client, cookies)["order"]["version"]
+
+    def patch(placement, **extra):
+        return client.patch(
+            f"/api/tasks/{first['id']}",
+            json={
+                "workspace": "personal",
+                "expected_revision": first["revision"],
+                "placement": placement,
+                **extra,
+            },
+            cookies=cookies,
+        )
+
+    cases = [
+        {"expected_order_version": True},
+        {"before_id": second["id"], "after_id": second["id"], "expected_order_version": base},
+        "not-a-dict",
+    ]
+    for placement in cases:
+        response = patch(placement, status="in_progress")
+        assert response.status_code == 400, placement
+        assert response.json()["error"]["code"] == "task_order_invalid", placement
+    # A placement on a write that keeps the status is refused, not ignored.
+    renamed = patch({"expected_order_version": base}, title="Renamed")
+    assert renamed.status_code == 400
+    assert renamed.json()["error"]["code"] == "task_order_invalid"
+
+
+def test_order_route_requires_version_400(world) -> None:
+    client, cookies, _config, _pcm = world
+    task = _create(client, cookies, title="Alpha")
+    for body in ({}, {"expected_order_version": True}, {"expected_order_version": "0"}):
+        response = client.post(
+            f"/api/tasks/{task['id']}/order",
+            json={"workspace": "personal", **body},
+            cookies=cookies,
+        )
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "expected_order_version_required"
+
+
+def test_order_route_moves_within_the_column(world) -> None:
+    client, cookies, _config, _pcm = world
+    first = _create(client, cookies, title="Alpha")
+    second = _create(client, cookies, title="Beta")
+    base = _board_order(client, cookies)["order"]["version"]
+    response = client.post(
+        f"/api/tasks/{second['id']}/order",
+        json={
+            "workspace": "personal",
+            "before_id": first["id"],
+            "expected_order_version": base,
+        },
+        cookies=cookies,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["task"]["id"] == second["id"]
+    assert body["order"]["sequences"]["backlog"] == [second["id"], first["id"]]
+    assert body["order_error"] is None
+    assert _board_order(client, cookies)["tasks"][0]["id"] == second["id"]
+
+
+def test_order_route_conflict_409_retryable(world) -> None:
+    client, cookies, _config, _pcm = world
+    first = _create(client, cookies, title="Alpha")
+    second = _create(client, cookies, title="Beta")
+    response = client.post(
+        f"/api/tasks/{second['id']}/order",
+        json={"workspace": "personal", "before_id": first["id"], "expected_order_version": 9999},
+        cookies=cookies,
+    )
+    assert response.status_code == 409
+    error = response.json()["error"]
+    assert error["code"] == "task_order_conflict"
+    assert error["retryable"] is True
+
+
+def test_order_route_unauthenticated_rejected(world) -> None:
+    client, cookies, _config, _pcm = world
+    task = _create(client, cookies, title="Alpha")
+    anonymous = client.post(
+        f"/api/tasks/{task['id']}/order",
+        json={"workspace": "personal", "expected_order_version": 1},
+    )
+    assert anonymous.status_code == 401
+
+
+def test_an_unreadable_order_file_is_reported_and_refuses_a_placement(world) -> None:
+    client, cookies, config, _pcm = world
+    first = _create(client, cookies, title="Alpha")
+    second = _create(client, cookies, title="Beta")
+    order_file = config.workspace_vault_root("personal") / "Workspace" / "task-order.json"
+    order_file.write_text("{not json", encoding="utf-8")
+
+    payload = _board_order(client, cookies)
+    assert isinstance(payload["order_error"], str) and payload["order_error"]
+    assert payload["order"]["version"] == -1
+    assert [row["id"] for row in payload["tasks"]] == [first["id"], second["id"]]
+
+    response = client.post(
+        f"/api/tasks/{second['id']}/order",
+        json={"workspace": "personal", "before_id": first["id"], "expected_order_version": -1},
+        cookies=cookies,
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "task_order_unreadable"
