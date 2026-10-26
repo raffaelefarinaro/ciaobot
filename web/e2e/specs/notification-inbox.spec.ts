@@ -150,6 +150,18 @@ test.describe('notification inbox', () => {
       }
       expect((await fixtureWrites(page)).filter((w) => w.path.endsWith('/read'))).toEqual([])
 
+      // Two barriers before anything is sampled or broadcast. Both events sockets
+      // are open, so A's read cannot be broadcast to a device that is not yet
+      // listening. And every source has answered on both devices: the chat rows
+      // are drawn before the proposals read lands, so a count sampled earlier
+      // misses that row and then looks one too high once it arrives.
+      await expect.poll(async () =>
+        (await (await page.request.get('/__fixture__/ws-count')).json()).open,
+      ).toBeGreaterThanOrEqual(2)
+      for (const p of [page, b]) {
+        await expect(p.locator('ul[aria-label="Source status"]')).toHaveCount(0)
+      }
+
       // A opens chat-1. Opening is what reads it, and B hears about it.
       const bBefore = await bellCount(b)
       await row(page, UNREAD_ROW('alpha-chat-1')).locator(ROWS).click()
