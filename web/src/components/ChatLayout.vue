@@ -129,10 +129,6 @@
             v-else-if="viewMode === 'tasks'"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <NotificationsView
-            v-else-if="viewMode === 'notifications'"
-            @open-sidebar="sidebarCollapsed = false"
-          />
           <MemoryMapView
             v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
             @open-sidebar="sidebarCollapsed = false"
@@ -315,7 +311,6 @@ const SubagentChatView = defineAsyncComponent(() => import('./SubagentChatView.v
 const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
 const TaskBoardView = defineAsyncComponent(() => import('./TaskBoardView.vue'))
-const NotificationsView = defineAsyncComponent(() => import('./NotificationsView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
 // The chat chunk is the biggest one, and the first chat opened after an
 // update is exactly when it has to be fetched: the hashed assets change with
@@ -655,11 +650,10 @@ const chatRoutePending = computed(() => {
   if (!id || store.activeChat) return false
   return chatLookupPendingId.value === id
 })
-const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'notifications' | 'settings' | 'memory' | 'proposals'>(() => {
+const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
   if (path.startsWith('/schedules')) return 'schedules'
-  if (path.startsWith('/notifications')) return 'notifications'
   if (path.startsWith('/tasks')) return 'tasks'
   if (path.startsWith('/memory')) return 'memory'
   if (path.startsWith('/proposals')) return 'proposals'
@@ -689,7 +683,7 @@ const viewShortcutsActive = computed(() =>
 // themselves. `1`–`9` keep switching workspaces from all of them: they are gated
 // on `viewShortcutsActive`, which the board and the inbox do not exclude.
 const shortcutsActive = computed(() =>
-  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'notifications' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
+  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
 )
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
@@ -818,7 +812,6 @@ const pageDocumentTitle = computed(() => {
   if (viewMode.value === 'memory') return 'memory'
   if (viewMode.value === 'proposals') return 'proposals'
   if (viewMode.value === 'tasks') return 'tasks'
-  if (viewMode.value === 'notifications') return 'notifications'
   if (projectIdParam.value) {
     const project = store.projects.find(p => p.project_id === projectIdParam.value)
     return project?.name || 'project'
@@ -1100,7 +1093,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // claims the keys it uses in the capture phase; this covers every chord it
   // does not.
   if (pendingNewChat.value) return
-  // Switch top-level sections (chat → schedules → tasks → memory → notifications → settings)
+  // Switch top-level sections (chat → schedules → tasks → memory → settings)
   // with Option+Arrow, because the browser has already spent Cmd+Left/Right on
   // back/forward. Never Tab: that stays the native focus traversal.
   const mod = e.metaKey || e.ctrlKey
@@ -1109,10 +1102,10 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   if (isSectionArrow) {
     if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
     // Order matches the sidebar's own destination order (Chats, Automations,
-    // Tasks, Memory, Notifications, Settings), so Option+Arrow walks the sections the way the
+    // Tasks, Memory, Settings), so Option+Arrow walks the sections the way the
     // nav lists them. `/tasks` needs its own index: it has no `viewMode` fall
     // through to, so without one Alt+Right from the board jumped to Home.
-    const sections = ['/', '/schedules', '/tasks', '/memory', '/notifications', '/settings']
+    const sections = ['/', '/schedules', '/tasks', '/memory', '/settings']
     const current = viewMode.value === 'chat' || viewMode.value === 'project'
       ? 0
       : viewMode.value === 'schedules'
@@ -1121,9 +1114,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
           ? 2
           : viewMode.value === 'memory' || viewMode.value === 'proposals'
             ? 3
-            : viewMode.value === 'notifications'
-              ? 4
-              : 5
+            : 4
     const next = (current + (e.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length
     e.preventDefault()
     void router.push(sections[next])
@@ -1171,7 +1162,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       // navigating to `/` would throw the user off the surface they pressed a
       // number on.
       void store.switchWorkspace(workspace.name, {
-        transition: viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'notifications',
+        transition: viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory',
       })
       return
     }
@@ -1230,7 +1221,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       memoryMapStore.selectNode(null)
       return
     }
-    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'notifications' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
       e.preventDefault()
       void router.push('/')
       return

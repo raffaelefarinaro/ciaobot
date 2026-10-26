@@ -50,14 +50,13 @@ function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
 }
 
 async function mountSidebar(
-  mode: 'chat' | 'memory' | 'proposals' | 'notifications' = 'proposals',
+  mode: 'chat' | 'memory' | 'proposals' = 'proposals',
   extra: { collapsed?: boolean } = {},
 ) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
-      { path: '/notifications', component: { template: '<div />' } },
     ],
   })
   await router.push('/')
@@ -423,19 +422,11 @@ describe('notifications bell', () => {
     vi.restoreAllMocks()
   })
 
-  it('bell_sits_between_tasks_and_settings', async () => {
-    seedInbox(0)
-    const wrapper = await mountSidebar('chat')
-    const hrefs = wrapper.findAll('.nav-links a').map((a) => a.attributes('href'))
-    expect(hrefs).toEqual(['/', '/schedules', '/memory', '/tasks', '/notifications', '/settings'])
-    wrapper.unmount()
-  })
-
   it('zero_count_has_no_numeral_and_plain_name', async () => {
     seedInbox(0)
     const wrapper = await mountSidebar('chat')
-    const bell = wrapper.get('.nav-links a[href="/notifications"]')
-    expect(bell.attributes('data-count')).toBeUndefined()
+    const bell = wrapper.get('.notif-bell')
+    expect(wrapper.find('.notif-bell-count').exists()).toBe(false)
     expect(bell.attributes('aria-label')).toBe('Notifications, none')
     wrapper.unmount()
   })
@@ -443,15 +434,15 @@ describe('notifications bell', () => {
   it('count_and_99_plus', async () => {
     seedInbox(3)
     const wrapper = await mountSidebar('chat')
-    let bell = wrapper.get('.nav-links a[href="/notifications"]')
-    expect(bell.attributes('data-count')).toBe('3')
+    let bell = wrapper.get('.notif-bell')
+    expect(bell.get('.notif-bell-count').text()).toBe('3')
     expect(bell.attributes('aria-label')).toBe('Notifications, 3 items')
     wrapper.unmount()
 
     seedInbox(100)
     const big = await mountSidebar('chat')
-    bell = big.get('.nav-links a[href="/notifications"]')
-    expect(bell.attributes('data-count')).toBe('99+')
+    bell = big.get('.notif-bell')
+    expect(bell.get('.notif-bell-count').text()).toBe('99+')
     expect(bell.attributes('aria-label')).toBe('Notifications, 100 items')
     big.unmount()
   })
@@ -461,20 +452,13 @@ describe('notifications bell', () => {
     const projects = useProjectStore()
     projects.chatsHealth = { status: 'stale', lastSuccessAt: READY_AT, error: 'x' }
     const wrapper = await mountSidebar('chat')
-    expect(wrapper.find('.nav-item-alert--partial').exists()).toBe(true)
-    expect(wrapper.get('.nav-links a[href="/notifications"]').attributes('aria-label'))
+    expect(wrapper.find('.notif-bell-ring').exists()).toBe(true)
+    expect(wrapper.get('.notif-bell').attributes('aria-label'))
       .toBe('Notifications, 1 item. Some sources could not be fully checked')
 
     projects.chatsHealth = { status: 'checking', lastSuccessAt: '', error: '' }
     await nextTick()
-    expect(wrapper.find('.nav-item-alert--partial').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('active_state', async () => {
-    seedInbox(0)
-    const wrapper = await mountSidebar('notifications')
-    expect(wrapper.get('.nav-links a[href="/notifications"]').classes()).toContain('nav-item--active')
+    expect(wrapper.find('.notif-bell-ring').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -482,17 +466,9 @@ describe('notifications bell', () => {
     seedInbox(100)
     const wrapper = await mountSidebar('chat', { collapsed: true })
     expect(wrapper.find('.nav-links').exists()).toBe(false)
-    const bell = wrapper.get('a[href="/notifications"]')
+    const bell = wrapper.get('.notif-bell')
     expect(bell.attributes('aria-label')).toBe('Notifications, 100 items')
-    expect(bell.get('.sidebar-rail-bell-count').text()).toBe('99+')
-    wrapper.unmount()
-  })
-
-  it('click_collapses_the_mobile_drawer', async () => {
-    seedInbox(0)
-    const wrapper = await mountSidebar('chat')
-    await wrapper.get('.nav-links a[href="/notifications"]').trigger('click')
-    expect(wrapper.emitted('chat-selected')).toHaveLength(1)
+    expect(bell.get('.notif-bell-count').text()).toBe('99+')
     wrapper.unmount()
   })
 
@@ -503,7 +479,7 @@ describe('notifications bell', () => {
     const refresh = vi.spyOn(inbox, 'refresh')
     const retry = vi.spyOn(inbox, 'retry')
     const wrapper = await mountSidebar('chat')
-    await wrapper.get('.nav-links a[href="/notifications"]').trigger('click')
+    await wrapper.get('.notif-bell').trigger('click')
     expect(init).not.toHaveBeenCalled()
     expect(refresh).not.toHaveBeenCalled()
     expect(retry).not.toHaveBeenCalled()

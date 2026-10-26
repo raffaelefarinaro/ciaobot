@@ -539,6 +539,27 @@ describe('ProjectSidebar global new chat', () => {
     })
   }
 
+  it('expanded_brand_row_has_bell_between_history_and_collapse', async () => {
+    const wrapper = await mountSidebar('chat')
+    const row = wrapper.get('.sidebar-brand-row').element
+    const order = Array.from(row.children).map((el) =>
+      el.classList.contains('sidebar-history') ? 'history'
+        : el.classList.contains('history-divider') ? 'divider'
+          : el.classList.contains('notif-bell') ? 'bell'
+            : el.classList.contains('toggle-btn') ? 'toggle' : '',
+    ).filter(Boolean)
+    expect(order).toEqual(['history', 'divider', 'bell', 'divider', 'toggle'])
+    wrapper.unmount()
+  })
+
+  it('no_notifications_destination_row', async () => {
+    const wrapper = await mountSidebar('chat')
+    const hrefs = wrapper.findAll('.nav-links a').map((a) => a.attributes('href'))
+    expect(hrefs).not.toContain('/notifications')
+    expect(wrapper.find('.nav-links').text()).not.toContain('Notifications')
+    wrapper.unmount()
+  })
+
   it('offers one New chat above the tree, opening the shared picker', async () => {
     const { pendingNewChat } = await import('../../lib/newChat')
     const wrapper = await mountSidebar('chat')
