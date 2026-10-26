@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../lib/api'
 import { cleanReason } from '../lib/decisionReasons'
+import { errorPayload } from '../lib/errorMessage'
+import { EMPTY_TASK_ORDER, taskOrderFrom, type PlacementAnchors } from '../lib/taskOrder'
 import {
   isTaskInvalidRow,
   taskApiErrorMessage,
@@ -17,6 +19,7 @@ import type {
   TaskDelegateResponse,
   TaskDetail,
   TaskListResponse,
+  TaskOrder,
   TaskResolutionReviewResponse,
   TaskRow,
   TaskStatus,
@@ -46,6 +49,19 @@ function tasksUrl(workspace: string): string {
 
 function taskUrl(taskId: string): string {
   return `/api/tasks/${encodeURIComponent(taskId)}`
+}
+
+/** What the user is told when the board moved under a placement write. */
+const ORDER_CONFLICT_MESSAGE = 'The board changed while you were moving that. It has been refreshed; try again.'
+
+/** What `reorder` answers with: success, or a plain sentence and whether it was a conflict. */
+export type ReorderResult = { ok: true } | { ok: false; conflict: boolean; message: string }
+
+/** A 409 that says the board moved: a stale order version or a stale task revision. */
+function isWriteConflict(e: unknown): boolean {
+  const detail = errorPayload(e)?.error
+  const code = detail && typeof detail === 'object' ? (detail as { code?: unknown }).code : undefined
+  return code === 'task_order_conflict' || code === 'task_revision_conflict'
 }
 
 /** The optional decision reason as a body fragment: trimmed, and absent when blank. */
@@ -79,6 +95,27 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
   const loadError = ref('')
   const error = ref('')
   const saving = ref(false)
+  /**
+   * The server's card order, one id sequence per status. The store never sorts
+   * and never edits it locally: it changes only when an answer carries `order`,
+   * so a failed write leaves no partial local order behind. The view previews a
+   * drag on its own copy.
+   */
+  const order = ref<TaskOrder>(EMPTY_TASK_ORDER)
+  /** The server's message when `Workspace/task-order.json` cannot be read; `''` otherwise. */
+  const orderError = ref('')
+  /**
+   * Bumped when a read finds the board changed by something other than this
+   * store's own write (an agent, `ciao task`, another tab), so a view mid-drag
+   * can tell its preview is stale. Not bumped on a first load or a switch.
+   */
+  const remoteChangeEpoch = ref(0)
+  /** Ticket for the newest request that may carry `order`; older answers are dropped. */
+  let orderSeq = 0
+  /** The tail of the placement-write chain: one gesture is in flight at a time. */
+  let writeChain: Promise<unknown> = Promise.resolve()
+  /** Bumped on every conflict; a write queued before one is dropped, never replayed. */
+  let conflictEpoch = 0
   /**
    * The one task whose Markdown description this board holds.
    *
@@ -207,12 +244,26 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * while the read is in flight.
    */
   async function reload(workspace: string): Promise<void> {
+    await readBoard(workspace, false)
+  }
+
+  /**
+   * `reload`'s body. `own` marks a read the store started itself to recover from
+   * its own failed write: what it finds is the aftermath of that write, not a
+   * remote change, so it does not bump `remoteChangeEpoch`.
+   */
+  async function readBoard(workspace: string, own: boolean): Promise<void> {
     if (!workspace) return
-    if (workspace !== loadedWorkspace.value) {
+    const switched = workspace !== loadedWorkspace.value
+    const before = boardSignature()
+    if (switched) {
       saving.value = false
       error.value = ''
       rows.value = []
       loadedWorkspace.value = ''
+      // Versions are per workspace; a held one means nothing on the next.
+      order.value = EMPTY_TASK_ORDER
+      orderError.value = ''
       // Task slugs can collide across workspaces, so a description held for one
       // workspace is not a description of the other's task with the same id.
       described.value = null
@@ -220,6 +271,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       resetAttempts()
     }
     const seq = ++requestSeq
+    const ticket = ++orderSeq
     descriptionSeq++
     loading.value = true
     loadError.value = ''
@@ -228,6 +280,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       if (seq !== requestSeq) return
       rows.value = taskRowsFrom(data)
       loadedWorkspace.value = workspace
+      adoptOrder(workspace, data, ticket)
+      if (!switched && !own && boardSignature() !== before) remoteChangeEpoch.value++
     } catch (e) {
       if (seq !== requestSeq) return
       loadError.value = taskApiErrorMessage(e, 'Could not load tasks')
@@ -253,6 +307,57 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    */
   function drawingWorkspace(workspace: string): boolean {
     return loadedWorkspace.value === workspace
+  }
+
+  /** The order version and every row's revision: what "the board changed" means. */
+  function boardSignature(): string {
+    return `${order.value.version}|${rows.value.map((row) => `${row.id}:${'revision' in row ? row.revision : ''}`).join(',')}`
+  }
+
+  /**
+   * Adopt the `order` an answer carried.
+   *
+   * Dropped unless the board still draws `workspace` (versions are per workspace)
+   * and `ticket` is still the newest taken: an older request answering late must
+   * not put its order over a newer one's. A lower version is dropped too, except
+   * the unreadable file's -1, which is the server saying the order is gone.
+   */
+  function adoptOrder(workspace: string, payload: unknown, ticket: number): void {
+    if (!drawingWorkspace(workspace) || ticket !== orderSeq) return
+    const raw = (payload ?? {}) as { order?: unknown; order_error?: unknown }
+    if (!raw.order || typeof raw.order !== 'object') return
+    const next = taskOrderFrom(raw.order)
+    const message = typeof raw.order_error === 'string' ? raw.order_error : ''
+    if (!message && next.version < order.value.version) return
+    order.value = next
+    orderError.value = message
+  }
+
+  /**
+   * Run one placement write after the one before it, never beside it.
+   *
+   * A write queued behind one that then conflicted is dropped with `dropped()`:
+   * its intent was computed against an order that has since changed, and
+   * replaying it would move a card somewhere the user never chose.
+   */
+  function enqueue<T>(run: () => Promise<T>, dropped: () => T): Promise<T> {
+    const epoch = conflictEpoch
+    const next = writeChain.then(() => (conflictEpoch !== epoch ? dropped() : run()))
+    writeChain = next.catch(() => undefined)
+    return next
+  }
+
+  /**
+   * The failure policy of a placement write: say it in a plain sentence, then
+   * re-read so the board shows what is on disk, not what the gesture hoped for.
+   */
+  async function recover(workspace: string, e: unknown, fallback: string): Promise<{ conflict: boolean; message: string }> {
+    const conflict = isWriteConflict(e)
+    if (conflict) conflictEpoch++
+    const message = conflict ? ORDER_CONFLICT_MESSAGE : taskApiErrorMessage(e, fallback)
+    await readBoard(workspace, true)
+    error.value = message
+    return { conflict, message }
   }
 
   /**
@@ -364,10 +469,11 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     if (!workspace || !input.title.trim()) return null
     // This write's answer is about to be the newest record the board holds.
     descriptionSeq++
+    const ticket = ++orderSeq
     saving.value = true
     error.value = ''
     try {
-      const data = await api.post<{ task?: unknown }>('/api/tasks', {
+      const data = await api.post<{ task?: unknown; order?: unknown }>('/api/tasks', {
         workspace,
         title: input.title.trim(),
         body: input.body ?? '',
@@ -379,6 +485,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       // with it — onto a board that never listed it.
       if (!drawingWorkspace(workspace)) return null
       const task = adopt(data?.task)
+      adoptOrder(workspace, data, ticket)
       // A create answers with the record as stored, body included, so this one
       // read saves the dialog a round trip for the task just filed.
       described.value = task
@@ -401,6 +508,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * `null` comes back from a refusal *and* from a workspace switch made while the
    * PATCH was in flight; the second drops the answer instead of adopting it onto
    * the board that replaced this one. See {@link drawingWorkspace}.
+   *
+   * A `placement` is dropped when the status does not change; use `reorder()` for a same-column move.
    */
   async function update(
     workspace: string,
@@ -408,33 +517,59 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     expectedRevision: string,
     changes: TaskChanges,
     body?: string,
+    placement?: PlacementAnchors,
   ): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
-    // A description read that started before this write is behind it, and its
-    // answer would put the revision it read back on the row this write moved on.
-    descriptionSeq++
-    saving.value = true
-    error.value = ''
-    try {
-      const data = await api.patch<{ task?: unknown }>(taskUrl(taskId), {
-        workspace,
-        expected_revision: expectedRevision,
-        ...changes,
-        ...(body === undefined ? {} : { body }),
-      })
-      // The board moved to another workspace while this saved. The write landed
-      // in the one that was left; its answer is not a row on the one now drawn,
-      // and handing it back would let the caller draw it there.
-      if (!drawingWorkspace(workspace)) return null
-      const task = adopt(data?.task)
-      if (task.id && described.value?.id === task.id) described.value = task
-      return task
-    } catch (e) {
-      error.value = taskApiErrorMessage(e, 'Could not save the task')
-      return null
-    } finally {
-      saving.value = false
+    // The version this gesture read, taken now: a write queued behind another
+    // must be judged against the order its anchors were computed from.
+    const expectedOrderVersion = order.value.version
+
+    async function sendUpdate(placed: PlacementAnchors | undefined): Promise<TaskDetail | null> {
+      // A description read that started before this write is behind it, and its
+      // answer would put the revision it read back on the row this write moved on.
+      descriptionSeq++
+      const ticket = ++orderSeq
+      saving.value = true
+      error.value = ''
+      try {
+        const data = await api.patch<{ task?: unknown; order?: unknown }>(taskUrl(taskId), {
+          workspace,
+          expected_revision: expectedRevision,
+          ...changes,
+          ...(body === undefined ? {} : { body }),
+          ...(placed ? { placement: { ...placed, expected_order_version: expectedOrderVersion } } : {}),
+        })
+        // The board moved to another workspace while this saved. The write landed
+        // in the one that was left; its answer is not a row on the one now drawn,
+        // and handing it back would let the caller draw it there.
+        if (!drawingWorkspace(workspace)) return null
+        const task = adopt(data?.task)
+        adoptOrder(workspace, data, ticket)
+        if (task.id && described.value?.id === task.id) described.value = task
+        return task
+      } catch (e) {
+        if (placed) await recover(workspace, e, 'Could not save the task')
+        else error.value = taskApiErrorMessage(e, 'Could not save the task')
+        return null
+      } finally {
+        saving.value = false
+      }
     }
+
+    // The server rejects a placement on a write that does not change the status
+    // (a same-column edit), so none is sent: the card keeps its place.
+    const row = rows.value.find((entry) => entry.id === taskId && !isTaskInvalidRow(entry))
+    const moves =
+      changes.status !== undefined && (!row || isTaskInvalidRow(row) || row.status !== changes.status)
+    if (!placement || !moves) return sendUpdate(undefined)
+    if (orderError.value) {
+      error.value = orderError.value
+      return null
+    }
+    return enqueue(() => sendUpdate(placement), () => {
+      error.value = ORDER_CONFLICT_MESSAGE
+      return null
+    })
   }
 
   /**
@@ -457,33 +592,100 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     expectedRevision: string,
     resolution?: string,
     reason?: string,
+    placement?: PlacementAnchors,
   ): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
-    descriptionSeq++
-    saving.value = true
-    error.value = ''
-    try {
-      const data = await api.post<{ task?: unknown }>(`${taskUrl(taskId)}/complete`, {
-        workspace,
-        expected_revision: expectedRevision,
-        ...(resolution === undefined ? {} : { resolution }),
-        ...reasonBody(reason),
-      })
-      // Approving a reviewed result releases the linkage and closes the card, so
-      // whatever history was held is about an attempt that no longer holds this
-      // task.
-      invalidateAttempts()
-      // The board moved to another workspace while this completed.
-      if (!drawingWorkspace(workspace)) return null
-      const task = adopt(data?.task)
-      if (task.id && described.value?.id === task.id) described.value = task
-      return task
-    } catch (e) {
-      error.value = taskApiErrorMessage(e, 'Could not complete the task')
-      return null
-    } finally {
-      saving.value = false
+    // Read now, not at send time; see `update`.
+    const expectedOrderVersion = order.value.version
+
+    async function sendComplete(placed: PlacementAnchors | undefined): Promise<TaskDetail | null> {
+      descriptionSeq++
+      const ticket = ++orderSeq
+      saving.value = true
+      error.value = ''
+      try {
+        const data = await api.post<{ task?: unknown; order?: unknown }>(`${taskUrl(taskId)}/complete`, {
+          workspace,
+          expected_revision: expectedRevision,
+          ...(resolution === undefined ? {} : { resolution }),
+          ...reasonBody(reason),
+          ...(placed ? { placement: { ...placed, expected_order_version: expectedOrderVersion } } : {}),
+        })
+        // Approving a reviewed result releases the linkage and closes the card, so
+        // whatever history was held is about an attempt that no longer holds this
+        // task.
+        invalidateAttempts()
+        // The board moved to another workspace while this completed.
+        if (!drawingWorkspace(workspace)) return null
+        const task = adopt(data?.task)
+        adoptOrder(workspace, data, ticket)
+        if (task.id && described.value?.id === task.id) described.value = task
+        return task
+      } catch (e) {
+        if (placed) await recover(workspace, e, 'Could not complete the task')
+        else error.value = taskApiErrorMessage(e, 'Could not complete the task')
+        return null
+      } finally {
+        saving.value = false
+      }
     }
+
+    if (!placement) return sendComplete(undefined)
+    if (orderError.value) {
+      error.value = orderError.value
+      return null
+    }
+    return enqueue(() => sendComplete(placement), () => {
+      error.value = ORDER_CONFLICT_MESSAGE
+      return null
+    })
+  }
+
+  /**
+   * Move one task inside its status column: one POST per gesture.
+   *
+   * The store changes the held order only from the answer, never before it, so
+   * "saved" is only ever claimed after the server said so; the view's drag
+   * preview is its own copy. `expectedVersion` is the order version the gesture
+   * read. A conflict refreshes the board and asks for a retry rather than
+   * replaying, and a write queued behind a conflicted one is dropped the same
+   * way. While `orderError` is set nothing is requested.
+   */
+  async function reorder(
+    workspace: string,
+    taskId: string,
+    anchors: PlacementAnchors,
+    expectedVersion: number,
+  ): Promise<ReorderResult> {
+    if (!workspace || !taskId) return { ok: false, conflict: false, message: '' }
+    if (orderError.value) {
+      error.value = orderError.value
+      return { ok: false, conflict: false, message: orderError.value }
+    }
+    return enqueue<ReorderResult>(async () => {
+      const ticket = ++orderSeq
+      saving.value = true
+      error.value = ''
+      try {
+        const data = await api.post<{ task?: unknown; order?: unknown }>(`${taskUrl(taskId)}/order`, {
+          workspace,
+          ...anchors,
+          expected_order_version: expectedVersion,
+        })
+        if (drawingWorkspace(workspace)) {
+          adopt(data?.task)
+          adoptOrder(workspace, data, ticket)
+        }
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, ...(await recover(workspace, e, 'Could not move the task')) }
+      } finally {
+        saving.value = false
+      }
+    }, () => {
+      error.value = ORDER_CONFLICT_MESSAGE
+      return { ok: false, conflict: true, message: ORDER_CONFLICT_MESSAGE }
+    })
   }
 
   /**
@@ -627,10 +829,15 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     // The record this read is about is about to be gone: its answer has nowhere
     // to go, and putting it back would resurrect a file the vault has lost.
     descriptionSeq++
+    const ticket = ++orderSeq
     saving.value = true
     error.value = ''
     try {
-      await api.del(taskUrl(taskId), { workspace, expected_revision: expectedRevision, ...reasonBody(reason) })
+      const data = await api.del<{ order?: unknown } | null>(taskUrl(taskId), {
+        workspace,
+        expected_revision: expectedRevision,
+        ...reasonBody(reason),
+      })
       // The record the held history belongs to is gone.
       if (described.value?.id === taskId) described.value = null
       if (attemptsTaskId.value === taskId) resetAttempts()
@@ -640,6 +847,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       // user is looking at.
       if (!drawingWorkspace(workspace)) return false
       rows.value = rows.value.filter((row) => isUnreadable(row) || row.id !== taskId)
+      adoptOrder(workspace, data, ticket)
       if (described.value?.id === taskId) described.value = null
       return true
     } catch (e) {
@@ -765,9 +973,10 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
 
   return {
     rows, loadedWorkspace, loading, loadError, error, saving, described,
+    order, orderError, remoteChangeEpoch,
     attempts, attemptsTaskId, attemptsLoading, attemptsLoaded, attemptsError,
     reload, revisionOf, get,
-    create, update, complete, addUpdate, linkChat, editUpdate, reviewResolution, remove, clearError,
+    create, update, complete, reorder, addUpdate, linkChat, editUpdate, reviewResolution, remove, clearError,
     delegate, attemptAction,
     ensureAttempts, invalidateAttempts, resetAttempts,
   }
