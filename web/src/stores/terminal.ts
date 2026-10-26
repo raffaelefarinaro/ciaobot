@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { onScopeDispose, ref } from 'vue'
 import { api } from '../lib/api'
+import { requestTerminalPanel } from '../lib/terminalPanel'
 import {
   TERMINAL_INPUT_MAX_BYTES,
   TERMINAL_MAX_COLS,
@@ -30,10 +31,13 @@ import {
 //
 // Two rules shape everything below.
 //
-// The grant is a cookie. A terminal grant is a random bearer in an HttpOnly
-// cookie, so the browser never holds it: there is no token in this file, no
-// token in a ref, and every request rides the same-origin session the api
-// helper already uses. The password is passed to one POST and is not kept.
+// The grant is a cookie, and the session is its trust boundary. A terminal
+// grant is a random bearer in an HttpOnly cookie, so the browser never holds
+// it: there is no token in this file, no token in a ref, and every request
+// rides the same-origin session the api helper already uses. There is no
+// password: the pane asks the engine for a grant with an empty body, and the
+// engine decides whether this signed-in, same-origin browser may hold the
+// socket.
 //
 // Two offsets, and they are not the same number. `acked` is what the renderer
 // has confirmed — the only offset a resume may use, because the contract says
@@ -96,8 +100,13 @@ const PING_INTERVAL_MS = 15_000
 const WATCHDOG_MS = 30_000
 /** How long the engine may take to answer the attach with a ready frame. */
 const READY_TIMEOUT_MS = 5000
-/** Automatic reconnect attempts before the client gives up and asks the user. */
-const MAX_AUTO_RECONNECT_ATTEMPTS = 8
+/**
+ * Automatic reconnect attempts before the client gives up and asks the user.
+ *
+ * Exported so a test can assert the exact number of attempts a bounded
+ * retry chain makes, rather than only that it stopped.
+ */
+export const MAX_AUTO_RECONNECT_ATTEMPTS = 8
 /** Sessions the engine keeps for one scope. */
 const MAX_SESSIONS = 4
 
@@ -227,8 +236,6 @@ export const useTerminalStore = defineStore('terminal', () => {
   const creating = ref(false)
   /** True while a session is being ended. */
   const ending = ref(false)
-  /** True while an unlock is in flight. */
-  const unlocking = ref(false)
 
   // ── Internals ──────────────────────────────────────────────────────────
 
@@ -546,8 +553,9 @@ export const useTerminalStore = defineStore('terminal', () => {
    * something to decide.
    *
    * A session another connection took over comes back through an explicit
-   * takeover, a session that is gone does not come back at all, a locked pane
-   * needs the password, and a failed stream needs the user to look at it.
+   * takeover, a session that is gone does not come back at all, a pane with
+   * no grant has to ask for one first, and a failed stream needs the user to
+   * look at it.
    */
   function canRecover(): boolean {
     if (!canConnect()) return false
@@ -732,9 +740,12 @@ export const useTerminalStore = defineStore('terminal', () => {
   function handleClose(code: number | undefined): void {
     switch (terminalCloseReason(code ?? 1006)) {
       case 'auth':
+        // The engine ended the stream because the grant is gone: it
+        // expired, or it was revoked with the session behind it. Nothing
+        // is asked of the user — the session is the trust boundary, so
+        // the pane asks for a new grant and resumes on its own.
         unlocked.value = false
-        phase.value = 'locked'
-        error.value = 'The terminal grant expired. Unlock the terminal again.'
+        void scheduleRetry()
         return
       case 'origin':
         phase.value = 'error'
@@ -763,9 +774,13 @@ export const useTerminalStore = defineStore('terminal', () => {
    *
    * A handshake refusal never reaches the browser as a close code — the
    * browser reports an abnormal closure instead — so the status is the only
-   * way to learn that the grant is gone and the pane must be locked again.
-   * The retry never creates a session: a reconnect resumes, it does not
-   * launch.
+   * way to learn that the grant is gone. A missing grant is not a dead
+   * end: the pane asks the engine for a new one, because the signed-in
+   * session is the trust boundary and there is no password to re-enter.
+   * A grant the engine will not give is not a dead end either: the next
+   * attempt asks again, on the same backoff, until the attempt budget
+   * runs out. The retry never creates a session: a reconnect resumes, it
+   * does not launch.
    */
   async function scheduleRetry(): Promise<void> {
     reconnectAttempts += 1
@@ -777,27 +792,43 @@ export const useTerminalStore = defineStore('terminal', () => {
     phase.value = 'reconnecting'
     const myScope = scopeEpoch
     const myConnection = connectionEpoch
-    let statusKnown = false
-    let statusUnlocked = false
     try {
       const raw = await api.get<unknown>(`${TERMINAL_API}/status`)
       if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
       const parsed = parseStatus(raw)
       if (parsed) {
-        statusKnown = true
-        statusUnlocked = parsed.available && parsed.unlock_expires_in > 0
         status.value = parsed
+        if (!parsed.available) {
+          unlocked.value = false
+          phase.value = 'locked'
+          error.value = unavailableMessage(parsed.reason)
+          return
+        }
+        unlocked.value = parsed.unlock_expires_in > 0
       }
     } catch {
       // The engine is unreachable; that is a reason to retry, not to lock.
     }
     if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
-    if (statusKnown && !statusUnlocked) {
-      unlocked.value = false
-      phase.value = 'locked'
-      error.value = 'The terminal grant expired. Unlock the terminal again.'
-      return
+    if (!unlocked.value) {
+      // The grant is gone, or the status could not be read and the pane
+      // knows it has none: a signed-in, same-origin browser gets a new
+      // one on its own.
+      const granted = await acquireGrant()
+      if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
+      if (!granted) {
+        // The engine would not give us a grant this time. That is not the
+        // end of the road: there is no form for the user to fill in any
+        // more, so the next attempt asks again, on the same backoff, until
+        // the attempt budget runs out.
+        scheduleTimer(() => {
+          if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
+          void scheduleRetry()
+        }, terminalReconnectDelayMs(reconnectAttempts))
+        return
+      }
     }
+    error.value = ''
     const delay = terminalReconnectDelayMs(reconnectAttempts)
     scheduleTimer(() => {
       if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
@@ -867,9 +898,13 @@ export const useTerminalStore = defineStore('terminal', () => {
    * Open the terminal for a scope.
    *
    * The status is read first: it is the only answer that says whether this
-   * browser may use the terminal at all. Sessions are listed when the grant
-   * is live, and an existing session is adopted — never created. Creating a
-   * shell is an explicit action.
+   * browser may use the terminal at all. The grant comes next, and the pane
+   * asks for it itself — there is no password to re-enter, because the
+   * signed-in session is the terminal's trust boundary. A grant the engine
+   * will not give is not the end of the road either: the pane asks again,
+   * on the same bounded backoff a lost connection uses. Sessions are listed
+   * when the grant is live, and an existing session is adopted — never
+   * created. Creating a shell is an explicit action.
    */
   async function open(next: TerminalTarget): Promise<void> {
     const id = 'chatId' in next ? next.chatId : next.projectId
@@ -878,6 +913,11 @@ export const useTerminalStore = defineStore('terminal', () => {
       phase.value = 'error'
       return
     }
+    // The pane is a chunk of its own, mounted by the shell the first time a
+    // terminal is asked for. Asking for it here keeps every way into the
+    // terminal — the chat's button, the project's button, a future deep link
+    // — on the same path.
+    requestTerminalPanel()
     const scopeChanged = target.value === null || scopeKey(target.value) !== scopeKey(next)
     invalidateWorld()
     visible.value = true
@@ -889,6 +929,10 @@ export const useTerminalStore = defineStore('terminal', () => {
       activeSession.value = null
       truncated.value = false
     }
+    // The retry budget belongs to the pane, not to the session: a pane
+    // that opens gets a whole budget of its own, and the chain the
+    // previous one left behind is stale (its connection epoch is gone).
+    reconnectAttempts = 0
     error.value = ''
     warning.value = ''
     phase.value = 'loading'
@@ -910,10 +954,28 @@ export const useTerminalStore = defineStore('terminal', () => {
         error.value = unavailableMessage(parsed.reason)
         return
       }
-      unlocked.value = parsed.unlock_expires_in > 0
-      if (!unlocked.value) {
-        phase.value = 'locked'
-        return
+      if (parsed.unlock_expires_in > 0) {
+        // The grant in the cookie is still live: it is not re-minted, so
+        // two tabs of one browser do not revoke each other's grant.
+        unlocked.value = true
+      } else {
+        // No grant yet. A signed-in, same-origin browser gets one on its
+        // own, so the pane opens without asking for anything.
+        const granted = await acquireGrant()
+        if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+        if (!granted) {
+          // The engine would not give us a grant. There is no form for the
+          // user to fill in any more, so the next attempt asks again, on
+          // the same backoff and the same budget a lost connection uses.
+          // The counter was reset above, so this first wait is the delay
+          // of attempt 1 — the attempt the timer is about to make.
+          scheduleTimer(() => {
+            if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+            if (!visible.value) return
+            void scheduleOpenRetry()
+          }, terminalReconnectDelayMs(reconnectAttempts + 1))
+          return
+        }
       }
       phase.value = 'ready'
       await refreshSessions()
@@ -923,6 +985,89 @@ export const useTerminalStore = defineStore('terminal', () => {
       if (myScope !== scopeEpoch || myOpen !== openEpoch) return
       error.value = 'The engine could not be asked whether the terminal is available.'
       phase.value = 'error'
+    }
+  }
+
+  /**
+   * The open path's own continuation.
+   *
+   * `open` asked for a grant and the engine would not give one. This asks
+   * again — on the same backoff and the same attempt budget a lost
+   * connection uses — and resumes where `open` stopped when the grant
+   * arrives: the pane becomes ready, the sessions are listed, and the
+   * socket opens once a surface attaches.
+   *
+   * It is deliberately not `scheduleRetry`: that one resumes a
+   * *connection*, and it needs a session and a screen to attach to, which a
+   * pane that has just opened does not have — `open` stopped before the
+   * session list.
+   */
+  async function scheduleOpenRetry(): Promise<void> {
+    reconnectAttempts += 1
+    if (reconnectAttempts > MAX_AUTO_RECONNECT_ATTEMPTS) {
+      phase.value = 'error'
+      error.value = 'The terminal connection could not be re-established.'
+      return
+    }
+    const myScope = scopeEpoch
+    const myOpen = openEpoch
+    const granted = await acquireGrant()
+    if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+    // A hidden pane asks for nothing and says nothing: the chain stops
+    // here rather than running behind the user's back.
+    if (!visible.value) return
+    if (!granted) {
+      // The engine would not give us a grant this time. The next attempt
+      // asks again, until the attempt budget runs out.
+      scheduleTimer(() => {
+        if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+        if (!visible.value) return
+        void scheduleOpenRetry()
+      }, terminalReconnectDelayMs(reconnectAttempts))
+      return
+    }
+    // The grant is here: the pane resumes where `open` stopped.
+    phase.value = 'ready'
+    error.value = ''
+    await refreshSessions()
+    if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+    if (!visible.value) return
+    maybeConnect()
+  }
+
+  /**
+   * Ask the engine for this browser's terminal grant.
+   *
+   * There is no password and nothing to re-enter: the signed-in session is
+   * the terminal's trust boundary, so the engine decides whether this
+   * browser may hold the socket. The body is empty — the route takes none —
+   * and the grant itself never reaches this code: it arrives as a cookie.
+   *
+   * The answer only counts for the open that asked: an older open of the
+   * same scope must not write over the state of the newer one, so the
+   * open epoch is checked before anything is written.
+   */
+  async function acquireGrant(): Promise<boolean> {
+    const myScope = scopeEpoch
+    const myOpen = openEpoch
+    try {
+      const raw = await api.post<unknown>(`${TERMINAL_API}/unlock`)
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return false
+      const expires = parseUnlock(raw)
+      if (expires === null) {
+        unlocked.value = false
+        phase.value = 'locked'
+        error.value = 'The engine did not confirm the terminal grant.'
+        return false
+      }
+      unlocked.value = true
+      return true
+    } catch {
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return false
+      unlocked.value = false
+      phase.value = 'locked'
+      error.value = 'The terminal grant could not be obtained.'
+      return false
     }
   }
 
@@ -950,58 +1095,6 @@ export const useTerminalStore = defineStore('terminal', () => {
     removeListeners()
     const surface = currentSurface()
     if (surface) dropQueued(surface)
-  }
-
-  /**
-   * Unlock the terminal.
-   *
-   * The password is handed to one request and is not kept anywhere: not in a
-   * ref, not in a log, not in an error message. A successful unlock changes
-   * the grant in the cookie, so the old socket is replaced on purpose — a
-   * late close from the watchdog of the old connection must not decide what
-   * the new one does.
-   */
-  async function unlock(password: string): Promise<boolean> {
-    if (unlocking.value) return false
-    const current = status.value
-    if (!current) {
-      error.value = 'Open the terminal before unlocking it.'
-      return false
-    }
-    if (!current.available) {
-      error.value = unavailableMessage(current.reason)
-      return false
-    }
-    unlocking.value = true
-    error.value = ''
-    const myScope = scopeEpoch
-    try {
-      const raw = await api.post<unknown>(`${TERMINAL_API}/unlock`, { password })
-      if (myScope !== scopeEpoch) return false
-      const expires = parseUnlock(raw)
-      if (expires === null) {
-        error.value = 'The engine did not confirm the unlock.'
-        phase.value = 'locked'
-        return false
-      }
-      unlocked.value = true
-      // A fresh grant is a fresh cookie: the old socket is dropped so its
-      // late close cannot clobber the new connection.
-      invalidateWorld()
-      phase.value = 'ready'
-      await refreshSessions()
-      if (myScope !== scopeEpoch) return false
-      maybeConnect()
-      return true
-    } catch {
-      if (myScope !== scopeEpoch) return false
-      unlocked.value = false
-      phase.value = 'locked'
-      error.value = 'The terminal did not unlock. Check the password and try again.'
-      return false
-    } finally {
-      unlocking.value = false
-    }
   }
 
   /**
@@ -1055,7 +1148,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   /**
    * Create a session.
    *
-   * This is the only path that starts a shell, and it is explicit: unlocking
+   * This is the only path that starts a shell, and it is explicit: opening
    * the terminal does not create one, and a reconnect never does. A second
    * click while the first is in flight is refused rather than sent.
    */
@@ -1146,8 +1239,10 @@ export const useTerminalStore = defineStore('terminal', () => {
    * selected while the request was in flight keeps its own connection: the
    * list loses the ended row, and nothing else moves.
    */
-  async function endSession(): Promise<boolean> {
-    const session = activeSession.value
+  async function endSession(sessionId?: string): Promise<boolean> {
+    const session = sessionId
+      ? sessions.value.find((entry) => entry.session_id === sessionId)
+      : activeSession.value
     if (!session) return false
     if (ending.value) return false
     ending.value = true
@@ -1324,11 +1419,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     unlocked,
     creating,
     ending,
-    unlocking,
     // actions
     open,
     hide,
-    unlock,
     refreshSessions,
     createSession,
     selectSession,

@@ -5,6 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
@@ -18,7 +20,8 @@ const chatId = 'chat-1234-abcd'
 function delegatedTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1', title: 'Ship it', status: 'in_review', project_id: '', due: '',
-    assignee: 'agent', chat_id: '', attempt_id: 'attempt-1', created_at: '', updated_at: '',
+    assignee: 'agent', chat_id: '', attempt_id: 'attempt-1', linked_chats: [],
+    created_at: '', updated_at: '',
     revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'ready_for_review',
     attempt_outcome: 'done', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
     ...overrides,
@@ -161,11 +164,57 @@ describe('ProjectSidebar chat actions', () => {
     const rows = wrapper.findAll('.chat-item')
     const delegated = rows.find(row => row.text().includes('Copy me'))!
     const plain = rows.find(row => row.text().includes('Plain chat'))!
-    expect(delegated.get('.chat-task-tag').text()).toBe('task')
-    // The row's accessible name comes from its content, so it says "task" too.
-    expect(delegated.text()).toContain('task')
+    expect(delegated.get('.chat-task-tag').find('.task-glyph').exists()).toBe(true)
+    // The row's accessible name comes from its content, so it says the relation too.
+    expect(delegated.text()).toContain('Delegated board task')
     expect(plain.find('.chat-task-tag').exists()).toBe(false)
-    expect(delegated.attributes('title')).toBe('Copy me\nDrag to move to another project')
+    expect(delegated.attributes('title'))
+      .toBe('Copy me\nDrag to move to another project\nDelegated board task')
+    wrapper.unmount()
+  })
+
+  it('names the delegated relation in the task badge\'s tooltip', async () => {
+    const store = useProjectStore()
+    store.chats[0].helper = {
+      kind: 'task_delegation', task_id: 'task-1', task_revision: 'r1', attempt_id: 'attempt-1',
+    }
+    const wrapper = await mountSidebar()
+
+    const tag = wrapper.get('.chat-item .chat-task-tag')
+    expect(tag.find('.task-glyph').exists()).toBe(true)
+    expect(tag.attributes('title')).toBe('Delegated board task')
+    // The tag hides while the row is hovered or focused, so the qualifier is
+    // also text: in the row's title for a pointer, in a hidden line for AT.
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('Delegated board task')
+    expect(wrapper.get('.chat-item .sr-only').text()).toBe(', Delegated board task')
+    wrapper.unmount()
+  })
+
+  it('tags a chat linked to a board task and says it is only linked', async () => {
+    const signals = useTaskSignalsStore()
+    signals.tasks = [delegatedTask({ id: 'linked-task', chat_id: '', linked_chats: [chatId] })]
+    signals.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar()
+
+    const tag = wrapper.get('.chat-item .chat-task-tag')
+    // The same checkbox glyph as a delegated chat, so the row reads as one.
+    expect(tag.find('.task-glyph').exists()).toBe(true)
+    // The relation is what says delegation apart: a link is not an attempt.
+    expect(tag.attributes('title')).toBe('Linked to a board task')
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('Linked to a board task')
+    expect(wrapper.get('.chat-item .sr-only').text()).toBe(', Linked to a board task')
+    wrapper.unmount()
+  })
+
+  it('leaves a chat with no task relation untagged', async () => {
+    const signals = useTaskSignalsStore()
+    signals.tasks = [delegatedTask({
+      id: 'other-task', chat_id: 'other-chat', linked_chats: ['other-chat'],
+    })]
+    signals.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.find('.chat-task-tag').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -174,7 +223,7 @@ describe('ProjectSidebar chat actions', () => {
     signals.tasks = [delegatedTask({ chat_id: chatId })]
     signals.loadedWorkspace = 'personal'
     const wrapper = await mountSidebar()
-    expect(wrapper.get('.chat-item .chat-task-tag').text()).toBe('task')
+    expect(wrapper.get('.chat-item .chat-task-tag').find('.task-glyph').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -407,6 +456,53 @@ describe('ProjectSidebar chat actions', () => {
 
     wrapper.unmount()
   })
+
+  it('shows the naming placeholder while a chat title is pending, then the title', async () => {
+    const store = useProjectStore()
+    store.chats[0].title = 'New Chat'
+    store.chats[0].title_status = 'pending'
+    const wrapper = await mountSidebar()
+    await flushPromises()
+
+    const shimmer = wrapper.get('.chat-item .title-shimmer')
+    // A bare span is role=generic, which cannot be named: the bar is hidden
+    // from assistive tech and the name travels as text beside it.
+    expect(shimmer.attributes('aria-hidden')).toBe('true')
+    expect(shimmer.attributes('aria-label')).toBeUndefined()
+    expect(shimmer.attributes('title')).toBe('Naming conversation')
+    const names = wrapper.findAll('.chat-item .sr-only')
+      .filter(node => node.text() === 'Naming conversation')
+    expect(names).toHaveLength(1)
+    // Once, and only once, so a screen reader does not hear it twice.
+    const row = wrapper.get('.chat-item')
+    expect(row.text().split('Naming conversation').length - 1).toBe(1)
+    // The placeholder stands in for the title, so the temporary one never shows.
+    expect(row.text()).not.toContain('New Chat')
+
+    store.chats[0].title = 'Deploy the API'
+    store.chats[0].title_status = 'ready'
+    await nextTick()
+
+    expect(wrapper.find('.chat-item .title-shimmer').exists()).toBe(false)
+    expect(wrapper.get('.chat-item .chat-title').text()).toBe('Deploy the API')
+
+    wrapper.unmount()
+  })
+
+  it('pulls in the shared naming placeholder stylesheet', () => {
+    // The sidebar's placeholder and the chat header's are the same bar: the
+    // sidebar loads the shared file, so the two cannot drift apart.
+    const here = join(__dirname, '..')
+    const source = readFileSync(join(here, 'ProjectSidebar.vue'), 'utf8')
+    expect(source).toContain('<style scoped src="./titleShimmer.css">')
+    const css = readFileSync(join(here, 'titleShimmer.css'), 'utf8')
+    expect(css).toMatch(/\.title-shimmer\s*\{[^}]*flex:\s*1/)
+    expect(css).toMatch(/animation:\s*title-shimmer-sweep/)
+    // The extracted stylesheet cannot declare keyframes for another block, so
+    // the mobile skeleton keeps its own sweep in the sidebar's block.
+    expect(source).toMatch(/animation:\s*mm-shimmer-sweep/)
+    expect(source).toMatch(/@keyframes\s+mm-shimmer-sweep/)
+  })
 })
 
 describe('ProjectSidebar global new chat', () => {
@@ -617,7 +713,9 @@ describe('ProjectSidebar update badge', () => {
     const settingsLink = wrapper.get('a[href="/settings"]')
 
     expect(settingsLink.classes()).toContain('nav-item--warning')
-    expect(settingsLink.attributes('data-note')).toBe('check')
+    // A failure is the warning dot, never a coloured word.
+    expect(settingsLink.find('.nav-item-alert').exists()).toBe(true)
+    expect(settingsLink.attributes('data-note')).toBeUndefined()
     expect(settingsLink.attributes('aria-label')).toBe('settings — action required')
 
     wrapper.unmount()
@@ -655,6 +753,7 @@ describe('ProjectSidebar update badge', () => {
     const wrapper = await mountSidebar()
     await nextTick()
     expect(wrapper.get('a[href="/schedules"]').classes()).not.toContain('nav-item--warning')
+    expect(wrapper.find('a[href="/schedules"] .nav-item-alert').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -663,7 +762,9 @@ describe('ProjectSidebar update badge', () => {
     useTaskStore().schedules = [scheduleIn('personal', { last_status: 'error' })]
     const wrapper = await mountSidebar()
     await nextTick()
-    expect(wrapper.get('a[href="/schedules"]').classes()).toContain('nav-item--warning')
+    const link = wrapper.get('a[href="/schedules"]')
+    expect(link.classes()).toContain('nav-item--warning')
+    expect(link.find('.nav-item-alert').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -874,7 +975,8 @@ describe('ProjectSidebar accessible context menus', () => {
     const wrapper = await mountSidebar()
     await flushPromises()
     expect(wrapper.findAll('.chat-code-tag')).toHaveLength(1)
-    expect(wrapper.get('.chat-code-tag').text()).toBe('code')
+    expect(wrapper.get('.chat-code-tag').text()).toBe('›_')
+    expect(wrapper.get('.chat-code-tag').attributes('role')).toBe('img')
     wrapper.unmount()
 
     store.projects[0].repo = null
@@ -891,14 +993,44 @@ describe('ProjectSidebar accessible context menus', () => {
     store.chats[0].repo_location = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
   }
 
-  it('lets the branch chip stand in for code when both apply', async () => {
+  it('shows only the code badge when code mode and a worktree both apply', async () => {
     worktreeChat(true)
     const wrapper = await mountSidebar()
     await flushPromises()
-    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
+    const code = wrapper.get('.chat-code-tag')
+    expect(code.text()).toBe('›_')
+    expect(code.attributes('role')).toBe('img')
+    expect(code.attributes('title')).toContain('feat-x')
+    expect(code.attributes('title')).toContain('/r/app-wt')
+    expect(code.attributes('aria-label')).toContain('feat-x')
+    expect(code.attributes('aria-label')).toContain('/r/app-wt')
+    expect(wrapper.find('.chat-repo-tag').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the dimmed branch tag when code mode is off', async () => {
+    worktreeChat(false)
+    const wrapper = await mountSidebar()
+    await flushPromises()
     const chip = wrapper.get('.chat-repo-tag')
-    expect(chip.attributes('title')).toBe('Code mode · Worktree: /r/app-wt')
-    expect(chip.classes()).not.toContain('chat-repo-tag--code-off')
+    expect(chip.text()).toBe('⑂ feat-x')
+    expect(chip.classes()).toContain('chat-repo-tag--code-off')
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the repository facts in the row title, where a hidden badge cannot hide them', async () => {
+    worktreeChat(true)
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    const badge = wrapper.get('.chat-code-tag')
+    // A fine pointer hides the row's marks while its actions show, so the
+    // facts the badge carries live in the row's own title too.
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(true)
+    expect(wrapper.get('.chat-item').attributes('title'))
+      .toBe(`Menu chat\nDrag to move to another project\n${badge.attributes('title')}`)
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('feat-x')
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('/r/app-wt')
     wrapper.unmount()
   })
 

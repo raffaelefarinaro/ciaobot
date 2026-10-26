@@ -137,12 +137,68 @@ describe('ProjectSidebar review section', () => {
     expect(create.attributes('href')).toBe('/settings/workspaces#new-workspace')
   })
 
+  it('lists Workspace settings, Manage workspaces and New workspace after the options', async () => {
+    const wrapper = await mountSidebar()
+    await wrapper.get('.workspace-scope-trigger').trigger('click')
+    const menu = wrapper.get('.workspace-scope-menu')
+    const items = menu.findAll('[role="menuitem"]')
+    expect(items.slice(-3).map(i => i.text().replace(/^\+\s*/, ''))).toEqual(
+      ['Workspace settings', 'Manage workspaces', 'New workspace'],
+    )
+    expect(items.slice(-3).map(i => i.attributes('href'))).toEqual(
+      ['/settings/workspace', '/settings/workspaces', '/settings/workspaces#new-workspace'],
+    )
+    // A separator sits between the workspace options and the three entries.
+    const children = Array.from(menu.element.children)
+    const separator = children.findIndex(el => el.getAttribute('role') === 'separator')
+    expect(separator).toBeGreaterThan(0)
+    expect(children[separator + 1]).toBe(items[items.length - 3].element)
+    expect(children[separator - 1]).toBe(items[items.length - 4].element)
+    wrapper.unmount()
+  })
+
+  it('arrow keys reach the settings entries', async () => {
+    const wrapper = await mountSidebar()
+    const trigger = wrapper.get<HTMLButtonElement>('.workspace-scope-trigger')
+    await trigger.trigger('click')
+    await nextTick()
+    const menu = wrapper.get('.workspace-scope-menu')
+    const items = menu.findAll<HTMLElement>('[role="menuitem"]')
+
+    await menu.trigger('keydown', { key: 'End' })
+    expect(document.activeElement).toBe(items[items.length - 1].element)
+    expect(items[items.length - 1].text()).toContain('New workspace')
+    await menu.trigger('keydown', { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(items[items.length - 2].element)
+    expect(items[items.length - 2].text()).toBe('Manage workspaces')
+    await menu.trigger('keydown', { key: 'End' })
+    await menu.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(items[0].element)
+
+    await menu.trigger('keydown', { key: 'Escape' })
+    await nextTick()
+    expect(wrapper.find('.workspace-scope-menu').exists()).toBe(false)
+    expect(document.activeElement).toBe(trigger.element)
+    wrapper.unmount()
+  })
+
+  it('choosing a settings entry closes the menu', async () => {
+    const wrapper = await mountSidebar()
+    await wrapper.get('.workspace-scope-trigger').trigger('click')
+    const manage = wrapper.findAll('[role="menuitem"]').find(i => i.text() === 'Manage workspaces')
+    expect(manage).toBeTruthy()
+    await manage!.trigger('click')
+    await nextTick()
+    expect(wrapper.find('.workspace-scope-menu').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it.each([
     ['chat', true],
     ['memory', false],
   ] as const)('switches workspace from the %s view with transition %s', async (mode, transition) => {
     const store = useProjectStore()
-    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue()
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
     const wrapper = await mountSidebar(mode)
     await wrapper.get('.workspace-scope-trigger').trigger('click')
     await wrapper.findAll('.workspace-scope-option')[1].trigger('click')

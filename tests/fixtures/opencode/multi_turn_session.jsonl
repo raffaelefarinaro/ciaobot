@@ -1,0 +1,23 @@
+{"id":"evt_multi_01","type":"session.inbox.enqueued","data":{"inboxID":"msg_multi_01","sessionID":"ses_multi_01","item":{"type":"user","payload":{"text":"Reply with the single word ONE."},"delivery":"queue"}}}
+{"id":"evt_multi_02","type":"session.execution.started","data":{"sessionID":"ses_multi_01"}}
+{"id":"evt_multi_03","type":"session.step.started","data":{"sessionID":"ses_multi_01","agent":"build","model":{"id":"big-pickle","providerID":"opencode","variant":"default"},"assistantMessageID":"msg_multi_02"}}
+{"id":"evt_multi_04","type":"session.reasoning.started","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_02","ordinal":0,"native":{"reasoningField":"reasoning_content"}}}
+{"id":"evt_multi_05","type":"session.reasoning.delta","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_02","ordinal":0,"delta":"The user says reply with the single word ONE."}}
+{"id":"evt_multi_06","type":"session.text.started","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_02","ordinal":0}}
+{"id":"evt_multi_07","type":"session.reasoning.ended","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_02","ordinal":0,"text":"The user says reply with the single word ONE.","native":{"reasoningField":"reasoning_content"}}}
+{"id":"evt_multi_08","type":"session.text.delta","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_02","ordinal":0,"delta":"ONE"}}
+{"id":"evt_multi_09","type":"session.text.ended","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_02","ordinal":0,"text":"ONE"}}
+{"id":"evt_multi_10","type":"session.step.streamed","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_02"}}
+{"id":"evt_multi_11","type":"session.step.ended","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_02","finish":"stop","rawFinish":"stop","cost":0,"tokens":{"input":12415,"output":3,"reasoning":10,"cache":{"read":2688,"write":0}}}}
+{"id":"evt_multi_12","type":"session.usage.updated","data":{"sessionID":"ses_multi_01","cost":0,"tokens":{"input":12415,"output":3,"reasoning":10,"cache":{"read":2688,"write":0}}}}
+{"id":"evt_multi_13","type":"session.execution.succeeded","data":{"sessionID":"ses_multi_01"}}
+{"id":"evt_multi_14","type":"session.inbox.enqueued","data":{"inboxID":"msg_multi_03","sessionID":"ses_multi_01","item":{"type":"user","payload":{"text":"Reply with the single word TWO."},"delivery":"queue"}}}
+{"id":"evt_multi_15","type":"session.execution.started","data":{"sessionID":"ses_multi_01"}}
+{"id":"evt_multi_16","type":"session.step.started","data":{"sessionID":"ses_multi_01","agent":"build","model":{"id":"big-pickle","providerID":"opencode","variant":"default"},"assistantMessageID":"msg_multi_04"}}
+{"id":"evt_multi_17","type":"session.text.started","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_04","ordinal":0}}
+{"id":"evt_multi_18","type":"session.text.delta","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_04","ordinal":0,"delta":"TWO"}}
+{"id":"evt_multi_19","type":"session.text.ended","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_04","ordinal":0,"text":"TWO"}}
+{"id":"evt_multi_20","type":"session.step.streamed","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_04"}}
+{"id":"evt_multi_21","type":"session.step.ended","data":{"sessionID":"ses_multi_01","assistantMessageID":"msg_multi_04","finish":"stop","rawFinish":"stop","cost":0,"tokens":{"input":22,"output":4,"reasoning":0,"cache":{"read":15104,"write":0}}}}
+{"id":"evt_multi_22","type":"session.usage.updated","data":{"sessionID":"ses_multi_01","cost":0,"tokens":{"input":12437,"output":7,"reasoning":10,"cache":{"read":17792,"write":0}}}}
+{"id":"evt_multi_23","type":"session.execution.succeeded","data":{"sessionID":"ses_multi_01"}}

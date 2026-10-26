@@ -252,6 +252,31 @@ def test_trim_drops_only_terminal_receipts(tmp_path, monkeypatch):
     assert rows == ["mrcpt_done_3", "mrcpt_done_4"]
 
 
+def test_a_trimmed_receipt_journal_does_not_touch_the_decision_sidecar(tmp_path, monkeypatch):
+    """Reasons live on the sidecar row because the receipt journal is trimmed."""
+    from ciao import proposal_actions
+
+    monkeypatch.setattr(mr, "MAX_BYTES", 150)
+    monkeypatch.setattr(mr, "KEEP_LINES", 2)
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("## 2026-09-01\n", encoding="utf-8")
+    proposal_actions.record_decision(
+        queue,
+        action="accept",
+        text="A fact.",
+        kind="memory",
+        via="pwa",
+        reason="yes, everywhere",
+    )
+    journal = _journal(tmp_path)
+    for i in range(5):
+        mr._append(journal, {"id": f"mrcpt_done_{i}", "status": mr.APPLIED, "ts": f"t{i}"})
+
+    assert [r["id"] for r in mr.read_receipts(journal)] == ["mrcpt_done_3", "mrcpt_done_4"]
+    assert [r["reason"] for r in mp.read_decisions(queue)] == ["yes, everywhere"]
+
+
 def test_trim_runs_while_holding_the_journal_lock(tmp_path, monkeypatch):
     """Trimming must run inside the append lock.
 

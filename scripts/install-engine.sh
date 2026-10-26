@@ -26,9 +26,13 @@ OSASCRIPT=osascript
 PGREP=pgrep
 CURL=curl
 SLEEP=sleep
+# The port `ciao run --installer-bootstrap` and a fresh install's first engine
+# serve on: ciao.config's `pwa_port` default.
+FRESH_PORT=8443
 version=
 workspace=
 no_start=0
+no_modify_path=0
 migrate=0
 as_host=0
 as_client=
@@ -101,7 +105,7 @@ settled_mismatch=
 
 usage() {
     cat >&2 <<'USAGE'
-Usage: install-engine.sh [--version VERSION] [--workspace DIRECTORY] [--no-start]
+Usage: install-engine.sh [--version VERSION] [--workspace DIRECTORY] [--no-start] [--no-modify-path]
                          [--migrate [--as-host | --as-client URL]]
 
 Installs the Ciaobot engine for the current user with uv; the PWA is its UI.
@@ -116,7 +120,8 @@ Installs the Ciaobot engine for the current user with uv; the PWA is its UI.
                        is still running 20s after it is asked to quit, nothing
                        is changed at all. A hand-over keeps the workspace that
                        engine runs in: --workspace may only name that same
-                       existing workspace, and no workspace is ever created.
+                        existing workspace, and no workspace is ever created.
+  --no-modify-path     Do not add ciao to a shell startup file.
   --as-host            With --migrate: treat this Mac as the host, even when its
                        node state cannot be read or trusted.
   --as-client URL      With --migrate: treat this Mac as a client of URL, which
@@ -129,6 +134,70 @@ USAGE
 fail() {
     echo "Ciaobot engine installer: $*" >&2
     exit 1
+}
+
+quote_shell_path() {
+    quoted_path=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+    printf "'%s'" "$quoted_path"
+}
+
+configure_path() {
+    path_shell=${SHELL##*/}
+    path_profile=
+    path_manual="export PATH=$(quote_shell_path "$bin_dir"):\"\$PATH\""
+    case "$path_shell" in
+        zsh)
+            path_profile=${ZDOTDIR:-$HOME}/.zshrc
+            path_line='case ":${PATH:-}:" in *:'"$(quote_shell_path "$bin_dir")"':*) ;; *) export PATH='"$(quote_shell_path "$bin_dir")"':"$PATH" ;; esac'
+            ;;
+        bash)
+            path_profile=$HOME/.bash_profile
+            for path_candidate in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+                if [ -e "$path_candidate" ]; then path_profile=$path_candidate; break; fi
+            done
+            path_line='case ":${PATH:-}:" in *:'"$(quote_shell_path "$bin_dir")"':*) ;; *) export PATH='"$(quote_shell_path "$bin_dir")"':"$PATH" ;; esac'
+            ;;
+        fish)
+            path_profile=${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish
+            path_line="fish_add_path $(quote_shell_path "$bin_dir")"
+            path_manual=$path_line
+            ;;
+        *) path_profile= ;;
+    esac
+    if [ "$no_modify_path" -ne 0 ]; then
+        echo "PATH was not modified. For this terminal run: $path_manual"
+        return
+    fi
+    if [ -z "$path_profile" ]; then
+        echo "Ciaobot installer could not update PATH automatically (unknown shell). For this terminal run: $path_manual"
+        return
+    fi
+    case ":${PATH:-}:" in
+        *:"$bin_dir":*)
+            echo "The ciao executable directory is already on PATH; no shell startup file was changed."
+            return
+            ;;
+    esac
+    if ! mkdir -p "$(dirname "$path_profile")" 2>/dev/null; then
+        echo "Ciaobot installer could not update PATH automatically. For this terminal run: $path_manual"
+        return
+    fi
+    if [ -L "$path_profile" ] ||
+        { [ -e "$path_profile" ] && { [ ! -f "$path_profile" ] || [ ! -w "$path_profile" ]; }; } ||
+        { [ ! -e "$path_profile" ] && [ ! -w "$(dirname "$path_profile")" ]; }; then
+        echo "Ciaobot installer could not update PATH automatically because $path_profile is not a safe writable file. For this terminal run: $path_manual"
+        return
+    fi
+    if grep -qF '# >>> Ciaobot installer PATH >>>' "$path_profile" 2>/dev/null; then
+        echo "Ciaobot installer PATH entry is already present in $path_profile."
+        return
+    fi
+    if ! printf '\n# >>> Ciaobot installer PATH >>>\n%s\n# <<< Ciaobot installer PATH <<<\n' "$path_line" >> "$path_profile" 2>/dev/null; then
+        echo "Ciaobot installer could not update PATH automatically. For this terminal run: $path_manual"
+        return
+    fi
+    echo "Added ciao to future terminal PATHs in $path_profile. To undo, remove the Ciaobot installer PATH block from that file."
+    echo "For this terminal run: $path_manual"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -144,6 +213,7 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --no-start) no_start=1; shift ;;
+        --no-modify-path) no_modify_path=1; shift ;;
         --migrate) migrate=1; shift ;;
         --as-host) as_host=1; shift ;;
         --as-client)
@@ -229,7 +299,7 @@ find_uv() {
         uv="$HOME/.local/bin/uv"
     else
         # Pinned version and official installer, and the caller's shell
-        # profile is left alone: PATH changes are the user's call.
+        # profile is left alone until the verified engine install completes.
         download "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-installer.sh" \
             "$tmp/uv-installer.sh" || fail "could not download the uv installer"
         UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin" sh "$tmp/uv-installer.sh" >/dev/null \
@@ -943,7 +1013,7 @@ rollback_host() {
     restore_desktop_agent || failure=yes
     if [ -n "$failure" ]; then
         migration_receipt rolled_back "$1 (rollback incomplete: $failure)" || true
-        fail "migration failed and Ciaobot.app's engine could NOT be fully restored: $1. See $migration_dir/receipt.json, and check: $HOME/.local/bin/ciao service status"
+        fail "migration failed and Ciaobot.app's engine could NOT be fully restored: $1. See $migration_dir/receipt.json, and check: $(quote_shell_path "$bin_dir/ciao") service status"
     fi
     # `|| true` on the write that records the rollback: this runs because
     # something already went wrong, and `set -e` taking the shell down here
@@ -969,7 +1039,7 @@ rollback_client() {
     restore_desktop_agent || failure=yes
     if [ -n "$failure" ]; then
         migration_receipt rolled_back "$1 (rollback incomplete: $failure)" || true
-        fail "migration failed and this Mac's local engine could NOT be fully restored: $1. See $migration_dir/receipt.json, and check: $HOME/.local/bin/ciao service status"
+        fail "migration failed and this Mac's local engine could NOT be fully restored: $1. See $migration_dir/receipt.json, and check: $(quote_shell_path "$bin_dir/ciao") service status"
     fi
     migration_receipt rolled_back "$1" || true
     fail "migration failed and this Mac's local engine was put back as it was: $1"
@@ -1052,6 +1122,68 @@ port_owner() {
         | tr -c '[:print:]' ' ' \
         | tr '\n' ' ' \
         | sed 's/  */ /g; s/^ //; s/ $//'
+}
+
+fresh_startup_state() {
+    # HTTP 200 alone can be an unrelated listener. Only the installed engine's
+    # startup contract and completed bind phase can prove fresh setup is ready.
+    "$tool_python" -I -c '
+import json
+import sys
+import uuid
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate startup field")
+        result[key] = value
+    return result
+
+def reject_constant(value):
+    raise ValueError("invalid JSON constant")
+
+try:
+    with open(sys.argv[2], "rb") as response:
+        raw = response.read(65537)
+    if len(raw) > 65536:
+        raise ValueError("oversized startup response")
+    result = json.loads(raw, object_pairs_hook=unique_fields, parse_constant=reject_constant)
+    if not isinstance(result, dict) or result.get("version") != sys.argv[1]:
+        raise ValueError("not the installed engine")
+    if type(result.get("desktop_api_version")) is not int or result["desktop_api_version"] != 1:
+        raise ValueError("unknown startup API")
+    for key in ("overall_ready", "port_in_use", "update_available"):
+        if type(result.get(key)) is not bool:
+            raise ValueError("invalid startup flag")
+    if "latest_version" not in result or (result["latest_version"] is not None and not isinstance(result["latest_version"], str)):
+        raise ValueError("invalid latest version")
+    startup_id = result.get("startup_id")
+    if not isinstance(startup_id, str) or uuid.UUID(startup_id).hex != startup_id:
+        raise ValueError("invalid live startup id")
+    if type(result.get("pid")) is not int or result["pid"] <= 0:
+        raise ValueError("invalid live engine pid")
+    phases = result.get("phases")
+    if not isinstance(phases, list):
+        raise ValueError("invalid startup phases")
+    by_name = {}
+    for phase in phases:
+        if not isinstance(phase, dict) or not isinstance(phase.get("name"), str) or not phase["name"] or phase["name"] in by_name:
+            raise ValueError("invalid or duplicate startup phase")
+        if phase.get("status") not in ("pending", "in_progress", "done", "failed") or not isinstance(phase.get("message"), str):
+            raise ValueError("invalid startup phase state")
+        for key in ("started_at", "finished_at"):
+            if key not in phase or (phase[key] is not None and not isinstance(phase[key], str)):
+                raise ValueError("invalid startup phase time")
+        by_name[phase["name"]] = phase
+    bind = by_name.get("server_starting", {})
+    if result["port_in_use"]:
+        print("port_in_use")
+    elif result["overall_ready"] and bind.get("status") == "done":
+        print("ready")
+except (ValueError, TypeError, KeyError, RecursionError, OSError):
+    sys.exit(1)
+' "$version" "$1"
 }
 
 python_probe_port() {
@@ -1430,8 +1562,8 @@ if [ -n "$host_entry" ]; then
     # so the user is told once.
     #
     # The revision that is superseded is read from the wheel itself
-    # (`ciao.server_host.LEGACY_HOST_REVISION`), never written here: a copy of
-    # the number in this script would silently stop matching on the next
+    # (`ciao.server_host.SUPERSEDED_HOST_PROTOCOLS`, a set), never written here:
+    # a copy of the numbers in this script would silently stop matching on the next
     # revision bump, and the warning is exactly what a user needs then. The
     # installed revision is read from the sealed plist with `plutil`, the one
     # tool macOS has for exactly this. A plist it cannot read is not proof of
@@ -1440,12 +1572,12 @@ if [ -n "$host_entry" ]; then
     # from the ownership record, not from this.
     host_superseded_plist="$HOME/Applications/Ciaobot Server.app/Contents/Info.plist"
     host_replacing=0
-    superseded_revision=$(
+    superseded_revisions=$(
         "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
-            python -I -c 'from ciao.server_host import LEGACY_HOST_REVISION; print(LEGACY_HOST_REVISION)' \
+            python -I -c 'from ciao.server_host import SUPERSEDED_HOST_PROTOCOLS; print(*SUPERSEDED_HOST_PROTOCOLS)' \
             2>/dev/null || true
     )
-    if [ -n "$superseded_revision" ] && [ -f "$host_superseded_plist" ]; then
+    if [ -n "$superseded_revisions" ] && [ -f "$host_superseded_plist" ]; then
         # `plutil` is looked up on PATH, not by its absolute path: the
         # installer is exercised on Linux CI too, where macOS's own plutil is
         # not there. A missing plutil only means "not a superseded host".
@@ -1453,9 +1585,11 @@ if [ -n "$host_entry" ]; then
             plutil -extract CFBundleVersion raw -o - \
                 "$host_superseded_plist" 2>/dev/null || true
         )
-        if [ "$host_revision" = "$superseded_revision" ]; then
-            host_replacing=1
-        fi
+        for superseded_revision in $superseded_revisions; do
+            if [ "$host_revision" = "$superseded_revision" ]; then
+                host_replacing=1
+            fi
+        done
     fi
     host_rc=0
     "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
@@ -1543,7 +1677,121 @@ install_step "could not write the install receipt" \
 # A client stops here on purpose. It gets no workspace resolved, no setup, no
 # service, no agent: the one thing it must not become is a second writer for a
 # runtime root a host owns.
+
+# A Mac with no engine definition and no configured workspace is onboarded in
+# the browser. This is decided before anything is created: the foreground
+# bootstrap provisions the destination the user confirms, and only a matching
+# handoff result activates the service. Migration and existing installs keep the
+# CLI setup path below.
+fresh_macos=0
+fresh_completed=0
+if [ "$migrate_path" = skip ] && [ "$(uname -s)" = Darwin ]; then
+    fresh_candidate=$workspace
+    [ -n "$fresh_candidate" ] || fresh_candidate="$HOME/Ciaobot"
+    case "$fresh_candidate" in
+        "~") fresh_candidate=$HOME ;;
+        "~/"*) fresh_candidate="$HOME/${fresh_candidate#"~/"}" ;;
+    esac
+    # The child's validator takes an absolute suggestion; a relative one the
+    # user typed must not make the wizard unreachable.
+    case "$fresh_candidate" in
+        /*) ;;
+        *) fresh_candidate="$(pwd -P)/$fresh_candidate" ;;
+    esac
+    fresh_suggestion=
+    [ -z "$workspace" ] || fresh_suggestion=$fresh_candidate
+    fresh_definition="$HOME/Library/LaunchAgents/$SERVER_LABEL.plist"
+    if [ ! -e "$fresh_definition" ] &&
+        ! is_set_up_workspace "$fresh_candidate" &&
+        ! is_set_up_workspace "$HOME/Ciaobot"; then
+        fresh_macos=1
+    fi
+fi
+
 if [ "$migrate_path" != client ]; then
+    if [ "$fresh_macos" -eq 1 ]; then
+        # Nothing is created here. `ciao run --installer-bootstrap` refuses to
+        # start on a machine that is not fresh, starts the wizard, and writes
+        # one handoff result only after setup succeeded; the parent activates
+        # the service from that result. A cancel or refusal leaves a complete
+        # binary install whose setup can be resumed.
+        if [ "$no_start" -eq 0 ]; then
+            # The bootstrap serves loopback only, so it can start on a port
+            # that the activated engine, which may listen on every interface,
+            # cannot bind. Warn, but let Advanced setup select another port.
+            port=$FRESH_PORT
+            probe_rc=0
+            python_probe_port "$port" || probe_rc=$?
+            if [ "$probe_rc" -eq 1 ]; then
+                owner=$(port_owner "$port")
+                echo "Warning: port $port is already in use${owner:+ by $owner}. Choose another port in Advanced setup, or free port $port before completing setup." >&2
+            fi
+            run_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+            [ -n "$run_id" ] || fail "could not generate an installer run id"
+            set -- run --installer-bootstrap --installer-run-id "$run_id"
+            # `--flag=value` so a suggestion that begins with a dash still
+            # reaches the wizard as a path.
+            [ -z "$fresh_suggestion" ] || set -- "$@" "--installer-suggest-workspace=$fresh_suggestion"
+            bootstrap_rc=0
+            "$ciao" "$@" || bootstrap_rc=$?
+            if [ "$bootstrap_rc" -ne 0 ]; then
+                echo "Ciaobot is installed, but setup did not finish. Nothing in a workspace was created or changed by this installer." >&2
+                echo "Resume setup with: $(quote_shell_path "$ciao") run --installer-bootstrap" >&2
+                exit "$bootstrap_rc"
+            fi
+            if ! activation_output=$("$ciao" installer activate --run-id "$run_id" --json); then
+                [ -z "$activation_output" ] || printf '%s\n' "$activation_output" >&2
+                echo "Ciaobot is installed, but the background service did not start. Nothing in the chosen folder was deleted or moved." >&2
+                echo "Resume with: $(quote_shell_path "$ciao") installer activate --run-id $run_id" >&2
+                exit 1
+            fi
+            # Only the verified activation result knows the wizard's chosen
+            # port. Parse data, never shell text or private workspace state, and
+            # refuse an ambiguous result rather than guessing the default port.
+            if ! activated_fields=$("$tool_python" -I -c '
+import json
+import os
+import sys
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate activation field")
+        result[key] = value
+    return result
+
+try:
+    result = json.loads(sys.argv[1], object_pairs_hook=unique_fields)
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise ValueError("activation was not successful")
+    port = result.get("port")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("invalid activation port")
+    workspace = result.get("workspace")
+    definition = result.get("definition")
+    for path in (workspace, definition):
+        if not isinstance(path, str) or not os.path.isabs(path) or any(ord(c) < 32 or ord(c) == 127 for c in path):
+            raise ValueError("invalid activation path")
+    if result.get("service_backend") != "macos":
+        raise ValueError("invalid activation backend")
+except (ValueError, TypeError):
+    sys.exit(1)
+print(workspace)
+print(port)
+' "$activation_output"); then
+                echo "Ciaobot is installed, but could not verify the background service activation result. Nothing in the chosen folder was deleted or moved." >&2
+                echo "Resume with: $(quote_shell_path "$ciao") installer activate --run-id $run_id" >&2
+                exit 1
+            fi
+            workspace=$(printf '%s\n' "$activated_fields" | head -1)
+            port=$(printf '%s\n' "$activated_fields" | tail -1)
+            fresh_url="http://localhost:$port"
+            fresh_completed=1
+        else
+            workspace=
+        fi
+    else
     # --yes turns off every guard in `ciao setup` (a health check that never
     # comes up, a service silently re-pointed at a different workspace), so it
     # is passed only for the workspace this script detected the engine already
@@ -1615,15 +1863,23 @@ if [ "$migrate_path" != client ]; then
         3) echo "warning: ciao setup could not set up memory regions (see the warning above); continuing install" >&2 ;;
         *) abort_install "ciao setup failed" ;;
     esac
+    fi
 fi
 
-if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
-    # The workspace's own `.env` is the authority on the port, and setup has
-    # just written it.
-    port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
-    [ -n "$port" ] || port=8443
-    install_step "could not start the engine; try: $ciao service status" \
-        "$ciao" service start --workspace "$workspace" --json >/dev/null
+if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
+    { [ "$fresh_macos" -eq 0 ] || [ "$fresh_completed" -eq 1 ]; }; then
+    # Fresh setup uses the validated activation port; existing installs keep
+    # their workspace configuration as the authority.
+    if [ "$fresh_macos" -eq 0 ]; then
+        port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
+        [ -n "$port" ] || port=8443
+    fi
+    # A fresh install's engine was already started by `ciao installer
+    # activate`; it still has to answer before the installer says so.
+    if [ "$fresh_macos" -eq 0 ]; then
+        install_step "could not start the engine; try: $(quote_shell_path "$ciao") service status" \
+            "$ciao" service start --workspace "$workspace" --json >/dev/null
+    fi
     # A slow first boot is not a failed install: the plist is written, so say
     # so instead of failing an install that did everything it promised. A
     # migration is the exception - the app's own agent is about to be retired,
@@ -1648,32 +1904,45 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
             port_in_use=1
             break
         fi
-        status=$("$CURL" -fsS "http://localhost:$port/api/startup-status" 2>/dev/null || true)
+        if [ "$fresh_macos" -eq 1 ]; then
+            # Bound both time and response size; discard even a partial body
+            # when curl fails (including its size/time limit).
+            if "$CURL" -fsS --max-time 5 --max-filesize 65536 \
+                "http://localhost:$port/api/startup-status" \
+                -o "$tmp/startup-status.json" 2>/dev/null; then
+                status=fresh
+            else
+                status=
+            fi
+        else
+            status=$("$CURL" -fsS "http://localhost:$port/api/startup-status" 2>/dev/null || true)
+        fi
         if [ -n "$status" ]; then
-            # The engine reports a bind failure as an explicit flag, so the
-            # installer can tell "the port is taken" from "still starting"
-            # without reading the phase's prose (#1654).
-            if printf '%s' "$status" | grep -q '"port_in_use":[[:space:]]*true'; then
-                port_in_use=1
-                break
-            fi
-            if [ "$migrate_path" != host ]; then
-                healthy=1
-                break
-            fi
-            # The version is picked out of the whole response, not counted out
-            # of it: the endpoint's payload has keys before `version`, so
-            # splitting the document on quotes and taking the fourth field
-            # reads whichever key happens to come first. `"version":` cannot
-            # match inside `"latest_version":` - the quote in front of `version`
-            # is a character in that name, not one - so this is the engine's own
-            # version and nothing else.
-            reported=$(printf '%s\n' "$status" \
-                | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
-                | head -1)
-            if [ "$reported" = "$version" ]; then
-                healthy=1
-                break
+            if [ "$fresh_macos" -eq 1 ]; then
+                startup_state=$(fresh_startup_state "$tmp/startup-status.json" 2>/dev/null || true)
+                case "$startup_state" in
+                    ready) healthy=1; break ;;
+                    port_in_use) port_in_use=1; break ;;
+                esac
+            else
+                # Preserve established-install and migration readiness rules.
+                # The engine reports a bind failure as an explicit flag (#1654).
+                if printf '%s' "$status" | grep -q '"port_in_use":[[:space:]]*true'; then
+                    port_in_use=1
+                    break
+                fi
+                if [ "$migrate_path" != host ]; then
+                    healthy=1
+                    break
+                fi
+                # Match the engine version, not a substring of latest_version.
+                reported=$(printf '%s\n' "$status" \
+                    | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
+                    | head -1)
+                if [ "$reported" = "$version" ]; then
+                    healthy=1
+                    break
+                fi
             fi
         fi
         attempt=$((attempt + 1))
@@ -1704,12 +1973,12 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
             if [ -n "$access_denied" ]; then
                 abort_install "$access_denied"
             fi
-            abort_install "the new engine did not answer on http://localhost:$port with version $version within ${health_attempts}s; check: $ciao service status"
+            abort_install "the new engine did not answer on http://localhost:$port with version $version within ${health_attempts}s; check: $(quote_shell_path "$ciao") service status"
         fi
         if [ -n "$access_denied" ]; then
             echo "Ciaobot engine installer: $access_denied" >&2
         else
-            echo "Ciaobot engine installer: the engine is still starting; check: ciao service status" >&2
+            echo "Ciaobot engine installer: the engine is still starting; check: $(quote_shell_path "$ciao") service status" >&2
         fi
     else
         engine_ready=1
@@ -1769,14 +2038,14 @@ if [ "$migrate_path" = host ]; then
             # wrong here: the app is still on disk and still does what it did
             # before, and a run that says nothing about it is the dead-but-
             # misleading state this step exists to end.
-            echo "Ciaobot.app could not be removed automatically; remove it with: ciao desktop uninstall"
+            echo "Ciaobot.app could not be removed automatically; remove it with: $(quote_shell_path "$ciao") desktop uninstall"
         elif [ -d "$migrate_app_bundle" ]; then
             case "$migrate_app_bundle" in
                 *.app)
                     if rm -rf "$migrate_app_bundle"; then
                         echo "Removed the retired Ciaobot.app."
                     else
-                        echo "Ciaobot.app could not be removed automatically; remove it with: ciao desktop uninstall"
+                        echo "Ciaobot.app could not be removed automatically; remove it with: $(quote_shell_path "$ciao") desktop uninstall"
                     fi
                     ;;
                 *)
@@ -1796,18 +2065,33 @@ fi
 
 echo "Ciaobot engine $version installed."
 echo "  ciao:      $ciao"
-echo "  workspace: $workspace"
+[ -z "$workspace" ] || echo "  workspace: $workspace"
+configure_path
 url=
-if [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ]; then
+if [ "$fresh_macos" -eq 1 ]; then
+    if [ "$fresh_completed" -eq 1 ] && [ "$engine_ready" -eq 1 ]; then
+        echo "Ciaobot is running from the folder you chose. Return to the browser tab to finish onboarding."
+        echo "If you closed it, open $fresh_url and log in with the password you set."
+        if [ -t 1 ] && command -v open >/dev/null 2>&1; then
+            open "$fresh_url" >/dev/null 2>&1 || true
+        fi
+    elif [ "$fresh_completed" -eq 1 ]; then
+        # The health wait has already said why; setup itself is saved.
+        echo "Setup is saved in the folder you chose, but Ciaobot is not answering yet. Once it is, open $fresh_url and log in with the password you set."
+        exit 1
+    else
+        echo "Setup was not started. Resume with: $(quote_shell_path "$ciao") run --installer-bootstrap"
+    fi
+elif [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ]; then
     # Printed to the terminal and nowhere else: the URL is a one-time
     # credential that signs the person at this keyboard in. A failure must not
     # reach the user as "Open Ciaobot: " with nothing after it.
     url_output=$("$ciao" setup-url --workspace "$workspace") \
-        || fail "could not create the sign-in link; run: $ciao setup-url --workspace $workspace"
+        || fail "could not create the sign-in link; run: $(quote_shell_path "$ciao") setup-url --workspace $workspace"
     url=$(printf '%s\n' "$url_output" | tail -1)
     case "$url" in
         http://*) ;;
-        *) fail "could not create the sign-in link; run: $ciao setup-url --workspace $workspace" ;;
+        *) fail "could not create the sign-in link; run: $(quote_shell_path "$ciao") setup-url --workspace $workspace" ;;
     esac
     echo "Open Ciaobot: $url"
     echo "This link signs you in once. Do not share it."
@@ -1817,10 +2101,6 @@ fi
 if [ "$migrate_path" != client ] && [ -f "$workspace/.runtime/welcome-pending" ]; then
     echo "Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager."
 fi
-case ":${PATH:-}:" in
-    *":$bin_dir:"*) ;;
-    *) echo "Add ciao to your PATH: $uv tool update-shell" ;;
-esac
-if [ -t 1 ] && [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ] && command -v open >/dev/null 2>&1; then
+if [ -t 1 ] && [ "$fresh_macos" -eq 0 ] && [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ] && command -v open >/dev/null 2>&1; then
     open "$url" >/dev/null 2>&1 || true
 fi

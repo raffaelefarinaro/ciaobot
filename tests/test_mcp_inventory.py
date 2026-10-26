@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
 
-from ciao.web.mcp_inventory import _jsonc_to_json, provider_inventory
+from ciao.web.mcp_inventory import _jsonc_to_json, _shell_prefix, provider_inventory
 
 
 @pytest.fixture(autouse=True)
@@ -154,3 +155,35 @@ async def test_claude_project_local_config_overrides_project_scope(
     assert row["scope"] == "local"
     assert row["kind"] == "http"
     assert row["allowed"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nt", [False, True])
+async def test_payload_carries_shell_prefix_and_no_example_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nt: bool
+) -> None:
+    root = tmp_path / ("it's \u2019work\u2018" if nt else "my work")
+    root.mkdir()
+    payload = await provider_inventory(
+        workspace="personal", agent_root=root, explicitly_denied=set(), manager=None,
+        claude_available=True, opencode_available=True,
+    )
+    # Patching os.name breaks pathlib, so only the prefix builder runs under it.
+    # Both cases patch it: the parametrization is about the target platform, not
+    # about the host running the suite, and a Windows runner is `nt` by default.
+    monkeypatch.setattr("ciao.web.mcp_inventory.os.name", "nt" if nt else "posix")
+    payload["shell"] = _shell_prefix(root)
+
+    if nt:
+        quoted = "".join(
+            ch * 2 if ch in "'\u2018\u2019\u201a\u201b" else ch for ch in str(root)
+        )
+        assert payload["shell"] == {
+            "kind": "powershell", "cd_prefix": f"Set-Location -LiteralPath '{quoted}'; ",
+        }
+    else:
+        assert payload["shell"] == {
+            "kind": "posix", "cd_prefix": f"cd -- {shlex.quote(str(root))} && ",
+        }
+    for provider in payload["providers"]:
+        assert "setup" not in provider

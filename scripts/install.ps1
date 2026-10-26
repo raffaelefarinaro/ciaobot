@@ -56,6 +56,14 @@ function Install-Ciaobot {
     $UvVersion = '0.12.17'
     $PythonVersion = '3.13'   # must equal PYTHON_VERSION in install-engine.sh; a test enforces it
     $CryptographyPin = 'cryptography==50.0.0'
+    # Always an x64 Python. Windows on Arm runs the engine as x64 under
+    # emulation: cryptography ships no win_arm64 wheel, so an Arm64 Python
+    # cannot install the engine or run the release verifier, and a native
+    # Arm64 uv picks one for a bare version. Not detected: launched from an
+    # x64 terminal (Git Bash) this script runs emulated, where .NET reports
+    # the OS as X64. Updates restage on the interpreter's own architecture
+    # (ciao/engine_update.python_request), so they stay x64.
+    $PythonRequest = "cpython-$PythonVersion-windows-x86_64-none"
     # Same key as ciao/release_manifest.py RELEASE_PUBLIC_KEY (a test keeps them equal).
     $ReleasePublicKey = 'RWSDUnIeQDnpmnNJiTjLmN6XOVFqgn1A0EXvTVG7AJIZXJxhyFN9osxm'
     $ManifestName = 'ciaobot-engine-manifest.json'
@@ -264,7 +272,10 @@ print(name, digest, size)
             ) -join "`n"
             Add-Type -TypeDefinition $source
         }
-        return [CiaobotSessions]::SignedIn($env:USERDOMAIN, $env:USERNAME)
+        # The account's own domain, not the USERDOMAIN variable: an OpenSSH session
+        # reports WORKGROUP there for a local account (see
+        # windows_service.current_user), which matched no session at all.
+        return [CiaobotSessions]::SignedIn([Environment]::UserDomainName, [Environment]::UserName)
     }
 
     function Test-EngineAnswering([int]$Port) {
@@ -279,6 +290,60 @@ print(name, digest, size)
         }
     }
 
+    # What a freshly activated engine's startup status says: 'ready',
+    # 'port_in_use', or '' for not yet. HTTP 200 alone can be an unrelated
+    # listener, so only the installed version with a finished bind phase is
+    # ready - the rule fresh_startup_state in install-engine.sh applies.
+    function Get-FreshStartupState([int]$Port, [string]$ExpectedVersion) {
+        try {
+            $response = Invoke-WebRequest -Uri "http://localhost:$Port/api/startup-status" `
+                -UseBasicParsing -TimeoutSec 5
+            if ($response.StatusCode -ne 200 -or $response.Content.Length -gt 65536) { return '' }
+            $status = $response.Content | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            return ''
+        }
+        if ([string]$status.version -ne $ExpectedVersion) { return '' }
+        if ($status.port_in_use -eq $true) { return 'port_in_use' }
+        $bind = @($status.phases | Where-Object { $_.name -eq 'server_starting' })
+        if (($status.overall_ready -eq $true) -and ($bind.Count -eq 1) -and ($bind[0].status -eq 'done')) {
+            return 'ready'
+        }
+        return ''
+    }
+
+    # Whether anything holds $Port on any interface. The activated engine may
+    # listen on every interface, so the probe is an exclusive wildcard bind,
+    # which Windows refuses while any other socket is bound to the port.
+    function Test-PortInUse([int]$Port) {
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Any, $Port)
+        $listener.ExclusiveAddressUse = $true
+        try {
+            $listener.Start()
+            return $false
+        } catch [System.Net.Sockets.SocketException] {
+            return $true
+        } finally {
+            try { $listener.Stop() } catch { }
+        }
+    }
+
+    # The programs listening on $Port, or '' when none is known.
+    # Get-NetTCPConnection is missing on some editions, so its absence costs
+    # the owner's name, never the port check. The name is the holder's own
+    # choice, so only printable ASCII of it is ever printed.
+    function Get-PortOwner([int]$Port) {
+        try {
+            $ids = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop |
+                ForEach-Object { $_.OwningProcess } | Sort-Object -Unique)
+        } catch {
+            return ''
+        }
+        $names = @($ids | ForEach-Object { (Get-Process -Id $_ -ErrorAction SilentlyContinue).ProcessName } |
+            Where-Object { $_ })
+        return (($names -join ' ') -replace '[^\x20-\x7E]', ' ').Trim()
+    }
+
     # Why the engine could not bind its port (#1669), or '' when it did not say.
     #
     # The engine records the reason outside the workspace
@@ -290,7 +355,7 @@ print(name, digest, size)
     function Read-PortInUseReason([string]$Uv, [string]$Wheel) {
         if (-not $Uv -or -not $Wheel) { return '' }
         $probe = Invoke-Native $Uv @(
-            'run', '--quiet', '--no-project', '--python', $PythonVersion, '--with', $Wheel,
+            'run', '--quiet', '--no-project', '--python', $PythonRequest, '--with', $Wheel,
             'python', '-I', '-c',
             "import sys`nfrom ciao.port_in_use import read_port_in_use`ntext = read_port_in_use()`nsys.stdout.write(text)`nsys.exit(0 if text else 1)"
         ) $true
@@ -389,7 +454,10 @@ print(name, digest, size)
     function Read-InstallState {
         if (-not (Test-Path -LiteralPath $StateFile)) { return $null }
         try {
-            return (Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json)
+            # UTF-8, as it is written: Windows PowerShell 5.1 reads a file
+            # without a BOM as ANSI, which turned a workspace such as
+            # "Notes T<e-acute>st" into mojibake that `ciao setup` refused.
+            return (Get-Content -LiteralPath $StateFile -Raw -Encoding UTF8 | ConvertFrom-Json)
         } catch {
             return $null
         }
@@ -731,7 +799,7 @@ print(name, digest, size)
         [System.IO.File]::WriteAllText($verifier, ($VerifierSource -replace "`r`n", "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
 
         # --- verify the manifest with the same Python verifier install-engine.sh runs ---
-        $manifestInfo = & $uv run --quiet --no-project --python $PythonVersion --with $CryptographyPin `
+        $manifestInfo = & $uv run --quiet --no-project --python $PythonRequest --with $CryptographyPin `
             python $verifier (Join-Path $tmp $ManifestName) (Join-Path $tmp $SignatureName) $Version $ReleasePublicKey
         if ($LASTEXITCODE -ne 0) { Fail 'release manifest verification failed' }
         $parts = (@($manifestInfo) -join ' ').Trim() -split '\s+'
@@ -774,6 +842,25 @@ print(name, digest, size)
         # unregister action, so the task goes through schtasks and the tool
         # through uv.
 
+        # A re-run over our own engine replaces the environment it runs from, and
+        # Windows will not remove a file a running process holds: uv failed with
+        # "Access is denied" halfway through deleting the live environment. So
+        # the engine is stopped first; the existing-install path below starts
+        # it again.
+        if ($toolWasInstalled) {
+            $runningToolDir = Get-UvPath $uv $false
+            $previousInstall = Read-InstallState
+            $runningPort = $DefaultPort
+            if ($previousInstall -and $previousInstall.workspace) {
+                $runningPort = Read-WorkspacePort ([string]$previousInstall.workspace)
+            }
+            # A task that is not running exits non-zero here, which is fine.
+            if (Test-TaskRegistered) { $null = Invoke-Schtasks @('/End', '/TN', $TaskName) }
+            if (-not (Wait-EngineStopped $runningToolDir $runningPort)) {
+                Fail "the running Ciaobot engine did not stop; stop it (schtasks /End /TN $TaskName) and re-run"
+            }
+        }
+
         # ADDS: tool
         $mutated = $true
         # A tool that was already there is not this run's to remove on failure.
@@ -784,7 +871,7 @@ print(name, digest, size)
         # locked file cannot be deleted, so uninstall and rollback would fail for
         # as long as that unrelated process runs. #857's spike measured it; own
         # files cost disk and install time.
-        $installed = Invoke-Native $uv @('tool', 'install', '--force', '--link-mode', 'copy', '--python', $PythonVersion, $wheel) $true
+        $installed = Invoke-Native $uv @('tool', 'install', '--force', '--link-mode', 'copy', '--python', $PythonRequest, $wheel) $true
         if ($installed.ExitCode -ne 0) { Fail 'uv tool install failed' }
         $binDir = Get-UvPath $uv $true
         if (-not $binDir) { Fail 'could not locate the uv tool bin directory' }
@@ -840,6 +927,122 @@ print(name, digest, size)
             $env:Path = Add-UserPathEntry $env:Path $binDir
         }
 
+        $workspaceWasSuggested = [bool]$Workspace
+        # A re-run without -Workspace keeps the folder this machine already
+        # uses. The browser wizard can put it anywhere, so the default name is
+        # only the default for a machine that has none; otherwise a repair
+        # would set up a second, empty workspace and repoint the task to it.
+        if (-not $Workspace) {
+            $recordedInstall = Read-InstallState
+            if ($recordedInstall -and $recordedInstall.workspace) { $Workspace = [string]$recordedInstall.workspace }
+        }
+        if (-not $Workspace) { $Workspace = Join-Path $env:USERPROFILE $DefaultWorkspaceName }
+        $Workspace = [Environment]::ExpandEnvironmentVariables($Workspace)
+        $workspace = [System.IO.Path]::GetFullPath($Workspace)
+        $defaultWorkspace = [System.IO.Path]::GetFullPath((Join-Path $env:USERPROFILE $DefaultWorkspaceName))
+        $taskFile = Join-Path $TaskDir $TaskFileName
+        $freshInstall = (-not (Test-Path -LiteralPath $taskFile)) -and (-not (Test-TaskRegistered)) -and
+            (-not (Test-Path -LiteralPath (Join-Path $workspace '.runtime\workspaces.json'))) -and
+            (-not (Test-Path -LiteralPath (Join-Path $defaultWorkspace '.runtime\workspaces.json')))
+        if ($freshInstall) {
+            if ($NoStart) {
+                Write-Host 'Setup was not started. Resume with: ciao run --installer-bootstrap'
+            } else {
+                # The bootstrap serves loopback only, so it can start on a port
+                # that the activated engine, which may listen on every
+                # interface, cannot bind. Warn, but let Advanced setup choose
+                # another port.
+                if (Test-PortInUse $DefaultPort) {
+                    $owner = Get-PortOwner $DefaultPort
+                    $heldBy = ''
+                    if ($owner) { $heldBy = " by $owner" }
+                    Write-Warning "Port $DefaultPort is already in use$heldBy. Choose another port in Advanced setup, or free port $DefaultPort before completing setup."
+                }
+                $runId = [guid]::NewGuid().ToString().ToLowerInvariant()
+                if (-not $runId) { Fail 'could not generate an installer run id' }
+                $bootstrapArgs = @('run', '--installer-bootstrap', '--installer-run-id', $runId)
+                if ($workspaceWasSuggested) { $bootstrapArgs += @('--installer-suggest-workspace', $workspace) }
+                $bootstrap = Invoke-Native $ciao $bootstrapArgs $false
+                foreach ($line in @($bootstrap.Output)) { Write-Host $line }
+                if ($bootstrap.ExitCode -ne 0) {
+                    Write-Host 'Setup did not finish. Nothing in a workspace was created or changed by this installer.'
+                    Write-Host 'Resume with: ciao run --installer-bootstrap'
+                    $mutated = $false
+                    throw "Ciaobot bootstrap exited with code $($bootstrap.ExitCode)"
+                }
+                $activation = Invoke-Native $ciao @('installer', 'activate', '--run-id', $runId, '--json') $false
+                $activationText = @($activation.Output) -join "`n"
+                # Only the verified activation result knows the wizard's chosen
+                # port: refuse an ambiguous result rather than guess the default.
+                try {
+                    if ($activation.ExitCode -ne 0) { throw 'activation command failed' }
+                    $activated = $activationText | ConvertFrom-Json -ErrorAction Stop
+                    if ($activated.ok -ne $true) { throw 'activation was not successful' }
+                    if ($activated.service_backend -ne 'windows') { throw 'invalid activation backend' }
+                    $activatedPort = $activated.port
+                    if (-not (($activatedPort -is [int]) -or ($activatedPort -is [long])) -or
+                        ($activatedPort -lt 1) -or ($activatedPort -gt 65535)) {
+                        throw 'invalid activation port'
+                    }
+                    $activatedWorkspace = [string]$activated.workspace
+                    if (-not $activatedWorkspace -or -not [System.IO.Path]::IsPathRooted($activatedWorkspace)) {
+                        throw 'invalid activation workspace'
+                    }
+                    $workspace = [System.IO.Path]::GetFullPath($activatedWorkspace)
+                    $freshPort = [int]$activatedPort
+                } catch {
+                    Write-Host $activationText
+                    Write-Host "Resume with: ciao installer activate --run-id $runId"
+                    $mutated = $false
+                    throw 'Ciaobot activation failed'
+                }
+                $stateWasThere = Test-Path -LiteralPath $StateFile
+                $previousState = Read-InstallState
+                if ((-not $pathEntryAdded) -and $previousState -and $previousState.path_entry) {
+                    $pathEntry = [string]$previousState.path_entry
+                }
+                $state = [ordered]@{ path_entry = $pathEntry; workspace = $workspace; version = $Version }
+                New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+                $json = New-Object System.Text.UTF8Encoding($false)
+                [System.IO.File]::WriteAllText($StateFile, (ConvertTo-Json -InputObject $state), $json)
+                if (-not $stateWasThere) { $done += 'state' }
+                # `ciao installer activate` started the task; the engine still
+                # has to answer before the installer says it is running.
+                $freshReady = $false
+                $signedIn = Test-UserSignedIn
+                for ($wait = 1; $signedIn -and $wait -le $HealthAttempts; $wait++) {
+                    $startup = Get-FreshStartupState $freshPort $Version
+                    if ($startup -eq 'ready') {
+                        $freshReady = $true
+                        break
+                    }
+                    if ($startup -eq 'port_in_use') { break }
+                    Start-Sleep -Seconds 1
+                }
+                Write-Host "Ciaobot $Version is installed: $ciao"
+                Write-Host "Workspace: $workspace"
+                if ($pathEntry) { Write-Host "Added to your PATH for new terminals (and to this one): $pathEntry" }
+                $freshUrl = "http://localhost:$freshPort"
+                if ($freshReady) {
+                    Write-Host 'Ciaobot is running from the folder you chose. Return to the browser tab to finish onboarding.'
+                    Write-Host "If you closed it, open $freshUrl and log in with the password you set."
+                    if (-not [Console]::IsOutputRedirected) {
+                        try { Start-Process $freshUrl | Out-Null } catch { }
+                    }
+                } elseif (-not $signedIn) {
+                    Write-Host "Setup is saved in the folder you chose. Nobody is signed in to Windows as $([Environment]::UserDomainName)\$([Environment]::UserName), so Ciaobot starts the next time this account signs in; then open $freshUrl and log in with the password you set."
+                } else {
+                    # The engine records a bind failure outside the workspace,
+                    # because an engine that cannot bind cannot serve the
+                    # endpoint that would report it (#1654, #1669).
+                    $freshPortReason = Read-PortInUseReason $uv $wheel
+                    if ($freshPortReason) { Write-Warning "Ciaobot engine installer: $freshPortReason" }
+                    Write-Host "Setup is saved in the folder you chose, but Ciaobot is not answering yet. Once it is, open $freshUrl and log in with the password you set."
+                    $mutated = $false
+                    throw 'Ciaobot did not answer after setup'
+                }
+            }
+        } else {
         # The workspace is never removed by this script, not even on a rollback:
         # it is the user's notes and memory, and an install that failed is the
         # last thing that should decide what happens to them. It is created
@@ -948,7 +1151,7 @@ print(name, digest, size)
         # person in when it does.
         $engineReady = $true
         if (-not $signedIn) {
-            Write-Host "Nobody is signed in to Windows as $env:USERDOMAIN\$env:USERNAME, so the engine starts the next time this account signs in."
+            Write-Host "Nobody is signed in to Windows as $([Environment]::UserDomainName)\$([Environment]::UserName), so the engine starts the next time this account signs in."
         } elseif (-not $healthy) {
             # The engine records a bind failure outside the workspace, because
             # an engine that cannot bind cannot serve the endpoint that would
@@ -997,6 +1200,7 @@ print(name, digest, size)
             }
         }
         if ($welcomePending) { Write-Host 'Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager.' }
+        }
     } catch {
         $message = $_.Exception.Message
         if ($mutated) {

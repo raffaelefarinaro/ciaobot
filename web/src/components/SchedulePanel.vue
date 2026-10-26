@@ -709,6 +709,7 @@ import { providerForModelSection, sectionsFromModelsResponse } from '../lib/mode
 import { isPerWorkspaceRoutine, scheduleInWorkspace, workspaceForSchedule } from '../lib/automationWorkspace'
 import { askConfirm } from '../lib/confirm'
 import { writeClipboard } from '../lib/codeCopy'
+import { effectiveWorkspaceDefaultModel } from '../lib/workspaceOverrides'
 
 const props = defineProps<{ showNew?: boolean }>()
 const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
@@ -1005,11 +1006,7 @@ const editInheritedModelLabel = computed(() => {
   const provider = projectStore.workspaceProviderOptions.find(
     option => option.value === workspace?.default_provider,
   )?.label || workspace?.default_provider || 'provider'
-  // Workspaces no longer pin a model: the effective default is the
-  // provider's own default from the Models tab.
-  const model = store.models?.provider_defaults?.[workspace?.default_provider || '']
-    || store.models?.default
-    || ''
+  const model = effectiveWorkspaceDefaultModel(workspace, store.models)
   return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`
 })
 
@@ -1259,7 +1256,7 @@ async function onSystemWorkspaceChange(event: Event) {
   const scheduleId = schedule.value.schedule_id
   await store.updateSchedule(scheduleId, { workspace })
   if (projectStore.activeWorkspace !== workspace) {
-    await projectStore.switchWorkspace(workspace, { transition: false })
+    if ((await projectStore.switchWorkspace(workspace, { transition: false })) === false) return
   }
   await router.push(`/schedules/${scheduleId}`)
 }

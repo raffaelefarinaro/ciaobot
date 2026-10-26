@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /**
- * Where a delegated chat comes from: the board task it works on.
+ * Where a chat's tasks come from: the board task it works on, and the board
+ * tasks it is linked to.
  *
  * One sentence naming the task, linked to its editor on the board, then the
  * agent's state in words. When the agent reported done and the result waits for
@@ -9,11 +10,19 @@
  * approve from where they read the result. A task waiting on the user gets no
  * button: the composer is the answer.
  *
+ * The completion asks for a note in the field, and the note is optional: one
+ * action completes the task, and a blank note completes it without a
+ * resolution — the same contract as the board's completion sheet.
+ *
+ * A task the chat is only *linked* to (`task link-chat`) is named in its own
+ * read-only sentence, with no state and no completion: the chat did not run
+ * that task, so it has nothing to report and nothing to close.
+ *
  * Read from `taskSignals`, the app-wide view of the active workspace's tasks. A
  * task that store does not hold (not loaded yet, or deleted) still gets the
  * sentence, from the chat's own `task_delegation` stamp, with no state.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { taskAttemptLabel } from '../lib/taskBoard'
 import { approveTask, markTaskDone, taskClosureErrorMessage } from '../lib/taskClosure'
 import type { ChatInfo, Task } from '../lib/types'
@@ -34,6 +43,18 @@ const delegation = computed(() =>
 )
 const task = computed<Task | null>(() => taskSignals.taskForChat(props.chat))
 const taskId = computed(() => task.value?.id || delegation.value?.task_id || '')
+
+/**
+ * The tasks this chat is linked to outside delegation (`task link-chat`).
+ *
+ * A link is a relation, not a lifecycle: the row below is read-only. The
+ * linked task is deliberately not the `task` above, so the state, the
+ * Approve Done and the Mark done that follow it stay the delegated chat's.
+ * A task the chat is both delegated to and linked to is said once.
+ */
+const linkedTasks = computed<Task[]>(() =>
+  taskSignals.linkedTasksForChat(props.chat).filter(t => t.id !== taskId.value),
+)
 
 /**
  * Whether a later attempt holds the task: this chat's result is history, and
@@ -73,10 +94,10 @@ const canMarkDone = computed(() => {
  * message. A modified click is left to the browser, which opens the task page
  * in a new tab.
  */
-function onTaskLink(event: MouseEvent): void {
+function onTaskLink(event: MouseEvent, id: string): void {
   if (!isPlainLeftClick(event)) return
   event.preventDefault()
-  useItemPeekStore().openTask(taskId.value)
+  useItemPeekStore().openTask(id)
 }
 
 const emit = defineEmits<{ (e: 'marked-done'): void }>()
@@ -85,16 +106,35 @@ const approving = ref(false)
 const approveError = ref('')
 const noteOpen = ref(false)
 const noteDraft = ref('')
+const noteField = ref<HTMLTextAreaElement | null>(null)
+/** The button that opens the prompt — one of the two, never both at once. */
+const closureButton = ref<HTMLButtonElement | null>(null)
 watch(taskId, () => {
   approveError.value = ''
   noteOpen.value = false
   noteDraft.value = ''
 })
 
+/**
+ * Open the closure prompt with the keyboard already in it: the button that
+ * opened it leaves the DOM, so focus would otherwise fall back to the body
+ * and the note — the common case, an empty one — would be typed nowhere.
+ */
 function beginClosure(): void {
   noteOpen.value = true
   noteDraft.value = ''
   approveError.value = ''
+  nextTick(() => noteField.value?.focus())
+}
+
+/**
+ * Close the prompt and hand the keyboard back to the button that opened it:
+ * the note field leaves the DOM with the prompt, and focus would otherwise
+ * fall back to the body.
+ */
+function cancelClosure(): void {
+  noteOpen.value = false
+  nextTick(() => closureButton.value?.focus())
 }
 
 async function markDone(resolution: string): Promise<void> {
@@ -115,6 +155,9 @@ async function markDone(resolution: string): Promise<void> {
     noteOpen.value = false
   } catch (e) {
     approveError.value = taskClosureErrorMessage(e, 'mark-done')
+    // The write disabled the field, and a browser that moves the focus off a
+    // disabled control leaves the keyboard nowhere: put it back in the note.
+    nextTick(() => noteField.value?.focus())
   } finally {
     approving.value = false
   }
@@ -133,6 +176,9 @@ async function approve(resolution: string): Promise<void> {
     noteOpen.value = false
   } catch (e) {
     approveError.value = taskClosureErrorMessage(e, 'approve')
+    // The write disabled the field, and a browser that moves the focus off a
+    // disabled control leaves the keyboard nowhere: put it back in the note.
+    nextTick(() => noteField.value?.focus())
   } finally {
     approving.value = false
   }
@@ -141,65 +187,64 @@ async function approve(resolution: string): Promise<void> {
   await taskSignals.reload(workspace)
 }
 
-function submitNote(withoutNote: boolean): void {
-  const resolution = withoutNote ? '' : noteDraft.value.trim()
-  if (!withoutNote && !resolution) return
+function submitNote(): void {
+  const resolution = noteDraft.value.trim()
   if (canApprove.value) void approve(resolution)
   else void markDone(resolution)
 }
 </script>
 
 <template>
-  <div v-if="taskId" class="task-origin">
+  <div v-if="taskId || linkedTasks.length" class="task-origin">
     <AppIcon class="task-origin-icon" name="activity" :size="16" />
     <div class="task-origin-body">
-      <p class="task-origin-line">
-        <template v-if="task">This chat works on the task <a class="task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink">{{ task.title || taskId }}</a>.</template>
-        <template v-else>This chat works on <a class="task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink">a task on the board</a>.</template>
-      </p>
-      <p v-if="statusWords" class="task-origin-status">{{ statusWords }}</p>
-      <template v-if="noteOpen">
-        <label class="task-origin-note-label" for="task-origin-resolution">How was this completed?</label>
-        <textarea
-          id="task-origin-resolution"
-          v-model="noteDraft"
-          class="task-origin-note"
-          rows="3"
-          :disabled="approving"
-        ></textarea>
-        <div class="task-origin-actions">
-          <button
-            type="button"
-            class="btn-small task-origin-approve"
-            :disabled="approving || !noteDraft.trim()"
-            @click="submitNote(false)"
-          >{{ approving ? 'Saving…' : (canApprove ? 'Approve Done' : 'Mark done') }}</button>
-          <button
-            type="button"
-            class="btn-small"
+      <template v-if="taskId">
+        <p class="task-origin-line">
+          <template v-if="task">This chat works on the task <a class="task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink($event, taskId)">{{ task.title || taskId }}</a>.</template>
+          <template v-else>This chat works on <a class="task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink($event, taskId)">a task on the board</a>.</template>
+        </p>
+        <p v-if="statusWords" class="task-origin-status">{{ statusWords }}</p>
+        <template v-if="noteOpen">
+          <label class="task-origin-note-label" for="task-origin-resolution">How was this completed? (optional)</label>
+          <textarea
+            id="task-origin-resolution"
+            ref="noteField"
+            v-model="noteDraft"
+            class="task-origin-note"
+            rows="3"
             :disabled="approving"
-            @click="submitNote(true)"
-          >Complete without note</button>
-          <button type="button" class="btn-small" :disabled="approving" @click="noteOpen = false">Cancel</button>
-        </div>
+          ></textarea>
+          <div class="task-origin-actions">
+            <button
+              type="button"
+              class="btn-small task-origin-approve"
+              :disabled="approving"
+              @click="submitNote()"
+            >{{ approving ? 'Saving…' : (canApprove ? 'Approve Done' : 'Mark done') }}</button>
+            <button type="button" class="btn-small" :disabled="approving" @click="cancelClosure">Cancel</button>
+          </div>
+        </template>
+        <button
+          v-else-if="canApprove"
+          ref="closureButton"
+          type="button"
+          class="btn-small task-origin-approve"
+          :disabled="approving"
+          :aria-label="`Approve the result of ${task!.title} and mark it done`"
+          @click="beginClosure"
+        >Approve Done</button>
+        <button
+          v-else-if="canMarkDone"
+          ref="closureButton"
+          type="button"
+          class="btn-small task-origin-approve"
+          :disabled="approving"
+          :aria-label="`Mark ${task!.title} done and archive this chat`"
+          @click="beginClosure"
+        >Mark done</button>
+        <p v-if="approveError" class="task-origin-error" role="alert">{{ approveError }}</p>
       </template>
-      <button
-        v-else-if="canApprove"
-        type="button"
-        class="btn-small task-origin-approve"
-        :disabled="approving"
-        :aria-label="`Approve the result of ${task!.title} and mark it done`"
-        @click="beginClosure"
-      >Approve Done</button>
-      <button
-        v-else-if="canMarkDone"
-        type="button"
-        class="btn-small task-origin-approve"
-        :disabled="approving"
-        :aria-label="`Mark ${task!.title} done and archive this chat`"
-        @click="beginClosure"
-      >Mark done</button>
-      <p v-if="approveError" class="task-origin-error" role="alert">{{ approveError }}</p>
+      <p v-for="linked in linkedTasks" :key="linked.id" class="task-origin-line">This chat is linked to the task <a class="task-origin-link" :href="`/tasks/${linked.id}`" @click="onTaskLink($event, linked.id)">{{ linked.title || linked.id }}</a>.</p>
     </div>
   </div>
 </template>
@@ -221,6 +266,9 @@ function submitNote(withoutNote: boolean): void {
 .task-origin-icon { flex: none; margin-top: 2px; color: var(--fg3); }
 .task-origin-body { min-width: 0; }
 .task-origin-line { margin: 0; overflow-wrap: anywhere; }
+/* Two sentences in a row — a delegated task and a linked one, or two links —
+   read as two lines, not one block. */
+.task-origin-line + .task-origin-line { margin-top: 2px; }
 .task-origin-link {
   color: var(--fg);
   font-weight: 650;

@@ -98,6 +98,55 @@ describe('proposals store filters', () => {
     expect(store.search).toBe('')
     expect(store.visibleRows('personal')).toHaveLength(3)
   })
+
+  describe('needs-you filter', () => {
+    function decided() {
+      const store = useProposalsStore()
+      store.rows = [
+        row({ id: 'you', decider: 'you' }),
+        row({ id: 'none' }),
+        row({ id: 'night', decider: 'nightly' }),
+        row({ id: 'w-you', workspace: 'work', decider: 'you' }),
+      ]
+      return store
+    }
+
+    it('needs-you shows undecided and decide:you rows, hides decide:nightly', () => {
+      const store = decided()
+      store.decideFilter = 'needs-you'
+
+      expect(store.visibleRows('personal').map(r => r.id)).toEqual(['you', 'none'])
+    })
+
+    it('needsYouCount counts over the workspace scope', () => {
+      const store = decided()
+      store.decideFilter = 'needs-you'
+
+      expect(store.needsYouCount('personal')).toBe(2)
+      expect(store.needsYouCount('work')).toBe(1)
+    })
+
+    it('resetFilters and revealRow clear the needs-you filter', () => {
+      const store = decided()
+      store.decideFilter = 'needs-you'
+      store.resetFilters()
+      expect(store.decideFilter).toBe('all')
+
+      store.decideFilter = 'needs-you'
+      store.revealRow('night')
+      expect(store.decideFilter).toBe('all')
+    })
+
+    it('needs-you does not hide history rows', () => {
+      const store = decided()
+      store.historyRows = [historyRow({ id: 'h1', workspace: 'personal' })]
+      const before = store.visibleHistory('personal').map(r => r.id)
+      store.decideFilter = 'needs-you'
+
+      expect(store.visibleHistory('personal').map(r => r.id)).toEqual(before)
+      expect(store.historyFiltersActive).toBe(false)
+    })
+  })
 })
 
 describe('post-mutation refresh', () => {
@@ -600,6 +649,38 @@ describe('sibling previews after an accept', () => {
     expect(store.previews.b?.revision).toBe('rev-2')
     expect(store.previews.c?.revision).toBe('rev-9')
     expect(vi.mocked(api.get).mock.calls.map(c => c[0])).not.toContain('/api/proposals/c/preview')
+  })
+})
+
+describe('decision reasons', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+  })
+
+  it('act sends reason only when one is given', async () => {
+    const store = useProposalsStore()
+    await store.act('p1', 'dismiss', '', { reason: 'one-off' })
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', { reason: 'one-off' })
+
+    await store.act('p1', 'dismiss')
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', {})
+
+    await store.act('p1', 'dismiss', '', { reason: '' })
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', {})
+  })
+
+  it('act with text, expectedRevision and reason sends all three', async () => {
+    const store = useProposalsStore()
+    await store.act('p1', 'accept', '', { expectedRevision: 'rev-1', text: 'Edited.', reason: 'not true' })
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/accept', {
+      expected_revision: 'rev-1',
+      text: 'Edited.',
+      reason: 'not true',
+    })
   })
 })
 

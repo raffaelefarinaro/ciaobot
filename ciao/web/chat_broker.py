@@ -84,11 +84,12 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
 
 
 QUEUE_DELIVERIES = frozenset({"queue", "steer"})
-#: Who the engine wrote an injected user turn for. Recorded per turn in
-#: ``ChatInfo.user_turn_origin`` and sent on ``user_echo`` / ``/messages`` so the
-#: PWA draws a notice card instead of a user bubble. Empty string = typed by the person.
+#: An engine-injected turn's source, or ``retry`` for a user-requested retry.
+#: Recorded per turn in ``ChatInfo.user_turn_origin`` and sent on
+#: ``user_echo`` / ``/messages`` so the PWA draws a notice card instead of a
+#: user bubble. Empty string = typed by the person.
 TURN_ORIGINS = frozenset({
-    "background_run", "cli_task_wake", "schedule", "task_delegation",
+    "background_run", "cli_task_wake", "retry", "schedule", "task_delegation",
     "task_resume", "webhook", "update_task",
 })
 # ``steer_id`` of an entry handed to ``steer_turn`` whose delivery id is not
@@ -111,14 +112,17 @@ def _flushed_entry(entry: dict) -> dict:
         flushed["origin"] = str(entry["origin"])
     if entry.get("send_id"):
         flushed["send_id"] = str(entry["send_id"])
+    if entry.get("send_ids"):
+        flushed["send_ids"] = list(entry["send_ids"])
     return flushed
 
 
 def shared_origin(entries: list[dict]) -> str:
     """The origin every entry carries, or "" if any entry lacks it or they differ.
 
-    A steered or combined message counts as engine-written only when all of it
-    is: a person's words mixed in must stay a visible bubble.
+    A steered or combined message retains an engine origin or user-requested
+    retry tag only when every entry shares it. Mixed-in ordinary typed words
+    must stay a visible bubble.
     """
     origins = {str(e.get("origin") or "") for e in entries}
     if len(origins) != 1:
@@ -402,6 +406,8 @@ def extract_file_touches(tool_name: str, tool_input: object) -> list[dict]:
 def normalize_file_touch_paths(
     touches: list[dict],
     workspace_root: Path | None = None,
+    *,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Canonicalise file-card paths and discard invalid surface requests.
 
@@ -414,10 +420,16 @@ def normalize_file_touch_paths(
     existing artifact was deliberately selected for preview. Its tool-use
     event arrives before the structured MCP result, so reject a missing target
     here instead of briefly painting a card for a request that will fail.
+
+    A relative tool path is the agent's cwd-relative path, so it resolves
+    against ``agent_root`` when given (else ``workspace_root``). The canonical
+    spelling stays relative to ``workspace_root``, which is what the viewer
+    endpoints anchor relative paths to.
     """
     if not touches:
         return touches
     root = workspace_root.resolve() if workspace_root is not None else None
+    base = agent_root.resolve() if agent_root is not None else root
     normalized: list[dict] = []
     seen: set[str] = set()
     for touch in touches:
@@ -427,21 +439,21 @@ def normalize_file_touch_paths(
             continue
         raw_path = Path(path_text.strip())
         target = raw_path
-        if not raw_path.is_absolute() and root is not None:
-            target = root / raw_path
+        if not raw_path.is_absolute() and base is not None:
+            target = base / raw_path
         try:
             resolved = target.resolve()
         except (OSError, RuntimeError):
             resolved = target
 
-        if item.get("action") == "surfaced" and root is not None:
+        if item.get("action") == "surfaced" and base is not None:
             # Match CiaoControlPlane._safe_relative: file_surface accepts only
             # existing files whose requested path is relative to, and resolves
             # inside, the active workspace.
             if raw_path.is_absolute():
                 continue
             try:
-                if not resolved.is_relative_to(root) or not resolved.is_file():
+                if not resolved.is_relative_to(base) or not resolved.is_file():
                     continue
             except OSError:
                 continue
@@ -451,8 +463,7 @@ def normalize_file_touch_paths(
             try:
                 canonical = resolved.relative_to(root).as_posix()
             except ValueError:
-                if raw_path.is_absolute():
-                    canonical = str(resolved)
+                canonical = str(resolved)
         item["file_path"] = canonical
         if canonical in seen:
             continue
@@ -464,6 +475,8 @@ def normalize_file_touch_paths(
 def refine_file_touch_actions(
     touches: list[dict],
     workspace_root: Path | None = None,
+    *,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Upgrade ``written`` → ``created`` when the path does not yet exist.
 
@@ -474,7 +487,9 @@ def refine_file_touch_actions(
         return touches
     root = workspace_root.resolve() if workspace_root is not None else None
     refined: list[dict] = []
-    for touch in normalize_file_touch_paths(touches, workspace_root):
+    for touch in normalize_file_touch_paths(
+        touches, workspace_root, agent_root=agent_root
+    ):
         item = dict(touch)
         action = item.get("action")
         path_text = item.get("file_path")
@@ -499,6 +514,7 @@ def apply_file_touches_to_payload(
     payload: dict,
     *,
     workspace_root: Path | None = None,
+    agent_root: Path | None = None,
 ) -> None:
     """Normalise ``file_touch`` / ``file_touches`` on a tool_use WS payload."""
     if payload.get("type") != "tool_use":
@@ -511,7 +527,9 @@ def apply_file_touches_to_payload(
         touches = [payload["file_touch"]]
     else:
         return
-    touches = refine_file_touch_actions(touches, workspace_root)
+    touches = refine_file_touch_actions(
+        touches, workspace_root, agent_root=agent_root
+    )
     if not touches:
         payload.pop("file_touch", None)
         payload.pop("file_touches", None)
@@ -650,6 +668,7 @@ class ChatStream:
         "_done",
         "prompt_text",
         "_pending",
+        "_draining",
         "_pending_id_seq",
         # Turn indexes of steers delivered into this turn; the drive loop
         # stamps them with the turn's completion time at the ResultEvent.
@@ -707,6 +726,10 @@ class ChatStream:
         # entry is {"id": str, "text": str, "images": list[str]} where images
         # are ref strings (resolved back to ImageAttachments at flush time).
         self._pending: list[dict] = []
+        # Entry currently removed by drain_one but not yet echoed, parked, or
+        # intentionally skipped. It remains an owner for WS idempotency while
+        # the drive loop awaits work such as a provider reload.
+        self._draining: list[dict] = []
         self._pending_id_seq = 0
         self.steered_turn_indexes: list[int] = []
         self.early_steer_deliveries: set[str] = set()
@@ -803,13 +826,29 @@ class ChatStream:
         """True when a queued entry already carries this client send id."""
         if not send_id:
             return False
-        return any(entry.get("send_id") == send_id for entry in self._pending)
+        return any(
+            entry.get("send_id") == send_id
+            or send_id in (entry.get("send_ids") or [])
+            for entry in [*self._pending, *self._draining]
+        )
 
     def drain_one(self) -> dict | None:
         """Return and remove the next queued message, or None if empty."""
         if not self._pending:
             return None
-        return _flushed_entry(self._pending.pop(0))
+        entry = _flushed_entry(self._pending.pop(0))
+        self._draining.append(entry)
+        return entry
+
+    def finish_drain_one(self, entry: dict) -> None:
+        """Release the idempotency owner once a drained entry changes state."""
+        self._draining = [current for current in self._draining if current is not entry]
+
+    def take_draining(self) -> list[dict]:
+        """Take entries left in the drain window for teardown parking."""
+        entries = self._draining
+        self._draining = []
+        return entries
 
     def drain_pending(self) -> list[dict]:
         """Return and clear any queued messages. Kept for compatibility."""
@@ -858,6 +897,10 @@ class ChatStream:
             }
             if entry.get("origin"):
                 d["origin"] = entry["origin"]
+            if entry.get("send_id"):
+                d["send_id"] = str(entry["send_id"])
+            if entry.get("send_ids"):
+                d["send_ids"] = list(entry["send_ids"])
             adopted.append(d)
         self._pending = [*adopted, *self._pending]
 

@@ -411,23 +411,23 @@ describe('ChatPanel action dock', () => {
 })
 
 
-describe('ChatPanel project context breadcrumb', () => {
+describe('ChatPanel project context', () => {
   beforeEach(() => {
     Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
   })
   afterEach(() => vi.restoreAllMocks())
 
-  it('links the project to its page and hides the workspace', async () => {
+  it('keeps the project name out of the chat title header', async () => {
     const { wrapper, store } = await mountPanel()
     expect(wrapper.find('.breadcrumb-workspace').exists()).toBe(false)
-    const project = wrapper.getComponent<typeof RouterLinkStub>('.breadcrumb-project')
-    expect(project.text()).toContain('Upwordo')
-    expect(project.props('to')).toBe(`/project/${store.projects[0].project_id}`)
+    expect(store.projects[0].name).toBe('Upwordo')
+    expect(wrapper.find('.breadcrumb-project').exists()).toBe(false)
+    expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(wrapper.find('#project-context-popup').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('drops the project control for the implicit General project', async () => {
+  it('keeps the project name out of the title header for General too', async () => {
     const { wrapper } = await mountPanel(store => {
       store.projects = [{ ...store.projects[0], name: 'General' }]
     })

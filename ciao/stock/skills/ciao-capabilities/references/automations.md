@@ -7,7 +7,7 @@
 - **Every N minutes** is `frequency="interval"` with `interval_minutes` (minimum 1). Combined with a chat it is what used to be called a loop, and behaves the same way: a run that comes due while the chat is still working is skipped and retried shortly after, never queued, and the cadence resumes after a restart rather than replaying what it missed. Combined with a project it opens a fresh chat each time.
 - **When to create one**: the agent creates automations conversationally when the user asks — this is an agent action, not a PWA-only button. Show a concise draft (cadence, next_run, target workspace, target project) and get confirmation before creating, unless the user already explicitly asked to apply it. Call `ciao schedule preview` first to validate. Ask which workspace/project when it isn't obvious from the request. An automation always belongs to one logical workspace and shows under Automations for that workspace.
 - Time-of-day runs that were due while the app was off are caught up on the next launch; each workspace shows how many it missed. A run that dispatched but stopped before it finished (a restart mid-turn, a killed model process) counts as missed too — it is recovered once on the next launch, and stays listed as missed if that recovery fails as well. A run that completed is never repeated. Interval runs are not replayed — their cadence just resumes.
-- System maintenance schedules ship with the app and appear on the Automations page next to the user's own. The **Session insights** switch in Settings → General stops the memory pass for newly archived chats.
+- System maintenance schedules ship with the app and appear on the Automations page next to the user's own.
 
 ## Webhook triggers (the other direction: events in, not times out)
 
@@ -34,7 +34,7 @@ the sender's own call is a short `curl` recipe in `PWA_API.md`.
   project, chat, model or permission mode.
 - **A webhook event is an ordinary new chat.** The turn it launches runs in the
   trigger's own project with the same permission mode and model a new chat gets
-  (Settings → Models & providers); there is no separate per-trigger mode. If it
+  (Settings → Providers); there is no separate per-trigger mode. If it
   needs an approval, that is an ordinary approval card waiting for you in
   **Needs-you**. If your new-chat default is bypass, webhook turns run in bypass
   too.

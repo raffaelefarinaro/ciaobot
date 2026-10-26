@@ -175,7 +175,9 @@ def test_setup_status_survives_a_deleted_working_directory(tmp_path, monkeypatch
 
     # A config without an explicit workspace_root has no root to fall back to,
     # but the payload must still be produced instead of raising.
-    bare = setup_status(SimpleNamespace(pwa_auth_token="test-token"), env={})
+    bare = setup_status(
+        SimpleNamespace(pwa_auth_token="test-token", suggested_workspace=None), env={}
+    )
     assert isinstance(bare["checks"], list)
     assert "providers" in bare
 
@@ -597,6 +599,8 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app).get("/api/setup-status")
@@ -635,6 +639,8 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -697,6 +703,8 @@ def _finish_client(tmp_path) -> TestClient:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
     return TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
@@ -733,7 +741,7 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     assert [w["name"] for w in registry] == ["life"]
     assert registry[0]["vault_root"] == "life/memory-vault"
     # Setup links no Google account: which accounts exist is the user's choice,
-    # made in Settings → Workspaces after onboarding.
+    # made in Settings → Manage workspaces after onboarding.
     assert registry[0]["gws_profile"] == ""
 
 
@@ -926,6 +934,8 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -1011,6 +1021,8 @@ def test_setup_finish_handoff_goes_through_the_backend(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
@@ -1073,6 +1085,8 @@ def test_setup_finish_requires_workspace(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
@@ -1085,8 +1099,8 @@ def test_setup_finish_requires_workspace(tmp_path) -> None:
 
 
 def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
-    """Without an explicit vault_root the vault is created inside the
-    workspace as memory-vault/ and everything is one git repo at the root."""
+    """Without an explicit vault_root the vault is created inside memory-vault/;
+    setup does not initialize Git history without explicit consent."""
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -1094,6 +1108,8 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     workspace = tmp_path / "workspace"
@@ -1113,9 +1129,19 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_ROOT=memory-vault" in env_text
     assert (workspace / "personal" / "memory-vault" / "MEMORY.md").is_file()
-    # One repo at the install root; the nested vault is never double-inited.
-    assert (workspace / ".git").is_dir()
+    assert not (workspace / ".git").exists()
     assert not (workspace / "personal" / "memory-vault" / ".git").exists()
+
+
+def test_setup_finish_existing_notes_does_not_create_initial_commit(tmp_path) -> None:
+    from ciao import cli
+
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "ideas.md").write_text("private\n", encoding="utf-8")
+    cli.setup_workspace(notes, vault_mode="existing", confirm_repoint=True)
+    assert not (notes / ".git").exists()
+    assert (notes / "ideas.md").read_text(encoding="utf-8") == "private\n"
 
 
 def test_setup_finish_accepts_0000_host(tmp_path) -> None:
@@ -1127,6 +1153,8 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://0.0.0.0:8443", client=_LOOPBACK_PEER).post(
@@ -1162,6 +1190,8 @@ def test_setup_finish_refuses_a_protected_folder_without_a_host(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     workspace = home / "Documents" / "ws"
 
@@ -1189,6 +1219,8 @@ def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
@@ -1208,6 +1240,8 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
 
     resp = TestClient(app, base_url="https://ciao.example").post(
@@ -1234,6 +1268,8 @@ def test_setup_routes_refuse_a_lan_peer_claiming_localhost(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
 
@@ -1271,6 +1307,8 @@ def _folder_picker_client(
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
+    app.state.installer_bootstrap = False
+    app.state.installer_run_id = None
     app.state.serializer = serializer
     return TestClient(app, base_url=base_url, client=peer)
 
@@ -2568,3 +2606,22 @@ def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) 
         assert len(calls) == 2
     finally:
         probe.cache_clear()
+
+
+def test_setup_status_reports_the_installer_folder_suggestion(tmp_path) -> None:
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        bootstrap_mode=True,
+        suggested_workspace=tmp_path / "notes",
+    )
+
+    assert setup_status(config, env={})["suggested_workspace"] == str(tmp_path / "notes")
+
+
+def test_setup_status_has_no_suggestion_on_a_configured_install(tmp_path) -> None:
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+
+    assert setup_status(config, env={})["suggested_workspace"] is None

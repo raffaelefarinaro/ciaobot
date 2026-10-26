@@ -34,6 +34,7 @@ def _events_app() -> Starlette:
         background_agent_counts={},
         background_runs={},
         chat_pin_states={},
+        chat_terminal_offer_states={},
         events=SimpleNamespace(attach=_IdleSubscription),
     )
     return app
@@ -69,6 +70,60 @@ def test_ws_rejects_cross_origin() -> None:
             pass
 
 
+def test_ws_rejects_a_scheme_mismatch() -> None:
+    """The handshake's origin has to carry the engine's own scheme.
+
+    The engine serves plain http here, so an `https` origin is a different
+    origin even when the host and the port match.
+    """
+    client = _signed_client(_events_app())
+
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with client.websocket_connect(
+            "/ws/events", headers={"Origin": "https://testserver"}
+        ):
+            pass
+    assert refused.value.code == 4003
+
+    # The same host and the same port, only the scheme differs: the port
+    # cannot carry the refusal on its own.
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with client.websocket_connect(
+            "/ws/events",
+            headers={
+                "Host": "testserver:8443",
+                "Origin": "https://testserver:8443",
+            },
+        ):
+            pass
+    assert refused.value.code == 4003
+
+    with client.websocket_connect(
+        "/ws/events", headers={"Origin": "http://testserver"}
+    ) as ws:
+        assert ws.receive_json()["type"] == "snapshot"
+
+
+def test_ws_accepts_a_tls_terminated_origin_behind_a_proxy() -> None:
+    """A TLS-terminating proxy presents ws; the browser origin is https.
+
+    The proxy declares the public host in `X-Forwarded-Host` and keeps it in
+    `Host` as well, so the origin host is the request host too: the
+    proxy-declared host carries the match, not the scheme the engine sees.
+    """
+    client = _signed_client(_events_app())
+
+    with client.websocket_connect(
+        "/ws/events",
+        headers={
+            "Host": "app.example",
+            "X-Forwarded-Host": "app.example",
+            "Origin": "https://app.example",
+        },
+    ) as ws:
+        assert ws.receive_json()["type"] == "snapshot"
+
+
 def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> None:
     # A `chat_streaming_done` in the gap between the snapshot and the
     # subscription was lost, leaving the client's spinner on forever.
@@ -87,6 +142,7 @@ def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> Non
         background_agent_counts={},
         background_runs={},
         chat_pin_states={},
+        chat_terminal_offer_states={},
         events=hub,
     )
     with _signed_client(app).websocket_connect(
@@ -111,6 +167,7 @@ def test_snapshot_failure_detaches_the_events_subscription() -> None:
         background_agent_counts={},
         background_runs={},
         chat_pin_states={},
+        chat_terminal_offer_states={},
         events=hub,
     )
     with pytest.raises(KeyError):
@@ -219,3 +276,62 @@ def test_pin_event_is_delivered_to_two_subscribers(tmp_path: Path) -> None:
             }
             assert first.receive_json() == expected
             assert second.receive_json() == expected
+
+
+def test_events_snapshot_carries_the_active_terminal_offers(tmp_path: Path) -> None:
+    """The snapshot lists the chats that have an offer, and only those.
+
+    The map is sparse and complete: it replaces the client's cache, so a
+    chat that is missing from it has no offer. A chat with no offer must
+    not appear with an empty value, or "cleared" and "never offered" would
+    look like two different states.
+    """
+    app = _real_events_app(tmp_path)
+    manager = app.state.project_chat_manager
+    project = manager.create_project("Offers", workspace="work")
+    offered = manager.create_chat(project.project_id, title="Offered")
+    quiet = manager.create_chat(project.project_id, title="Quiet")
+    payload = manager.set_terminal_offer(offered.chat_id, "npm install -g ciao")
+
+    with _signed_client(app).websocket_connect(
+        "/ws/events", headers={"Origin": "http://testserver"}
+    ) as ws:
+        snapshot = ws.receive_json()
+
+    assert snapshot["type"] == "snapshot"
+    assert snapshot["chat_terminal_offers"] == {offered.chat_id: payload}
+    assert quiet.chat_id not in snapshot["chat_terminal_offers"]
+
+
+def test_a_cleared_terminal_offer_announces_null_and_leaves_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    """The clear is an event with a null payload, and the map empties.
+
+    The event carries the complete state rather than a delta, so a client
+    that missed the offer still converges; and the next snapshot has no
+    entry, because the map replaces the cache.
+    """
+    app = _real_events_app(tmp_path)
+    manager = app.state.project_chat_manager
+    project = manager.create_project("Offers", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Offered")
+    payload = manager.set_terminal_offer(chat.chat_id, "npm install -g ciao")
+
+    client = _signed_client(app)
+    with client.websocket_connect(
+        "/ws/events", headers={"Origin": "http://testserver"}
+    ) as ws:
+        assert ws.receive_json()["type"] == "snapshot"
+        manager.dismiss_terminal_offer(chat.chat_id, payload["id"])
+        assert ws.receive_json() == {
+            "type": "chat_terminal_offer_changed",
+            "chat_id": chat.chat_id,
+            "terminal_offer": None,
+        }
+
+    with client.websocket_connect(
+        "/ws/events", headers={"Origin": "http://testserver"}
+    ) as ws:
+        snapshot = ws.receive_json()
+    assert snapshot["chat_terminal_offers"] == {}

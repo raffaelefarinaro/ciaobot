@@ -23,6 +23,12 @@ from ciao.web.project_chats import ProjectChatManager, _CAPABILITY_IMAGE_MSG
 from tests.conftest import attach_stub_mcp
 
 
+# How long a whole fake turn may take before the test fails instead of
+# hanging. Only a hang guard: nothing here measures speed, and a healthy turn
+# finishes in milliseconds. 2s timed out on a loaded Windows runner (#1862).
+_TURN_TIMEOUT_S = 30.0
+
+
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -146,7 +152,7 @@ async def test_preflight_question_shape_and_cancel(tmp_path: Path, monkeypatch) 
                 chat.chat_id, request_id=q["request_id"], action="cancel"
             ),
         ),
-        timeout=2.0,
+        timeout=_TURN_TIMEOUT_S,
     )
 
     questions = [e for e in events if e.get("type") == "model_capability_question"]
@@ -216,7 +222,7 @@ async def test_preflight_switch_redispatches_on_picked_model(tmp_path: Path, mon
                 model_id="test/sees",
             ),
         ),
-        timeout=2.0,
+        timeout=_TURN_TIMEOUT_S,
     )
 
     # Dispatched exactly once, on the picked model.
@@ -264,7 +270,7 @@ async def test_preflight_picker_closes_cleanly(tmp_path: Path, monkeypatch) -> N
                 chat.chat_id, request_id=q["request_id"], action="picker"
             ),
         ),
-        timeout=2.0,
+        timeout=_TURN_TIMEOUT_S,
     )
 
     assert drive_calls == []
@@ -296,7 +302,7 @@ async def test_preflight_timeout_closes_turn_with_bubble(tmp_path: Path, monkeyp
     pcm._drive_stream = fake_drive  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "what is this?", images=[_img(tmp_path)])
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=_TURN_TIMEOUT_S)
 
     assert any(e.get("type") == "model_capability_question" for e in events)
     status = [e for e in events if e.get("type") == "status"]
@@ -327,7 +333,7 @@ async def test_preflight_skips_without_images(tmp_path: Path, monkeypatch) -> No
     pcm._drive_stream = fake_drive  # type: ignore[assignment]
 
     stream = pcm.start_stream(chat.chat_id, "hello there")
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=_TURN_TIMEOUT_S)
 
     assert seen == [_TEXT_ONLY]
     assert not any(e.get("type") == "model_capability_question" for e in events)
@@ -352,7 +358,7 @@ async def test_preflight_unattended_never_blocks(tmp_path: Path, monkeypatch) ->
     stream = pcm.start_stream(
         chat.chat_id, "what is this?", images=[_img(tmp_path)], unattended=True
     )
-    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+    events = await asyncio.wait_for(_consume(stream), timeout=_TURN_TIMEOUT_S)
 
     assert not any(e.get("type") == "model_capability_question" for e in events)
     status = [e for e in events if e.get("type") == "status"]

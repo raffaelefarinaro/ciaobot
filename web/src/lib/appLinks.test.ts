@@ -8,7 +8,13 @@ vi.mock('../router', () => ({ router: { push, currentRoute } }))
 const openTask = vi.hoisted(() => vi.fn((_id: string) => undefined))
 vi.mock('../stores/itemPeek', () => ({ useItemPeekStore: () => ({ openTask }) }))
 
-import { handleAppLinkClick, isAppRouteHref, parseTaskHref, parseWorkspaceFileAccessHref } from './appLinks'
+import {
+  handleAppLinkClick,
+  isAppRouteHref,
+  parseChatHref,
+  parseTaskHref,
+  parseWorkspaceFileAccessHref,
+} from './appLinks'
 
 const ID = '0123456789abcdef0123456789abcdef'
 
@@ -28,8 +34,9 @@ const PAGES = [
   '/memory/history',
   '/settings',
   '/settings/home',
+  '/settings/workspace',
   '/settings/workspaces',
-  '/settings/models',
+  '/settings/providers',
   '/settings/skills',
   '/settings/subagents',
   '/settings/commands',
@@ -70,11 +77,16 @@ describe('isAppRouteHref', () => {
       // The app's own "How to install" link (`HomeSetupCard.vue`) uses this
       // shorter spelling of the same destination.
       '/settings#install-app',
-      '/settings/models#chat-providers',
+      '/settings/providers#chat-providers',
       '/settings/workspaces#new-workspace',
     ]) {
       expect(isAppRouteHref(href), href).toBe(true)
     }
+  })
+
+  it('still treats /settings/workspaces as an app link', () => {
+    expect(isAppRouteHref('/settings/workspaces')).toBe(true)
+    expect(isAppRouteHref('/settings/workspaces#new-workspace')).toBe(true)
   })
 
   it('knows a task address by its full record id only', () => {
@@ -100,9 +112,10 @@ describe('isAppRouteHref', () => {
       '/settings/',
       '/memory/',
       '/settings/unknown',
-      '/settings/providers',
+      '/settings/models',
+      '/settings/models#chat-providers',
       '/settings?tab=models',
-      '/settings/models?effort=high',
+      '/settings/providers?effort=high',
       '/settings/workspaces#install-app',
       '/settings/home#new-workspace',
       '/memory/review#top',
@@ -153,7 +166,7 @@ describe('a workspace File access link', () => {
       '/settings/workspaces?workspace=personal',
       '/settings/workspaces#file-access',
       '/settings/workspaces/?workspace=personal#file-access',
-      '/settings/models?workspace=personal#file-access',
+      '/settings/providers?workspace=personal#file-access',
       `https://example.com/settings/workspaces?workspace=personal#file-access`,
       `//example.com/settings/workspaces?workspace=personal#file-access`,
       '/settings/workspaces?workspace=../api/x#file-access',
@@ -176,6 +189,61 @@ describe('parseTaskHref', () => {
     ]) {
       expect(parseTaskHref(href), href).toBeNull()
     }
+  })
+})
+
+// A reference to another conversation is a link into the app: it opens the
+// chat in this tab, in the same window the reader is already in.
+describe('a chat address', () => {
+  const CHAT = 'chat-0123abcd'
+
+  it('knows a chat by its exact id', () => {
+    expect(isAppRouteHref(`/chat/${CHAT}`)).toBe(true)
+    expect(parseChatHref(`/chat/${CHAT}`)).toBe(CHAT)
+  })
+
+  it('rejects a malformed or extended chat address', () => {
+    for (const href of [
+      '/chat/chat-0123abcde',
+      '/chat/chat-0123abcd1',
+      '/chat/chat-0123ABCD',
+      '/chat/chat-1',
+      '/chat/chat-0123abcd/extra',
+      '/chat/chat-0123abcd?tab=1',
+      '/chat/chat-0123abcd#top',
+      '/chat',
+      '/chat/',
+      `https://example.com/chat/${CHAT}`,
+      `//example.com/chat/${CHAT}`,
+    ]) {
+      expect(parseChatHref(href), href).toBeNull()
+      expect(isAppRouteHref(href), href).toBe(false)
+    }
+  })
+
+  it('routes a plain click to the chat in place', async () => {
+    const a = anchor(`/chat/${CHAT}`)
+    const event = click(a.querySelector('strong')!)
+    expect(handleAppLinkClick(event)).toBe(true)
+    expect(event.defaultPrevented).toBe(true)
+    await vi.waitFor(() => expect(push).toHaveBeenCalledWith(`/chat/${CHAT}`))
+    // A chat is not a task: no peek, just the conversation.
+    expect(openTask).not.toHaveBeenCalled()
+  })
+
+  it('leaves a modified click and the middle button to the browser', () => {
+    for (const init of [
+      { metaKey: true },
+      { ctrlKey: true },
+      { shiftKey: true },
+      { altKey: true },
+      { button: 1 },
+    ]) {
+      const event = click(anchor(`/chat/${CHAT}`), init)
+      expect(handleAppLinkClick(event), JSON.stringify(init)).toBe(false)
+      expect(event.defaultPrevented).toBe(false)
+    }
+    expect(push).not.toHaveBeenCalled()
   })
 })
 

@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -48,7 +49,6 @@ from ciao.providers.opencode import (
     _summarize_tool_input as _summarize_opencode_tool_input,
 )
 from ciao.rate_limits import is_rate_limit_telemetry
-from ciao.web import chat_service
 from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 
 logger = logging.getLogger(__name__)
@@ -203,6 +203,7 @@ def _failed_tool_use_ids(msgs: list) -> set[str]:
 def _extract_assistant_blocks(
     raw: object,
     workspace_root: Path | None = None,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
@@ -258,6 +259,7 @@ def _extract_assistant_blocks(
             touches = normalize_file_touch_paths(
                 extract_file_touches(name, tinput),
                 workspace_root,
+                agent_root=agent_root,
             )
             entry = {"kind": "tool_use", "name": name, "summary": summary}
             # Kept so the history builder can match this call against its
@@ -678,7 +680,13 @@ def _overlay_assistant_timings(
 
 
 def _render_opencode_thread(
-    thread: dict, chat, *, metadata: bool = True, start_user_idx: int = 0
+    thread: dict,
+    chat,
+    *,
+    metadata: bool = True,
+    start_user_idx: int = 0,
+    workspace_root: Path | None = None,
+    agent_root: Path | None = None,
 ) -> list[dict]:
     """Render opencode session messages into the provider-neutral PWA row shape.
 
@@ -692,6 +700,9 @@ def _render_opencode_thread(
 
     ``start_user_idx`` offsets per-session user numbering when stitching
     ``previous_session_ids``.
+
+    ``workspace_root`` and ``agent_root`` normalise file-card paths the way the
+    Claude replay does (see :func:`normalize_file_touch_paths`).
     """
     messages = thread.get("messages")
     if not isinstance(messages, list):
@@ -787,7 +798,11 @@ def _render_opencode_thread(
                 state = part.get("state")
                 state = state if isinstance(state, dict) else {}
                 raw_input = state.get("input")
-                touches = _opencode_file_touches(tool, raw_input)
+                touches = normalize_file_touch_paths(
+                    _opencode_file_touches(tool, raw_input) or [],
+                    workspace_root,
+                    agent_root=agent_root,
+                )
                 if str(state.get("status") or "") == "error":
                     # A failed/denied write or edit reached nothing on disk:
                     # match the live path (and the Claude replay path) by
@@ -814,54 +829,6 @@ def _render_opencode_thread(
     if metadata:
         _overlay_assistant_timings(result, chat.user_turn_timings)
     return result
-
-
-def _opencode_child_status(
-    messages: list,
-    info: dict | None = None,
-    active: bool | None = None,
-) -> str:
-    """A V2 child session's lifecycle state.
-
-    ``/api/session/active`` is authoritative for the current execution;
-    ``Session.Info.outcome`` describes only the previous completed execution.
-    Normalized projected messages remain a defensive fallback for sparse data.
-    """
-    if active is True:
-        return "running"
-    last: dict | None = None
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        message_info = message.get("info")
-        if isinstance(message_info, dict) and message_info.get("role") == "assistant":
-            last = message_info
-    if last is not None:
-        if last.get("error"):
-            return "failed"
-        time_info = last.get("time")
-        if (
-            isinstance(time_info, dict)
-            and time_info.get("created")
-            and not time_info.get("completed")
-        ):
-            return "running"
-    if isinstance(info, dict):
-        outcome = str(info.get("outcome") or "")
-        if outcome == "failed":
-            return "failed"
-        if outcome in {"succeeded", "interrupted"}:
-            return "completed"
-        if active is None:
-            # A read from a different OpenCode process cannot establish
-            # inactivity. Keep an unobserved child visible/running rather than
-            # allowing an archive or schedule waiter to settle it early.
-            return "running"
-    if active is False:
-        return "completed"
-    if active is None and isinstance(info, dict):
-        return "running"
-    return "completed"
 
 
 def _opencode_child_duration_ms(info: dict) -> int | None:
@@ -911,6 +878,303 @@ def _opencode_child_turn_index(info: dict, chat) -> int:
         if sent_ms <= created_ms and idx > best:
             best = idx
     return best
+
+
+def _stamp_user_turn(
+    entry: dict,
+    chat: Any,
+    turn_index: int,
+    raw_message: Any,
+    fallback_sent_at: str = "",
+) -> None:
+    """Stamp the index-derived fields for one user row.
+
+    ``raw_message`` is the SDK message object, needed only for the inline-image
+    fallback on a session row; ``fallback_sent_at`` is the durable turn's own
+    timestamp, used only when ``user_turn_timings`` has no send time.
+
+    The fields this helper owns are cleared before stamping, so re-stamping a
+    row with the turn index it really belongs to cannot leave the previous
+    turn's flags on it. Images are always re-derived from this turn's refs (or
+    the session message's inline blocks), never kept from the row's old index.
+    """
+    for key in ("images", "sent_at", "steered", "unattended", "origin"):
+        entry.pop(key, None)
+    # Image refs are recorded per user-turn index at send time. JSON keys are
+    # strings, but tolerate int lookups too in case the map has been mutated
+    # in-memory since the last save.
+    refs = chat.user_turn_images.get(str(turn_index))
+    if refs is None:
+        refs = chat.user_turn_images.get(turn_index)
+    if refs:
+        entry["images"] = list(refs)
+    elif raw_message is not None:
+        # Fall back to inline base64 images from the SDK session. This handles
+        # sessions that were context-compacted: the user_turn_images index map
+        # becomes stale after compaction shifts the turn numbering, but inline
+        # images survive.
+        inline = _extract_inline_images(raw_message)
+        if inline:
+            entry["images"] = inline
+    # Surface the user-turn index so the client can dedup replayed user_echo
+    # events against history it already loaded.
+    entry["turn_index"] = turn_index
+    # Attach the persisted send time so the UI footer can show it on reload.
+    # Missing for pre-feature chats: the frontend treats an empty string as
+    # "no timestamp".
+    timing = chat.user_turn_timings.get(str(turn_index)) or chat.user_turn_timings.get(turn_index)
+    sent_at = timing.get("sent_at") if isinstance(timing, dict) else ""
+    if not sent_at:
+        sent_at = fallback_sent_at
+    if sent_at:
+        entry["sent_at"] = sent_at
+    # Loop/schedule ticks are user turns in the session file too, so the flag
+    # has to come from our own per-turn record.
+    if chat.user_turn_steered.get(str(turn_index)) or chat.user_turn_steered.get(turn_index):
+        entry["steered"] = True
+    elif chat.user_turn_unattended.get(str(turn_index)) or chat.user_turn_unattended.get(turn_index):
+        entry["unattended"] = True
+    origin = chat.user_turn_origin.get(str(turn_index)) or chat.user_turn_origin.get(turn_index)
+    if origin:
+        entry["origin"] = origin
+
+
+def _align_user_turns(
+    result: list[dict],
+    session_user_rows: list[tuple[int, str, Any]],
+    current_rows: list[dict],
+    chat: Any,
+) -> tuple[list[dict], list[tuple[dict, int]]]:
+    """Align rendered session user rows with the durable transcript's turns.
+
+    This module numbers user rows by their position in the provider session,
+    while the engine numbers turns per send. A send that died before the
+    provider recorded anything is absent from the session, so every later
+    session row inherited its ``turn_index``, its ``sent_at`` and its per-turn
+    flags. The durable transcript does hold that turn (``is_error`` on its
+    assistant row), so walk both lists in order, count the durable turns the
+    session cannot show, and number the rows positionally from ``base``.
+
+    Numbering positionally is what keeps the common shapes untouched: with no
+    lost turn the session's own ``base + position`` is already the engine's
+    numbering for steered and post-handover rows alike. The counts decide what
+    a mismatch means: of the sends the session is short of, ``lost`` turns
+    explain some, and whatever is left can only be a *different* text for a
+    send the session does hold — an engine-rewritten prompt (an attachment's
+    ``ciao-drop:`` refs expanded into absolute paths), which consumes its
+    session row instead of taking a turn number of its own.
+
+    A durable file also holds turns that are not counted sends at all: our own
+    hidden continuation prompts are written by ``record_turn`` without bumping
+    ``user_turn_count`` and are hidden by the renderer, so they are dropped
+    before the walk.
+
+    Only an *error* durable turn with no session counterpart is rendered as a
+    lost turn.
+
+    It also returns the text pairing, as ``(rendered user row, durable user
+    row index)``, so the metadata overlay can follow it.
+    """
+    durable = [
+        (index, row)
+        for index, row in enumerate(current_rows)
+        if row.get("role") == "user"
+    ]
+    # Continuation prompts are recorded as turns but never counted as sends and
+    # never rendered, so they own no turn index.
+    durable = [
+        (index, row)
+        for index, row in durable
+        if not cli_envelopes.is_hidden_continuation(str(row.get("content") or ""))
+    ]
+    if not durable or not session_user_rows:
+        return result, []
+    base = chat.turn_index_base
+    # The durable file belongs to a provider stint: a handover leaves the
+    # previous provider's file on disk, so it can hold turns this chat no
+    # longer renders. A steer bumps `user_turn_count` without writing a durable
+    # turn, so it is subtracted from how many durable turns the current stint
+    # can have. `count == 0` is the older-state/test-double case: nothing is
+    # sliced.
+    count = int(getattr(chat, "user_turn_count", 0) or 0)
+    expected = 0
+    if count:
+        steered = sum(
+            1
+            for key in getattr(chat, "user_turn_steered", {})
+            if int(key) >= base and int(key) < count
+        )
+        expected = (count - base) - steered
+        if expected <= 0:
+            # Nothing this stint can be aligned against.
+            return result, []
+        if expected < len(durable):
+            durable = durable[-expected:]
+    durable_texts = [
+        " ".join(str(row.get("content") or "").split()) for _index, row in durable
+    ]
+    session_texts = [
+        " ".join(text.split()) for _pos, text, _message in session_user_rows
+    ]
+
+    def failed_turn(index: int) -> bool:
+        """Whether the durable reply to the turn at ``index`` is an error row."""
+        if index + 1 >= len(current_rows):
+            return False
+        reply = current_rows[index + 1]
+        return reply.get("role") == "assistant" and bool(reply.get("is_error"))
+
+    def lost_turn_rows(abs_turn: int, index: int, row: dict) -> list[dict]:
+        """The two durable rows for a send the provider never recorded."""
+        user_row: dict = {
+            "role": "user",
+            "content": row.get("content") or "",
+            "turn_index": abs_turn,
+            "sent_at": str(row.get("sent_at") or ""),
+        }
+        refs = chat.user_turn_images.get(str(abs_turn))
+        if refs is None:
+            refs = chat.user_turn_images.get(abs_turn)
+        if refs:
+            user_row["images"] = list(refs)
+        return [user_row, {**current_rows[index + 1], "is_error": True}]
+
+    def has_session_counterpart(text: str, start: int) -> bool:
+        """Whether any session user row from ``start`` on carries this text.
+
+        A durable transcript can hold fewer turns than the session — a chat
+        whose recording starts partway through, or a store that was reset. Its
+        turn indices are then relative to that shorter list, so re-stamping a
+        session row from them would misnumber it. Only a turn with no
+        counterpart at all may be counted, which keeps this path from ever
+        duplicating the session rows it holds.
+        """
+        return text in session_texts[start:]
+
+    def run_length(texts: list[str], start: int) -> int:
+        """How many consecutive rows from ``start`` carry the same text."""
+        length = 0
+        while start + length < len(texts) and texts[start + length] == texts[start]:
+            length += 1
+        return length
+
+    durable_counts = Counter(durable_texts)
+    session_counts = Counter(session_texts)
+
+    def is_lost_like(position: int) -> bool:
+        """An error turn whose identical-text run outnumbers the session's."""
+        index, _row = durable[position]
+        text = durable_texts[position]
+        return failed_turn(index) and durable_counts[text] > session_counts[text]
+
+    # How many sends the session is short of, and how many of those the error
+    # turns explain. What is left can only be a non-error turn the session
+    # cannot show.
+    surplus = max(0, expected - len(session_user_rows)) if count else 0
+    missing = max(0, surplus - sum(1 for p in range(len(durable)) if is_lost_like(p)))
+
+    pairs: list[tuple[int, int, dict]] = []
+    # Durable turns the session cannot render, in durable order: the session
+    # position they sit before, "lost" (a failed send to render) or "skipped"
+    # (a turn that only consumes an index), their index in ``current_rows`` and
+    # the durable row itself.
+    shifts: list[tuple[int, str, int, dict]] = []
+    session_pos = 0
+    for position, (index, row) in enumerate(durable):
+        text = durable_texts[position]
+        if session_pos >= len(session_user_rows):
+            # The session ended first: a failed turn still earns a row, and a
+            # non-error turn takes an index only when one is genuinely missing.
+            if failed_turn(index):
+                shifts.append((len(session_user_rows), "lost", index, row))
+            elif missing > 0:
+                missing -= 1
+                shifts.append((len(session_user_rows), "skipped", index, row))
+            continue
+        if (
+            text != session_texts[session_pos]
+            and not failed_turn(index)
+            and has_session_counterpart(text, session_pos)
+        ):
+            # The session holds sends the durable store never recorded (a send
+            # that never reached record_turn). They own no durable turn, so
+            # move past them to this turn's own row before pairing it. A failed
+            # turn keeps the fall-through so the run-length and lost-turn logic
+            # decide.
+            session_pos = session_texts.index(text, session_pos)
+        if text == session_texts[session_pos]:
+            # `retryFromError` re-sends the same text after a failure, so a run
+            # of identical texts has to align from the RIGHT: the failed send
+            # keeps its row, and the retry keeps the index the engine counted
+            # for it. Equal-length runs (a genuine repeat, or several sends
+            # that all reached the provider) pair one-to-one as before.
+            if failed_turn(index) and run_length(durable_texts, position) > run_length(
+                session_texts, session_pos
+            ):
+                shifts.append((session_pos, "lost", index, row))
+                continue
+            pairs.append((session_pos, index, row))
+            session_pos += 1
+        elif not has_session_counterpart(text, session_pos):
+            # A failed send is the case the whole path exists for: the session
+            # cannot hold it, so it owns its row and its index.
+            if failed_turn(index):
+                shifts.append((session_pos, "lost", index, row))
+                continue
+            if count == 0:
+                # Older state with no counter: the file's own length is the
+                # only evidence, so a missing turn takes an index.
+                shifts.append((session_pos, "skipped", index, row))
+                continue
+            if missing > 0:
+                missing -= 1
+                shifts.append((session_pos, "skipped", index, row))
+                continue
+            # No send is missing here: this durable turn is an engine-rewritten
+            # prompt (attachment refs expanded into paths), so it is the SAME
+            # send as the session row at the cursor. Consume that row so a
+            # later lost turn anchors after it.
+            if session_pos < len(session_user_rows):
+                pairs.append((session_pos, index, row))
+                session_pos += 1
+    shift_anchors = [anchor for anchor, _kind, _index, _row in shifts]
+
+    def shifts_up_to(position: int) -> int:
+        return sum(1 for anchor in shift_anchors if anchor <= position)
+
+    paired_by_position = {position: row for position, _index, row in pairs}
+    for position, (rendered_at, _text, message) in enumerate(session_user_rows):
+        paired = paired_by_position.get(position)
+        _stamp_user_turn(
+            result[rendered_at],
+            chat,
+            base + position + shifts_up_to(position),
+            raw_message=message,
+            fallback_sent_at=str((paired or {}).get("sent_at") or ""),
+        )
+    paired_rows = [
+        (result[session_user_rows[position][0]], index) for position, index, _row in pairs
+    ]
+    insertions: list[tuple[int, list[dict]]] = []
+    for ordinal, (anchor, kind, index, row) in enumerate(shifts):
+        if kind != "lost":
+            continue
+        target = (
+            session_user_rows[anchor][0]
+            if anchor < len(session_user_rows)
+            else len(result)
+        )
+        # The shift entries ahead of this one (all at the same or an earlier
+        # anchor) already own the turn numbers before it.
+        insertions.append(
+            (target, lost_turn_rows(base + anchor + ordinal, index, row))
+        )
+    # Anchors are non-decreasing along the walk, so inserting from the highest
+    # one down keeps the earlier positions valid; within one anchor the last
+    # lost entry goes in first to keep the durable order.
+    for target, rows in reversed(insertions):
+        result[target:target] = rows
+    return result, paired_rows
 
 
 def _overlay_transcript_metadata(
@@ -963,6 +1227,75 @@ def _overlay_transcript_metadata(
                 entries[index][key] = source[key]
 
 
+def _overlay_paired_metadata(
+    entries: list[dict],
+    transcript_rows: list[dict],
+    paired: list[tuple[dict, int]],
+) -> None:
+    """Copy each paired durable turn's reply metadata onto its session turn.
+
+    ``paired`` is ``_align_user_turns``' text pairing: a rendered user row and
+    the index of the durable user row it matched. The durable reply is the row
+    after it; the target is the last assistant row before the next user row,
+    which is where the turn footer reads its usage.
+    """
+    durable_for = {id(row): index for row, index in paired}
+    current: int | None = None
+    last_assistant: dict | None = None
+
+    def flush() -> None:
+        if current is None or last_assistant is None:
+            return
+        if current + 1 >= len(transcript_rows):
+            return
+        source = transcript_rows[current + 1]
+        if source.get("role") != "assistant":
+            return
+        for key in ("usage", "quota", "effective_model"):
+            if source.get(key):
+                last_assistant[key] = source[key]
+
+    for row in entries:
+        if row.get("role") == "user":
+            flush()
+            current = durable_for.get(id(row))
+            last_assistant = None
+        elif row.get("role") == "assistant":
+            last_assistant = row
+    flush()
+
+
+def _stamp_archive_turn_indices(rows: list[dict], chat) -> None:
+    """Give archived user rows the ``turn_index`` the live transcript uses.
+
+    Hidden continuation turns are already dropped from ``rows`` and carry no
+    index. Steered indices bump ``user_turn_count`` without a user row, so they
+    are skipped. Counting back from ``user_turn_count`` keeps the newest rows
+    right when earlier rows belong to a previous provider stint (below
+    ``turn_index_base``); those get no index.
+    """
+    base = chat.turn_index_base
+    count = chat.user_turn_count
+    steered = {int(key) for key in chat.user_turn_steered}
+    user_rows = [row for row in rows if row.get("role") == "user"]
+    if count > 0:
+        idx = count - 1
+        for row in reversed(user_rows):
+            while idx in steered:
+                idx -= 1
+            if idx < base:
+                break
+            row["turn_index"] = idx
+            idx -= 1
+    else:
+        idx = base
+        for row in user_rows:
+            while idx in steered:
+                idx += 1
+            row["turn_index"] = idx
+            idx += 1
+
+
 def _messages_from_archived_transcript(
     pcm,
     config,
@@ -983,12 +1316,12 @@ def _messages_from_archived_transcript(
             archive_path,
         )
         return None
-    parsed = pcm._parse_transcript_messages(text)
-    parsed = chat_service._normalize_handover_messages(parsed)
+    parsed: list[dict] = pcm._parse_transcript_messages(text)
     # Map transcript timestamp field to the frontend's sent_at key.
     for parsed_entry in parsed:
         if "timestamp" in parsed_entry and "sent_at" not in parsed_entry:
             parsed_entry["sent_at"] = parsed_entry["timestamp"]
+    _stamp_archive_turn_indices(parsed, chat)
     _overlay_assistant_timings(parsed, chat.user_turn_timings)
     return parsed
 
@@ -1128,7 +1461,11 @@ async def _assemble_chat_messages(
                 if not opencode_thread:
                     continue
                 segment = _render_opencode_thread(
-                    opencode_thread, chat, start_user_idx=start_user_idx
+                    opencode_thread,
+                    chat,
+                    start_user_idx=start_user_idx,
+                    workspace_root=config.workspace_root,
+                    agent_root=session_root,
                 )
             except Exception:  # noqa: BLE001 — one missing segment must not blank siblings
                 continue
@@ -1222,12 +1559,18 @@ async def _assemble_chat_messages(
         return list(handover_messages)
 
     user_idx = chat.turn_index_base
+    # Every user row this session rendered, with the text the durable
+    # transcript is compared against and the SDK message its images can be
+    # re-derived from: a send that died before the provider wrote it shifts
+    # this numbering off the durable one.
+    session_user_rows: list[tuple[int, str, Any]] = []
     failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         if m.type == "assistant":
             blocks = _extract_assistant_blocks(
                 m.message,
                 workspace_root=config.workspace_root,
+                agent_root=session_root,
             )
             # Drop the CLI's "No response requested." sentinel that marks
             # interrupted turns. If the message contained ONLY that sentinel
@@ -1390,40 +1733,8 @@ async def _assemble_chat_messages(
             "content": content,
         }
         if m.type == "user":
-            # Image refs are recorded per user-turn index at send time. JSON
-            # keys are strings, but tolerate int lookups too in case the map
-            # has been mutated in-memory since the last save.
-            refs = chat.user_turn_images.get(str(user_idx))
-            if refs is None:
-                refs = chat.user_turn_images.get(user_idx)
-            if refs:
-                entry["images"] = list(refs)
-            else:
-                # Fall back to inline base64 images from the SDK session.
-                # This handles sessions that were context-compacted: the
-                # user_turn_images index map becomes stale after compaction
-                # shifts the turn numbering, but inline images survive.
-                inline = _extract_inline_images(m.message)
-                if inline:
-                    entry["images"] = inline
-            # Surface the user-turn index so the client can dedup replayed
-            # user_echo events against history it already loaded.
-            entry["turn_index"] = user_idx
-            # Attach the persisted send time so the UI footer can show it on
-            # reload. Missing for pre-feature chats: the frontend treats an
-            # empty string as "no timestamp".
-            timing = chat.user_turn_timings.get(str(user_idx)) or chat.user_turn_timings.get(user_idx)
-            if timing and timing.get("sent_at"):
-                entry["sent_at"] = timing["sent_at"]
-            # Loop/schedule ticks are user turns in the session file too, so the
-            # flag has to come from our own per-turn record.
-            if chat.user_turn_steered.get(str(user_idx)) or chat.user_turn_steered.get(user_idx):
-                entry["steered"] = True
-            elif chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
-                entry["unattended"] = True
-            origin = chat.user_turn_origin.get(str(user_idx)) or chat.user_turn_origin.get(user_idx)
-            if origin:
-                entry["origin"] = origin
+            _stamp_user_turn(entry, chat, user_idx, m.message)
+            session_user_rows.append((len(result), content, m.message))
             user_idx += 1
         result.append(entry)
     # Stitch the durable transcript's per-turn metadata (token usage with the
@@ -1434,7 +1745,15 @@ async def _assemble_chat_messages(
     current = pcm._transcripts.current_messages(
         ChatContext.for_web(chat_id), provider
     )
+    # Number the session rows from the durable turns they pair with, and
+    # render the failed turns the session cannot contain. Metadata follows the
+    # same text pairing; the positional overlay is only for chats the alignment
+    # could not pair.
+    result, paired = _align_user_turns(result, session_user_rows, current, chat)
     if current and result:
-        _overlay_transcript_metadata(result, current)
+        if paired:
+            _overlay_paired_metadata(result, current, paired)
+        else:
+            _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
     return [*handover_messages, *result]

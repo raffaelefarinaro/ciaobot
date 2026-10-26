@@ -5,7 +5,7 @@ import {
   PopoverRoot,
   PopoverTrigger,
 } from 'reka-ui'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
 
 export interface ModelSection {
   key: string
@@ -33,6 +33,14 @@ interface Props {
   // image-capability card's "Open picker" to land the user on the current
   // backend instead of the full cross-provider list.
   filterSection?: string
+  // Ids of a heading and a description rendered in the header slot, so the
+  // listbox and its search field can name and explain the picker instead of
+  // leaving that text visual-only. With a trigger, `labelledBy` is also the
+  // id of the row label that names the picker (Settings "Default model"), so
+  // a screen reader hears "Default model, Engine default (sonnet)" instead of
+  // two look-alike buttons named only by their current value (#1924).
+  labelledBy?: string
+  describedBy?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -45,6 +53,8 @@ const props = withDefaults(defineProps<Props>(), {
   placement: 'bottom-start',
   activeModels: () => [],
   triggerless: false,
+  labelledBy: '',
+  describedBy: '',
 })
 
 const emit = defineEmits<{
@@ -55,6 +65,12 @@ const emit = defineEmits<{
 
 const open = ref(false)
 const query = ref('')
+// The trigger's visible value, so its accessible name can be the row label
+// followed by the current model rather than the label alone.
+const triggerLabelId = useId()
+const triggerLabelledBy = computed(() =>
+  props.labelledBy ? `${props.labelledBy} ${triggerLabelId}` : undefined,
+)
 const rootRef = ref<HTMLElement | null>(null)
 const triggerRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
@@ -331,9 +347,10 @@ onMounted(() => {
           :disabled="disabled"
           :title="triggerLabel"
           :aria-expanded="popoverVisible"
+          :aria-labelledby="triggerLabelledBy"
           aria-haspopup="listbox"
         >
-          <span class="model-selector__label">{{ triggerLabel }}</span>
+          <span :id="triggerLabelId" class="model-selector__label">{{ triggerLabel }}</span>
           <span class="model-selector__chevron" aria-hidden="true">▾</span>
         </button>
       </PopoverTrigger>
@@ -359,6 +376,7 @@ onMounted(() => {
             class="model-selector__listbox"
           role="listbox"
           :aria-multiselectable="multiple"
+          :aria-labelledby="labelledBy || undefined"
         >
           <div v-if="$slots.header" class="model-selector__header">
             <slot name="header" />
@@ -371,6 +389,7 @@ onMounted(() => {
               type="text"
               class="model-selector__search"
               placeholder="Search models"
+              :aria-describedby="describedBy || undefined"
               @keydown="onKeydown"
             />
           </div>
@@ -403,6 +422,7 @@ onMounted(() => {
                 }"
                 :data-model="model"
                 :data-section="section.key"
+                :title="model"
                 :disabled="section.disabled"
                 role="option"
                 :aria-selected="isActive(model)"

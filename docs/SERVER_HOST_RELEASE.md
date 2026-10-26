@@ -26,17 +26,17 @@ engine version:
 | `arch` | `universal` |
 | `filename` | `ciaobot-server-host-macos-universal-v1.tar.gz` |
 | `bundle_id` | `local.ciaobot.server` |
-| `host_revision` | `3` |
+| `host_revision` | `4` |
 | `host_protocol` | `2` |
 
 `host_revision` and `host_protocol` are the host's own revision, never the
 engine release version. `publish.yml` currently rebuilds the archive on every
 release, so its `sha256` and `size` (computed from the bytes that release
 serves) and the host's CDHash can differ between releases that share revision
-`3`; whether to reuse one archive across releases is still open. The selector
+`4`; whether to reuse one archive across releases is still open. The selector
 accepts a host entry only when the platform, arch, filename, bundle id,
 revision, protocol and positive size all match exactly; `host_revision`/`host_protocol` reject a boolean, so `True`
-cannot stand in for revision `3`.
+cannot stand in for revision `4`.
 
 ## Wheel-only releases remain supported
 
@@ -123,6 +123,12 @@ revision-2 host it can prove is ours (`ciao/server_host_install.py`), restoring
 the old bundle and the old record if the replacement fails. The installer warns
 once that macOS will ask again for Accessibility and Automation, because those
 grants are tied to the exact signed bytes.
+
+Revision 4 (#1642) changes only the host's startup stop handling: the launch
+reads a private signal queue, so a stop that arrives just before the launch
+still prevents the spawn. The sealed bytes change, so the installer replaces a
+revision-2 (v1.6.0) or revision-3 (v1.6.1) host the same way and the user is warned
+once. The revision-2 allowance is removed one release after revision 4 ships.
 
 ## What this does not do
 

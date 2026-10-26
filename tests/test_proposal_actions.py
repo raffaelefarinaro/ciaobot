@@ -351,3 +351,44 @@ def test_a_dismissal_records_no_receipt(tmp_path: Path) -> None:
     )
 
     assert read_decisions(queue)[0]["receipt_id"] == ""
+
+
+def test_a_dismissal_records_its_reason(tmp_path: Path) -> None:
+    from ciao.memory_proposals import read_decisions
+
+    queue = _queue(tmp_path)
+    proposal_actions.record_decision(
+        queue,
+        action="dismiss",
+        text="Ada prefers plain text.",
+        kind="memory",
+        via="pwa",
+        proposal_id="abc",
+        reason="already known",
+    )
+
+    decisions = read_decisions(queue)
+    assert decisions[0]["action"] == "dismissed"
+    assert decisions[0]["reason"] == "already known"
+
+
+def test_an_edited_accept_records_its_reason_and_receipt(tmp_path: Path) -> None:
+    from ciao.memory_proposals import read_decisions
+
+    queue = _queue(tmp_path)
+    proposal_actions.record_decision(
+        queue,
+        action="accept",
+        text="Ada prefers plain text.",
+        kind="memory",
+        via="pwa",
+        destination="ciao:memory",
+        outcome="written",
+        proposal_id="abc",
+        receipt_id="rcpt-1",
+        reason="yes, everywhere",
+    )
+
+    decisions = read_decisions(queue)
+    assert decisions[0]["reason"] == "yes, everywhere"
+    assert decisions[0]["receipt_id"] == "rcpt-1"

@@ -177,32 +177,32 @@ def _target(tmp_path: Path) -> Path:
     return tmp_path / "Applications" / APP_NAME
 
 
-def _make_superseded_bundle(root: Path) -> Path:
+def _make_superseded_bundle(root: Path, revision: int = 3) -> Path:
     """A host bundle of the superseded revision, with the old identity fields."""
     bundle = root / APP_NAME
     (bundle / "Contents" / "MacOS").mkdir(parents=True)
     (bundle / "Contents" / "Resources").mkdir(parents=True)
     (bundle / "Contents" / "_CodeSignature").mkdir(parents=True)
-    (bundle / _EXE_REL).write_bytes(b"revision-two-host-binary")
+    (bundle / _EXE_REL).write_bytes(b"revision-three-host-binary")
     (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
     (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
     info = BUILD.bundle_info()
-    info["CFBundleVersion"] = "2"
-    info["CFBundleShortVersionString"] = "2"
-    info[BUILD.HOST_PROTOCOL_KEY] = 1
+    info["CFBundleVersion"] = str(revision)
+    info["CFBundleShortVersionString"] = str(revision)
+    info[BUILD.HOST_PROTOCOL_KEY] = server_host.SUPERSEDED_HOST_PROTOCOLS[revision]
     with (bundle / _PLIST_REL).open("wb") as handle:
         plistlib.dump(info, handle)
     return bundle
 
 
-def _write_superseded_record(path: Path, bundle: Path) -> Path:
-    """The owner-only record a revision-2 installation would have written."""
+def _write_superseded_record(path: Path, bundle: Path, revision: int = 3) -> Path:
+    """The owner-only record a revision-3 installation would have written."""
     document: dict[str, Any] = {
         "schema": 1,
         "bundle_path": os.fspath(bundle),
         "bundle_id": BUNDLE_ID,
-        "host_revision": 2,
-        "host_protocol": 1,
+        "host_revision": revision,
+        "host_protocol": server_host.SUPERSEDED_HOST_PROTOCOLS[revision],
         "executable_sha256": hashlib.sha256(
             (bundle / _EXE_REL).read_bytes()
         ).hexdigest(),
@@ -555,20 +555,21 @@ def test_install_refuses_a_revision_one_host_without_touching_it(
 
 
 @requires_posix_uid
-def test_install_replaces_a_superseded_revision_two_host(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("revision", [2, 3])
+def test_install_replaces_a_superseded_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: int
 ) -> None:
     # The upgrade path for the revision bump (#1659). Without it the bump
-    # silently de-installs the host on every existing Mac: the revision-2
+    # silently de-installs the host on every existing Mac: a superseded
     # record is refused, the installer says "a host already exists", and the
     # engine install continues without a host at all.
     monkeypatch.setattr(sys, "platform", "darwin")
     archive, _bundle, entry = _fixture(tmp_path)
     target = _target(tmp_path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    old_bundle = _make_superseded_bundle(target.parent)
+    old_bundle = _make_superseded_bundle(target.parent, revision)
     record = _write_superseded_record(
-        tmp_path / "records" / "server-host.json", old_bundle
+        tmp_path / "records" / "server-host.json", old_bundle, revision
     )
     old_exe = (old_bundle / _EXE_REL).read_bytes()
     runner = _FakeRunner()
@@ -578,7 +579,7 @@ def test_install_replaces_a_superseded_revision_two_host(
     )
 
     # The new host is in place, and the record vouches for it.
-    assert snapshot.host_revision == 3
+    assert snapshot.host_revision == 4
     assert snapshot.bundle_path == os.path.realpath(target)
     assert (target / _EXE_REL).read_bytes() == b"universal-host-binary"
     assert read_host_ownership(record) == snapshot
@@ -714,8 +715,8 @@ def test_install_refuses_a_host_it_cannot_prove_it_owns(
                 "schema": 1,
                 "bundle_path": os.fspath(tmp_path / "elsewhere" / APP_NAME),
                 "bundle_id": BUNDLE_ID,
-                "host_revision": 2,
-                "host_protocol": 1,
+                "host_revision": 3,
+                "host_protocol": 2,
                 "executable_sha256": "a" * 64,
                 "per_arch_cdhashes": dict(_CDHASH),
                 "bundle_files": {
@@ -1293,7 +1294,7 @@ def test_select_skips_a_host_this_engine_cannot_install(
     # verify_manifest follows. The selector's refusal becomes a spoken skip.
     future = _host_entry(
         filename="ciaobot-server-host-macos-universal-v2.tar.gz",
-        host_revision=4,
+        host_revision=5,
         host_protocol=3,
     )
     manifest, signature = _signed_manifest(tmp_path, future)

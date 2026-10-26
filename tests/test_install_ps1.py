@@ -295,6 +295,14 @@ def _ciao_argument_lists() -> list[list[str]]:
                 _ps1_list(base.group(1)) + [t for group in extra for t in _ps1_list(group)]
             )
             continue
+        if line.startswith("$bootstrapArgs"):
+            calls.append([
+                "run", "--installer-bootstrap", "--installer-run-id", "RUN_ID",
+            ])
+            continue
+        if line.startswith("@('installer', 'activate'"):
+            calls.append(["installer", "activate", "--run-id", "RUN_ID", "--json"])
+            continue
         # The list literal is what the engine is given; the trailing `$true`/
         # `$false` is Invoke-Native's own $Quiet argument, not part of the call.
         array = re.search(r"@\(.*\)", line)
@@ -894,3 +902,124 @@ def test_format_command_parses_back_to_the_same_arguments() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.splitlines() == [program, *arguments]
+
+
+def _fresh_path() -> str:
+    start = SCRIPT_TEXT.index("if ($freshInstall) {")
+    return SCRIPT_TEXT[start:SCRIPT_TEXT.index("# The workspace is never removed by this script", start)]
+
+
+def test_fresh_install_warns_about_a_held_port_before_the_wizard() -> None:
+    fresh = _fresh_path()
+    probe = fresh.index("if (Test-PortInUse $DefaultPort)")
+    assert probe < fresh.index("$bootstrap = Invoke-Native")
+    # A warning, as install-engine.sh prints: Advanced setup can pick another port.
+    sentence = "Choose another port in Advanced setup, or free port $DefaultPort before completing setup."
+    assert sentence in fresh
+    assert "Choose another port in Advanced setup, or free port $port before completing setup." in SH_TEXT
+
+
+def test_fresh_install_reports_running_only_once_the_engine_answers() -> None:
+    fresh = _fresh_path()
+    # The port is the wizard's, from the verified activation result.
+    assert "$freshPort = [int]$activatedPort" in fresh
+    assert "Get-FreshStartupState $freshPort $Version" in fresh
+    assert "localhost:8443" not in fresh
+    ready = fresh.index("if ($freshReady) {")
+    running = fresh.index("Ciaobot is running from the folder you chose.")
+    not_answering = fresh.index("but Ciaobot is not answering yet.")
+    assert fresh.index("Get-FreshStartupState") < ready < running < not_answering
+    assert "throw 'Ciaobot did not answer after setup'" in fresh[not_answering:]
+    for sentence in (
+        "Ciaobot is running from the folder you chose. Return to the browser tab to finish onboarding.",
+        "Setup is saved in the folder you chose, but Ciaobot is not answering yet.",
+    ):
+        assert sentence in fresh
+        assert sentence in SH_TEXT
+
+
+def test_fresh_startup_state_requires_the_installed_engine_and_a_finished_bind() -> None:
+    body = _ps1_function("Get-FreshStartupState")
+    assert "[string]$status.version -ne $ExpectedVersion" in body
+    assert "'server_starting'" in body
+    assert "$status.overall_ready -eq $true" in body
+    assert "return 'port_in_use'" in body
+    # The same rule as install-engine.sh's fresh_startup_state.
+    assert 'bind = by_name.get("server_starting", {})' in SH_TEXT
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs Windows PowerShell 5.1")
+def test_port_probe_sees_a_listener_on_one_interface() -> None:
+    import socket
+
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    port = held.getsockname()[1]
+    free = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    free.bind(("127.0.0.1", 0))
+    free_port = free.getsockname()[1]
+    free.close()
+    probe = (
+        _ps1_function("Test-PortInUse")
+        + f"\nTest-PortInUse {port}\nTest-PortInUse {free_port}\n"
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", probe],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    finally:
+        held.close()
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["True", "False"]
+
+
+def test_windows_on_arm_installs_an_x64_engine() -> None:
+    # cryptography ships no win_arm64 wheel, so every uv call that builds or
+    # runs Python asks for x64. Unconditionally: an emulated x64 PowerShell
+    # (started from Git Bash) reports an Arm64 OS as X64.
+    assert '$PythonRequest = "cpython-$PythonVersion-windows-x86_64-none"' in SCRIPT_TEXT
+    assert "OSArchitecture" not in SCRIPT_TEXT
+    assert not re.search(r"--python'?,? \$PythonVersion\b", SCRIPT_TEXT)
+    assert SCRIPT_TEXT.count("$PythonRequest") >= 4  # the assignment and three uv calls
+
+
+def test_signed_in_check_uses_the_account_domain_not_userdomain() -> None:
+    # OpenSSH sets USERDOMAIN=WORKGROUP for a local account, so comparing it
+    # with the session's domain said "nobody is signed in" while the account
+    # was at the console, and skipped the readiness wait (#2051).
+    assert "return [CiaobotSessions]::SignedIn([Environment]::UserDomainName, [Environment]::UserName)" in SCRIPT_TEXT
+    assert "$env:USERDOMAIN" not in SCRIPT_TEXT
+
+
+def test_reinstall_stops_the_running_engine_before_replacing_its_environment() -> None:
+    # Windows will not delete a file a running process holds: a re-run over a
+    # running install failed in `uv tool install --force` with "Access is
+    # denied" halfway through removing the live environment (#2051).
+    stop = SCRIPT_TEXT.index("if ($toolWasInstalled) {\n            $runningToolDir")
+    block = SCRIPT_TEXT[stop:SCRIPT_TEXT.index("# ADDS: tool", stop)]
+    assert "Invoke-Schtasks @('/End', '/TN', $TaskName)" in block
+    assert "Wait-EngineStopped $runningToolDir $runningPort" in block
+    assert stop < SCRIPT_TEXT.index("$installed = Invoke-Native $uv @('tool', 'install'")
+    # Only after the release verified: a bad download never stops the engine.
+    assert SCRIPT_TEXT.index("release manifest verification failed") < stop
+
+
+def test_rerun_without_workspace_keeps_the_recorded_workspace() -> None:
+    # The wizard can choose any folder, so a repair run without -Workspace has
+    # to use the one the install state records, not the default name (#2051).
+    recorded = SCRIPT_TEXT.index("$recordedInstall = Read-InstallState")
+    default = SCRIPT_TEXT.index(
+        "if (-not $Workspace) { $Workspace = Join-Path $env:USERPROFILE $DefaultWorkspaceName }"
+    )
+    assert recorded < default
+    assert recorded > SCRIPT_TEXT.index("$workspaceWasSuggested = [bool]$Workspace")
+    assert recorded < SCRIPT_TEXT.index("$freshInstall = ")
+
+
+def test_install_state_is_read_as_the_utf8_it_is_written_in() -> None:
+    # 5.1 reads a BOM-less file as ANSI, so a non-ASCII workspace came back as
+    # mojibake and a repair or uninstall acted on a path that does not exist.
+    assert "New-Object System.Text.UTF8Encoding($false)" in SCRIPT_TEXT
+    assert "Get-Content -LiteralPath $StateFile -Raw -Encoding UTF8" in SCRIPT_TEXT

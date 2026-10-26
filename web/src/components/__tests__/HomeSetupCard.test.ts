@@ -46,6 +46,13 @@ function hasButton(view: VueWrapper, label: string): boolean {
   return view.findAll('button').some((b) => b.text() === label)
 }
 
+/** The one navigation link that points at `to`, wherever the card put it. */
+function linkTo(view: VueWrapper, to: string) {
+  const match = view.findAllComponents(RouterLinkStub).find((l) => l.props('to') === to)
+  if (!match) throw new Error(`no link to ${to}`)
+  return match
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   state.pushEnabled = false
@@ -84,6 +91,44 @@ describe('HomeSetupCard', () => {
     expect(hasButton(view, 'Enable')).toBe(true)
   })
 
+  it('uses quiet row labels for the three setup tasks', async () => {
+    const view = await mountCard()
+
+    // A task name, not a heading: one plain label per row.
+    expect(view.findAll('.home-setup-label').map(l => l.text())).toEqual([
+      'Install the app',
+      'Turn on notifications',
+      'Use on your phone',
+    ])
+    expect(view.findAll('.home-setup-steps strong')).toHaveLength(0)
+  })
+
+  it('places install help in the action column as a real link', async () => {
+    const view = await mountCard()
+
+    const help = linkTo(view, '/settings#install-app')
+    const row = view.find('.home-setup-step')
+    const hint = row.find('.hint')
+    expect(hint.exists()).toBe(true)
+    // The help sits in the row's action column, not inside the hint text.
+    expect(hint.element.contains(help.element)).toBe(false)
+    expect(help.element.parentElement).toBe(row.element)
+    // A navigation link, dressed as a quiet bordered action: never a primary.
+    expect(help.classes()).toContain('home-setup-action')
+    expect(help.classes()).not.toContain('btn-primary')
+  })
+
+  it('keeps notification enable primary and help neutral', async () => {
+    const view = await mountCard()
+
+    expect(button(view, 'Enable').classes()).toContain('btn-primary')
+    for (const to of ['/settings#install-app', '/settings/access#other-devices']) {
+      const help = linkTo(view, to)
+      expect(help.classes(), to).toContain('home-setup-action')
+      expect(help.classes(), to).not.toContain('btn-primary')
+    }
+  })
+
   it('says the app is already installed when Chromium reports it to a tab', async () => {
     installedOnDevice.value = true
     state.pushEnabled = true
@@ -111,6 +156,7 @@ describe('HomeSetupCard', () => {
     expect(hasButton(view, 'Install')).toBe(true)
     // Instructions are for the browsers without a prompt; this one has one.
     expect(view.text()).not.toContain('Install option in the address bar or menu')
+    expect(view.findAllComponents(RouterLinkStub).some(l => l.props('to') === '/settings#install-app')).toBe(false)
 
     await button(view, 'Install').trigger('click')
     await flushPromises()
@@ -297,8 +343,23 @@ describe('HomeSetupCard', () => {
     expect(view.text()).toContain('Install Tailscale')
     expect(view.text()).toContain('Add to Home Screen')
     expect(
-      view.findAllComponents(RouterLinkStub).some(l => l.props('to') === '/settings#other-devices'),
+      view.findAllComponents(RouterLinkStub).some(l => l.props('to') === '/settings/access#other-devices'),
     ).toBe(true)
+  })
+
+  it('keeps phone instructions behind a closed disclosure', async () => {
+    const view = await mountCard()
+
+    const disclosure = view.find('details.home-setup-phone')
+    expect(disclosure.exists()).toBe(true)
+    expect(disclosure.attributes('open')).toBeUndefined()
+    // The row still says what it is; the instructions wait behind the summary.
+    expect(disclosure.find('summary').text()).toBe('Use on your phone')
+    expect(view.text()).toContain('Install Tailscale')
+    expect(view.text()).toContain('Make Ciaobot reachable from the phone')
+    expect(view.text()).toContain('Add to Home Screen')
+    const phone = linkTo(view, '/settings/access#other-devices')
+    expect(phone.element.closest('details')?.classList.contains('home-setup-phone')).toBe(true)
   })
 
   it('hides the phone setup row on a remote browser', async () => {

@@ -15,6 +15,9 @@ from ciao import provider_registry
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
 MessagePhase = Literal["commentary", "final_answer"]
 
+# Title a chat carries until auto-title (or the user) names it.
+DEFAULT_CHAT_TITLE = "New Chat"
+
 
 @dataclass(slots=True)
 class ProviderSessionData:
@@ -152,8 +155,19 @@ class AgentRequest:
     # ``ciao.fs_sandbox``). ``agent_roots`` are the resolved directories a
     # workspace-scoped turn may read and write: the agent root first, then the
     # workspace vault root, de-duplicated. Machine scope ignores both.
+    # ``agent_read_only`` are files a workspace-scoped turn may read but never
+    # write: the runtime's re-rooting receipt and workspace registry, so the
+    # agent's own `ciao` CLI resolves the same paths as the engine (#1945).
+    # Machine scope ignores it.
     agent_fs_scope: str = "machine"
     agent_roots: tuple[str, ...] = ()
+    agent_read_only: tuple[str, ...] = ()
+    # Workspace scope only (#1968): ``agent_denied`` is the resolved ``secrets``
+    # directory when it lies inside a granted root, hidden from the agent;
+    # ``agent_denied_except`` is the linked account's directory inside it,
+    # re-allowed read-write. Empty when ``secrets`` is not covered by a root.
+    agent_denied: tuple[str, ...] = ()
+    agent_denied_except: tuple[str, ...] = ()
     # Resolved path of the project's linked git repository ("" = none). Both
     # providers load its skills and allow it in every filesystem scope; it is
     # fixed when the provider process starts.

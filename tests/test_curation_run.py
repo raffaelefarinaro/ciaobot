@@ -23,7 +23,7 @@ import pytest
 
 from ciao import curation_run as cr
 from ciao import memory_receipts as mr
-from ciao import skill_proposals
+from ciao import skill_proposals, task_decisions
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.learning_records import (
     LearningRecord,
@@ -348,12 +348,11 @@ def test_guide_review_is_weekly_but_not_a_required_hygiene_key(
     assert cr.read_last_full_pass(vault / cr.CURATION_LOG_RELATIVE) == "2026-09-01"
 
 
-def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:
-    """`[memory]`/`[profile]` rows stay queued for the user by contract.
+def test_unpredicted_region_facts_are_predict_work(tmp_path: Path) -> None:
+    """`[memory]`/`[profile]` rows with no verdict on file are work: to predict one.
 
-    Counting them as work would make a workspace with one pending
-    cross-project fact look busy every night forever, and the run would spend
-    a model turn re-reading a row it is forbidden to act on.
+    They are still never acted on at handover off; the run only records what it
+    would do, so the operator's agreement number has something to measure.
     """
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
@@ -372,7 +371,10 @@ def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:
         today=date(2026, 9, 19),
     )
 
-    assert worklist.empty
+    assert not worklist.empty
+    proposals = [item for item in worklist.items if item.pass_id == cr.PASS_PROPOSALS]
+    assert len(proposals) == 1
+    assert len(proposals[0].keys) == 2
 
 
 def test_proposals_sharing_one_sentence_are_separate_work(tmp_path: Path) -> None:
@@ -2880,3 +2882,244 @@ def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> Non
     assert "references/curation-pass-4b-observations.md" in prompt
     for command in ("ciao observation-propose", "ciao observation-merge", "ciao observation-prune"):
         assert command in observations
+
+
+def test_rules_pass_planned_only_when_weekly_due_and_stale(tmp_path: Path) -> None:
+    """The decision-rules pass rides the weekly marker and needs fresh operator decisions."""
+    from ciao import decision_rules
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+
+    def plan(last: str) -> dict[str, cr.WorklistItem]:
+        _fresh_log(vault, last_full_pass=last)
+        return {
+            item.pass_id: item
+            for item in cr.build_worklist(
+                vault_root=vault,
+                workspace=vault.name,
+                guide_path=guide,
+                category_registry=_categories(vault),
+                workspace_dir=tmp_path,
+                today=date(2026, 9, 19),
+            ).items
+        }
+
+    assert cr.PASS_RULES not in plan("2026-09-01")
+    for index in range(5):
+        task_decisions.append_decision(
+            vault,
+            kind="delete",
+            task_id=f"t{index}",
+            task_title="x",
+            task_created_by="agent",
+            project_id="",
+            attempt_id="",
+            attempt_state="",
+            actor="user",
+            via="pwa",
+            reason="",
+            now=datetime(2026, 9, 10, tzinfo=UTC),
+        )
+    item = plan("2026-09-01")[cr.PASS_RULES]
+    assert item.weekly is True
+    assert item.keys == (decision_rules.progress_key("task"),)
+    assert set(item.keys).isdisjoint(cr.REQUIRED_HYGIENE_KEYS)
+    assert cr.PASS_RULES not in plan("2026-09-18")
+    assert cr.PASS_ORDER.index(cr.PASS_GUIDE) < cr.PASS_ORDER.index(cr.PASS_RULES) < cr.PASS_ORDER.index(cr.PASS_LOGS)
+
+
+def test_the_care_prompt_names_the_rules_pass_and_pass1_read() -> None:
+    prompt = next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+    assert "## 7b. Distill decision rules" in prompt
+    assert prompt.index("## 7. ") < prompt.index("## 7b. ") < prompt.index("## 8. ")
+    assert "references/curation-pass-7b-decision-rules.md" in prompt
+    assert "Workspace/Memory-Review-Rules.md` if it exists" in prompt
+    assert len(prompt.encode("utf-8")) <= 8192
+
+
+# ── decider ────────────────────────────────────────────────────────────────
+
+
+def _worklist_for_queue(
+    tmp_path: Path,
+    queue_text: str,
+    *,
+    handover: str = "off",
+    predictions: tuple[tuple[str, str, str], ...] = (),
+    dismissed_at: str | None = None,
+) -> "cr.Worklist":
+    import json
+
+    from ciao import proposal_predictions
+    from ciao.memory_proposals import dismissed_log_path
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    (vault / cr.PROPOSALS_RELATIVE).write_text(
+        "# Memory proposals\n\n" + queue_text, encoding="utf-8", newline=""
+    )
+    for kind, text, verdict in predictions:
+        proposal_predictions.record_prediction(
+            vault / cr.PROPOSALS_RELATIVE,
+            kind=kind,
+            text=text,
+            verdict=verdict,
+            reason="because",
+        )
+    if dismissed_at is not None:
+        # Every queued fact was decided (and re-queued) after its prediction.
+        decided = [text for _kind, text, _verdict in predictions]
+        dismissed_log_path(vault / cr.PROPOSALS_RELATIVE).write_text(
+            "".join(
+                json.dumps({"dismissed_at": dismissed_at, "kind": "memory", "text": text}) + "\n"
+                for text in decided
+            ),
+            encoding="utf-8",
+        )
+    return cr.build_worklist(
+        handover=handover,
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+
+def test_decide_you_rows_are_not_nightly_work(tmp_path: Path) -> None:
+    """An escalated row waits for the operator; a nightly or undecided one is work."""
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    escalated = _worklist_for_queue(tmp_path / "a", "- [people Mo] x  _(decide: you; r)_\n")
+    assert escalated.empty
+    nightly = _worklist_for_queue(tmp_path / "b", "- [people Mo] x  _(decide: nightly; r)_\n")
+    assert not nightly.empty
+    region = _worklist_for_queue(tmp_path / "c", "- [memory] x  _(decide: nightly; r)_\n")
+    assert not region.empty
+
+
+def _proposal_keys(worklist: "cr.Worklist") -> tuple[str, ...]:
+    for item in worklist.items:
+        if item.pass_id == cr.PASS_PROPOSALS:
+            return item.keys
+    return ()
+
+
+def test_a_predicted_region_fact_is_not_work_when_handover_is_off(tmp_path: Path) -> None:
+    worklist = _worklist_for_queue(
+        tmp_path,
+        "- [memory] x\n",
+        handover="off",
+        predictions=(("memory", "x", "dismiss"),),
+    )
+    assert worklist.empty
+
+
+def test_a_predicted_dismiss_is_act_work_for_dismiss_and_all(tmp_path: Path) -> None:
+    for name, handover in (("a", "dismiss"), ("b", "all")):
+        (tmp_path / name).mkdir()
+        worklist = _worklist_for_queue(
+            tmp_path / name,
+            "- [memory] x\n",
+            handover=handover,
+            predictions=(("memory", "x", "dismiss"),),
+        )
+        assert len(_proposal_keys(worklist)) == 1
+
+
+def test_a_predicted_accept_is_act_work_only_for_all(tmp_path: Path) -> None:
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    for name, handover, expected in (("a", "off", 0), ("b", "dismiss", 0), ("c", "all", 1)):
+        worklist = _worklist_for_queue(
+            tmp_path / name,
+            "- [memory] x\n",
+            handover=handover,
+            predictions=(("memory", "x", "accept"),),
+        )
+        assert len(_proposal_keys(worklist)) == expected
+
+
+def test_decide_you_region_row_is_predicted_but_never_acted_on(tmp_path: Path) -> None:
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    row = "- [memory] x  _(decide: you; r)_\n"
+    unpredicted = _worklist_for_queue(tmp_path / "a", row, handover="all")
+    assert len(_proposal_keys(unpredicted)) == 1
+    predicted = _worklist_for_queue(
+        tmp_path / "b", row, handover="all", predictions=(("memory", "x", "accept"),)
+    )
+    assert predicted.empty
+
+
+def test_region_row_key_changes_between_predict_and_act_stage(tmp_path: Path) -> None:
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    predict = _worklist_for_queue(tmp_path / "a", "- [memory] x\n", handover="all")
+    act = _worklist_for_queue(
+        tmp_path / "b",
+        "- [memory] x\n",
+        handover="all",
+        predictions=(("memory", "x", "accept"),),
+    )
+    assert _proposal_keys(predict) != _proposal_keys(act)
+    assert len(_proposal_keys(predict)) == len(_proposal_keys(act)) == 1
+
+
+def test_a_requeued_region_fact_with_a_stale_prediction_is_predict_work_again(
+    tmp_path: Path,
+) -> None:
+    """The operator dismissed it after the verdict was recorded; the old verdict is void."""
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    row = "- [memory] x\n"
+    acting = _worklist_for_queue(
+        tmp_path / "a", row, handover="all", predictions=(("memory", "x", "accept"),)
+    )
+    requeued = _worklist_for_queue(
+        tmp_path / "b",
+        row,
+        handover="all",
+        predictions=(("memory", "x", "accept"),),
+        dismissed_at="2999-01-01T00:00:00+00:00",
+    )
+
+    assert len(_proposal_keys(acting)) == 1  # act:accept
+    # Back at the predict stage, so a different key.
+    assert len(_proposal_keys(requeued)) == 1
+    assert _proposal_keys(requeued) != _proposal_keys(acting)
+
+
+def test_dismiss_and_all_share_the_act_key_for_a_predicted_dismiss(tmp_path: Path) -> None:
+    """Pins today's behaviour: the key carries the stage and verdict, not the setting."""
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    keys = [
+        _proposal_keys(
+            _worklist_for_queue(
+                tmp_path / name,
+                "- [memory] x\n",
+                handover=handover,
+                predictions=(("memory", "x", "dismiss"),),
+            )
+        )
+        for name, handover in (("a", "dismiss"), ("b", "all"))
+    ]
+    assert keys[0] == keys[1]
+
+
+def test_item_key_ignores_the_decider() -> None:
+    """The worklist key must not hash the decider, or resume of a run breaks."""
+    from ciao.proposal_kinds import parse_bullet
+
+    plain = parse_bullet("- [people Mo] x  _(from: s)_")
+    tagged = parse_bullet("- [people Mo] x  _(from: s)_  _(decide: you; r)_")
+    assert plain is not None and tagged is not None
+    assert cr._proposal_subject(plain, 0) == cr._proposal_subject(tagged, 0)

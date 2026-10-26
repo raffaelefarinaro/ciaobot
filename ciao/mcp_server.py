@@ -692,6 +692,31 @@ async def _op_chat_send(service: CiaoMcpService, chat_id: str, prompt: str) -> d
     return await service._invoke("chat_send", lambda cp, p: cp.chat_send(p, chat_id, prompt), mutating=True)
 
 
+async def _op_chat_terminal_offer(service: CiaoMcpService, command: str) -> dict[str, Any]:
+    """Suggest a terminal command for the calling chat.
+
+    The command is untrusted, model-authored text the user reads, copies and
+    runs themselves. Nothing is executed, no terminal is opened, nothing is
+    unlocked and no output is collected: the call only records the suggestion
+    on the calling chat, which is transient and in memory only.
+
+    There is no chat argument, and no label, kind or path: the offer belongs
+    to the chat that asked for it. The argument is a plain string on purpose:
+    a schema *constraint* on the text would put a rejected command inside
+    pydantic's validation error, so the engine validates the text itself and
+    refuses it with a static reason.
+
+    A malformed *type* is the schema's refusal, and the raw tool error does
+    carry the value that was submitted. What keeps it out of the engine's
+    HTTP envelope, its log and its telemetry is the dispatcher, which
+    answers with the error's first line only. The raw exception still holds
+    the value, so a transport that surfaced it whole would show it.
+    """
+    return await service._invoke(
+        "chat_terminal_offer", lambda cp, p: cp.chat_terminal_offer(p, command)
+    )
+
+
 async def _op_chat_continue(service: CiaoMcpService, chat_id: str) -> dict[str, Any]:
     """Continue an archived chat as a new active chat."""
     return await service._invoke("chat_continue", lambda cp, p: cp.chat_continue(p, chat_id), mutating=True)
@@ -1097,10 +1122,10 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
             fields you pass change. Omit one to leave it alone.
         body: Replaces the description/links wholesale when given.
 
-    Setting `status: done` here is refused: only the user completes a task
-    (`task_completion_requires_user`). Use `task_action` with `complete` for
-    the same reason it is a separate verb — it is a human decision, and a
-    refused completion must not be mistaken for a broken edit.
+    Setting `status: done` here is refused (`task_completion_requires_user`).
+    Use `task_action` with `complete` and a `reason` once the user has clearly
+    said the task is done; it is a separate verb because it is the user's
+    decision, and a refused completion must not be mistaken for a broken edit.
     """
     changes: dict[str, Any] = {
         key: value
@@ -1120,26 +1145,29 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
 
 
 async def _op_task_delete(service: CiaoMcpService, task_id: str,
-                          expected_revision: str) -> dict[str, Any]:
-    """Permanently remove one task record the user asked you to delete.
+                          expected_revision: str, reason: str) -> dict[str, Any]:
+    """Permanently remove one task record, only when the user clearly asked.
 
     Args:
         task_id: The task's 32-hex id, from `task_list` or `task_get`.
         expected_revision: The `revision` you read. A stale one removes
             nothing — re-read rather than resending the same revision.
+        reason: Required. Why the record is being removed, in the user's words.
+            An empty one is refused. Stored with the decision and read by the
+            weekly rules pass, never acted on.
 
     This removes only that task file, including the notes, history and
     delegation log stored inside it. It does not delete or archive linked
     chats, stop a running turn, discard attempt history, or complete the
-    task. Deletion is permanent and has no trash: do it only at the user's
-    request, and tell them the record is gone for good. It is attended-only:
+    task. Deletion is permanent and has no trash: do it only when the user
+    clearly asked, and say what will be lost before you do it. It is attended-only:
     a scheduled or otherwise unattended turn is refused
     (`unattended_forbidden`) and must ask the user to run it.
     """
     return await service._invoke(
         "task_delete",
         lambda cp, p: cp.task_delete(
-            p, task_id, expected_revision=expected_revision
+            p, task_id, expected_revision=expected_revision, reason=reason
         ),
         mutating=True,
     )
@@ -1250,8 +1278,13 @@ async def _op_task_report(service: CiaoMcpService, task_id: str, outcome: str,
 
 
 async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
-                                 action: str) -> dict[str, Any]:
+                                 action: str,
+                                 reason: str | None = None) -> dict[str, Any]:
     """One lifecycle gesture on a delegation attempt.
+
+    reason: Optional, `detach` only, for a result that is ready for review: why
+        it is being released, in the user's words if they gave one. Stored with
+        the decision, never acted on.
 
     action:
         "stop"   — end the running turn. Not undoable, and the task keeps its
@@ -1270,13 +1303,15 @@ async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
         "stop": lambda cp, p: cp.task_attempt_action(p, attempt_id, "stop"),
         "resume": lambda cp, p: cp.task_attempt_action(p, attempt_id, "resume"),
         "retry": lambda cp, p: cp.task_attempt_action(p, attempt_id, "retry"),
-        "detach": lambda cp, p: cp.task_attempt_action(p, attempt_id, "detach"),
+        "detach": lambda cp, p: cp.task_attempt_action(p, attempt_id, "detach", reason=reason),
     }
     op = dispatch.get(action)
     if op is None:
         raise ControlPlaneError(
             "invalid_action", "action must be stop, resume, retry, or detach."
         )
+    if reason is not None and action != "detach":
+        raise ControlPlaneError("invalid_action", "reason is only recorded by detach.")
     # `_DESTRUCTIVE`: `stop` ends a turn that cannot be resumed, so the whole
     # operation is ask-class rather than allow-class.
     return await service._invoke("task_attempt_action", op, mutating=True)
@@ -1285,7 +1320,8 @@ async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
 async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
                           expected_revision: str, status: str | None = None,
                           assignee: str | None = None, project_id: str | None = None,
-                          due: str | None = None) -> dict[str, Any]:
+                          due: str | None = None,
+                          reason: str | None = None) -> dict[str, Any]:
     """Move, complete or reassign one task, at the revision you read.
 
     action:
@@ -1293,21 +1329,27 @@ async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
             (`backlog` = To do, `in_progress`, `in_review`, `done`). A task you
             were delegated reaches `in_review` by your `task_report` with
             outcome `done`; you need not move it there yourself.
-        "complete" — mark it done. **Refused for you**: the user completes a
-            task, not the agent, so this returns
-            `task_completion_requires_user` however it is spelled. Ask the
-            user to mark it done rather than trying another route to the
-            same status.
+        "complete" — mark it done, only when the user clearly said it is done.
+            `reason` is required: why the user says so, in their words. It is
+            stored as the completion's resolution and read by the learning
+            pass. It is attended-only (`unattended_forbidden` on a scheduled
+            turn). A task linked to a chat or a delegated run, including one
+            ready for review, is refused: the user approves those on the
+            board. `move` with `status: done` and `task_update` with
+            `status: done` stay refused (`task_completion_requires_user`);
+            do not try them.
         "reassign" — set the assignee (`user` or `agent`).
 
     Args:
         project_id, due: Applied with the gesture when given.
+        reason: Required for `complete`, refused on any other action.
     """
     return await service._invoke(
         "task_action",
         lambda cp, p: cp.task_action(
             p, action, task_id, expected_revision=expected_revision,
             status=status, assignee=assignee, project_id=project_id, due=due,
+            reason=reason,
         ),
         mutating=True,
     )
@@ -1341,7 +1383,7 @@ async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: s
             quietly running it somewhere else.
 
     The launched turn runs in the permission mode a new chat defaults to
-    (Settings → Models & providers). A sender can never choose it.
+    (Settings → Providers). A sender can never choose it.
 
     The reply is the trigger **plus its secret, shown once**: only a hash of it
     is kept, so it cannot be read back — hand it to the sender now, or rotate and
@@ -1486,6 +1528,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("chat_create", _WRITE, _op_chat_create.__doc__ or "", _op_chat_create),
     Operation("chat_update", _WRITE, _op_chat_update.__doc__ or "", _op_chat_update),
     Operation("chat_send", _WRITE, _op_chat_send.__doc__ or "", _op_chat_send),
+    Operation("chat_terminal_offer", _READ, _op_chat_terminal_offer.__doc__ or "", _op_chat_terminal_offer),
     Operation("chat_continue", _WRITE, _op_chat_continue.__doc__ or "", _op_chat_continue),
     Operation("chat_retry", _WRITE, _op_chat_retry.__doc__ or "", _op_chat_retry),
     Operation("chat_handover", _WRITE, _op_chat_handover.__doc__ or "", _op_chat_handover),

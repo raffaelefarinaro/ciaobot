@@ -1111,10 +1111,10 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
     ("PWA_AUTH_REQUIRED", "remove it: password protection is always on"),
     # Server settings that moved to Settings. Server startup imports each one
     # into `.runtime/app_settings.json` once; after that they are inert.
-    ("PWA_HOST", "remove it: it was imported once into Settings → General → Network access"),
-    ("CIAO_LOG_LEVEL", "remove it: it was imported once into Settings → General → Developer"),
-    ("CIAO_DEV_MODE", "remove it: it was imported once into Settings → General → Developer"),
-    ("CIAO_APP_REPO", "remove it: it was imported once into Settings → General → Developer"),
+    ("PWA_HOST", "remove it: it was imported once into Settings → Access & devices → Network access"),
+    ("CIAO_LOG_LEVEL", "remove it: it was imported once into Settings → Advanced → Developer"),
+    ("CIAO_DEV_MODE", "remove it: it was imported once into Settings → Advanced → Developer"),
+    ("CIAO_APP_REPO", "remove it: it was imported once into Settings → Advanced → Developer"),
     # The workspace list is runtime state owned by Settings. Server startup
     # imports the variable into workspaces.json once; after that it is inert.
     (

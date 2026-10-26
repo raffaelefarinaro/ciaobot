@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
+from ciao.execution_modes import cap_schedule_mode
 from ciao.legacy_node_state import (
     LegacyNodeState,
     STATE_FILENAME as LEGACY_STATE_FILENAME,
@@ -70,6 +71,8 @@ class StartupPhase:
 class StartupTracker:
     _phases: dict[str, StartupPhase] = field(default_factory=dict)
     overall_ready: bool = False
+    startup_id: str | None = None
+    engine_pid: int | None = None
     # Fired with the phase when it reaches a terminal state (done/failed).
     # Used to record system jobs into job_runs without coupling this class
     # to the recorder. Errors in the callback are swallowed by the caller.
@@ -120,6 +123,18 @@ class StartupTracker:
             "phases": [asdict(p) for p in self._phases.values()],
             "overall_ready": self.overall_ready,
         }
+
+
+def schedule_run_mode(
+    config: CiaoConfig, saved: str, provider: str, workspace: str | None
+) -> str:
+    """The permission mode one schedule run uses.
+
+    The default is the operator's pin for the provider the run resolves to, with
+    the workspace's override of that pin winning. A saved mode (an agent-made
+    routine) is an upper limit, not a pin: see ``cap_schedule_mode``.
+    """
+    return cap_schedule_mode(saved, config.default_mode_for_provider(provider, workspace))
 
 
 def _refresh_vault_index(
@@ -503,10 +518,33 @@ def _restart_watchdog(
         exit_now(restart_code)
 
 
-async def _async_main(*, supervised: bool = False) -> int:
+async def _async_main(
+    *,
+    supervised: bool = False,
+    installer_bootstrap: bool = False,
+    installer_run_id: str | None = None,
+    installer_suggest_workspace: str | None = None,
+) -> int:
+    if installer_bootstrap:
+        # Before anything is created: refuse to bootstrap over an install, then
+        # isolate this process from any inherited destination.
+        from ciao.install_discovery import InstallerEntryRefused, require_fresh_installer_entry
+
+        try:
+            require_fresh_installer_entry(environ=os.environ, cwd=Path.cwd())
+        except InstallerEntryRefused as exc:
+            print(f"Ciaobot installer bootstrap refused: {exc}", file=sys.stderr)
+            return 64
+        _enter_installer_bootstrap_environment(config_root=Path.home() / ".ciao" / "installer-bootstrap")
     _ensure_tool_dirs_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
-    config = CiaoConfig.from_env()
+    # Ordinary startup keeps its exact call shape; only the installer mode asks
+    # for the scratch branch.
+    config = (
+        CiaoConfig.from_env(installer_bootstrap=True, installer_suggest_workspace=installer_suggest_workspace)
+        if installer_bootstrap
+        else CiaoConfig.from_env()
+    )
 
     from ciao.instance_lock import WorkspaceInstanceLock
 
@@ -516,16 +554,62 @@ async def _async_main(*, supervised: bool = False) -> int:
         port=config.pwa_port,
     )
     with lock:
+        from ciao.onboarding import ensure_startup_receipt
+
+        ensure_startup_receipt(
+            config.state_path.parent,
+            workspace_root=config.workspace_root,
+            bootstrap_mode=config.bootstrap_mode,
+        )
         # One-time import of the retired CIAO_WORKSPACES variable; it writes
         # the registry, so it runs under the lock like the persist below.
         config.import_legacy_workspaces_env()
         config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
-        return await _run_server_locked(config, supervised=supervised)
+        if installer_bootstrap:
+            return await _run_server_locked(
+                config,
+                supervised=supervised,
+                startup_id=lock.startup_id,
+                engine_pid=os.getpid(),
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+            )
+        return await _run_server_locked(
+            config,
+            supervised=supervised,
+            startup_id=lock.startup_id,
+            engine_pid=os.getpid(),
+        )
 
 
-async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) -> int:
+def _enter_installer_bootstrap_environment(*, config_root: Path) -> None:
+    """Isolate an installer bootstrap child from anything inherited.
+
+    The environment is sanitised in place, not just the mapping handed to the
+    config: several downstream readers hit ``os.environ`` directly. The working
+    directory moves to a neutral launcher folder so cwd discovery cannot see the
+    runtime root, and the no-browser preference survives.
+    """
+    keep = {"CIAO_NO_BROWSER"}
+    for key in [key for key in os.environ if key.startswith(("CIAO_", "PWA_")) and key not in keep]:
+        os.environ.pop(key, None)
+    os.environ.pop("GWS_PROFILE", None)
+    launcher = config_root / "launcher"
+    launcher.mkdir(parents=True, exist_ok=True)
+    os.chdir(launcher)
+
+
+async def _run_server_locked(
+    config: CiaoConfig,
+    *,
+    supervised: bool = False,
+    startup_id: str | None = None,
+    engine_pid: int | None = None,
+    installer_bootstrap: bool = False,
+    installer_run_id: str | None = None,
+) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
     # Runtime-mutable settings overlay (PWA Settings). Applied on top of the
@@ -536,11 +620,15 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     from ciao.app_settings import AppSettingsStore
 
     app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
-    app_settings.migrate_legacy_insights_enabled(
-        getattr(config, "legacy_insights_disabled", None)
-    )
     app_settings.import_legacy_env(getattr(config, "legacy_env_settings", {}))
     app_settings.apply_to_config(config)
+    if installer_bootstrap:
+        # Stored settings must not move an installer bootstrap off loopback or
+        # into dev mode; this applies to this process only and is never saved.
+        config.pwa_host = "127.0.0.1"
+        config.pwa_port = 8443
+        config.dev_mode = False
+        config.app_repo = None
 
     setup_error_logging(config.workspace_root)
     # The engine holds a descriptor per accepted connection. A service manager
@@ -576,7 +664,11 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     from ciao import job_runs
 
     job_runs.configure(config.state_path.parent)
-    tracker = StartupTracker(on_finish=job_runs.record_startup_phase)
+    tracker = StartupTracker(
+        on_finish=job_runs.record_startup_phase,
+        startup_id=startup_id,
+        engine_pid=engine_pid,
+    )
 
     # Start provider checks in the background
     tracker.start("connect_claude_code")
@@ -879,10 +971,11 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # The mode default is the operator's pin for the provider this run
         # actually resolves to (Settings -> Models & providers -> permission mode), so a
         # routine obeys the same setting a hand-opened chat on that provider
-        # does. It used to fall back to the Telegram context's mode, which is a
-        # different surface's state and belongs to no workspace.
-        provider, model, _workspace = pcm.schedule_effective_routing(entry)
-        mode = entry.mode or config.default_mode_for_provider(provider)
+        # does, with this workspace's override of that pin winning. It used to
+        # fall back to the Telegram context's mode, which is a different
+        # surface's state and belongs to no workspace.
+        provider, model, workspace = pcm.schedule_effective_routing(entry)
+        mode = schedule_run_mode(config, entry.mode, provider, workspace)
         return ("claude", model, mode, provider)
 
     # Classified before anything else touches the runtime root, because the
@@ -967,7 +1060,13 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     if not getattr(config, "bootstrap_mode", False):
         mcp_service = CiaoMcpService(config)
 
-    app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
+    app = create_app(
+        config,
+        app_settings=app_settings,
+        mcp_service=mcp_service,
+        installer_bootstrap=installer_bootstrap,
+        installer_run_id=installer_run_id,
+    )
     app.state.startup_tracker = tracker
     # The startup gate's own verdict, so routes and tests read the same answer
     # the writers were armed from instead of re-deriving it from the state file.
@@ -1541,7 +1640,13 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     return 0
 
 
-def main(*, supervised: bool = False) -> None:
+def main(
+    *,
+    supervised: bool = False,
+    installer_bootstrap: bool = False,
+    installer_run_id: str | None = None,
+    installer_suggest_workspace: str | None = None,
+) -> None:
     """CLI entrypoint."""
     # INFO until the workspace's own log level (Settings) is known, which
     # `_run_server_locked` applies.
@@ -1549,7 +1654,12 @@ def main(*, supervised: bool = False) -> None:
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:
-        code = asyncio.run(_async_main(supervised=supervised))
+        code = asyncio.run(_async_main(
+            supervised=supervised,
+            installer_bootstrap=installer_bootstrap,
+            installer_run_id=installer_run_id,
+            installer_suggest_workspace=installer_suggest_workspace,
+        ))
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)
         code = 2

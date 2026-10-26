@@ -14,6 +14,7 @@ import {
 import { errorMessage } from '../lib/errorMessage'
 import { nextBackgroundableCalls, type BackgroundableCalls } from '../lib/moveToBackground'
 import { applyKeyboardSettings, useKeyboardSettings } from '../composables/useKeyboardSettings'
+import { applyAppearanceSettings } from '../composables/useAppearanceSettings'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft, type OrphanDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
@@ -33,6 +34,7 @@ import type {
   BackgroundRunLog,
   BackgroundRunSummary,
   SubagentTranscript,
+  TerminalOffer,
   WsEvent,
   QueueDelivery,
   SteerFallbackReason,
@@ -324,6 +326,7 @@ export const useProjectStore = defineStore('projects', () => {
     not_running: 'Nothing was running to steer into, so it was queued instead.',
     no_turn: 'Nothing was running to steer into, so it was queued instead.',
     stopped: 'Stopped before it was steered. It stays in the queue.',
+    send_id_limit: 'That steer batch was too large to deduplicate safely; overflow was queued for the next turn.',
   }
   type QueuedMessage = { id: string; text: string; images?: string[]; delivery: QueueDelivery; steering?: boolean; waiting?: boolean }
   function makeQueuedId(): string {
@@ -855,7 +858,7 @@ export const useProjectStore = defineStore('projects', () => {
   // in the same burst to a dying socket is rare next to the common
   // single-message case, and the queue path already persists server-side
   // when its frame arrives.
-  interface UnackedSend { id: string; text: string; images?: string[]; at: number; attempts: number }
+  interface UnackedSend { id: string; text: string; images?: string[]; at: number; attempts: number; origin?: 'retry' }
   const unackedSends: Record<string, UnackedSend> = {}
   const unackedRecoveryTimers: Record<string, ReturnType<typeof setTimeout>> = {}
   // Grace before declaring a send lost: a turn that DID start replays its
@@ -969,13 +972,16 @@ export const useProjectStore = defineStore('projects', () => {
     // tracking via the echoed user_echo. Empty comment buckets: the original
     // send already consumed them via consumePreparedAttachments.
     // The same send id rides on: this is the same logical send, so the
-    // engine can recognise it instead of running a second turn for it.
+    // engine can recognise it instead of running a second turn for it. The
+    // retry tag rides with it, so a resend of a deliberate retry is still
+    // recorded as one.
     sendMessage(chatId, unacked.text, {
       composed: unacked.text,
       imageRefs: unacked.images,
       fileComments: [],
       chatComments: [],
       sendId: unacked.id,
+      origin: unacked.origin,
     })
   }
 
@@ -1094,20 +1100,37 @@ export const useProjectStore = defineStore('projects', () => {
   // chat has running background agents OR is streaming a turn (agents
   // dispatched mid-turn nest live inside the Working trace).
   let subagentPollTimer: ReturnType<typeof setInterval> | null = null
+  // Rows the cheap running list names for the active chat. A separate owner
+  // from the engine count above: the count only exists while a watcher lives,
+  // so a chat whose count is 0 can still have a running child the list found.
+  // Never written back into `backgroundAgents`.
+  const activeRunningSubagentCount = computed(() =>
+    (runningSubagents.value[activeChatId.value || ''] || []).length,
+  )
+  // True while the running-list poll is alive. Independent running rows keep
+  // the full-list poll going only while that poll can still learn they ended,
+  // so a row the server never retires cannot hold a 4s transcript poll forever.
+  const runningPollLive = ref(false)
   watch(
     () => [
       activeChatId.value,
       activeBackgroundAgents.value,
       isStreaming.value,
       subagentViewActiveChatId.value,
+      activeRunningSubagentCount.value > 0 && runningPollLive.value,
     ] as const,
-    ([chatId, count, streamingNow, viewChatId]) => {
+    ([chatId, count, streamingNow, viewChatId, runningKnown], previous) => {
       if (subagentPollTimer !== null) {
         clearInterval(subagentPollTimer)
         subagentPollTimer = null
       }
-      if (!chatId || (count <= 0 && !streamingNow)) return
+      if (!chatId || (count <= 0 && !streamingNow && !runningKnown)) return
       if (viewChatId !== null && viewChatId === chatId) return
+      // Discovery: running rows appeared for this chat with nothing else
+      // polling it. Paint the full list now instead of after the first tick.
+      if (runningKnown && count <= 0 && !streamingNow && !(previous && previous[0] === chatId && previous[4])) {
+        void loadSubagents(chatId)
+      }
       subagentPollTimer = setInterval(() => {
         void loadSubagents(chatId)
       }, 4000)
@@ -1200,19 +1223,13 @@ export const useProjectStore = defineStore('projects', () => {
       clearInterval(runningSubagentTimer)
       runningSubagentTimer = null
     }
+    runningPollLive.value = false
   }
-  watch(anyChatWorking, (working) => {
-    stopRunningSubagentPoll()
-    // Refresh on both edges: rising paints the rows without waiting a tick,
-    // falling starts the drain that clears the last of them.
-    void refreshRunningSubagents()
-    if (working) {
-      runningSubagentTimer = setInterval(() => {
-        void refreshRunningSubagents()
-      }, RUNNING_SUBAGENT_POLL_MS)
-      return
-    }
+  // Poll until the rows clear or the drain budget is spent. Used for the
+  // falling edge of work and for rows discovered while nothing is working.
+  function startRunningSubagentDrain(): void {
     let drainTicksLeft = RUNNING_SUBAGENT_DRAIN_TICKS
+    runningPollLive.value = true
     runningSubagentTimer = setInterval(() => {
       if (Object.keys(runningSubagents.value).length === 0 || drainTicksLeft <= 0) {
         stopRunningSubagentPoll()
@@ -1221,7 +1238,35 @@ export const useProjectStore = defineStore('projects', () => {
       drainTicksLeft -= 1
       void refreshRunningSubagents()
     }, RUNNING_SUBAGENT_POLL_MS)
+  }
+  watch(anyChatWorking, (working) => {
+    stopRunningSubagentPoll()
+    // Refresh on both edges: rising paints the rows without waiting a tick,
+    // falling starts the drain that clears the last of them.
+    void refreshRunningSubagents()
+    if (working) {
+      runningPollLive.value = true
+      runningSubagentTimer = setInterval(() => {
+        void refreshRunningSubagents()
+      }, RUNNING_SUBAGENT_POLL_MS)
+      return
+    }
+    startRunningSubagentDrain()
   })
+  // Rows fetched while nothing is working (page load, reconnect, a child the
+  // engine count never announced) would otherwise be listed once and never
+  // refreshed, so a finished child kept its spinner. Discovery restarts the
+  // bounded drain; a failed request is not completion, only a successful
+  // list without the row is, and `refreshRunningSubagents` keeps the rows
+  // across a failure.
+  watch(
+    () => Object.values(runningSubagents.value).some(rows => rows.length > 0),
+    (any) => {
+      if (any && !anyChatWorking.value && runningSubagentTimer === null) {
+        startRunningSubagentDrain()
+      }
+    },
+  )
 
   function projectChats(projectId: string): ChatInfo[] {
     // Hide remote chats (session lives on another device, not openable here).
@@ -1574,7 +1619,7 @@ export const useProjectStore = defineStore('projects', () => {
       generalProject((payload.workspace as WorkspaceName) || activeWorkspace.value)
     if (!project) throw new Error('No project available to restore into')
     if (project.workspace !== activeWorkspace.value) {
-      await switchWorkspace(project.workspace)
+      if (!(await switchWorkspace(project.workspace))) return
     }
     await createChat(project.project_id, DEFAULT_CHAT_TITLE, payload.text)
     clearChatDraft(payload.originalChatId)
@@ -1636,6 +1681,10 @@ export const useProjectStore = defineStore('projects', () => {
                   images: Array.isArray(row.images) ? row.images.map(String) : undefined,
                   at: typeof row.at === 'number' ? row.at : Date.now(),
                   attempts: typeof row.attempts === 'number' ? row.attempts : 0,
+                  // Only the exact 'retry' tag is restored. Any other value
+                  // is dropped, never defaulted: an engine origin must not
+                  // ride the wire just because a cache named one.
+                  origin: row.origin === 'retry' ? 'retry' : undefined,
                 }
               }
             }
@@ -1909,11 +1958,14 @@ export const useProjectStore = defineStore('projects', () => {
     const initialHistory = initialChatId
       ? loadMessages(initialChatId, { waitForSettledReply: true })
       : undefined
+    // The offer watermark is captured before the request, not when it lands:
+    // a payload that raced a newer offer change must not roll it back.
+    const initialDetailReadStart = initialChatId ? terminalOfferReadStart() : 0
     const initialDetail = initialChatId
       ? api.get<ChatInfo>(`/api/chats/${encodeURIComponent(initialChatId)}`)
         .then(chat => {
           if (routeChatId() === initialChatId) {
-            replaceChat(chat)
+            replaceChat(chat, initialDetailReadStart)
             activeChatId.value = initialChatId
           }
           return chat
@@ -1925,6 +1977,7 @@ export const useProjectStore = defineStore('projects', () => {
         restoreState()
         restoreUnread()
       }
+      const listReadStart = terminalOfferReadStart()
       const [workspaceResponse, p, c] = await Promise.all([
         api.get<WorkspacesResponse>('/api/workspaces'),
         api.get<ProjectInfo[]>('/api/projects'),
@@ -1937,7 +1990,7 @@ export const useProjectStore = defineStore('projects', () => {
       projects.value = p
       // Keep an archived deep link's prefetched history through reconciliation.
       if (initialDetail) await initialDetail
-      reconcileActiveChats(c)
+      reconcileActiveChats(c, listReadStart)
       // Offer back any draft whose chat no longer exists — most likely swept
       // as an abandoned empty chat before its unsent text could be sent (#277).
       // Load-time only (not on every in-session refresh; `bootstrapped` is
@@ -1955,7 +2008,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (initialDetail) {
         const detail = await initialDetail
         // The catalog may have been captured before this particular chat.
-        if (detail && routeChatId() === initialChatId) replaceChat(detail)
+        if (detail && routeChatId() === initialChatId) replaceChat(detail, initialDetailReadStart)
       }
       // Resolve the current route after bootstrap: navigation during the
       // requests must not be undone by the route that started them.
@@ -2075,7 +2128,131 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  function reconcileChatList(nextChats: ChatInfo[]) {
+  // ── Transient terminal offers ────────────────────────────────────────
+  //
+  // A command the assistant suggested in a chat. The engine owns it; this
+  // map is the browser's transient copy: it lives in memory only (never
+  // persisted). Chat list/detail payloads hydrate it under read-start
+  // watermarks, and the `/ws/events` snapshot replaces the full map. The
+  // command is untrusted text the user reviews and runs; nothing here
+  // executes it.
+  const terminalOffers = ref<Record<string, TerminalOffer>>({})
+
+  // A monotonic counter that orders the offer state against the HTTP reads
+  // that can overwrite it. Every read start and every accepted change takes
+  // the next value, so "did this read start before that change?" is a
+  // comparison of two integers. A wall clock would not do: two events in
+  // the same millisecond would compare equal, and the read that raced them
+  // would be taken as fresh.
+  let terminalOfferClock = 0
+  // The clock value of the last global snapshot, and of the last change for
+  // each chat. A read may only write when neither of them is newer than it.
+  let terminalOfferSnapshotClock = 0
+  const terminalOfferChatClock: Record<string, number> = {}
+
+  function nextTerminalOfferClock(): number {
+    terminalOfferClock += 1
+    return terminalOfferClock
+  }
+
+  /**
+   * The clock value a read has to reach to be allowed to write. A read that
+   * started before the newest change for that chat is stale: its payload
+   * predates the change and must not roll it back.
+   */
+  function terminalOfferWatermark(chatId: string): number {
+    return Math.max(terminalOfferSnapshotClock, terminalOfferChatClock[chatId] ?? 0)
+  }
+
+  /**
+   * Capture the point in the offer timeline a read starts at. Call this
+   * BEFORE the request: an answer is only as fresh as the question that
+   * asked for it, so a watermark taken when the response lands would take
+   * every stale reply for a fresh one.
+   */
+  function terminalOfferReadStart(): number {
+    return nextTerminalOfferClock()
+  }
+
+  /**
+   * A well-formed offer is a non-empty id and a non-empty command. The
+   * command is never rewritten here — the engine owns its text, and this
+   * client only ever displays it.
+   */
+  function isTerminalOffer(value: unknown): value is TerminalOffer {
+    if (!value || typeof value !== 'object') return false
+    const candidate = value as { id?: unknown; command?: unknown }
+    return typeof candidate.id === 'string' && candidate.id.length > 0
+      && typeof candidate.command === 'string' && candidate.command.trim().length > 0
+  }
+
+  /**
+   * Apply the offer a payload carried. A payload that raced a newer event or
+   * a newer snapshot is stale and changes nothing; a fresh one writes the
+   * offer, or clears it when the payload names none.
+   */
+  function applyTerminalOfferRead(
+    chatId: string,
+    offer: TerminalOffer | null,
+    readStartedAt: number,
+  ): boolean {
+    if (readStartedAt < terminalOfferWatermark(chatId)) return false
+    if (offer) terminalOffers.value[chatId] = { id: offer.id, command: offer.command }
+    else delete terminalOffers.value[chatId]
+    return true
+  }
+
+  /**
+   * Hydrate one chat's offer from a payload row. An archived row never
+   * hydrates: the command died with the chat, and a preserved archived row
+   * must not bring it back.
+   */
+  function applyTerminalOfferFromChatInfo(chat: ChatInfo, readStartedAt: number): void {
+    if (chat.archived) return
+    applyTerminalOfferRead(chat.chat_id, chat.terminal_offer ?? null, readStartedAt)
+  }
+
+  /**
+   * The complete offer map from the `/ws/events` snapshot. It replaces the
+   * map: the snapshot names every chat that holds an offer, so a chat it
+   * does not name holds none. A chat this client has not listed yet keeps
+   * its row — the snapshot can arrive before the chat list.
+   */
+  function applyTerminalOfferSnapshot(offers: Record<string, TerminalOffer>): void {
+    const next: Record<string, TerminalOffer> = {}
+    for (const [chatId, offer] of Object.entries(offers)) {
+      // The engine only ever sends `{id, command}`; an entry that is not
+      // one is left out rather than carried into the map as half an offer.
+      if (!isTerminalOffer(offer)) continue
+      next[chatId] = { id: offer.id, command: offer.command }
+    }
+    terminalOffers.value = next
+    terminalOfferSnapshotClock = nextTerminalOfferClock()
+  }
+
+  /**
+   * Apply a change the engine announced: an offer, or its removal. The chat
+   * is stamped, so a read that was already in flight cannot roll the change
+   * back.
+   */
+  function setTerminalOffer(chatId: string, offer: TerminalOffer | null): void {
+    terminalOfferChatClock[chatId] = nextTerminalOfferClock()
+    if (offer) terminalOffers.value[chatId] = { id: offer.id, command: offer.command }
+    else delete terminalOffers.value[chatId]
+  }
+
+  /**
+   * The offers of the chats a set of projects took with them. A chat that is
+   * gone holds no command, and its id is stamped so a read still in flight
+   * cannot bring the command back.
+   */
+  function clearTerminalOffersForProjects(projectIds: Set<string>): void {
+    for (const chat of chats.value) {
+      if (projectIds.has(chat.project_id)) setTerminalOffer(chat.chat_id, null)
+    }
+  }
+
+  function reconcileChatList(nextChats: ChatInfo[], readStartedAt: number = terminalOfferClock) {
     const applied = applyPendingArchived(nextChats)
     chats.value = applied
     hydrateParkedQueues(applied)
@@ -2084,6 +2261,12 @@ export const useProjectStore = defineStore('projects', () => {
     // chat id a pre-#1119 build left in the browser-local pin/dismissal keys.
     for (const chat of nextChats) applyChatPinFromChatInfo(chat)
     pruneChatPins(nextChats.map(ch => ch.chat_id))
+
+    // Hydrate the transient offers from the same payload, under the same
+    // watermark: a list that raced a newer offer change must not roll it
+    // back, and a list read after it may clear an offer the engine no
+    // longer holds.
+    for (const chat of applied) applyTerminalOfferFromChatInfo(chat, readStartedAt)
 
     // Rebase any receipt-time snippet stamps now that the server's real
     // activity times are available (see lastResultSnippetNeedsRebase).
@@ -2132,7 +2315,7 @@ export const useProjectStore = defineStore('projects', () => {
    * preserved from what we already hold locally instead of being dropped by a
    * wholesale array replace. Active rows replace their peers in place.
    */
-  function reconcileActiveChats(activeChats: ChatInfo[]) {
+  function reconcileActiveChats(activeChats: ChatInfo[], readStartedAt: number = terminalOfferClock) {
     const merged: ChatInfo[] = []
     const activeById = new Map(activeChats.map(c => [c.chat_id, c]))
     for (const existing of chats.value) {
@@ -2151,7 +2334,7 @@ export const useProjectStore = defineStore('projects', () => {
     for (const c of activeById.values()) merged.push(c)
     chats.value = merged
     // Reuse reconcileChatList's side effects (message pruning, unread, overlay).
-    reconcileChatList(merged)
+    reconcileChatList(merged, readStartedAt)
   }
 
   function hasSettledHistory(chatId: string): boolean {
@@ -2201,8 +2384,9 @@ export const useProjectStore = defineStore('projects', () => {
       // chats, which this poll never needs — archived rows are held locally.
       // This keeps the every-15s refresh light instead of re-shipping the
       // whole registry to the client on each tick.
+      const listReadStart = terminalOfferReadStart()
       const latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
-      reconcileActiveChats(latestChats)
+      reconcileActiveChats(latestChats, listReadStart)
 
       const chatId = activeChatId.value
       const chatStillOpen = chatId
@@ -2332,6 +2516,27 @@ export const useProjectStore = defineStore('projects', () => {
     return res
   }
 
+  // Persist a new workspace order. The list moves at once and snaps back when
+  // the save fails. The active workspace stays active; only positions change.
+  // Returns the server payload (its `primary` can change with the order), or
+  // null when `names` is not the current set of workspaces and nothing was sent.
+  async function reorderWorkspaces(names: string[]): Promise<WorkspacesResponse | null> {
+    const previous = workspaces.value
+    const reordered = names
+      .map(name => previous.find(w => w.name === name))
+      .filter((w): w is WorkspaceInfo => w !== undefined)
+    if (reordered.length !== previous.length) return null
+    workspaces.value = reordered
+    try {
+      const res = await api.post<WorkspacesResponse>('/api/workspaces/reorder', { order: names })
+      workspaces.value = res.workspaces || []
+      return res
+    } catch (err) {
+      workspaces.value = previous
+      throw err
+    }
+  }
+
   async function updateWorkspace(name: WorkspaceName, payload: Partial<WorkspaceInfo>) {
     const res = await api.patch<WorkspacesResponse & { renamed?: { from: string; to: string } }>(
       `/api/workspaces/${encodeURIComponent(name)}`,
@@ -2384,6 +2589,8 @@ export const useProjectStore = defineStore('projects', () => {
     projects.value.forEach(p => { if (p.workspace === name) projectIds.add(p.project_id) })
     projects.value = projects.value.filter(p => !projectIds.has(p.project_id))
     projectIds.forEach(clearDraftsForProject)
+    // The archived workspace's chats go with it, and so do their commands.
+    clearTerminalOffersForProjects(projectIds)
     chats.value = chats.value.filter(c => !projectIds.has(c.project_id))
     if (selectedInWorkspace && selectedChatId) {
       disconnectWs(selectedChatId)
@@ -2467,6 +2674,8 @@ export const useProjectStore = defineStore('projects', () => {
     const report = await api.del<ProjectDeleteReport>(`/api/projects/${projectId}?delete_vault=1`)
     projects.value = projects.value.filter(p => p.project_id !== projectId)
     clearDraftsForProject(projectId)
+    // The project's chats go with it, and so do the commands they offered.
+    clearTerminalOffersForProjects(new Set([projectId]))
     chats.value = chats.value.filter(c => c.project_id !== projectId)
     if (activeChatProject === projectId) {
       if (activeChatId.value) disconnectWs(activeChatId.value)
@@ -2486,6 +2695,8 @@ export const useProjectStore = defineStore('projects', () => {
     })
     projects.value = projects.value.filter(p => p.project_id !== projectId)
     clearDraftsForProject(projectId)
+    // The completed project's chats go with it, and so do their commands.
+    clearTerminalOffersForProjects(new Set([projectId]))
     chats.value = chats.value.filter(c => c.project_id !== projectId)
     if (activeChatProject === projectId) {
       if (activeChatId.value) disconnectWs(activeChatId.value)
@@ -2535,6 +2746,7 @@ export const useProjectStore = defineStore('projects', () => {
       try {
         // A runtime override (home's model picker) rides the create call; the
         // server otherwise starts the chat on the workspace default.
+        const readStart = terminalOfferReadStart()
         const c = await api.post<ChatInfo>(
           `/api/projects/${projectId}/chats`,
           runtime ? { title, model: runtime.model, provider: runtime.provider } : { title },
@@ -2542,7 +2754,7 @@ export const useProjectStore = defineStore('projects', () => {
         // The server also broadcasts chat_created for this same chat. The
         // broadcast can arrive before the POST response, so reconcile through
         // the ID-aware helper instead of pushing a possible duplicate.
-        replaceChat(c)
+        replaceChat(c, readStart)
         messages.value[c.chat_id] = []
         // Write before switching: ChatPanel reads the draft once at mount, so
         // this must already be in storage before the new panel mounts below.
@@ -2564,10 +2776,12 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function renameChat(chatId: string, title: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, { title })
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+    applyTerminalOfferFromChatInfo(c, readStart)
   }
 
   async function updateChat(
@@ -2580,10 +2794,12 @@ export const useProjectStore = defineStore('projects', () => {
       code_mode?: boolean
     },
   ) {
+    const readStart = terminalOfferReadStart()
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+    applyTerminalOfferFromChatInfo(c, readStart)
   }
 
   /** PATCH a chat's code mode. Throws the ApiError so the chip can show the engine's message. */
@@ -2596,11 +2812,12 @@ export const useProjectStore = defineStore('projects', () => {
     updates: { model: string; provider: RuntimeProvider },
   ) {
     const visibleMessages = normalizeMessages(messages.value[chatId] || [])
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {
       ...updates,
       messages: visibleMessages,
     })
-    replaceChat(c)
+    replaceChat(c, readStart)
     await loadMessages(chatId)
     if (activeChatId.value === chatId) {
       disconnectWs(chatId)
@@ -2615,11 +2832,12 @@ export const useProjectStore = defineStore('projects', () => {
     turnIndex: number,
   ) {
     const snapshot = normalizeMessages(copiedMessages)
+    const readStart = terminalOfferReadStart()
     const fork = await api.post<ChatInfo>(`/api/chats/${chatId}/fork`, {
       messages: snapshot,
       turn_index: turnIndex,
     })
-    replaceChat(fork)
+    replaceChat(fork, readStart)
     messages.value[fork.chat_id] = snapshot
     persistMessages()
     await switchChat(fork.chat_id)
@@ -2629,10 +2847,12 @@ export const useProjectStore = defineStore('projects', () => {
   async function moveChat(chatId: string, targetProjectId: string) {
     // Server validates same-workspace + non-archived + project exists.
     // The chat_moved broadcast on /ws/events also reconciles other tabs.
+    const readStart = terminalOfferReadStart()
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, { project_id: targetProjectId })
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+    applyTerminalOfferFromChatInfo(c, readStart)
     return c
   }
 
@@ -2646,6 +2866,8 @@ export const useProjectStore = defineStore('projects', () => {
     const query = options?.onlyIfEmpty ? '?only_if_empty=1' : ''
     const result = await api.del<{ deleted?: boolean }>(`/api/chats/${chatId}${query}`)
     if (options?.onlyIfEmpty && result?.deleted === false) return false
+    // The chat is gone for good, and the command it offered went with it.
+    setTerminalOffer(chatId, null)
     // Deliberate delete: the chat is really gone, so any draft riding along
     // with it is by construction never a sweep casualty — clear it now.
     clearChatDraft(chatId)
@@ -2829,6 +3051,9 @@ export const useProjectStore = defineStore('projects', () => {
       // emitted after the archive request has already cleared this pane.
       if (c) c.postprocess = res.postprocess
     }
+    // The archive committed, so the command the chat offered died with it.
+    // Not before: a refused archive leaves the chat, and its offer, alone.
+    setTerminalOffer(chatId, null)
     delete archivingChats.value[chatId]
     // Active already cleared optimistically; keep the guard for races where
     // the user switched chats between the optimistic clear and the response.
@@ -2839,32 +3064,39 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function continueArchivedChat(chatId: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/continue`)
     chats.value.push(c)
+    // A continued chat starts with no offer: the command belonged to the
+    // archived conversation, and it is not copied into the new one.
+    applyTerminalOfferFromChatInfo(c, readStart)
     messages.value[c.chat_id] = []
     switchChat(c.chat_id)
     return c
   }
 
   async function setChatRetry(chatId: string, prompt: string, images?: string[]) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, {
       action: 'set',
       prompt,
       images: images || [],
     })
-    replaceChat(c)
+    replaceChat(c, readStart)
     return c
   }
 
   async function stopChatRetry(chatId: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, { action: 'stop' })
-    replaceChat(c)
+    replaceChat(c, readStart)
     return c
   }
 
   async function tryChatRetryNow(chatId: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, { action: 'try_now' })
-    replaceChat(c)
+    replaceChat(c, readStart)
     reattachActiveChatSocket(chatId)
     return c
   }
@@ -2878,11 +3110,12 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  function replaceChat(chat: ChatInfo) {
+  function replaceChat(chat: ChatInfo, readStartedAt: number = terminalOfferClock) {
     const idx = chats.value.findIndex(x => x.chat_id === chat.chat_id)
     if (idx >= 0) chats.value[idx] = chat
     else chats.value.push(chat)
     applyChatPinFromChatInfo(chat)
+    applyTerminalOfferFromChatInfo(chat, readStartedAt)
     hydrateParkedQueues([chat])
   }
 
@@ -2914,11 +3147,14 @@ export const useProjectStore = defineStore('projects', () => {
     path: string,
     expectedRevision: number,
   ): Promise<ChatPinState> {
+    // The response is a whole ChatInfo, so it hydrates the transient offer
+    // too: capture the watermark before the request, not when it lands.
+    const readStart = terminalOfferReadStart()
     try {
       const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, {
         pin: { path, expected_revision: expectedRevision },
       })
-      replaceChat(c)
+      replaceChat(c, readStart)
       return chatPinStateFromChat(c)
     } catch (e) {
       const err = e as { status?: number; payload?: PinConflictPayload }
@@ -2929,7 +3165,61 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  /**
+   * Dismiss the command a chat offered.
+   *
+   * The body is exactly the contract's `{terminal_offer:{expected_id}}`: a
+   * dismissal never carries a pin, a title or anything else, so it can
+   * never race another write on the same chat. A 409 means another offer
+   * took the chat's place: the engine's offer is adopted and the conflict
+   * is reported, so the caller can show what is there now. A malformed
+   * conflict body is never repaired into "no offer" — the caller retries,
+   * and the state on screen stays as it is until the engine says otherwise.
+   */
+  async function dismissTerminalOffer(
+    chatId: string,
+    expectedId: string,
+  ): Promise<'dismissed' | 'conflict'> {
+    // Captured before the request: the answer is only as fresh as the
+    // question that asked for it.
+    const readStartedAt = terminalOfferReadStart()
+    try {
+      await api.patch<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`, {
+        terminal_offer: { expected_id: expectedId },
+      })
+    } catch (e) {
+      const err = e as { status?: number; payload?: { error?: string; terminal_offer?: unknown } }
+      if (err?.status !== 409) throw e
+      const payload = err.payload
+      if (payload?.error !== 'terminal_offer_conflict') throw e
+      const current = payload.terminal_offer
+      if (current === null) {
+        // The engine holds no offer any more: adopt that, and report the
+        // conflict so the caller knows the id it presented was stale.
+        if (applyTerminalOfferRead(chatId, null, readStartedAt)) {
+          terminalOfferChatClock[chatId] = nextTerminalOfferClock()
+        }
+        return 'conflict'
+      }
+      if (!isTerminalOffer(current)) {
+        // A malformed conflict body is not turned into "no offer": half an
+        // offer is not a state, and repairing it would silently drop a
+        // command the user never dismissed.
+        throw e
+      }
+      if (applyTerminalOfferRead(chatId, current, readStartedAt)) {
+        terminalOfferChatClock[chatId] = nextTerminalOfferClock()
+      }
+      return 'conflict'
+    }
+    if (applyTerminalOfferRead(chatId, null, readStartedAt)) {
+      terminalOfferChatClock[chatId] = nextTerminalOfferClock()
+    }
+    return 'dismissed'
+  }
+
   async function newSession(chatId: string) {
+    const readStart = terminalOfferReadStart()
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/new`)
     // A reset clears `archived` server-side on the same chat_id, so any stale
     // local archive intent for it must go with it.
@@ -2937,6 +3227,9 @@ export const useProjectStore = defineStore('projects', () => {
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+    // A new provider session starts with no offer: the command belonged to
+    // the session that is gone.
+    applyTerminalOfferFromChatInfo(c, readStart)
     messages.value[chatId] = []
     persistMessages()
     // Reconnect WebSocket for fresh session
@@ -3405,13 +3698,13 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Paginated history: older pages + lazy part expansion ────────────
 
-  function canLoadOlder(chatId: string): boolean {
-    return Boolean(historyMeta.value[chatId]?.hasMore)
-  }
-
-  function isLoadingOlder(chatId: string): boolean {
-    return Boolean(loadingOlder.value[chatId])
-  }
+  const canLoadOlderByChat = computed(() => Object.fromEntries(
+    Object.entries(historyMeta.value).map(([chatId, meta]) => [chatId, Boolean(meta?.hasMore)]),
+  ))
+  const isLoadingOlderByChat = computed(() => Object.fromEntries(
+    [...new Set([...Object.keys(historyMeta.value), ...Object.keys(loadingOlder.value)])]
+      .map(chatId => [chatId, Boolean(loadingOlder.value[chatId])]),
+  ))
 
   /** Fetch the previous page above the loaded window and prepend it. The
    * caller (ChatPanel) preserves scroll position across the prepend. */
@@ -3693,8 +3986,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function ensureChatInfo(chatId: string): Promise<void> {
     if (canOpenChat(chatId)) return
+    const readStart = terminalOfferReadStart()
     try {
-      replaceChat(await api.get<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`))
+      replaceChat(await api.get<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`), readStart)
     } catch {
       // A deleted or inaccessible deep link must not select an unknown chat.
     }
@@ -3788,9 +4082,23 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs(chatId)
   }
 
-  async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }) {
+  // Set by the open Settings workspace editor so a switch away from unsaved
+  // edits asks first. Returns false to keep the current workspace.
+  let workspaceSwitchGuard: ((from: WorkspaceName) => Promise<boolean>) | null = null
+  function setWorkspaceSwitchGuard(guard: ((from: WorkspaceName) => Promise<boolean>) | null): void {
+    workspaceSwitchGuard = guard
+  }
+  function clearWorkspaceSwitchGuard(guard: (from: WorkspaceName) => Promise<boolean>): void {
+    if (workspaceSwitchGuard === guard) workspaceSwitchGuard = null
+  }
+
+  // Resolves true once the workspace is active (or already was), false when the
+  // settings guard declined: a caller that goes on to act in `ws` must stop.
+  async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }): Promise<boolean> {
     const transition = options?.transition !== false
-    if (activeWorkspace.value === ws) return
+    if (activeWorkspace.value === ws) return true
+    if (workspaceSwitchGuard && !(await workspaceSwitchGuard(activeWorkspace.value))) return false
+    if (activeWorkspace.value === ws) return true
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
     // A workspace switch expresses scope, not a request to open an arbitrary
@@ -3804,6 +4112,7 @@ export const useProjectStore = defineStore('projects', () => {
       const { router } = await import('../router')
       await router.push('/')
     }
+    return true
   }
 
   // ── WebSocket ───────────────────────────────────────────────────────
@@ -4293,6 +4602,9 @@ export const useProjectStore = defineStore('projects', () => {
       const gone = new Set(dropped)
       dropped.forEach(clearDraftsForProject)
       const selected = activeChat.value
+      // The dropped projects' chats go with them, and so do the commands
+      // they offered.
+      clearTerminalOffersForProjects(gone)
       chats.value = chats.value.filter(c => !gone.has(c.project_id))
       if (selected && gone.has(selected.project_id) && activeChatId.value === selected.chat_id) {
         disconnectWs(selected.chat_id)
@@ -4314,6 +4626,7 @@ export const useProjectStore = defineStore('projects', () => {
             revision: msg.keyboard_revision,
           })
         }
+        if (msg.appearance) applyAppearanceSettings(msg.appearance)
         // Reset broker-streaming state to match server truth.
         projectStreaming.value = {}
         for (const entry of msg.active_streams) {
@@ -4334,6 +4647,10 @@ export const useProjectStore = defineStore('projects', () => {
         // closed/archived), so a client that missed a pin/unpin while its socket
         // was down heals to server truth instead of writing stale browser state.
         applyChatPinsSnapshot(msg.chat_pins)
+        // The transient offer map is complete too: the snapshot replaces it,
+        // so an offer the engine no longer holds is cleared, and one it
+        // holds for a chat this client has not listed yet is kept.
+        applyTerminalOfferSnapshot(msg.chat_terminal_offers)
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -4354,6 +4671,9 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'keyboard_settings_changed':
         applyKeyboardSettings(msg)
+        break
+      case 'appearance_settings_changed':
+        applyAppearanceSettings(msg)
         break
       case 'server_restarting':
         beginServerRestart(msg.message)
@@ -4461,8 +4781,9 @@ export const useProjectStore = defineStore('projects', () => {
           }
         }
         // Refresh the chats list so last_activity_at + recent ordering update.
+        const listReadStart = terminalOfferReadStart()
         api.get<ChatInfo[]>('/api/chats?active_only=1')
-          .then(c => reconcileActiveChats(c))
+          .then(c => reconcileActiveChats(c, listReadStart))
           .catch(() => { /* ignore */ })
         // Ensure the active chat's transcript refreshes even when the tab is
         // hidden — otherwise the answer stays invisible until the user opens
@@ -4524,8 +4845,9 @@ export const useProjectStore = defineStore('projects', () => {
           void loadSubagents(msg.chat_id)
         }
         // Keep sidebar ordering and last-activity timestamps in sync.
+        const listReadStart = terminalOfferReadStart()
         api.get<ChatInfo[]>('/api/chats?active_only=1')
-          .then(c => reconcileActiveChats(c))
+          .then(c => reconcileActiveChats(c, listReadStart))
           .catch(() => { /* ignore */ })
         break
       }
@@ -4596,6 +4918,8 @@ export const useProjectStore = defineStore('projects', () => {
           if (msg.archive_path) chat.archive_path = msg.archive_path
         }
         if (archivingChats.value[msg.chat_id]) delete archivingChats.value[msg.chat_id]
+        // The command died with the chat.
+        setTerminalOffer(msg.chat_id, null)
         // Hold the local flag until a chat-list payload agrees: a GET that left
         // before the archive committed can still resolve after this event.
         pendingArchived.value.add(msg.chat_id)
@@ -4626,8 +4950,9 @@ export const useProjectStore = defineStore('projects', () => {
         // second fetch of the same chat. Harmless; keep it, the agent's switches need it.
         // The event has no after_turn_index; the server's ChatInfo does. Refetch
         // rather than guess the anchor (an optimistic user row has no turn_index yet).
+        const readStart = terminalOfferReadStart()
         void api.get<ChatInfo>(`/api/chats/${encodeURIComponent(msg.chat_id)}`)
-          .then((fresh) => { replaceChat(fresh) })
+          .then((fresh) => { replaceChat(fresh, readStart) })
           .catch(() => { /* next chats load heals it */ })
         break
       }
@@ -4643,6 +4968,16 @@ export const useProjectStore = defineStore('projects', () => {
         }, { source: 'event' })
         break
       }
+      case 'chat_terminal_offer_changed': {
+        // The engine offered (or dropped) a command. Nothing else happens
+        // here: an archived chat holds no offer, so a late event cannot give
+        // it one, and the command is never run — only displayed.
+        const chat = chats.value.find(c => c.chat_id === msg.chat_id)
+        if (chat?.archived) break
+        if (msg.terminal_offer !== null && !isTerminalOffer(msg.terminal_offer)) break
+        setTerminalOffer(msg.chat_id, msg.terminal_offer)
+        break
+      }
       case 'chat_deleted': {
         // Fires when the server prunes an empty chat (user created a "New
         // Chat" and never sent a message, then moved on) or when another
@@ -4652,6 +4987,8 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
         }
+        // The chat is gone, and so is the command it offered.
+        setTerminalOffer(msg.chat_id, null)
         dropChatPinState(msg.chat_id)
         if (messages.value[msg.chat_id]) delete messages.value[msg.chat_id]
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
@@ -4684,6 +5021,9 @@ export const useProjectStore = defineStore('projects', () => {
         const selectedChatId = activeChat.value?.project_id === msg.project_id
           ? activeChatId.value
           : null
+        // The project's chats go with it, and so do the commands they
+        // offered.
+        clearTerminalOffersForProjects(new Set([msg.project_id]))
         projects.value = projects.value.filter(p => p.project_id !== msg.project_id)
         chats.value = chats.value.filter(c => c.project_id !== msg.project_id)
         if (selectedChatId) {
@@ -4706,7 +5046,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'workspaces_changed': {
-        // A workspace was archived, restored or renamed in another tab or
+        // A workspace was archived, restored, renamed or reordered in another tab or
         // device. Refetch the registry so the sidebar and pickers stop
         // offering it (or show it again) without a reload. A rename also
         // moves the selection, so the renamed workspace stays selected here.
@@ -4736,11 +5076,11 @@ export const useProjectStore = defineStore('projects', () => {
         // A Google Workspace login went dead (revoked/expired token). The
         // server debounces to one event per breakage; surface it as a
         // persistent error toast. The fix is re-authentication in
-        // Settings → Workspaces, so the Fix action navigates there rather
-        // than seeding a chat. The PWA push banner is the other
+        // Settings → Overview → Google account, so the Fix action navigates
+        // there rather than seeding a chat. The PWA push banner is the other
         // channel (see push.py); this is the live in-app signal.
         pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
-          fixRoute: '/settings/workspaces',
+          fixRoute: '/settings/workspace',
           fixLabel: 'Fix in Settings',
         })
         break
@@ -4776,13 +5116,19 @@ export const useProjectStore = defineStore('projects', () => {
   // the send-out path can promote that exact bubble in place instead of
   // pushing a second copy. It deliberately carries no `turn_index`, which is
   // the invariant the `user_echo` handler relies on to reconcile an
-  // optimistic bubble rather than duplicate the turn.
+  // optimistic bubble rather than duplicate the turn. The promotion stamps
+  // the bubble with the same `send_id` the frame carries, so the echo
+  // recognises the promoted bubble as this send instead of pushing a second
+  // copy of the same turn.
   type PendingUserMessage = ChatMessage & { pendingSend?: true }
-  interface DeferredSend { composed: string; images?: string[] }
+  interface DeferredSend { composed: string; images?: string[]; origin?: 'retry' }
   const deferredSends: Record<string, DeferredSend[]> = {}
 
   function sameDeferredPayload(a: DeferredSend, b: DeferredSend): boolean {
     if (a.composed.trim() !== b.composed.trim()) return false
+    // A deliberate retry is a new intent, so it never collapses into a
+    // pending ordinary send of the same words.
+    if ((a.origin || '') !== (b.origin || '')) return false
     const ai = a.images || []
     const bi = b.images || []
     return ai.length === bi.length && ai.every((v, i) => v === bi[i])
@@ -4813,6 +5159,7 @@ export const useProjectStore = defineStore('projects', () => {
       content: entry.composed,
       timestamp: new Date().toISOString(),
       images: entry.images,
+      origin: entry.origin,
       pendingSend: true,
     }
     msgs.push(bubble)
@@ -4830,7 +5177,10 @@ export const useProjectStore = defineStore('projects', () => {
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i] as PendingUserMessage
       if (m.role !== 'user' || !m.pendingSend) continue
-      if (sameDeferredPayload({ composed: m.content || '', images: m.images }, entry)) return i
+      // The tag is part of the payload: a pending retry bubble is the
+      // retry's own, never an ordinary send's.
+      const origin = m.origin === 'retry' ? 'retry' : undefined
+      if (sameDeferredPayload({ composed: m.content || '', images: m.images, origin }, entry)) return i
     }
     return -1
   }
@@ -4838,11 +5188,17 @@ export const useProjectStore = defineStore('projects', () => {
   // The frame is on the wire (or the send was abandoned): this is an ordinary
   // optimistic bubble now. Clearing the marker keeps a later deferred send
   // from promoting or deleting a bubble that is not its own, and guarantees
-  // no bubble can stay "pending" forever.
-  function settlePendingSendBubble(chatId: string, entry: DeferredSend): boolean {
+  // no bubble can stay "pending" forever. When the frame carried a send id,
+  // the bubble gets it too: the `user_echo` reconciliation matches bubbles by
+  // send id, so a promoted bubble that never learned the id could not be
+  // recognised and the echo pushed a second copy of the same turn. An
+  // abandoned send has no id to stamp, and keeps none.
+  function settlePendingSendBubble(chatId: string, entry: DeferredSend, sendId?: string): boolean {
     const idx = findPendingSendBubble(chatId, entry)
     if (idx === -1) return false
-    delete (messages.value[chatId][idx] as PendingUserMessage).pendingSend
+    const bubble = messages.value[chatId][idx] as PendingUserMessage
+    delete bubble.pendingSend
+    if (sendId) bubble.send_id = sendId
     return true
   }
 
@@ -4913,11 +5269,11 @@ export const useProjectStore = defineStore('projects', () => {
     // attachment bundle now, before a retry callback can read another
     // message's staged attachments from the shared composer bucket.
     if (!prepared) consumePreparedAttachments(chatId, message)
-    const { composed, imageRefs } = message
+    const { composed, imageRefs, origin } = message
     // Only a retry can own an optimistic pending bubble / registry entry: the
     // first call either sends straight away or creates them below.
     const wasDeferred = _deferredAttempt > 0
-    const deferredEntry: DeferredSend = { composed, images: imageRefs }
+    const deferredEntry: DeferredSend = { composed, images: imageRefs, origin }
     const ws = sockets.value[chatId]
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       if (!wasDeferred) {
@@ -4977,10 +5333,17 @@ export const useProjectStore = defineStore('projects', () => {
     // A tracked entry for a DIFFERENT message is not this send: it gets its
     // own id, and the tracked entry keeps its id for its own retry.
     const tracked = unackedSends[chatId]
-    const trackedIsThisSend = Boolean(tracked && tracked.text === composed)
+    // A deliberate retry is a new intent, not a repeat of the tracked send:
+    // it never inherits the tracked id, even when the words are identical.
+    // The tag is the only thing that says "new intent" — never the text.
+    const isRetry = origin === 'retry'
     const sendId = message.sendId
-      ?? (trackedIsThisSend ? tracked?.id : undefined)
+      ?? (tracked && tracked.text === composed && !isRetry ? tracked.id : undefined)
       ?? newSendId()
+    // The tracked entry survives only when this send IS that entry, which the
+    // id decides: the recovery resend keeps its attempt count, so the
+    // one-retry cap holds.
+    const trackedIsThisSend = Boolean(tracked && tracked.id === sendId)
 
     if (alreadyStreaming) {
       // Queue: don't push to the main messages list yet. Queued messages live
@@ -5006,6 +5369,7 @@ export const useProjectStore = defineStore('projects', () => {
         type: 'message', text: composed, mode: 'queue', delivery, send_id: sendId,
       }
       if (imageRefs) payload.images = imageRefs
+      if (origin) payload.origin = origin
       payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
       onSent?.()
@@ -5016,13 +5380,15 @@ export const useProjectStore = defineStore('projects', () => {
     // in place rather than pushing a second copy. `settlePending…` returns
     // false when a history reload wiped it, in which case we push fresh.
     if (wasDeferred) dropDeferredSend(chatId, deferredEntry)
-    if (!wasDeferred || !settlePendingSendBubble(chatId, deferredEntry)) {
+    if (!wasDeferred || !settlePendingSendBubble(chatId, deferredEntry, sendId)) {
       const msgs = messages.value[chatId] || []
       msgs.push({
         role: 'user',
         content: composed,
         timestamp: new Date().toISOString(),
         images: imageRefs,
+        // A deliberate retry is tagged, so the bubble says what the turn is.
+        origin,
         // The id marks this bubble as the client's own optimistic copy, so
         // the server's copy of the same turn is never mistaken for it.
         send_id: sendId,
@@ -5042,13 +5408,16 @@ export const useProjectStore = defineStore('projects', () => {
 
     const payload: Record<string, unknown> = { type: 'message', text: composed, send_id: sendId }
     if (imageRefs) payload.images = imageRefs
+    // A deliberate retry is tagged on the wire, so the engine records the
+    // turn as a retry and echoes the tag back.
+    if (origin) payload.origin = origin
     // Track until the server proves receipt. Cleared by the echoed user_echo,
     // by the turn showing up in /messages, or recovered once on reconnect.
     // An identical pending entry (the recovery path resending this very
     // message) keeps its attempt count so the one-retry cap holds.
     if (!trackedIsThisSend) {
       unackedSends[chatId] = {
-        id: sendId, text: composed, images: imageRefs, at: Date.now(), attempts: 0,
+        id: sendId, text: composed, images: imageRefs, at: Date.now(), attempts: 0, origin,
       }
       persistUnackedSends()
     }
@@ -5694,6 +6063,9 @@ export const useProjectStore = defineStore('projects', () => {
     const streamingEventTypes = new Set(['text_delta', 'tool_use', 'thinking', 'status', 'user_echo', 'token_usage'])
     const impliesStreaming = streamingEventTypes.has(event.type)
       && !(event.type === 'status' && event.message === 'stopped')
+      // A duplicate echo repeats a send the engine already owns; it must not
+      // put the spinner back on a finished turn.
+      && !(event.type === 'user_echo' && event.duplicate)
     if (impliesStreaming && !streaming.value[chatId]) {
       streaming.value[chatId] = true
       if (streamingText.value[chatId] === undefined) streamingText.value[chatId] = ''
@@ -5724,6 +6096,15 @@ export const useProjectStore = defineStore('projects', () => {
           // a turn that ran. Nothing to render — the transcript already holds
           // the turn — but the client state has to settle: the send is
           // delivered, and no turn is streaming.
+          // `streaming` is truthful here, so the last transcript user turn is the running one.
+          const runningTurn = streaming.value[chatId]
+            ? msgs.filter(m => m.role === 'user' && m.turn_index != null).at(-1)?.turn_index ?? null
+            : null
+          if (runningTurn != null && event.turn_index === runningTurn) {
+            // A recovery resend of the turn that is still running: the echo is a
+            // repeat, but this turn owns the live buffer. Only settle the send.
+            break
+          }
           clearStreamingState(chatId)
           void loadMessages(chatId, { background: true })
           break
@@ -6516,6 +6897,7 @@ export const useProjectStore = defineStore('projects', () => {
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    terminalOffers,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
@@ -6525,9 +6907,10 @@ export const useProjectStore = defineStore('projects', () => {
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
+    canLoadOlderByChat, isLoadingOlderByChat,
     // Actions
     setQueuedDelivery,
-    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace,
+    fetchAll, fetchWorkspaces, createWorkspace, reorderWorkspaces, updateWorkspace,
     archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
     workspaceRegistryRevision, refreshWorkspaceRegistry,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
@@ -6535,7 +6918,7 @@ export const useProjectStore = defineStore('projects', () => {
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
+    switchChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
@@ -6544,9 +6927,10 @@ export const useProjectStore = defineStore('projects', () => {
     addFileCommentImage, removeFileCommentImage,
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
+    terminalOfferReadStart, dismissTerminalOffer,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
-    canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
+    loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs, reconnectNow,
     engineSeenAliveWithin,
     beginServerRestart, restoreState,

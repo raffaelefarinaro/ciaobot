@@ -1,5 +1,5 @@
 import { devices, expect, test, type Page } from '@playwright/test'
-import { BOOTED, COMPOSER, boot, isolate } from '../support/app'
+import { BOOTED, COMPOSER, boot, isolate, quiesce } from '../support/app'
 
 /**
  * DESIGN.md requires every interactive target to be at least 44x44 CSS px on
@@ -9,8 +9,12 @@ import { BOOTED, COMPOSER, boot, isolate } from '../support/app'
 const TOUCH_MIN = 44
 const TABS = [
   '/settings',
+  '/settings/appearance',
+  '/settings/access',
+  '/settings/advanced',
+  '/settings/workspace',
   '/settings/workspaces',
-  '/settings/models',
+  '/settings/providers',
   '/settings/skills',
   '/settings/subagents',
   '/settings/commands',
@@ -21,7 +25,7 @@ const TABS = [
 // before it is measured. Automations and Import have no fixture rows, so they
 // wait on their heading.
 const MAIN_SURFACES: Array<[string, string]> = [
-  ['/', '.home-setup-link'],
+  ['/', '.home-setup'],
   ['/tasks', '.task-card'],
   ['/automations', '.schedule-panel .page-tag'],
   ['/memory/review', '.pr-select-toggle'],
@@ -39,8 +43,10 @@ const MAIN_SURFACES: Array<[string, string]> = [
 const POPUP_SURFACES: Array<[string, string]> = [
   ...MAIN_SURFACES,
   ['/chat/alpha-chat-1', COMPOSER],
+  ['/settings/workspace', '.settings-main'],
   ['/settings/workspaces', '.settings-main'],
-  ['/settings/models', '.settings-main'],
+  ['/settings/providers', '.settings-main'],
+  ['/settings/advanced', '.settings-main'],
 ]
 
 /**
@@ -48,7 +54,11 @@ const POPUP_SURFACES: Array<[string, string]> = [
  * that are smaller than TOUCH_MIN in either dimension.
  */
 async function measure(page: Page, scope = 'body') {
+  // Never measure a layout that is still being styled: sizes read before a
+  // lazy stylesheet applies are the fine-pointer ones.
+  await quiesce(page)
   return page.evaluate(({ min, scope }) => {
+    if (!matchMedia('(pointer: coarse)').matches) throw new Error('page is not a coarse pointer; sizes would be fine-pointer ones')
     document.querySelectorAll('details').forEach((d) => { d.open = true })
     const bad: string[] = []
     let total = 0
@@ -86,34 +96,36 @@ async function measure(page: Page, scope = 'body') {
   }, { min: TOUCH_MIN, scope })
 }
 
-/** Visible popup triggers: menus, popovers, disclosure buttons and Settings' New/Edit forms. */
+/** Visible popup triggers: menus, popovers, disclosure buttons and Settings' New form. */
 const TRIGGER = '[aria-haspopup], [aria-expanded="false"]'
 const TRIGGER_CAP = 80
-// Opening these proves the run reached each kind of popup, not just some DOM change.
-const KNOWN_TRIGGERS = [
-  'Model for the new chat',
-  '/settings/workspaces › New workspace',
-  '/settings/workspaces › Edit workspace',
-  'Show chat details',
-]
-// Triggers a headless run may legitimately fail to click (covered by another element).
-const MAX_SKIPPED = 3
+// Opening these proves each surface reached the kind of popup it is meant to
+// cover, not just some DOM change. Keyed by the surface they live on.
+const KNOWN_TRIGGERS: Record<string, string[]> = {
+  '/': ['Model for the new chat'],
+  '/chat/alpha-chat-1': ['Show chat details'],
+  '/settings/workspaces': ['New workspace', 'Actions for workspace'],
+}
+// Triggers a surface may legitimately fail to click because another element
+// covers them. This was one whole-run cap of 3; each surface is now its own
+// test, so the cap is per surface and the caps sum to 1, never more than 3.
+// The task editor opens as a modal over the board, so the board's "Show done
+// tasks" toggle behind it is covered by design. Every other surface must click
+// every trigger it tags.
+const MAX_SKIPPED: Record<string, number> = { '/tasks/0123456789abcdef0123456789abcdef': 1 }
 
 /**
  * Measure every open `.field-info-panel`: report those whose box leaves the
- * viewport or sits more than 12px from the visible glyph's bottom, and name
- * the ones measured so the caller can prove the check ran.
+ * viewport or sits more than 12px from the visible glyph's bottom.
  */
 async function panelProblems(page: Page) {
   return page.evaluate(() => {
     const out: string[] = []
-    const measured: string[] = []
     const w = window.innerWidth
     for (const el of Array.from(document.querySelectorAll('.field-info-panel'))) {
       const r = el.getBoundingClientRect()
       if (r.width === 0) continue
       const summary = el.parentElement?.querySelector('summary')
-      measured.push(summary?.getAttribute('aria-label') ?? '')
       if (r.left < -0.5 || r.right > w + 0.5) out.push(`panel overflows viewport: left ${Math.round(r.left)} right ${Math.round(r.right)} of ${w}`)
       const s = summary?.getBoundingClientRect()
       // The 20px glyph sits centred in the 44px hit area, so its bottom is the
@@ -121,7 +133,7 @@ async function panelProblems(page: Page) {
       const glyphBottom = s ? s.bottom - 12 : 0
       if (s && Math.abs(r.top - glyphBottom) > 12.5) out.push(`panel ${Math.round(r.top - glyphBottom)}px from the glyph`)
     }
-    return { out, measured }
+    return { out }
   })
 }
 
@@ -140,23 +152,33 @@ async function tagTriggers(page: Page): Promise<number> {
   }, TRIGGER)
 }
 
-/** Resolve once the DOM has changed from `before` elements and then held still for a few frames. */
+/**
+ * True once the DOM has changed from `before` elements and then held still
+ * for a few frames; false if it never changed (nothing opened). Counted in
+ * animation frames, not milliseconds: a wall-clock cutoff reads a slow runner
+ * as "the click did nothing".
+ */
 async function settled(page: Page, before: number): Promise<boolean> {
-  // Reset the stability counter first: values left by the previous trigger
-  // could otherwise satisfy the check on the first frame, before anything opened.
+  // Reset the counters first: values left by the previous trigger could
+  // otherwise satisfy the check on the first frame, before anything opened.
   await page.evaluate(() => {
-    const w = window as unknown as { __touchLast?: number; __touchStable?: number }
+    const w = window as unknown as { __touchLast?: number; __touchStable?: number; __touchIdle?: number }
     w.__touchLast = undefined
     w.__touchStable = 0
+    w.__touchIdle = 0
   })
-  return page.waitForFunction((was) => {
-    const w = window as unknown as { __touchLast?: number; __touchStable?: number }
+  return page.waitForFunction(({ was, quiet, idle }) => {
+    const w = window as unknown as { __touchLast?: number; __touchStable?: number; __touchIdle?: number }
     const now = document.getElementsByTagName('*').length
-    if (now === was) return false
+    if (now === was) {
+      // Unchanged since the click: give a popup `idle` frames to start opening.
+      w.__touchIdle = (w.__touchIdle ?? 0) + 1
+      return w.__touchIdle >= idle ? 'nothing' : false
+    }
     w.__touchStable = w.__touchLast === now ? (w.__touchStable ?? 0) + 1 : 0
     w.__touchLast = now
-    return w.__touchStable >= 5
-  }, before, { polling: 'raf', timeout: 2000 }).then(() => true, () => false)
+    return w.__touchStable >= quiet ? 'opened' : false
+  }, { was: before, quiet: 5, idle: 60 }, { polling: 'raf', timeout: 0 }).then(async (h) => (await h.jsonValue()) === 'opened')
 }
 
 test.use({ ...devices['iPhone 13'], defaultBrowserType: undefined })
@@ -164,6 +186,14 @@ test.use({ ...devices['iPhone 13'], defaultBrowserType: undefined })
 test.describe('touch targets', () => {
   test.beforeEach(async ({ page }, testInfo) => {
     await isolate(page, `touch-${testInfo.workerIndex}`)
+    // The mocked update below would otherwise raise an "Update available" toast
+    // once per browser context, at whatever moment the status fetch lands. It
+    // is fixed to the bottom of the viewport and covers whichever trigger is
+    // there, so a click on it timed out depending on timing. Mark it seen: no
+    // spec here is about the toast.
+    await page.addInitScript(() => {
+      try { localStorage.setItem('ciao-update-toast-seen-version', '1.2.0') } catch { /* private mode */ }
+    })
     await page.route('**/api/package/status', (route) => route.fulfill({ json: {
       current_version: '1.1.0', latest_version: '1.2.0', update_available: true, mode: 'installer',
     } }))
@@ -223,14 +253,14 @@ test.describe('touch targets', () => {
     expect(found.bad, `controls under ${TOUCH_MIN}px:\n${found.bad.join('\n')}`).toEqual([])
   })
 
-  test('controls inside menus and dialogs are at least 44×44 on touch', async ({ page }) => {
-    const small: string[] = []
-    const panels: string[] = []
-    const measuredPanels = new Set<string>()
-    const opened: string[] = []
-    const skipped: string[] = []
-    for (const [route, ready] of POPUP_SURFACES) {
+  for (const [route, ready] of POPUP_SURFACES) {
+    test(`controls inside menus and dialogs on ${route} are at least 44×44 on touch`, async ({ page }) => {
+      const small: string[] = []
+      const panels: string[] = []
+      const opened: string[] = []
+      const skipped: string[] = []
       await boot(page, route, ready)
+      await quiesce(page)
       let count = await tagTriggers(page)
       expect(count, `${route}: trigger cap of ${TRIGGER_CAP} would hide triggers`).toBeLessThan(TRIGGER_CAP)
       const baseline = new Set((await measure(page)).bad)
@@ -245,11 +275,12 @@ test.describe('touch targets', () => {
         const label = (await trigger.first().evaluate((el) => (el.getAttribute('aria-label') || el.textContent || '')
           .trim().replace(/\s+/g, ' ').slice(0, 40)).catch(() => '')) || `#${i}`
         const name = `${route} › ${label}`
+        await quiesce(page)
         const before = await page.evaluate(() => document.getElementsByTagName('*').length)
         try {
           await trigger.click({ timeout: 2000 })
         } catch (err) {
-          skipped.push(`${name}: ${String(err).split('\n')[0]}`)
+          skipped.push(`${name}: ${String(err)}`)
           await boot(page, route, ready)
           count = await tagTriggers(page)
           continue
@@ -259,7 +290,6 @@ test.describe('touch targets', () => {
         const found = await measure(page)
         for (const f of found.bad) if (!baseline.has(f)) small.push(`${name}: ${f}`)
         const p = await panelProblems(page)
-        p.measured.forEach((m) => measuredPanels.add(m))
         for (const m of p.out) panels.push(`${name}: ${m}`)
         await page.keyboard.press('Escape')
         // Escape leaves forms open on Settings, and a trigger may navigate: start those clean.
@@ -268,15 +298,32 @@ test.describe('touch targets', () => {
           count = await tagTriggers(page)
         }
       }
+      for (const known of KNOWN_TRIGGERS[route] ?? []) {
+        expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened on ${route}; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
+      }
+      expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED[route] ?? 0)
+      expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
+      expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
+    })
+  }
+
+  test('the workspace reorder handle and Move up / Move down are at least 44×44 on touch', async ({ page }) => {
+    await boot(page, '/settings/workspaces', '.settings-main')
+    const handle = page.locator('[data-workspace-handle="beta"]')
+    await expect(handle).toBeVisible()
+    const box = await handle.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.width).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+    expect(box!.height).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+
+    await page.getByRole('button', { name: 'Actions for workspace beta' }).click()
+    for (const name of ['Move workspace beta up', 'Move workspace beta down']) {
+      const item = page.getByRole('menuitem', { name })
+      await expect(item).toBeVisible()
+      const itemBox = await item.boundingBox()
+      expect(itemBox, name).not.toBeNull()
+      expect(itemBox!.height, name).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
+      expect(itemBox!.width, name).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
     }
-    for (const known of KNOWN_TRIGGERS) {
-      expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
-    }
-    expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED)
-    for (const label of ['About Google Workspace integration', 'About GWS profiles']) {
-      expect(measuredPanels.has(label), `panel "${label}" was never measured`).toBe(true)
-    }
-    expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
-    expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
   })
 })

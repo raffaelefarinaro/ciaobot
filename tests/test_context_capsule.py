@@ -230,7 +230,7 @@ def test_the_file_access_line_names_the_roots_only_for_a_confined_chat() -> None
     )
     assert "/work/agent, /work/agent/memory-vault/work" in line
     assert '"Operation not permitted"' in line
-    assert "Settings → Workspaces → Edit → File access" in line
+    assert "Settings → Overview → File access" in line
     assert "file_access=" not in build_context_capsule(workspace="work")
 
 
@@ -366,3 +366,71 @@ def test_a_linked_chat_with_code_mode_off_gets_the_light_block(
 
 def test_the_linked_repo_rules_keep_notes_out_of_the_repo() -> None:
     assert "Notes, plans, reports, drafts and artifacts" in LINKED_REPO_RULES
+
+
+def _prime(manager, chat, session_id: str = "ses_1") -> None:  # type: ignore[no-untyped-def]
+    """Send a turn's capsule and commit its context marker in provider session *session_id*."""
+    from types import SimpleNamespace
+
+    chat.session_id = session_id
+    manager._build_prompt_prefix(chat)
+    digest = manager._stable_context_marker(chat)[0]
+    manager._commit_context_marker(chat, SimpleNamespace(context_digest=digest), session_id)
+
+
+def test_code_mode_switched_on_mid_session_inlines_the_instructions_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Switched on from the PWA, the agent has never seen the text: inline it, then point."""
+    manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
+    chat.code_mode = False
+    _prime(manager, chat)
+    chat.code_mode = True
+
+    assert manager._needs_stable_context(chat)
+    prefix = manager._build_prompt_prefix(chat)
+    assert "Code-work rules" in prefix
+    assert "Run make test" in prefix
+
+    _prime(manager, chat)  # that turn went out
+    chat.code_mode = False
+    _prime(manager, chat)
+    chat.code_mode = True
+    prefix = manager._build_prompt_prefix(chat)
+    assert f"read {repo}/AGENTS.md" in prefix
+    assert "Run make test" not in prefix
+
+
+def test_agents_md_edited_mid_session_points_at_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
+    _prime(manager, chat)
+    assert chat.instructions_session_id == "ses_1"
+    (repo / "AGENTS.md").write_text("Run make check", encoding="utf-8")
+
+    prefix = manager._build_prompt_prefix(chat)
+    assert f"read {repo}/AGENTS.md" in prefix
+    assert "Run make check" not in prefix
+
+
+def test_a_new_provider_session_gets_the_full_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat, _repo = _linked_manager(tmp_path, monkeypatch)
+    _prime(manager, chat)
+    assert "[Linked repository]" not in manager._build_prompt_prefix(chat)
+
+    chat.session_id = "ses_2"  # rotated, compacted into a new session, or forked
+    prefix = manager._build_prompt_prefix(chat)
+    assert "[Repository instructions:" in prefix
+    assert "Run make test" in prefix
+    # A cleared marker (compaction, cancelled first turn) inlines it as well.
+    chat.context_digest = ""
+    assert "Run make test" in manager._build_prompt_prefix(chat)
+
+
+def test_repo_instructions_are_capped_at_8000_characters() -> None:
+    from ciao import repo_link
+
+    assert repo_link.REPO_INSTRUCTIONS_MAX_CHARS == 8_000

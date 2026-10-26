@@ -115,6 +115,8 @@ def _add_args(tmp_path: Path, **overrides):
         "payload": "",
         "source": "chat-824cd4ec",
         "json": False,
+        "decide": "",
+        "decide_reason_file": "",
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -442,6 +444,8 @@ def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
         payload="",
         source="chat-abc",
         json=False,
+        decide="",
+        decide_reason_file="",
     )
     # A CIAO_VAULT_ROOT that names a different vault than the active workspace
     # is refused, not silently overridden in either direction.
@@ -471,6 +475,8 @@ def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
         payload="",
         source="chat-abc",
         json=False,
+        decide="",
+        decide_reason_file="",
     )
     with unittest.mock.patch.dict(os.environ, manual_env):
         assert _memory_proposal_add_command(explicit_args) == 0
@@ -1627,3 +1633,143 @@ def test_add_command_repo_refuses_a_path_with_a_closing_bracket(tmp_path: Path) 
     payload = str(tmp_path / "app]x")
     assert _memory_proposal_add_command(_add_args(tmp_path, kind="repo", payload=payload)) == 2
     assert not (tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md").exists()
+
+
+# --- decider tail --------------------------------------------------------------
+
+
+def test_as_bullet_renders_the_decide_tail_last() -> None:
+    """The decide tail follows from and request, loses ')' and round-trips."""
+    from ciao.proposal_kinds import parse_bullet
+
+    proposal = mp.MemoryProposal(
+        target="learnings", text="x", source_section="s", request="r",
+        decider="you", decide_reason="why (really)",
+    )
+    line = proposal.as_bullet()
+    assert line.endswith("  _(from: s)_  _(request: r)_  _(decide: you; why really)_")
+    bullet = parse_bullet(line)
+    assert bullet is not None
+    assert (bullet.text, bullet.source, bullet.request) == ("x", "s", "r")
+    assert (bullet.decider, bullet.decide_reason) == ("you", "why really")
+
+
+def test_append_proposals_dedupes_a_bullet_that_carries_a_decide_tail(tmp_path: Path) -> None:
+    """Dedupe still sees a bullet once it carries a decide tail."""
+    proposal = mp.MemoryProposal(
+        target="memory", text="Prefer uv.", source_section="s",
+        decider="nightly", decide_reason="check chats",
+    )
+    assert mp.append_proposals([proposal], tmp_path) is not None
+    assert mp.append_proposals([proposal], tmp_path) is None
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    assert queue.read_text(encoding="utf-8").count("Prefer uv.") == 1
+
+
+def _queue_path(tmp_path: Path) -> Path:
+    return tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+
+
+def test_add_command_writes_decider_with_reason_file(tmp_path: Path) -> None:
+    """--decide plus a reason file lands as the last tail on the bullet."""
+    from ciao.cli import _memory_proposal_add_command
+
+    reason = tmp_path / "reason.txt"
+    reason.write_text("Check\nother chats.\n", encoding="utf-8")
+    code = _memory_proposal_add_command(
+        _add_args(tmp_path, decide="nightly", decide_reason_file=str(reason))
+    )
+    assert code == 0
+    line = [
+        ln for ln in _queue_path(tmp_path).read_text(encoding="utf-8").splitlines()
+        if ln.startswith("- [")
+    ][0]
+    assert line.endswith("_(decide: nightly; Check other chats.)_")
+
+
+def test_add_command_refuses_decide_without_a_reason(tmp_path: Path) -> None:
+    """The reason is the point of the field, so --decide alone is refused."""
+    from ciao.cli import _memory_proposal_add_command
+
+    assert _memory_proposal_add_command(_add_args(tmp_path, decide="you")) == 2
+
+
+def test_add_command_refuses_a_reason_without_decide(tmp_path: Path) -> None:
+    """A reason file with no decider names nothing, so it is refused."""
+    from ciao.cli import _memory_proposal_add_command
+
+    reason = tmp_path / "reason.txt"
+    reason.write_text("why", encoding="utf-8")
+    assert _memory_proposal_add_command(
+        _add_args(tmp_path, decide_reason_file=str(reason))
+    ) == 2
+
+
+def test_add_command_refuses_an_empty_reason(tmp_path: Path) -> None:
+    """A blank reason file is no reason."""
+    from ciao.cli import _memory_proposal_add_command
+
+    reason = tmp_path / "reason.txt"
+    reason.write_text("  \n", encoding="utf-8")
+    assert _memory_proposal_add_command(
+        _add_args(tmp_path, decide="you", decide_reason_file=str(reason))
+    ) == 2
+
+
+def test_list_proposals_rows_carry_decider(tmp_path: Path) -> None:
+    """Rows expose decider and reason; a legacy bullet has an empty decider."""
+    queue = tmp_path / "Memory-Proposals.md"
+    queue.write_text(
+        "- [memory] a  _(from: s)_  _(decide: you; judgement)_\n"
+        "- [memory] b  _(from: s)_\n",
+        encoding="utf-8",
+    )
+    rows = mp.list_proposals(queue)
+    assert (rows[0]["decider"], rows[0]["decide_reason"]) == ("you", "judgement")
+    assert rows[1]["decider"] == ""
+
+
+def test_record_decision_stores_a_reason_and_read_decisions_returns_it(tmp_path: Path) -> None:
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+
+    assert mp.record_dismissal(queue, text="One.", kind="memory", via="pwa", reason="  tool quirk ")
+    assert mp.record_promotion(queue, text="Two.", kind="memory", via="pwa", reason="yes, everywhere")
+    assert mp.record_dismissal(queue, text="Three.", kind="memory", via="pwa")
+
+    rows = mp.read_decisions(queue)
+    assert [r["reason"] for r in rows] == ["tool quirk", "yes, everywhere", ""]
+    lines = mp.dismissed_log_path(queue).read_text(encoding="utf-8").splitlines()
+    assert "reason" not in json.loads(lines[2])
+
+
+def test_a_reason_with_unicode_line_separators_cannot_split_the_row(tmp_path: Path) -> None:
+    vault = tmp_path
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("## 2026-09-01\n", encoding="utf-8")
+
+    assert mp.record_dismissal(
+        queue, text="Sep fact.", kind="memory", via="pwa", reason="a\u2028b\u2029c\u0085d\nnext"
+    )
+
+    rows = mp.read_decisions(queue)
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "a b c d next"
+    assert mp.was_dismissed(vault, "Sep fact.") is True
+
+
+def test_read_decisions_reason_is_empty_for_legacy_rows(tmp_path: Path) -> None:
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    mp.dismissed_log_path(queue).write_text(
+        '{"kind": "memory", "text": "Legacy."}\n'
+        '{"promoted_at": "2026-01-01T00:00:00+00:00", "kind": "memory", "text": "Old accept."}\n',
+        encoding="utf-8",
+    )
+
+    rows = mp.read_decisions(queue)
+    assert [r["reason"] for r in rows] == ["", ""]
+    before = [mp.history_row_id(r, "personal") for r in rows]
+    with_reason = [mp.history_row_id({**r, "reason": "why"}, "personal") for r in rows]
+    assert before == with_reason

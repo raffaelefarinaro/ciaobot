@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,10 @@ def test_workspace_instance_lock_blocks_second_backend_and_releases(tmp_path: Pa
         metadata = json.loads(first.path.read_text(encoding="utf-8"))
         assert metadata["status"] == "running"
         assert metadata["port"] == 8443
+        startup_id = metadata["startup_id"]
+        assert startup_id == first.startup_id
+        first.acquire()
+        assert first.startup_id == startup_id
         with pytest.raises(WorkspaceAlreadyRunningError, match="port 8443"):
             second.acquire()
     finally:
@@ -27,6 +32,13 @@ def test_workspace_instance_lock_blocks_second_backend_and_releases(tmp_path: Pa
     second.release()
     metadata = json.loads(second.path.read_text(encoding="utf-8"))
     assert metadata["status"] == "stopped"
+    assert metadata["startup_id"] == second.startup_id
+    assert second.startup_id != startup_id
+    second.release()
+    previous_id = second.startup_id
+    second.acquire()
+    assert second.startup_id != previous_id
+    second.release()
 
 
 @pytest.mark.asyncio
@@ -41,9 +53,12 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     class RecordingLock:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.startup_id = "test-startup-id"
 
         def __enter__(self):
+            from ciao.onboarding import read_receipt
+
+            assert read_receipt(config.state_path.parent) is None
             events.append("lock")
             return self
 
@@ -54,17 +69,27 @@ async def test_startup_persists_normalized_registry_only_after_lock(
         state_path=tmp_path / ".runtime" / "state.json",
         workspace_root=tmp_path,
         pwa_port=8443,
+        bootstrap_mode=False,
         _workspace_registry_changed=True,
     )
 
     def persist() -> None:
         assert events == ["lock", "import", "gws"]
+        # Persistence creates durable legacy evidence only after startup has
+        # initialized the fresh receipt; it cannot retroactively exempt it.
+        config.state_path.parent.mkdir(parents=True, exist_ok=True)
+        (config.state_path.parent / "workspaces.json").write_text("[]")
         events.append("persist")
 
     config.persist_workspace_registry = persist
 
     def import_legacy() -> list[str]:
         assert events == ["lock"]
+        from ciao.onboarding import read_receipt
+
+        receipt = read_receipt(config.state_path.parent)
+        assert receipt is not None
+        assert receipt.installation.status == "in_progress"
         events.append("import")
         return []
 
@@ -77,7 +102,9 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     config.import_legacy_gws_profile_env = import_legacy_gws
 
-    async def run_server_locked(_config, *, supervised: bool = False) -> int:
+    async def run_server_locked(_config, *, supervised: bool = False, startup_id=None, engine_pid=None) -> int:
+        assert startup_id == "test-startup-id"
+        assert engine_pid == os.getpid()
         events.append("run")
         return 0
 
@@ -87,3 +114,7 @@ async def test_startup_persists_normalized_registry_only_after_lock(
 
     assert await main._async_main() == 0
     assert events == ["lock", "import", "gws", "persist", "run", "unlock"]
+    from ciao.onboarding import read_receipt
+
+    receipt = read_receipt(config.state_path.parent)
+    assert receipt is not None and receipt.installation.status == "in_progress"

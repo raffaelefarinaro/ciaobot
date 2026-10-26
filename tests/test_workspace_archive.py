@@ -553,6 +553,34 @@ def test_restore_carries_the_claude_ai_connectors_switch(tmp_path):
     assert config.workspaces["work"].claude_ai_connectors is False
 
 
+def test_workspace_archive_restore_resets_memory_handover_to_off(tmp_path):
+    """Handover is deliberately not carried through an archive: a restore fails closed."""
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    config.workspaces["work"].memory_handover = "all"
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert config.workspaces["work"].memory_handover == "off"
+
+
+def test_workspace_archive_restore_does_not_restore_provider_overrides(tmp_path):
+    """Overrides can carry bypass, so a restore comes back on engine defaults."""
+    from ciao.workspace_archive import restored_settings
+
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    config.workspaces["work"].provider_overrides = {"claude": {"permission_mode": "bypass"}}
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    metadata = {"workspace": {"default_provider": "claude", "provider_overrides": {"claude": {"permission_mode": "bypass"}}}}
+    assert "provider_overrides" not in restored_settings(config, metadata)
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert config.workspaces["work"].provider_overrides == {}
+
+
 def test_restore_refuses_a_taken_name(tmp_path):
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
@@ -1273,3 +1301,40 @@ def test_a_missing_vault_root_is_rebuilt_for_the_layout(tmp_path):
 
     assert restored.status_code == 200, restored.json()
     assert config.workspaces["work"].vault_root == "work/memory-vault"
+
+
+# ── order ────────────────────────────────────────────────────────────────────
+
+
+def _three_workspaces(tmp_path: Path, order: list[str]):
+    client, config, pcm, store = _app(tmp_path, rerooted=False)
+    config.workspaces["extra"] = WorkspaceConfig(
+        name="extra", vault_root="memory-vault/extra"
+    )
+    Path(config.workspace_vault_root("extra")).mkdir(parents=True, exist_ok=True)
+    rebuilt = {name: config.workspaces[name] for name in order}
+    config.workspaces.clear()
+    config.workspaces.update(rebuilt)
+    return client, config
+
+
+def test_restored_workspace_is_last_in_order(tmp_path):
+    client, config = _three_workspaces(tmp_path, ["personal", "work", "extra"])
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+    assert list(config.workspaces) == ["personal", "extra"]
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert list(config.workspaces) == ["personal", "extra", "work"]
+    assert [w["name"] for w in restored.json()["workspaces"]] == ["personal", "extra", "work"]
+
+
+def test_archive_keeps_remaining_order(tmp_path):
+    client, config = _three_workspaces(tmp_path, ["work", "personal", "extra"])
+
+    response = client.post("/api/workspaces/work/archive")
+
+    assert response.status_code == 200, response.json()
+    assert list(config.workspaces) == ["personal", "extra"]
+    assert [w["name"] for w in response.json()["workspaces"]] == ["personal", "extra"]

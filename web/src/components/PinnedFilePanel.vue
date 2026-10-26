@@ -339,6 +339,7 @@ import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { handleAppLinkClick } from '../lib/appLinks'
+import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { fileViewerKindForPath, useFileViewerStore } from '../stores/fileViewer'
@@ -480,7 +481,7 @@ const docDir = computed(() => {
 })
 
 const metadata = computed(() => buildVaultDocumentMetadata(content.value, cleanPath.value, markdownPaths.value))
-const renderedMarkdown = computed(() => renderVaultMarkdown(metadata.value.body, cleanPath.value, markdownPaths.value))
+const renderedMarkdown = computed(() => renderVaultMarkdown(metadata.value.body, cleanPath.value, markdownPaths.value, true))
 
 // ── Metadata card view model is shared with FileViewerModal. ──────────
 function openRelated(path: string): void {
@@ -865,6 +866,7 @@ function onMdClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
   if (handleAppLinkClick(e)) return
+  if (handleOpenLocalFileClick(e, (m) => projectsStore.pushErrorToast('Could not open file', m))) return
 
   const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
   if (fileLink) {
@@ -2180,3 +2182,7 @@ defineExpose({ isBusyAuthoring })
   }
 }
 </style>
+
+<!-- The openable dead link: a `file:` path rendered as a button the engine
+     can act on. Shared with the chat panel and the file viewer. -->
+<style scoped src="./markdownDeadLink.css"></style>

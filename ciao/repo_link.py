@@ -117,7 +117,7 @@ def candidates_payload() -> dict[str, Any]:
 
 #: Largest repo instructions file injected into chat context, in characters.
 #: Larger files are cut at a line boundary with a note naming the file.
-REPO_INSTRUCTIONS_MAX_CHARS = 20_000
+REPO_INSTRUCTIONS_MAX_CHARS = 8_000
 
 _ENVELOPE_REPLACEMENTS = (
     ("[CIAO_CONTEXT_BEGIN]", "[CIAO-CONTEXT-BEGIN]"),

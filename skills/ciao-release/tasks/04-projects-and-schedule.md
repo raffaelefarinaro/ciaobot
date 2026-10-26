@@ -11,11 +11,10 @@ Two separate things are checked here, and they must not be conflated:
 1. **An app project with a scaffolded vault note.** Created from the sidebar's
    `+`, it lives in the sidebar and its page is `/project/<id>`. Creating it
    **scaffolds the project's vault note** and binds the project to it, so the
-   new project is vault-backed: its page offers a **Complete** action, and the
-   page's ••• actions menu is **absent** (`web/src/components/ProjectView.vue`
-   renders *Complete* for a project with a `vault_folder`, and the ••• menu —
-   the one holding *Delete project* — only for one without; auto-created
-   projects are excluded from both branches).
+   new project is vault-backed: its page offers a **Complete** action and a
+   ••• actions menu with *Delete project* (`web/src/components/ProjectView.vue`
+   renders *Complete* and the ••• menu for a project with a `vault_folder`;
+   auto-created projects are excluded from both branches).
 2. **A vault project note.** A note in the memory vault under `projects/`. It is
    completed from **Memory → To decide → To revisit**
    (`/memory/review?show=revisit`), which posts `complete` to
@@ -27,7 +26,10 @@ Two separate things are checked here, and they must not be conflated:
 Open the app root in the tab. The sidebar's `+` is the project entry point.
 Create a project called `Release smoke vX.Y.Z`, then land on `/project/<id>`.
 
-**Use a fixture name whose slug is not already bound in this workspace** —
+Run this only in an already isolated smoke workspace/engine. If none is
+available, report this creation checkpoint **BLOCKED**; do not create a live
+engine or seed a smoke workspace into the operator's workspace. **Use a fixture
+name whose slug is not already bound in this workspace** —
 append a timestamp or an attempt suffix (e.g. `Release smoke vX.Y.Z #2`), or
 run this step in a fresh smoke workspace. The name you pick leaves the fixture
 in the sidebar, so a second walkthrough of the same version would otherwise
@@ -50,21 +52,16 @@ workspace's `projects/active/`.
 The scaffolded vault note is part of the fixture and stays in place with the
 project — that write is the creation working, not leakage into the workspace,
 and it is not cleaned up afterwards. The page must offer a **Complete** action
-— the project is vault-backed, so `ProjectView` renders it — and the page's
-••• actions menu must be **absent**, because that menu, the one holding
-*Delete project*, is rendered only for a project with no vault folder. A page
-offering ••• instead of Complete means the app stopped scaffolding the vault
-note — unless the slug was taken (above) — which is the confusion this task
-exists to avoid. (The sidebar row's own
-menu is a different one and offers *Rename* + *Delete*, so scope this check to
-the project page.) Record the project id, its vault folder, and the fact that
-it is untouched.
+and its ••• actions menu must offer *Delete project*. Both are rendered for a
+non-auto project with a vault folder. (The sidebar row's own menu is a different
+one and offers *Rename* + *Delete*, so scope this check to the project page.)
+Record the project id, its vault folder, and the fact that it is untouched.
 
 ## Step 2 — complete an isolated synthetic vault project note
 
-This is the vault half, and it must run against a **throwaway smoke workspace**,
-never the operator's real notes. If the walkthrough is running against the
-operator's real workspace and no isolated smoke workspace/engine is available,
+This is the vault half, and it must run against an **already isolated throwaway
+smoke workspace/engine**, never the operator's real notes. If no isolated
+smoke workspace/engine is available,
 **mark this completion checkpoint BLOCKED** and say so plainly — do not claim it
 passed and do not seed into the real vault.
 
@@ -162,7 +159,7 @@ in the same step.
 
 - `04-projects-01-created.png` — the app project page with its sidebar row
   (Step 1). Look for: page populated, row present, the vault-backed **Complete**
-  action offered, the page's ••• menu absent, nothing clipped. Leave it
+  action and ••• *Delete project* menu offered, nothing clipped. Leave it
   untouched.
 - `04-projects-02-completed.png` — after completing the **synthetic vault note**
   (Step 2), or the BLOCKED state if there is no isolated workspace. Look for:
@@ -182,7 +179,7 @@ Record the two halves separately:
 
 - **App project (Step 1):** created from the sidebar, row present, vault-backed
   (its vault folder scaffolded and named in the **Lives in** rail), **Complete**
-  offered, the page's ••• *Delete project* menu absent, left untouched.
+  and page's ••• *Delete project* menu offered, neither pressed, left untouched.
 - **Vault project note (Step 2):** isolated workspace used (name it), synthetic
   seed path, `completable: true` confirmed, completion applied only to that row,
   source gone, completed note body retained with `status: completed`, row absent

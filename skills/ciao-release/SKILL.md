@@ -248,7 +248,7 @@ unattended. **Never read `PWA_AUTH_TOKEN` out of the workspace `.env` and type
 it yourself** — it puts the password in the transcript and in this task's
 context for no benefit.
 
-**Mandatory check:** Settings -> Models must show the same OpenCode and Claude
+**Mandatory check:** Settings -> Providers must show the same OpenCode and Claude
 versions as `ciao/stock/provider-versions.json` on the release branch. If they
 differ, re-record, commit, push to the release branch, and repeat the real chat
 turn with that provider:

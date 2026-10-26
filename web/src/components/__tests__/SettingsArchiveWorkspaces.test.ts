@@ -27,6 +27,19 @@ vi.mock('../../lib/api', () => {
         ? Promise.reject(new Error('HTTP 500'))
         : Promise.resolve({ archived: state.archived })
     }
+    if (path.startsWith('/api/proposals/handover')) {
+      return Promise.resolve({
+        workspace: 'work',
+        handover: 'off',
+        acting_available: true,
+        agreement: {
+          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
+          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
+          suggest_handover: false,
+        },
+      })
+    }
+    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     if (path === '/api/integrations/gws') {
       return Promise.resolve({
         installed: false,
@@ -35,6 +48,8 @@ vi.mock('../../lib/api', () => {
         profiles: [],
       })
     }
+    // The Overview's Chats and models card reads the engine defaults.
+    if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})
   })
   return {
@@ -89,12 +104,12 @@ function archived(overrides: Partial<ArchivedWorkspace> = {}): ArchivedWorkspace
   }
 }
 
-async function mountWorkspacesTab() {
+async function mountWorkspacesTab(path = '/settings/workspaces') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
   })
-  await router.push('/settings/workspaces')
+  await router.push(path)
   await router.isReady()
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
@@ -150,8 +165,11 @@ describe('Settings > Workspaces archive', () => {
       expect(labels).toContain('Archive')
       expect(labels).not.toContain('Delete')
       const personal = cardFor(wrapper, 'personal')
-      expect(personal.find('.set-menu-btn').exists()).toBe(false)
-      expect((await openActions(personal)).map(b => b.text())).not.toContain('Archive')
+      // The trigger exists for every row: the primary one offers Rename only.
+      expect(personal.find('.set-menu-btn').exists()).toBe(true)
+      const personalLabels = (await openActions(personal)).map(b => b.text())
+      expect(personalLabels).toContain('Rename')
+      expect(personalLabels).not.toContain('Archive')
     } finally {
       wrapper.unmount()
     }
@@ -195,7 +213,7 @@ describe('Settings > Workspaces archive', () => {
       expect(request!.message).toBe(archiveConfirmMessage('work'))
       expect(request!.message).toContain('stops using its notes and memory')
       expect(request!.message).toContain('.archived-workspaces/')
-      expect(request!.message).toContain('restore it from Settings → Workspaces')
+      expect(request!.message).toContain('restore it under Manage workspaces (workspace switcher)')
       expect(request!.message).not.toMatch(/delete/i)
 
       state.workspaces = workspaces(['personal'])
@@ -208,6 +226,41 @@ describe('Settings > Workspaces archive', () => {
       expect(wrapper.findAll('.workspace-list .workspace-card').map(c => c.find('.workspace-title').text()))
         .toEqual(['personal'])
       expect(wrapper.find('.archived-item').text()).toContain('work')
+    } finally {
+      wrapper.unmount()
+      vi.mocked(api.post).mockReset()
+      vi.mocked(api.post).mockImplementation(() => Promise.resolve({}))
+    }
+  })
+
+  it('archives the active workspace from Overview', async () => {
+    const { api } = await import('../../lib/api')
+    const { pendingConfirm } = await import('../../lib/confirm')
+    const { useProjectStore } = await import('../../stores/projects')
+    vi.mocked(api.post).mockImplementation((path: string) => {
+      if (path === '/api/workspaces/work/archive') {
+        return Promise.resolve({ ...workspaces(['personal']), archived: { path: '.archived-workspaces/work-20260923-101500' } })
+      }
+      return Promise.resolve({})
+    })
+    useProjectStore().activeWorkspace = 'work'
+    const wrapper = await mountWorkspacesTab('/settings/workspace')
+    try {
+      const button = wrapper.get('[aria-label="Archive workspace work"]')
+      expect(button.text()).toBe('Archive workspace')
+      await button.trigger('click')
+      await nextTick()
+
+      const request = pendingConfirm.value
+      expect(request).toBeTruthy()
+      expect(request!.title).toBe('Archive workspace')
+      expect(request!.message).toBe(archiveConfirmMessage('work'))
+
+      state.workspaces = workspaces(['personal'])
+      request!.resolve(true)
+      await flushPromises()
+
+      expect(api.post).toHaveBeenCalledWith('/api/workspaces/work/archive')
     } finally {
       wrapper.unmount()
       vi.mocked(api.post).mockReset()

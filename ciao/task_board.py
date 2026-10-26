@@ -27,7 +27,7 @@ and the refusal names the shape instead of normalizing it silently.
 raw bytes. Every update must present the revision it read; a stale one is a
 :ref:`revision_conflict <TaskBoardError>` and the file is left unchanged.
 
-**Managed-operation rules are not file restrictions.** The agent-cannot-complete,
+**Managed-operation rules are not file restrictions.** The agent-completes-only-with-a-resolution
 and linked-task rules below bind this store's ``update`` path.
 A user editing the Markdown directly can write whatever the schema accepts;
 this module never polices hand edits, it only refuses to manufacture such
@@ -158,6 +158,7 @@ _FIELD_ORDER = (
     "chat_id",
     "attempt_id",
     "linked_chats",
+    "created_by",
 )
 
 # Fields a managed ``update`` accepts through ``changes``. ``schema``,
@@ -214,7 +215,7 @@ class TaskBoardError(Exception):
     - ``unsafe_path``: a malformed id, a link or reparse point where a
       real file must be, a non-regular file, or a path escaping the vault.
     - ``completion_requires_user``: the agent caller tried to set status
-      ``done`` through the managed API.
+      ``done`` through the managed API without a resolution.
     - ``bad_request``: a managed-API argument has the wrong type (a
       non-string ``resolution`` or ``attempt_id`` on ``update``).
     - ``read_failed``: store I/O failed (directory traversal, read, lock
@@ -242,6 +243,10 @@ class TaskRecord:
     delegation (#1334). They carry no lifecycle meaning: they never block
     completion, start or stop a turn, or stand in for an attempt. Empty when
     the key is absent or null.
+
+    ``created_by`` is ``"agent"`` for a task the agent filed through the
+    managed create, else ``None`` (user-filed and every task from before the
+    field existed).
     """
 
     schema: int
@@ -256,6 +261,7 @@ class TaskRecord:
     chat_id: str | None
     attempt_id: str | None
     linked_chats: tuple[str, ...] = ()
+    created_by: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,6 +427,17 @@ def _coerce_optional_id(value: Any, name: str) -> str | None:
         )
     _reject_non_roundtrip_controls(value, name)
     return value
+
+
+def _coerce_created_by(value: Any) -> str | None:
+    """The ``created_by`` marker: ``"agent"`` or None (``"user"`` reads as None)."""
+    if value is None or value == "user":
+        return None
+    if value == "agent":
+        return "agent"
+    raise TaskBoardError(
+        "invalid_task", f"created_by must be 'agent' or null, not {value!r}"
+    )
 
 
 def _coerce_linked_chats(value: Any) -> tuple[str, ...]:
@@ -763,6 +780,7 @@ def _build_record(data: Mapping[str, Any], expected_id: str) -> TaskRecord:
         chat_id=_coerce_optional_id(data.get("chat_id"), "chat_id"),
         attempt_id=_coerce_optional_id(data.get("attempt_id"), "attempt_id"),
         linked_chats=_coerce_linked_chats(data.get("linked_chats")),
+        created_by=_coerce_created_by(data.get("created_by")),
     )
 
 
@@ -847,6 +865,8 @@ def render_new_task(record: TaskRecord, body: str) -> bytes:
         raise TaskBoardError("invalid_task", "task body must be a string")
     lines = ["---"]
     for key in _FIELD_ORDER:
+        if key == "created_by" and record.created_by is None:
+            continue
         lines.append(f"{key}: {_render_field_value(key, record)}")
     lines.append("---")
     raw = ("\n".join(lines) + "\n" + body).encode("utf-8")
@@ -1522,12 +1542,14 @@ class TaskBoardStore:
         body: str = "",
         project_id: str | None = None,
         due: str | date | None = None,
+        created_by: Actor = "user",
     ) -> TaskDocument:
         """Create one task with a fresh identity and return its document.
 
         Defaults: ``backlog`` status, ``user`` assignee, ``none`` review,
         null linkage. The caller supplies only the human fields; identity
-        and timestamps come from the store.
+        and timestamps come from the store. ``created_by="agent"`` writes the
+        ``created_by: agent`` marker; a user-filed task writes no such line.
         """
         clean_title = _coerce_title(title)
         clean_project = _coerce_optional_id(project_id, "project_id")
@@ -1563,6 +1585,7 @@ class TaskBoardStore:
                     updated_at=now,
                     chat_id=None,
                     attempt_id=None,
+                    created_by="agent" if created_by == "agent" else None,
                 )
                 raw = render_new_task(record, body)
                 parsed = parse_task(raw, expected_id=task_id)
@@ -1618,9 +1641,10 @@ class TaskBoardStore:
         Managed-operation rules (they bind this API, not direct file
         editors):
 
-        - An agent caller cannot set status ``done``
-          (``completion_requires_user``). A user can complete a
-          manual/non-live task.
+        - An agent caller can set status ``done`` only on a write that carries
+          a non-empty ``resolution``, the user's reason for closing it
+          (``completion_requires_user`` otherwise). A user can complete a
+          manual/non-live task with or without one.
         - A task linked to a live chat or attempt (non-null ``chat_id`` /
           ``attempt_id``) cannot be completed or reassigned here at all:
           that needs the later delegation service's stop/detach workflow.
@@ -1669,7 +1693,7 @@ class TaskBoardStore:
                     "task body has more than one completion history section; "
                     "refusing to guess which one the write should keep",
                 )
-            effective = self._plan_changes(document, dict(changes), actor)
+            effective = self._plan_changes(document, dict(changes), actor, resolution)
             current_status = document.record.status
             patched_status = effective.get("status", current_status)
             working = body
@@ -2101,9 +2125,17 @@ class TaskBoardStore:
         self._changed()
 
     def _plan_changes(
-        self, document: TaskDocument, changes: dict[str, object], actor: Actor
+        self,
+        document: TaskDocument,
+        changes: dict[str, object],
+        actor: Actor,
+        resolution: str | None = None,
     ) -> dict[str, object]:
-        """Validate requested edits and apply the managed-operation rules."""
+        """Validate requested edits and apply the managed-operation rules.
+
+        An agent may reach ``done`` only on a write that carries a non-empty
+        ``resolution``: the user's reason, which the completion record keeps.
+        """
         _check_editable(changes)
         current = document.record
         # Validate value shapes first, so a bad enum is reported as such
@@ -2112,10 +2144,11 @@ class TaskBoardStore:
             _normalize_change(key, value)
         linked = current.chat_id is not None or current.attempt_id is not None
         if changes.get("status") == "done":
-            if actor == "agent":
+            if actor == "agent" and not (resolution or "").strip():
                 raise TaskBoardError(
                     "completion_requires_user",
-                    "only the user can mark a task done through the managed API",
+                    "an agent can mark a task done only with a resolution: "
+                    "the reason the user gave for closing it",
                 )
             if linked:
                 raise TaskBoardError(

@@ -204,6 +204,19 @@ def _isolate_launch_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.fixture(autouse=True)
+def _isolate_linux_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a test read the machine's real `/etc/systemd/system/ciaobot.service`.
+
+    Bare-shell discovery trusts that unit on Linux, so a suite run on the VPS (or
+    any box with the engine installed) would otherwise discover the live
+    workspace. Autouse for the same reason as `_isolate_launch_agents`.
+    """
+    monkeypatch.setattr(
+        "ciao.linux_service.UNIT_PATH", tmp_path / "no-systemd" / "ciaobot.service"
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_install_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let a test read or write the machine's real install receipt.
 
@@ -268,6 +281,24 @@ def _isolate_job_runs(tmp_path: Path) -> None:
     jr.configure(tmp_path)
     yield
     jr._runtime_dir_override = None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the host's gh login out of every test (#1961).
+
+    A workspace-scoped request would otherwise read ``~/.config/gh`` and run
+    ``gh auth token`` on the machine running the suite. Tests of the real
+    functions import them directly from ``ciao.fs_sandbox``, which this patch
+    does not touch.
+    """
+    from ciao import fs_sandbox
+
+    fs_sandbox.clear_gh_token_cache()
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda *a, **k: None)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: None)
+    yield
+    fs_sandbox.clear_gh_token_cache()
 
 
 def attach_stub_mcp(manager):

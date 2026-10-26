@@ -34,7 +34,7 @@ def _configured_workspace_root(config) -> Path | None:
     environment), ``CiaoConfig.from_env`` falls back to the bootstrap workspace
     rather than the configured install root. Recover the actual root from the
     LaunchAgent plist so the credential directory points at the workspace the
-    Settings → Workspaces card shows, not ``~/.ciao/bootstrap``.
+    Overview's Google account row shows, not ``~/.ciao/bootstrap``.
     """
     from ciao.config import _bootstrap_workspace
     from ciao.macos_service import default_launch_agents_dir
@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     if not profile:
         print(
             "No Google account is linked to this workspace. "
-            "Link one in Settings → Workspaces.",
+            "Link one in Settings → Overview → Google account.",
             file=sys.stderr,
         )
         return 2
@@ -160,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     if not gws:
         print(
             "ciao gws: the 'gws' CLI was not found on PATH. Install it from "
-            "Settings → Workspaces (Google Workspace card).",
+            "Settings → Overview → Google account.",
             file=sys.stderr,
         )
         return 1

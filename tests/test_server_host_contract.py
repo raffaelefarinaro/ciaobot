@@ -45,6 +45,7 @@ from ciao.server_host import (
     host_service_argv,
     inspect_host_bundle,
     parse_service_command,
+    SUPERSEDED_HOST_PROTOCOLS,
     read_host_ownership,
     verify_owned_host,
     verify_superseded_host,
@@ -1312,7 +1313,7 @@ def test_verify_owned_host_never_writes_or_signs(
 # ── ownership: the superseded host this engine can still replace ────────────
 
 
-def _make_superseded_bundle(root: Path) -> Path:
+def _make_superseded_bundle(root: Path, revision: int = 3) -> Path:
     """A host bundle of the superseded revision, with the old identity fields."""
     bundle = root / APP_NAME
     (bundle / "Contents" / "MacOS").mkdir(parents=True)
@@ -1322,23 +1323,23 @@ def _make_superseded_bundle(root: Path) -> Path:
     (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
     (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
     document = BUILD.bundle_info()
-    document["CFBundleVersion"] = "2"
-    document["CFBundleShortVersionString"] = "2"
-    document[HOST_PROTOCOL_KEY] = 1
+    document["CFBundleVersion"] = str(revision)
+    document["CFBundleShortVersionString"] = str(revision)
+    document[HOST_PROTOCOL_KEY] = SUPERSEDED_HOST_PROTOCOLS[revision]
     with (bundle / _PLIST_REL).open("wb") as handle:
         plistlib.dump(document, handle)
     return bundle
 
 
-def _superseded_record(bundle: Path) -> dict[str, Any]:
-    """The ownership record a revision-2 installation would have written.
+def _superseded_record(bundle: Path, revision: int = 3) -> dict[str, Any]:
+    """The ownership record a revision-3 installation would have written.
 
     The digests are the ones the bundle's own bytes hash to, so the only thing
     that separates this record from a current one is its revision and protocol.
     """
     document = _record(os.fspath(bundle))
-    document["host_revision"] = 2
-    document["host_protocol"] = 1
+    document["host_revision"] = revision
+    document["host_protocol"] = SUPERSEDED_HOST_PROTOCOLS[revision]
     document["executable_sha256"] = hashlib.sha256(b"universal-host-binary").hexdigest()
     document["bundle_files"] = {
         _PLIST_REL: hashlib.sha256((bundle / _PLIST_REL).read_bytes()).hexdigest(),
@@ -1350,19 +1351,20 @@ def _superseded_record(bundle: Path) -> dict[str, Any]:
 
 
 @requires_posix_uid
-def test_a_revision_two_record_is_read_as_a_superseded_host(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("revision", [2, 3])
+def test_a_superseded_revision_record_is_read_as_a_superseded_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: int
 ) -> None:
     # The current reader refuses anything that is not the current revision:
-    # a revision-2 record is not proof that the installed bundle is the host
+    # a superseded-revision record is not proof that the installed bundle is the host
     # this engine speaks to. The superseded reader is the one that answers
     # "is this bundle ours?", so the installer can replace it (#1659).
     monkeypatch.setattr(sys, "platform", "darwin")
-    bundle = _make_superseded_bundle(tmp_path)
+    bundle = _make_superseded_bundle(tmp_path, revision)
     runner = _FakeRunner()
     record = _write_record(
         tmp_path / "server-host.json",
-        _superseded_record(bundle),
+        _superseded_record(bundle, revision),
     )
 
     # The current reader refuses it.
@@ -1375,19 +1377,32 @@ def test_a_revision_two_record_is_read_as_a_superseded_host(
 
     # The superseded reader accepts it, and answers with the same identity.
     superseded = verify_superseded_host(bundle, ownership_path=record, runner=runner)
-    assert superseded.host_revision == 2
-    assert superseded.host_protocol == 1
+    assert superseded.host_revision == revision
+    assert superseded.host_protocol == SUPERSEDED_HOST_PROTOCOLS[revision]
     assert superseded.bundle_path == os.fspath(bundle)
     assert superseded.bundle_id == BUNDLE_ID
 
 
 @requires_posix_uid
-@pytest.mark.parametrize("revision", [1, 3, 4])
-def test_only_the_one_superseded_revision_is_accepted(
+def test_a_record_naming_the_other_superseded_revision_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each revision is proven against its own bytes: a revision-2 record cannot
+    # vouch for a revision-3 bundle.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_superseded_bundle(tmp_path, 3)
+    record = _write_record(tmp_path / "server-host.json", _superseded_record(bundle, 2))
+    with pytest.raises(ServerHostError):
+        verify_superseded_host(bundle, ownership_path=record, runner=_FakeRunner())
+
+
+@requires_posix_uid
+@pytest.mark.parametrize("revision", [1, 4, 5])
+def test_only_the_superseded_revision_set_is_accepted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: int
 ) -> None:
-    # Exactly one older revision is superseded. Anything else - a revision this
-    # engine never shipped, or the current one - is refused by both readers.
+    # Revisions 2 and 3 are superseded. Anything else - a revision this engine
+    # never shipped, the current one or a future one - is refused by both readers.
     monkeypatch.setattr(sys, "platform", "darwin")
     bundle = _make_superseded_bundle(tmp_path)
     document = _superseded_record(bundle)
@@ -1401,7 +1416,7 @@ def test_only_the_one_superseded_revision_is_accepted(
 def test_a_superseded_host_must_still_match_its_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The proof is not "the record says revision 2": the bundle's bytes must
+    # The proof is not "the record says revision 3": the bundle's bytes must
     # still match that record exactly, exactly as verify_owned_host requires.
     monkeypatch.setattr(sys, "platform", "darwin")
     bundle = _make_superseded_bundle(tmp_path)

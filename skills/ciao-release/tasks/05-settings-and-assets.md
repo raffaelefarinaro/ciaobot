@@ -12,31 +12,39 @@ is where a partial change shows up.
 Settings is **not a single page that scrolls**. Each section has its own route,
 listed in the sidebar, and each renders only its own cards:
 
-`/settings` (General, the default), `/settings/workspaces`, `/settings/models`,
-`/settings/skills`, `/settings/subagents`, `/settings/commands`,
-`/settings/mcp`.
+`/settings` (General, the default), `/settings/appearance`,
+`/settings/access`, `/settings/providers`, `/settings/advanced`,
+`/settings/workspace` (Overview), `/settings/skills`, `/settings/subagents`,
+`/settings/commands`, `/settings/mcp`, and `/settings/workspaces` (Manage workspaces, not in the rail: open it from the workspace switcher).
 
 Visit each route in turn. On each one, **wait for that route's own heading or
 load state to resolve** — do not sleep a fixed interval and call it loaded.
-`/settings/providers` is a redirect to `/settings/models#chat-providers`; it is
-not a section of its own.
+`/settings/models` redirects to `/settings/providers`; it is not a section of
+its own. The sidebar rail has two groups: Ciaobot (General, Appearance,
+Access & devices, Providers, Advanced, Workspaces) and the active workspace (Overview, Skills, Subagents, Commands, MCP servers).
 
-`/settings` (General) carries What can Ciaobot do?, Appearance, This host,
-memory backup, insights, Updates, the main workspace, workspace health, the PWA
-password card, Other devices, app install, notifications, keyboard shortcuts,
-open source (and Debug only in dev mode). Watch for:
+`/settings` (General) carries Updates, What can Ciaobot do?, app install,
+notifications, keyboard shortcuts, start at sign-in, insights and open
+source. `/settings/workspace` (Overview) is the active workspace's page: the
+Workspace and Google account cards, memory handover, update task history and,
+for an archivable workspace, Archive this workspace. `/settings/advanced` carries This
+host, memory backup, the Ciaobot folder, workspace health and Developer (and
+Debug only in dev mode). `/settings/access` carries the PWA password card,
+Other devices and Network access. `/settings/appearance` is the Appearance card
+alone. Watch for:
 
+- Google account card on `/settings/workspace`: one row (Connect Google account when none; Connected with a ··· menu when linked); open Connect and confirm Escape closes it and focus returns.
 - The online backup card shows state and last successful upload; scope,
   repository and raw diagnostics sit behind a native `<details>` disclosure.
-- The "What can Ciaobot do?" card at the top links out to the public
+- The "What can Ciaobot do?" card links out to the public
   feature guide.
 
 The **"On this page" rail is route-specific**: it is built from the cards the
 current tab rendered (`tocItems` in `web/src/components/SettingsView.vue`), so
-it lists the sections of *that* route, not the seven Settings sections on one
+it lists the sections of *that* route, not the ten Settings sections on one
 scroll. A rail that names another route's cards is a finding.
 
-On `/settings/models`, compare each provider row's version (OpenCode and Claude)
+On `/settings/providers`, compare each provider row's version (OpenCode and Claude)
 with `ciao/stock/provider-versions.json` on the release branch. A mismatch is a
 release blocker: report it, do not fix it here.
 
@@ -45,29 +53,31 @@ finding; do not wait on it more than once.
 
 ## Step 1b — File access per workspace
 
-Open `/settings/workspaces`. Each workspace row must show a **File access** tag
-with the effective value (*Workspace only* or *Whole machine*). Open **Edit** on
-one workspace and confirm the **File access** select offers *Default*, *Workspace
-only* and *Whole machine*. Close it without saving. Do not change the value.
+Open `/settings/workspaces`. Each workspace row's summary line
+(`provider · file access · Google email or no Google`) must show the effective
+File access (*Workspace only* or *Whole machine*). Follow
+**Settings →** on one workspace: it makes that workspace active and opens
+`/settings/workspace`, where the **File access** select must offer *Default*,
+*Workspace only* and *Whole machine*. Do not change the value.
 
 ## Step 2 — the four asset lists are scoped to one workspace
 
-This is the point of the task. **Skills, Subagents, Commands and MCP servers all
-belong to the workspace selected in the sidebar.** Only one workspace is
-selected at a time, so: record the four lists on the current workspace, switch
-the sidebar to another workspace, let the active-workspace watcher refetch, and
-record them again. On a single-workspace install there is nothing to switch to:
-report the before/after checkpoint **BLOCKED** rather than inventing a second
-workspace.
+This is the point of the task. **Skills, Subagents, Commands and MCP servers
+belong to the selected workspace, but each list loads on its own Settings tab.**
+For each list, open its tab in the first workspace and record the visible rows;
+switch workspaces, return to that tab, and record its rows again. Only the
+currently visible scoped tab refetches immediately on a workspace switch; the
+others reload when opened. On a single-workspace install there is nothing to
+switch to: report the before/after checkpoint **BLOCKED** rather than inventing
+a second workspace.
 
 Record the names visible in the four lists (for example by reading the text of
 the skill-name and row elements in the page).
 
 **Watch for, precisely:**
 
-- All four refetch together on the switch. Scoping only the reads would be worse
-  than the original bug: a create would file an asset in a root the list never
-  shows.
+- The currently visible scoped tab refetches on the switch; do not expect
+  off-screen tabs to fetch until visited. Check each tab in each workspace.
 - **Stock skills stay in every list.** `sync-skills` installs them into every
   agent root, so a scoped list still shows the built-ins. Their absence is a bug,
   not the scoping working.
@@ -86,7 +96,7 @@ actually calls (`web/src/components/SettingsView.vue`, `useMcpServers.ts`):
 
 - Skills — `/api/admin/skills?workspace=<name>`
 - Subagents — `/api/agent-assets?workspace=<name>` (`subagents`)
-- Commands — `/api/agent-assets?workspace=<name>` (`commands`)
+- Commands — `/api/commands?workspace=<name>`
 - MCP servers — `/api/mcp/status?workspace=<name>`
 
 Run the fetch inside the authenticated browser tab, where the session cookie
@@ -97,6 +107,7 @@ const ws = '<workspace>';
 for (const path of [
   `/api/admin/skills?workspace=${encodeURIComponent(ws)}`,
   `/api/agent-assets?workspace=${encodeURIComponent(ws)}`,
+  `/api/commands?workspace=${encodeURIComponent(ws)}`,
   `/api/mcp/status?workspace=${encodeURIComponent(ws)}`,
 ]) {
   const res = await fetch(path, { credentials: 'same-origin' });
@@ -117,7 +128,7 @@ Do not create, edit or delete anything in Settings.
 - `05-settings-01-general.png` — `/settings` (General). Look for: its own
   sections present, rail listing this route's cards, backup card collapsed
   details, no clipped headings, no overlap.
-- `05-settings-02-route.png` — one additional route (e.g. `/settings/models` or
+- `05-settings-02-route.png` — one additional route (e.g. `/settings/providers` or
   `/settings/skills`). Look for: only that route's cards, its own rail where the
   route has more than one section (`/settings/mcp` legitimately shows none),
   load state resolved, no other route's sections bleeding in.
@@ -125,7 +136,7 @@ Do not create, edit or delete anything in Settings.
   workspace. Look for: stock skills present, lists populated or a sensible
   empty state.
 - `05-settings-04-assets-after.png` — the same lists after the workspace switch.
-  Look for: all four refetched together, stock skills still present, Global rows
+  Look for: each list refreshed when its tab was visited, stock skills still present, Global rows
   allowed to be unchanged, no stale rows, no stray toast.
 
 Redact credentials and account details from any screenshot.
@@ -138,8 +149,8 @@ Record:
 
 - Which Settings routes loaded, which hung.
 - Whether the "On this page" rail matched the route it was on.
-- Before/after asset lists across a workspace switch, and whether all four moved
-  together (Global rows explicitly allowed to stay the same).
+- Before/after asset lists across a workspace switch, verifying each tab after
+  visiting it (Global rows explicitly allowed to stay the same).
 - Whether stock skills were still present in the scoped list.
 - Any copy that describes a whole-install inventory when the page is scoped.
 

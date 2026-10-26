@@ -75,6 +75,21 @@ class ChatPinConflictError(Exception):
         self.pin = pin
 
 
+class TerminalOfferConflictError(Exception):
+    """A dismissal quoted a terminal-offer id that is no longer current.
+
+    A chat carries at most one suggested command, and a dismissal names the
+    offer it saw. A device that raced a newer offer must not remove it
+    silently — the user is looking at a command the other device never saw
+    — so the write conflicts instead. Carries the authoritative current
+    offer so the caller can re-apply against it.
+    """
+
+    def __init__(self, terminal_offer: dict[str, str]) -> None:
+        super().__init__("Terminal offer conflict")
+        self.terminal_offer = terminal_offer
+
+
 def _restored_pin_paths(raw: Any) -> list[str]:
     """Canonical dismissed-pin paths out of a registry record.
 
@@ -112,6 +127,7 @@ from ciao.frontmatter import split_frontmatter
 from ciao.model_tiers import is_tier
 from ciao.repo_link import read_repo_instructions, repo_state
 from ciao.models import (
+    DEFAULT_CHAT_TITLE,
     THINKING_LEVELS,
     AgentRequest,
     BridgeMode,
@@ -142,6 +158,11 @@ from ciao.schedules import (
 )
 from ciao.sessions import StateStore
 from ciao.subagent_tracking import SubagentInfo
+from ciao.terminal_offer import (
+    TerminalOffer,
+    new_terminal_offer,
+    terminal_offer_payload,
+)
 from ciao.tool_path import prepend_engine_path
 from ciao.transcripts import (
     TranscriptStore,
@@ -242,12 +263,18 @@ _RESUME_CONTINUE_PROMPT = "continue"
 # persistently flaky connection cannot loop forever burning quota. Once hit,
 # the turn is left for the user to continue manually.
 _MAX_CONNECTION_DROP_RETRIES = 6
-# Cap on hourly quota retries. Claude's session limit resets on a 5-hour
-# window, so six hourly attempts (the five hours of the window plus one) cover
-# a session limit that clears on schedule. Weekly and monthly limits use the
-# "quota_terminal" kind instead: one attempt a day, capped by
-# _MAX_TERMINAL_QUOTA_RETRIES, and never by this cap.
+# Cap on quota retries. Consecutive quota retries back off exponentially from
+# _RETRY_INTERVAL_SECONDS (1h, 2h, 4h, then every _MAX_QUOTA_RETRY_INTERVAL_SECONDS),
+# so a limit that does not clear is not hit with the identical turn every
+# hour. When Claude's saved rate-limit snapshot names the rejected five-hour
+# bucket's reset, the retry is pointed there instead (_quota_reset_at). Weekly
+# and monthly limits use the "quota_terminal" kind instead: one attempt a day,
+# capped by _MAX_TERMINAL_QUOTA_RETRIES, and never by this cap.
 _MAX_QUOTA_RETRIES = 6
+_MAX_QUOTA_RETRY_INTERVAL_SECONDS = 8 * 60 * 60
+# A retry that comes due while the chat is running a turn waits this long and
+# checks again, not a whole retry interval (which backs off to hours).
+_RETRY_BUSY_DEFER_SECONDS = 5 * 60
 # Weekly and monthly usage limits reset on a days-long window, so an hourly
 # retry would only burn attempts. One attempt a day for a week covers a weekly
 # limit that clears on schedule.
@@ -266,6 +293,18 @@ _NETWORK_RETRY_REASON = "network unreachable"
 
 def _network_retry_interval(attempts: int) -> int:
     return _NETWORK_RETRY_BASE_SECONDS << attempts
+
+
+def _quota_retry_interval(attempts: int) -> int:
+    """Delay before quota retry number ``attempts + 1``: 1h, 2h, 4h, then capped."""
+    return min(_RETRY_INTERVAL_SECONDS << min(attempts, 8), _MAX_QUOTA_RETRY_INTERVAL_SECONDS)
+
+
+# Claude rate-limit buckets whose rejection explains each quota retry kind.
+_QUOTA_RESET_BUCKETS = {
+    "quota": ("five_hour",),
+    "quota_terminal": ("seven_day", "seven_day_opus", "seven_day_sonnet"),
+}
 
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
@@ -480,11 +519,65 @@ class ProjectInfo:
         }
 
 
+# How many user turns keep their client send id. The map exists to spot a
+# duplicate resend, and the PWA stops resending a send older than 30 s, so
+# dedup only needs the recent sends. Left unbounded, the map grew with
+# every turn of every chat and was persisted with the chat metadata.
+SEND_ID_HISTORY_TURNS = 64
+MAX_SEND_IDS_PER_TURN = 100
+
+
+def _entry_send_ids(entry: dict) -> list[str]:
+    send_ids = [str(entry["send_id"])] if entry.get("send_id") else []
+    send_ids.extend(str(send_id) for send_id in (entry.get("send_ids") or []))
+    return list(dict.fromkeys(send_ids))
+
+
+def _entries_within_send_id_limit(
+    chat: "ChatInfo", turn_index: int, entries: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    key = str(turn_index)
+    recorded = chat.user_turn_send_ids.get(key)
+    owned = {recorded} if isinstance(recorded, str) else (
+        set(recorded) if isinstance(recorded, list) else set()
+    )
+    accepted: list[dict] = []
+    overflow: list[dict] = []
+    for entry in entries:
+        additions = set(_entry_send_ids(entry)) - owned
+        if len(owned) + len(additions) > MAX_SEND_IDS_PER_TURN:
+            overflow.append(entry)
+            continue
+        accepted.append(entry)
+        owned.update(additions)
+    return accepted, overflow
+
+
+def _prune_send_id_history(send_ids: dict) -> None:
+    """Keep only the newest `SEND_ID_HISTORY_TURNS` entries of a send-id map.
+
+    The keys are decimal turn indices, so they order by integer value. A key
+    that is not a decimal index does not name a turn and is dropped. The map
+    is pruned in place: the caller owns it.
+    """
+    indexed: list[tuple[int, str]] = []
+    for key in list(send_ids):
+        text = str(key)
+        if not text.isdecimal():
+            continue
+        indexed.append((int(text), text))
+    indexed.sort(reverse=True)
+    keep = {text for _, text in indexed[:SEND_ID_HISTORY_TURNS]}
+    for key in list(send_ids):
+        if str(key) not in keep:
+            del send_ids[key]
+
+
 @dataclass(slots=True)
 class ChatInfo:
     chat_id: str
     project_id: str
-    title: str = "New Chat"
+    title: str = DEFAULT_CHAT_TITLE
     model: str = "opus"
     # Routing key for ProviderService: which CLI runs the turn.
     provider: str = "claude"
@@ -549,10 +642,10 @@ class ChatInfo:
     # turn (#1392). The provider transcripts do not say so, so history reads
     # this back to mark the bubble. Absent key = an ordinary turn.
     user_turn_steered: dict = field(default_factory=dict)
-    # Map of user-turn index (as str) → TURN_ORIGINS value for turns the engine
-    # wrote (wakes, automation runs, task resumes, webhooks, update tasks). The
-    # provider transcripts store them as ordinary user messages; history reads
-    # this back so the PWA draws a notice card. Absent key = typed by the person.
+    # Map of user-turn index (as str) → TURN_ORIGINS value for engine-written
+    # turns or a user-requested retry. Provider transcripts store these as
+    # ordinary user messages; history reads this back so the PWA draws a notice
+    # card. Absent key = an ordinary typed turn (or a mixed-origin steer).
     user_turn_origin: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → the client send id the PWA minted for
     # that turn. The engine answers a repeated send id with a duplicate echo
@@ -565,9 +658,20 @@ class ChatInfo:
     # Transient UI flag: "pending" while an auto-title generation is in
     # flight, "ready" otherwise. Not persisted — reset to "ready" on load.
     title_status: str = "ready"
+    # Transient, in memory only: the command the assistant suggests for this
+    # chat. It is guidance the user reads, copies and runs themselves — it is
+    # never executed here — and it is deliberately not persisted: a command
+    # can name a credential or a private path, so it never reaches the chat
+    # registry, its audit log or a backup of either. A provider's own
+    # tool-call transcript may still hold the arguments the model was given;
+    # that is the provider's record, not Ciaobot's state. The offer ends with
+    # the conversation it was made in (archive, new session, handover) or
+    # with an explicit dismissal, and a restart ends it with everything else.
+    terminal_offer: TerminalOffer | None = None
     # Deferred retry state for provider quota/session-limit failures. Pending
-    # retries are replayed hourly until they succeed, the user stops them, or
-    # the chat is archived/deleted.
+    # retries are replayed on their kind's schedule (see _arm_retry) until they
+    # succeed, hit the kind's cap, the user stops them, or the chat is
+    # archived/deleted.
     retry_status: str = ""
     retry_prompt: str = ""
     retry_image_refs: list[str] = field(default_factory=list)
@@ -581,6 +685,9 @@ class ChatInfo:
     # kind's budget at zero.
     retry_kind: str = ""
     retry_interval_seconds: int = _RETRY_INTERVAL_SECONDS
+    # True when the failed turn was an automation run, so the replay runs
+    # unattended too (unattended guidance, no attended-turn bookkeeping).
+    retry_unattended: bool = False
     # Visible messages preserved when the chat is handed to a fresh provider
     # session. They are prepended by /messages so the same chat does not lose
     # pre-handover history after reload.
@@ -599,6 +706,12 @@ class ChatInfo:
     # project/workspace digest or a new provider session re-sends them.
     context_digest: str = ""
     context_session_id: str = ""
+    # Provider session that has already received the linked repo's
+    # instructions text inline; a later repo change in it gets a pointer.
+    instructions_session_id: str = ""
+    # Set while a turn whose capsule inlines the instructions is in flight;
+    # committed to instructions_session_id with the context marker. Not saved.
+    instructions_inline_pending: bool = False
     # Raw AskUserQuestion JSON (`{"questions": [...]}`) when the model paused
     # this chat on a question the user hasn't answered yet. Set when the
     # headless CLI fires AskUserQuestion (which we interrupt so it can't
@@ -701,6 +814,7 @@ class ChatInfo:
             "last_snippet": self.last_snippet,
             "last_error": self.last_error,
             "title_status": self.title_status,
+            "terminal_offer": terminal_offer_payload(self.terminal_offer),
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
             "pending_queue": [
@@ -740,6 +854,51 @@ class ChatInfo:
         if local is not None:
             d["local"] = local
         return d
+
+    def record_send_id(self, turn_index: int, send_id: str) -> None:
+        """Record the client send id of a user turn.
+
+        The map is kept to the recent turns: only those can be looked up
+        for a duplicate resend, so the older ones are dropped instead of
+        growing the chat metadata for the life of the chat.
+        """
+        self.record_send_ids(turn_index, [send_id])
+
+    def record_send_ids(self, turn_index: int, send_ids: list[str]) -> None:
+        """Record every client send id that contributed to one user turn."""
+        key = str(turn_index)
+        previous = self.user_turn_send_ids.get(key)
+        recorded = [previous] if isinstance(previous, str) else (
+            list(previous) if isinstance(previous, list) else []
+        )
+        additions = list(
+            dict.fromkeys(sid for sid in send_ids if sid and sid not in recorded)
+        )
+        if len(recorded) + len(additions) > MAX_SEND_IDS_PER_TURN:
+            raise ValueError(
+                f"A user turn cannot own more than {MAX_SEND_IDS_PER_TURN} send ids"
+            )
+        for send_id in additions:
+            recorded.append(send_id)
+        if not recorded:
+            return
+        self.user_turn_send_ids[key] = recorded[0] if len(recorded) == 1 else recorded
+        _prune_send_id_history(self.user_turn_send_ids)
+
+    def remove_send_ids(self, turn_index: int, send_ids: list[str]) -> None:
+        """Remove selected IDs from a turn without disturbing other owners."""
+        key = str(turn_index)
+        previous = self.user_turn_send_ids.get(key)
+        recorded = [previous] if isinstance(previous, str) else (
+            list(previous) if isinstance(previous, list) else []
+        )
+        remaining = [send_id for send_id in recorded if send_id not in send_ids]
+        if not remaining:
+            self.user_turn_send_ids.pop(key, None)
+        else:
+            self.user_turn_send_ids[key] = (
+                remaining[0] if len(remaining) == 1 else remaining
+            )
 
 
 def chat_pin_payload(chat: ChatInfo) -> dict[str, Any]:
@@ -1088,12 +1247,14 @@ class ProjectChatManager:
                 retry_attempts=int(cd.get("retry_attempts", 0) or 0),
                 retry_kind=str(cd.get("retry_kind", "") or ""),
                 retry_interval_seconds=int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS),
+                retry_unattended=bool(cd.get("retry_unattended", False)),
                 handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
                 ),
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
                 context_digest=cd.get("context_digest", ""),
                 context_session_id=cd.get("context_session_id", ""),
+                instructions_session_id=cd.get("instructions_session_id", ""),
                 pending_question=cd.get("pending_question", ""),
                 pending_permission=cd.get("pending_permission", ""),
                 pending_queue=list(cd.get("pending_queue", [])),
@@ -1210,10 +1371,12 @@ class ProjectChatManager:
                     "retry_attempts": c.retry_attempts,
                     "retry_kind": c.retry_kind,
                     "retry_interval_seconds": c.retry_interval_seconds,
+                    "retry_unattended": c.retry_unattended,
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
                     "context_digest": c.context_digest,
                     "context_session_id": c.context_session_id,
+                    "instructions_session_id": c.instructions_session_id,
                     "pending_question": c.pending_question,
                     "pending_permission": c.pending_permission,
                     "pending_queue": c.pending_queue,
@@ -1563,26 +1726,15 @@ class ProjectChatManager:
                 )
                 self._events.publish({"type": "project_deleted", "project_id": pid})
 
-        if not self._chats:
-            # The onboarding chat lands in the first configured workspace —
-            # single-workspace registries from the wizard carry the name the
-            # user chose; the legacy fallback keeps this on "personal".
-            ws_names = self._workspace_names()
-            first_ws = ws_names[0] if ws_names else "personal"
-            general = next(
-                (
-                    p
-                    for p in self._projects.values()
-                    if p.workspace == first_ws and p.name == "General"
-                ),
-                None,
-            )
-            if general is not None:
-                self._create_onboarding_chat(general.project_id)
-
         self._save()
 
-    def _create_onboarding_chat(self, project_id: str) -> None:
+    def start_onboarding_interview(self, project_id: str) -> str | None:
+        """Open the guided first-run interview on request, never on install.
+
+        The journey is the only automatic first-run surface; this is the explicit
+        action behind it, so the interview and knowledge-seeding prompts stay
+        available without a chat appearing for someone who never asked.
+        """
         from ciao.setup_marker import read_setup_vault_mode
 
         vault_mode = read_setup_vault_mode(self._config.state_path.parent)
@@ -1620,9 +1772,7 @@ class ProjectChatManager:
             "confident about is filed into your notes; what it is not arrives as "
             "a proposal you can accept or dismiss in **Memory · To decide**. What "
             "it files shows up in **Memory · History**, where you can see the "
-            "change and undo it while the note is still as the pass left it. "
-            "Turning insights off only stops new passes — it never deletes what "
-            "is already saved."
+            "change and undo it while the note is still as the pass left it."
         )
         # One block, both shapes, for the same reason as `memory_intro` (#987):
         # the known state, the interview and the starting-knowledge pass are the
@@ -1770,6 +1920,10 @@ class ProjectChatManager:
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": assistant_msg},
         ]
+        # `create_chat()` already saved; the interview context was assigned after
+        # that, so persist it here or the messages vanish on the next reload.
+        self._save()
+        return chat.chat_id
 
     def _onboarding_memory_categories(self, workspace: str) -> tuple[str, str]:
         """The workspace's enabled, non-hidden category labels, in registry order.
@@ -2872,7 +3026,7 @@ class ProjectChatManager:
 
         Returns a dict with ``ok``, ``vault_moved`` (bool), ``vault_folder``
         (str | None), ``outcome``, and ``memory_pass`` (the pass chat id, or
-        None when Session insights is off or there is no vault folder).
+        None when there is no vault folder).
         """
         if project_id == _CC_CLI_PROJECT_ID:
             raise ValueError("The Claude Code CLI project cannot be completed.")
@@ -3161,8 +3315,31 @@ class ProjectChatManager:
         except OSError as exc:
             # Roll the staged link cleanup back, so the vault is exactly as it
             # was: the folder is still there, and so are the links into it.
+            #
+            # A note the removal already took is left alone: writing it back
+            # would put a note the user deleted on disk again, linking to a
+            # note that may be gone with it. Every restore is best-effort, so
+            # one unwritable note does not strand the notes after it: the
+            # failures are collected and named in the error instead of
+            # escaping as an OSError the delete route cannot answer.
+            unrestored: list[str] = []
             for path, text in undo.items():
-                Path(path).write_text(text, encoding="utf-8", newline="")
+                note_path = Path(path)
+                if not note_path.exists():
+                    continue
+                try:
+                    # Read it back first: a note that cannot be read is one
+                    # we cannot restore either, and the failure belongs to
+                    # this note instead of to the next one.
+                    note_path.read_text(encoding="utf-8")
+                    note_path.write_text(text, encoding="utf-8", newline="")
+                except OSError as restore_exc:
+                    unrestored.append(f"{path} ({restore_exc})")
+            if unrestored:
+                raise ValueError(
+                    f"delete failed: {exc}; could not restore "
+                    f"{len(unrestored)} note(s): {', '.join(unrestored)}"
+                ) from exc
             raise ValueError(f"delete failed: {exc}") from exc
 
         report["vault_entry_removed"] = True
@@ -3332,10 +3509,11 @@ class ProjectChatManager:
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
-        # The provider's operator default (Settings → Models tab); the
-        # workspace no longer pins a model. An explicit ``model`` arg wins.
-        # Passing chat_provider resolves against that provider's own operator
-        # default when it differs from the workspace's default provider.
+        # This workspace's override for the chat's provider, else that
+        # provider's operator default (Settings → Providers tab). An explicit
+        # ``model`` arg wins. Passing chat_provider resolves against that
+        # provider's own values when it differs from the workspace's default
+        # provider.
         default_model = self._config.default_model_for_workspace(
             workspace, chat_provider
         )
@@ -3349,10 +3527,11 @@ class ProjectChatManager:
         # and then opens" bug. Empty chats now live until the user deletes
         # them explicitly.
         cid = f"chat-{chat_service._uuid8()}"
-        # Per-provider default thinking level for new chats; a missing entry
-        # leaves it to the provider default ("" = auto).
-        default_thinking = (self._config.provider_default_thinking or {}).get(
-            chat_provider, ""
+        # Per-provider default thinking level for new chats: the workspace's
+        # override, then the engine's; neither leaves it to the provider
+        # default ("" = auto).
+        default_thinking = self._config.default_thinking_for_provider(
+            chat_provider, workspace
         )
         chat = ChatInfo(
             chat_id=cid,
@@ -3360,7 +3539,7 @@ class ProjectChatManager:
             title=title,
             model=chat_model,
             provider=chat_provider,
-            mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider)),
+            mode=cast(BridgeMode, mode or self._config.default_mode_for_provider(chat_provider, workspace)),
             thinking_level=default_thinking,
             created_at=chat_service._now_iso(),
             helper=chat_service._normalize_chat_helper(helper),
@@ -3717,6 +3896,101 @@ class ProjectChatManager:
         })
         return chat_pin_payload(chat)
 
+    # ── Terminal offers (transient suggested commands) ───────────────────
+
+    @property
+    def chat_terminal_offer_states(self) -> dict[str, dict[str, str]]:
+        """The active terminal offer of every chat that has one, by chat id.
+
+        Sparse and complete: a chat without an offer is simply absent, and
+        the map as a whole REPLACES the client's cache. A chat missing from
+        it has no offer, which is how a stale offer is cleared.
+        """
+        states: dict[str, dict[str, str]] = {}
+        for cid, chat in self._chats.items():
+            payload = terminal_offer_payload(chat.terminal_offer)
+            if payload is not None:
+                states[cid] = payload
+        return states
+
+    def set_terminal_offer(
+        self, chat_id: str, command: str
+    ) -> dict[str, str] | None:
+        """Offer ``command`` as this chat's suggested terminal command.
+
+        Returns the new payload, or ``None`` for a chat that does not exist.
+        The command is validated and normalized first: what is stored is what
+        the card shows and what the user copies.
+
+        Offering the same text again while it is already active is not a
+        change: the id stays (a dismissal the user is holding must stay
+        valid) and nothing is published. A different text is a new offer
+        with a new id.
+
+        Nothing is saved. The offer is transient state, and the command may
+        name a credential.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        if chat.archived:
+            raise ValueError("Cannot offer a terminal command in an archived chat")
+        offer = new_terminal_offer(command)
+        current = chat.terminal_offer
+        if current is not None and current.command == offer.command:
+            return terminal_offer_payload(current)
+        chat.terminal_offer = offer
+        self._events.publish({
+            "type": "chat_terminal_offer_changed",
+            "chat_id": chat.chat_id,
+            "terminal_offer": terminal_offer_payload(offer),
+        })
+        return terminal_offer_payload(offer)
+
+    def dismiss_terminal_offer(
+        self, chat_id: str, expected_id: str
+    ) -> dict[str, str] | None:
+        """Dismiss this chat's offer when it is the one the caller saw.
+
+        Returns the payload that was dismissed, or ``None`` when there was
+        nothing to dismiss — no such chat, or no offer. A stale
+        ``expected_id`` raises :class:`TerminalOfferConflictError` and
+        changes nothing, so a device that raced a newer offer cannot remove
+        a command the user is looking at.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        current = chat.terminal_offer
+        if current is None:
+            return None
+        if current.id != expected_id:
+            raise TerminalOfferConflictError(terminal_offer_payload(current))
+        chat.terminal_offer = None
+        self._events.publish({
+            "type": "chat_terminal_offer_changed",
+            "chat_id": chat.chat_id,
+            "terminal_offer": None,
+        })
+        return terminal_offer_payload(current)
+
+    def _clear_terminal_offer(self, chat: ChatInfo) -> bool:
+        """Drop the chat's offer and publish the clear. True when there was one.
+
+        The offer belongs to the conversation it was made in, so a lifecycle
+        transition that starts a new one (archive, new session, handover)
+        ends it. Nothing is saved: the offer was never in the registry.
+        """
+        if chat.terminal_offer is None:
+            return False
+        chat.terminal_offer = None
+        self._events.publish({
+            "type": "chat_terminal_offer_changed",
+            "chat_id": chat.chat_id,
+            "terminal_offer": None,
+        })
+        return True
+
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
         turns_data = []
@@ -3745,6 +4019,8 @@ class ProjectChatManager:
                     }
                     if usage:
                         row["usage"] = usage
+                    if turn["effective_model"]:
+                        row["effective_model"] = turn["effective_model"]
                     turns_data.append(row)
 
         return turns_data
@@ -4014,6 +4290,8 @@ class ProjectChatManager:
         if provider_service:
             asyncio.ensure_future(provider_service.disconnect())
         self._save()
+        # The offer belonged to the conversation that just ended.
+        self._clear_terminal_offer(chat)
         return chat
 
     def mark_handover_context_used(self, chat_id: str) -> None:
@@ -4209,7 +4487,7 @@ class ProjectChatManager:
             or chat.pending_question
             or chat.pending_permission
             or chat.retry_status
-            or self._subagents.running_count(chat_id) > 0
+            or self._subagents.work_count(chat_id) > 0
         ):
             return False
         try:
@@ -4254,6 +4532,7 @@ class ProjectChatManager:
         completion_id: str,
         resolution: str,
         completed_at: str,
+        relayed_by_agent: bool = False,
     ) -> str | None:
         return self._memory_pass.enqueue_task_completion(
             workspace=workspace,
@@ -4261,6 +4540,7 @@ class ProjectChatManager:
             completion_id=completion_id,
             resolution=resolution,
             completed_at=completed_at,
+            relayed_by_agent=relayed_by_agent,
         )
 
     def enqueue_project_closure(
@@ -4390,6 +4670,8 @@ class ProjectChatManager:
             except ValueError:
                 chat.archive_path = str(result)
         self._save()
+        # The archived chat is read-only history: it carries no offer.
+        self._clear_terminal_offer(chat)
         self._events.publish({
             "type": "chat_archived",
             "chat_id": chat_id,
@@ -4514,6 +4796,8 @@ class ProjectChatManager:
         provider = self._pop_provider(chat_id)
         self._schedule_provider_cleanup(chat, provider, session_ids)
         self._save()
+        # The offer belonged to the session that just ended.
+        self._clear_terminal_offer(chat)
         return chat
 
     # ── Provider management ──────────────────────────────────────────────
@@ -4970,12 +5254,100 @@ class ProjectChatManager:
         path = Path(raw).expanduser()
         return str(path.resolve()) if path.is_dir() else ""
 
+    def _gws_config_dir(self, workspace: str | None) -> tuple[Path, bool]:
+        """The workspace's gws credential directory and whether an account is linked.
+
+        An unlinked workspace gets a per-workspace directory that never holds
+        credentials, so credentials an agent logs in to one unlinked workspace
+        never serve another.
+        """
+        from ciao.gws_auth import profile_config_dir  # noqa: PLC0415
+
+        gws_profile = self._workspace_gws_profile(workspace)
+        config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
+        if config_dir is not None:
+            return config_dir, True
+        slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
+        return Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE), False
+
+    def _agent_read_only_for_chat(self, chat: ChatInfo, fs_scope: str) -> tuple[str, ...]:
+        """Runtime files a workspace-scoped chat reads but never writes (#1945).
+
+        Also the ``gws`` CLI with its links, npm package and node, so
+        ``ciao gws`` runs when it is installed under the home folder (#1959),
+        and the ``gh`` config directory so ``gh`` finds its login (#1961).
+        gws gets its credential directory writable for its token cache (see
+        ``_agent_fs_scope_for_chat``), with the account's ``client_secret.json``
+        and ``credentials.json`` pinned here so they stay write-denied: an
+        agent cannot plant a client secret with a hostile ``token_uri``.
+        """
+        if fs_scope != "workspace":
+            return ()
+        from ciao.fs_sandbox import gh_config_read_root, gws_tool_read_roots  # noqa: PLC0415
+        from ciao.tool_path import login_shell_path  # noqa: PLC0415
+        from ciao.workspace_reroot import receipt_path, registry_file  # noqa: PLC0415
+
+        runtime = self._config.state_path.parent
+        gws_roots = [str(p) for p in gws_tool_read_roots(login_shell_path())]
+        granted = [str(receipt_path(runtime)), str(registry_file(runtime)), *gws_roots]
+        gws_dir = self._granted_gws_dir(chat)
+        if gws_dir is not None:
+            for name in ("client_secret.json", "credentials.json"):
+                pinned = gws_dir / name
+                if pinned.exists():
+                    granted.append(str(pinned))
+        gh_dir = gh_config_read_root(os.environ)
+        if gh_dir is not None:
+            granted.append(str(gh_dir))
+        return tuple(granted)
+
+    def _granted_gws_dir(self, chat: ChatInfo) -> Path | None:
+        """The linked account's resolved credential directory, or None.
+
+        Resolve before granting: an agent that can write secrets/ must not
+        redirect the profile directory (or secrets itself) to another folder.
+        """
+        gws_dir, linked = self._gws_config_dir(self._workspace_for_chat(chat.chat_id))
+        if (
+            linked
+            and gws_dir.is_dir()
+            and gws_dir.resolve() == Path(self._config.workspace_root).resolve() / "secrets" / gws_dir.name
+        ):
+            return gws_dir.resolve()
+        return None
+
+    def _agent_denied_for_chat(
+        self, chat: ChatInfo, fs_scope: str, fs_roots: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The hidden ``secrets`` folder and the linked account re-allowed in it (#1968).
+
+        Set only in workspace scope when ``secrets`` (or, if it is a symlink,
+        its resolved target) is a directory strictly inside a granted root: the agent's shell could then
+        read every account's credentials. The sandbox stays pure; the decision
+        is made here, where the workspace root, roots and linked account are known.
+        """
+        if fs_scope != "workspace":
+            return (), ()
+        secrets = Path(self._config.workspace_root).resolve() / "secrets"
+        if not secrets.is_dir():
+            return (), ()
+        # A symlinked ``secrets`` hides its resolved target. No regrant applies:
+        # ``_granted_gws_dir`` refuses an account directory reached through it.
+        target = secrets.resolve()
+        if not any(target != Path(root) and target.is_relative_to(root) for root in fs_roots):
+            return (), ()
+        gws = None if secrets.is_symlink() else self._granted_gws_dir(chat)
+        return (str(target),), ((str(gws),) if gws else ())
+
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
         Roots are the chat's agent root and that workspace's vault root,
         resolved and de-duplicated, agent root first. A project's linked
-        repository follows the vault root. A chat granted the data
+        repository follows the vault root, then the linked Google account's
+        credential directory, writable for gws's token cache (#1959; its client
+        secret and refresh credentials are write-denied, see
+        ``_agent_read_only_for_chat``). A chat granted the data
         root (the memory-backup setup chat, #1328) also gets that root, last.
         Machine scope never reads them, so they are only computed for the
         workspace case.
@@ -4990,6 +5362,9 @@ class ProjectChatManager:
         linked_repo = self._linked_repo_for_chat(chat)
         if linked_repo:
             roots.append(linked_repo)
+        gws_dir = self._granted_gws_dir(chat)
+        if gws_dir is not None and not any(gws_dir.is_relative_to(root) for root in roots):
+            roots.append(str(gws_dir))
         if chat.grants_data_root:
             roots.append(str(backup_scope.data_root(self._config).resolve()))
         return "workspace", tuple(dict.fromkeys(roots))
@@ -5002,11 +5377,16 @@ class ProjectChatManager:
             revoke(chat_id)
 
     def _linked_repo_context(
-        self, chat: ChatInfo, project: ProjectInfo | None
+        self,
+        chat: ChatInfo,
+        project: ProjectInfo | None,
+        *,
+        inline_instructions: bool = True,
     ) -> tuple[str, str, str]:
         """(stable block, digest fingerprint, per-turn line); ("", "", "") when unlinked.
 
-        Code mode on: the full block with the repository's instructions. Linked
+        Code mode on: the full block with the repository's instructions, or
+        with a pointer to the file when ``inline_instructions`` is False. Linked
         but off: a light hint naming the path and how to switch on.
         """
         if project is None or not project.repo_path:
@@ -5027,7 +5407,11 @@ class ProjectChatManager:
             return block, f"{path}\0missing", f"linked_repo={path} missing=true"
         ins = read_repo_instructions(path)
         block = render_linked_repo_block(
-            path=path, missing=False, instructions_name=ins.name, instructions_text=ins.text
+            path=path,
+            missing=False,
+            instructions_name=ins.name,
+            instructions_text=ins.text,
+            inline_instructions=inline_instructions,
         )
         return (
             block,
@@ -5054,8 +5438,25 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(chat, project)
+        # The repository instructions are inlined once per provider session:
+        # the first time they are attached, whenever that is (turn 1, or code
+        # mode switched on mid-session from the PWA). A later re-send in a
+        # session that already took the text (AGENTS.md edited, code mode
+        # toggled again) points at the file instead. A cleared context marker
+        # (compaction, cancelled first turn) inlines it again.
+        already_inlined = bool(
+            chat.context_digest
+            and chat.session_id
+            and chat.context_session_id == chat.session_id
+            and chat.instructions_session_id == chat.session_id
+        )
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(
+            chat, project, inline_instructions=not already_inlined
+        )
         include_stable = self._needs_stable_context(chat)
+        chat.instructions_inline_pending = bool(
+            include_stable and chat.code_mode and repo_block and not already_inlined
+        )
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
         # it can write; a machine-scope chat gets no file-access line at all.
@@ -5497,7 +5898,9 @@ class ProjectChatManager:
             return ""
         return workspace_gws_profile(self._config, workspace)
 
-    def _model_for_provider(self, model: str, provider: str) -> str:
+    def _model_for_provider(
+        self, model: str, provider: str, workspace: str | None = None
+    ) -> str:
         """A chat's model, resolved for the provider that will actually run it.
 
         Tier aliases (haiku/sonnet/opus/fable) are Claude Code's own
@@ -5511,20 +5914,26 @@ class ProjectChatManager:
         """
         resolved = (model or "").strip()
         if provider != "claude" and is_tier(resolved):
-            return self._config.default_model_for_provider(provider)
+            return self._config.default_model_for_provider(provider, workspace)
         return chat_service._normalize_tier(resolved)
 
     def _resolve_and_validate_chat_model(
         self, model: str, provider: str, project_id: str
     ) -> str:
         """Normalize a chat model to its canonical form, then validate it."""
-        resolved_model = self._model_for_provider(model, provider)
+        project = self._projects.get(project_id)
+        resolved_model = self._model_for_provider(
+            model, provider, project.workspace if project else None
+        )
         self._validate_configured_model(resolved_model, provider)
         return resolved_model
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""
-        return self._model_for_provider(chat.model, chat.provider)
+        project = self._projects.get(chat.project_id)
+        return self._model_for_provider(
+            chat.model, chat.provider, project.workspace if project else None
+        )
 
     def _validate_configured_model(
         self, model: str | None, provider: str | None
@@ -5607,14 +6016,7 @@ class ProjectChatManager:
         # with no linked account must not fall through to that login either (it
         # is the operator's own account), so it gets a directory that never
         # holds credentials and a bare `gws` finds none.
-        from ciao.gws_auth import profile_config_dir
-
-        config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
-        if config_dir is None:
-            # One directory per workspace, so credentials an agent logs in
-            # to one unlinked workspace never serve another.
-            slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
-            config_dir = Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE)
+        config_dir, _linked = self._gws_config_dir(workspace)
         env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
@@ -5651,7 +6053,50 @@ class ProjectChatManager:
             is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
         ):
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+        # The macOS keychain is outside a workspace sandbox, so gh cannot read
+        # its own login there: the engine passes the token in (#1961). Only the
+        # cache is read here; ``warm_gh_token`` fills it off the event loop.
+        gh_path = self._gh_path_for_token(chat, project)
+        if gh_path is not None:
+            from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
+
+            gh_token = gh_token_for_sandbox(gh_path, os.environ, cached_only=True)
+            if gh_token:
+                env["GH_TOKEN"] = gh_token
         return env
+
+    def _gh_path_for_token(self, chat: ChatInfo, project: Any) -> str | None:
+        """The ``gh`` executable whose token a chat gets, or None (#1961).
+
+        None outside workspace scope (the chat reaches the keychain itself), in
+        a memory pass (it must not reach an external surface), when gh is not
+        installed or its shim is broken, and when the agent could have written
+        gh: an executable inside a writable root must never run unsandboxed.
+        """
+        fs_scope, roots = self._agent_fs_scope_for_chat(chat)
+        if fs_scope != "workspace" or is_memory_pass_chat(chat, project):
+            return None
+        from ciao.tool_path import resolve_tool  # noqa: PLC0415
+
+        try:
+            gh_path = resolve_tool("gh")
+        except OSError:
+            return None
+        if gh_path is None:
+            return None
+        resolved = Path(gh_path).resolve()
+        if any(resolved.is_relative_to(Path(root).resolve()) for root in roots):
+            return None
+        return gh_path
+
+    async def warm_gh_token(self, chat: ChatInfo) -> None:
+        """Fill the gh token cache off the event loop before a turn starts (#1961)."""
+        gh_path = self._gh_path_for_token(chat, self._projects.get(chat.project_id))
+        if gh_path is None:
+            return
+        from ciao.fs_sandbox import gh_token_for_sandbox  # noqa: PLC0415
+
+        await asyncio.to_thread(gh_token_for_sandbox, gh_path, dict(os.environ))
 
     def _claude_ai_connectors_on(self, workspace: str) -> bool:
         """Whether a Claude chat in ``workspace`` loads the claude.ai connectors.
@@ -5716,6 +6161,9 @@ class ProjectChatManager:
     def _commit_context_marker(
         chat: ChatInfo, request: AgentRequest, session_id: str
     ) -> bool:
+        if chat.instructions_inline_pending and session_id:
+            chat.instructions_session_id = session_id
+        chat.instructions_inline_pending = False
         if not request.context_digest or not session_id:
             return False
         if (
@@ -5849,6 +6297,7 @@ class ProjectChatManager:
             extra_env[AGENT_TOKEN_ENV] = token
 
         fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
+        denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -5861,6 +6310,9 @@ class ProjectChatManager:
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             agent_fs_scope=fs_scope,
             agent_roots=fs_roots,
+            agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
+            agent_denied=denied,
+            agent_denied_except=denied_except,
             linked_repo=self._linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
@@ -6115,13 +6567,19 @@ class ProjectChatManager:
         return self._broker.get(chat_id)
 
     def has_pending_send(self, chat_id: str, send_id: str) -> bool:
-        """True when the chat's live queue already holds this client send id."""
+        """True when a live or parked queue entry holds this client send id."""
         if not send_id:
             return False
         stream = self._broker.get(chat_id)
-        if stream is None:
+        if stream is not None and stream.has_pending_send(send_id):
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        return stream.has_pending_send(send_id)
+        return any(
+            send_id == entry.get("send_id") or send_id in (entry.get("send_ids") or [])
+            for entry in chat.pending_queue
+        )
 
     def queue_message(
         self,
@@ -6137,7 +6595,8 @@ class ProjectChatManager:
 
         ``delivery="steer"`` marks it for injection into the running turn; the
         caller then awaits ``steer_queue`` to dispatch it. ``origin`` tags an
-        engine-written message (see ``start_stream``); it rides on the entry.
+        engine-written message or user-requested retry (see ``start_stream``);
+        it rides on the entry.
         ``send_id`` is the client send id, recorded on the queue entry so the
         flushed turn can carry it.
 
@@ -6252,6 +6711,16 @@ class ProjectChatManager:
         # turn: texts joined with a blank line and every image, in list order.
         # The turn keeps an origin only when every entry shares it. The rest of
         # the waiting queue stays.
+        turn_index = chat.user_turn_count
+        selected, overflow = _entries_within_send_id_limit(
+            chat, turn_index, selected
+        )
+        if overflow and not selected:
+            raise ValueError(
+                f"This turn can own at most {MAX_SEND_IDS_PER_TURN} send ids; "
+                "the entries remain queued."
+            )
+        overflow_entry_ids = [str(entry["id"]) for entry in overflow]
         text = "\n\n".join(
             t for t in (str(e.get("text", "")).strip() for e in selected) if t
         )
@@ -6264,6 +6733,29 @@ class ProjectChatManager:
         origin = shared_origin(selected)
         if not text and not images:
             return False  # nothing to send (images gone): entries stay waiting
+        send_ids = [
+            str(sid)
+            for e in selected
+            for sid in ([e["send_id"]] if e.get("send_id") else [])
+            + list(e.get("send_ids") or [])
+        ]
+        previous_send_ids = chat.user_turn_send_ids.get(str(turn_index))
+        send_id_history_before = {
+            key: list(value) if isinstance(value, list) else value
+            for key, value in chat.user_turn_send_ids.items()
+        }
+        previously_owned = (
+            {previous_send_ids}
+            if isinstance(previous_send_ids, str)
+            else set(previous_send_ids)
+            if isinstance(previous_send_ids, list)
+            else set()
+        )
+        newly_owned = [sid for sid in send_ids if sid not in previously_owned]
+        # Reserve ownership before removing the parked entries or calling the
+        # synchronous start path, which can re-enter message handling.
+        chat.record_send_ids(turn_index, send_ids)
+        self._save()
         sent_ids = {id(e) for e in selected}
         chat.pending_queue = [e for e in chat.pending_queue if id(e) not in sent_ids]
         self._save()
@@ -6272,10 +6764,18 @@ class ProjectChatManager:
         except BaseException:
             # The turn did not start: the entries are still waiting.
             chat.pending_queue = [*selected, *chat.pending_queue]
+            # Reservation may have pruned old turn slots. Restore any such
+            # pre-existing owners before removing only this dispatch's IDs.
+            for key, value in send_id_history_before.items():
+                chat.user_turn_send_ids.setdefault(key, value)
+            chat.remove_send_ids(turn_index, newly_owned)
+            _prune_send_id_history(chat.user_turn_send_ids)
             self._save()
             raise
         # What still waits stays on the chat; publish it with the new stream.
         stream.publish_pending()
+        if overflow_entry_ids:
+            self._publish_steer_fallback(stream, overflow_entry_ids, "send_id_limit")
         return True
 
     async def steer_queue(self, chat_id: str) -> None:
@@ -6309,6 +6809,16 @@ class ProjectChatManager:
             entries = stream.steer_candidates()
             if not entries:
                 return
+            turn_index = chat.user_turn_count
+            entries, overflow = _entries_within_send_id_limit(
+                chat, turn_index, entries
+            )
+            if overflow:
+                overflow_ids = [str(entry["id"]) for entry in overflow]
+                stream.set_delivery(overflow_ids, "queue")
+                self._publish_steer_fallback(stream, overflow_ids, "send_id_limit")
+            if not entries:
+                return
             entry_ids = [str(e["id"]) for e in entries]
             text = "\n\n".join(
                 t for t in (str(e["text"]).strip() for e in entries) if t
@@ -6324,6 +6834,7 @@ class ProjectChatManager:
                     if attachment:
                         images.append(attachment)
             fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
+            denied, denied_except = self._agent_denied_for_chat(chat, fs_scope, fs_roots)
             request = AgentRequest(
                 prompt=text,
                 model=self._runtime_model_for_chat(chat),
@@ -6335,6 +6846,9 @@ class ProjectChatManager:
                 disallowed_tools=self.disallowed_tools_for_chat(chat),
                 agent_fs_scope=fs_scope,
                 agent_roots=fs_roots,
+                agent_read_only=self._agent_read_only_for_chat(chat, fs_scope),
+                agent_denied=denied,
+                agent_denied_except=denied_except,
                 linked_repo=self._linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )
@@ -6415,6 +6929,7 @@ class ProjectChatManager:
         if chat is None:
             return
         cancelled_origin = ""
+        cancelled_send_ids: list[str] = []
         if turn_index is not None:
             if chat.user_turn_count == turn_index + 1:
                 chat.user_turn_count = turn_index
@@ -6423,7 +6938,9 @@ class ProjectChatManager:
                 chat.user_turn_images.pop(key, None)
                 chat.user_turn_unattended.pop(key, None)
                 chat.user_turn_steered.pop(key, None)
-                chat.user_turn_send_ids.pop(key, None)
+                cancelled_send_ids = chat.user_turn_send_ids.pop(key, [])
+                if isinstance(cancelled_send_ids, str):
+                    cancelled_send_ids = [cancelled_send_ids]
                 cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
                 self._streaming.discard_turn_perf(chat_id, turn_index)
             else:
@@ -6447,6 +6964,8 @@ class ProjectChatManager:
         }
         if cancelled_origin:
             entry["origin"] = cancelled_origin
+        if cancelled_send_ids:
+            entry["send_ids"] = cancelled_send_ids
         chat.pending_queue = [*chat.pending_queue, entry]
         self._save()
         stream.publish_queue_state(chat.pending_queue)
@@ -6496,6 +7015,15 @@ class ProjectChatManager:
                 # whether a person is present. A steer into a scheduled turn
                 # must not make it look attended.
                 chat.user_turn_unattended[str(turn_index)] = True
+            chat.record_send_ids(
+                turn_index,
+                [
+                    str(sid)
+                    for e in entries
+                    for sid in ([e["send_id"]] if e.get("send_id") else [])
+                    + list(e.get("send_ids") or [])
+                ],
+            )
             chat.last_activity_at = sent_at
             chat.last_read_at = sent_at  # user sending = implicitly read
             self._save()
@@ -6845,6 +7373,7 @@ class ProjectChatManager:
         current_images: list[ImageAttachment] | None,
         had_progress: bool,
         reason: str,
+        unattended: bool,
     ) -> bool:
         """Arm a deferred retry for a quota/connection/startup/auth failure.
 
@@ -6859,7 +7388,8 @@ class ProjectChatManager:
         same cap because they are safe to replay but should not retry forever
         when the local runtime is persistently unhealthy. Every armed retry
         parks queued follow-ups onto the chat so they survive to the retried
-        turn. Returns True if a retry was armed.
+        turn. ``unattended`` is the failed turn's flag; the replay keeps it.
+        Returns True if a retry was armed.
         """
         chat = self._chats.get(chat_id)
         # Replaying the prompt after output already streamed re-runs any tool
@@ -6912,16 +7442,15 @@ class ProjectChatManager:
         elif kind == "quota_terminal":
             interval = _TERMINAL_QUOTA_RETRY_INTERVAL_SECONDS
         else:
-            interval = _RETRY_INTERVAL_SECONDS
+            interval = _quota_retry_interval(attempts)
         armed = self.set_chat_retry(
             chat_id,
             prompt,
             image_refs=image_refs,
             reason=reason,
-            next_at=(
-                self._terminal_quota_reset_at(chat) if kind == "quota_terminal" else None
-            ),
+            next_at=self._quota_reset_at(chat, kind),
             interval_seconds=interval,
+            unattended=unattended,
         )
         if armed is None:
             return False
@@ -6929,14 +7458,17 @@ class ProjectChatManager:
         self._park_pending_for_retry(chat_id, stream)
         return True
 
-    def _terminal_quota_reset_at(self, chat: ChatInfo | None) -> str | None:
-        """Return when a rejected Claude weekly bucket resets, plus a minute.
+    def _quota_reset_at(self, chat: ChatInfo | None, kind: str) -> str | None:
+        """Return when the rejected Claude bucket behind a quota retry resets, plus a minute.
 
-        The next daily attempt is pointed at the reset instead of a fixed
-        interval when the saved rate-limit snapshot names one. The file is user
-        state, so every field is type-checked and nothing here raises.
+        ``kind`` picks the buckets: the five-hour session window for "quota",
+        the weekly buckets for "quota_terminal"; any other kind has none. The
+        next attempt is pointed at the reset instead of the backoff interval
+        when the saved rate-limit snapshot names one. The file is user state,
+        so every field is type-checked and nothing here raises.
         """
-        if chat is None or chat.provider != "claude":
+        bucket_names = _QUOTA_RESET_BUCKETS.get(kind)
+        if bucket_names is None or chat is None or chat.provider != "claude":
             return None
         try:
             payload = RateLimitStore(
@@ -6949,7 +7481,7 @@ class ProjectChatManager:
             return None
         now = time.time()
         resets = []
-        for name in ("seven_day", "seven_day_opus", "seven_day_sonnet"):
+        for name in bucket_names:
             bucket = buckets.get(name)
             if not isinstance(bucket, dict) or bucket.get("status") != "rejected":
                 continue
@@ -6971,11 +7503,13 @@ class ProjectChatManager:
         reason: str = "manual",
         next_at: str | None = None,
         interval_seconds: int = _RETRY_INTERVAL_SECONDS,
+        unattended: bool = False,
     ) -> ChatInfo | None:
         """Mark a chat turn for deferred retry, hourly unless told otherwise.
 
         A manual or MCP retry is always hourly, even when an earlier automatic
-        retry on this chat ran on a shorter or daily interval.
+        retry on this chat ran on a shorter or daily interval. ``unattended``
+        replays the turn as an automation run.
         """
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived:
@@ -6988,6 +7522,7 @@ class ProjectChatManager:
         chat.retry_image_refs = list(image_refs or [])
         chat.retry_last_error = reason
         chat.retry_interval_seconds = interval_seconds
+        chat.retry_unattended = unattended
         chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
@@ -7092,7 +7627,7 @@ class ProjectChatManager:
             chat.retry_prompt,
             images=images or None,
             is_retry=True,
-            unattended=network,
+            unattended=network or chat.retry_unattended,
         )
 
     def _resolve_retry_images(self, chat: ChatInfo) -> list[ImageAttachment]:
@@ -7133,6 +7668,7 @@ class ProjectChatManager:
         chat.retry_attempts = 0
         chat.retry_kind = ""
         chat.retry_interval_seconds = _RETRY_INTERVAL_SECONDS
+        chat.retry_unattended = False
         self._save()
         self._publish_retry(chat)
         task = self._retry_tasks.pop(chat.chat_id, None)
@@ -7169,7 +7705,7 @@ class ProjectChatManager:
                 if chat is None or chat.archived or chat.retry_status != "pending":
                     return
                 if self._broker.get(chat_id) is not None:
-                    chat.retry_next_at = chat_service._iso_after(chat.retry_interval_seconds)
+                    chat.retry_next_at = chat_service._iso_after(_RETRY_BUSY_DEFER_SECONDS)
                     self._save()
                     self._publish_retry(chat)
                     continue
@@ -7323,8 +7859,9 @@ class ProjectChatManager:
         ``compact`` starts a context compaction instead of a user turn: it
         takes no user-turn slot, echoes no user bubble and never auto-titles.
 
-        ``origin`` (a ``TURN_ORIGINS`` value) tags a turn the engine wrote, so
-        history and the echo let the PWA draw a notice card, not a user bubble.
+        ``origin`` (a ``TURN_ORIGINS`` value) tags an engine-written turn or a
+        user-requested retry, so history and the echo let the PWA draw a notice
+        card, not a user bubble.
 
         ``send_id`` is the client send id for this turn. The engine records it
         per user turn, so a later frame carrying the same id is answered with
@@ -7452,7 +7989,7 @@ class ProjectChatManager:
             if origin:
                 chat_meta.user_turn_origin[str(turn_index)] = origin
             if send_id:
-                chat_meta.user_turn_send_ids[str(turn_index)] = send_id
+                chat_meta.record_send_id(turn_index, send_id)
             self._streaming.start_turn_perf(chat_id, turn_index)
 
         # First buffered event: echo the user prompt so any client subscribing
@@ -7544,20 +8081,30 @@ class ProjectChatManager:
         if chat is None:
             return None
         send_ids = chat.user_turn_send_ids
-        for key in sorted(
-            send_ids.keys(),
-            key=lambda k: int(k) if str(k).isdigit() else -1,
-            reverse=True,
-        ):
-            if send_ids.get(key) != send_id:
+        # One pass over the map: the newest turn carrying the id wins, and a
+        # key that is not a decimal turn index names no turn at all.
+        found_key: str | None = None
+        found_index = -1
+        for key, recorded in send_ids.items():
+            recorded_ids = [recorded] if isinstance(recorded, str) else recorded
+            if not isinstance(recorded_ids, list) or send_id not in recorded_ids:
                 continue
-            turn_index = int(key)
-            timing = chat.user_turn_timings.get(key) or chat.user_turn_timings.get(turn_index)
-            sent_at = ""
-            if isinstance(timing, dict):
-                sent_at = str(timing.get("sent_at") or "")
-            return {"turn_index": turn_index, "sent_at": sent_at}
-        return None
+            text = str(key)
+            if not text.isdecimal():
+                continue
+            turn_index = int(text)
+            if turn_index > found_index:
+                found_index = turn_index
+                found_key = text
+        if found_key is None:
+            return None
+        timing = chat.user_turn_timings.get(found_key) or chat.user_turn_timings.get(
+            found_index
+        )
+        sent_at = ""
+        if isinstance(timing, dict):
+            sent_at = str(timing.get("sent_at") or "")
+        return {"turn_index": found_index, "sent_at": sent_at}
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str

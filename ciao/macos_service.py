@@ -25,7 +25,7 @@ from ciao.port_in_use import (
     read_port_in_use,
 )
 from ciao.server_host import ServerHostError, parse_service_command
-from ciao.workspace_access import read_denial
+from ciao.workspace_access import denial_path, read_denial
 
 SERVER_LABEL = "com.ciao.server"
 LEGACY_MENUBAR_LABEL = "com.ciao.menubar"
@@ -48,7 +48,20 @@ RELOAD_POLL_INTERVAL_S = 0.5
 # has had a chance to fail is a start that reports a hope. The engine
 # reaches its bind within a second or two of starting, so this is about
 # the failure and not about the engine being ready.
-START_SETTLE_TIMEOUT_S = 2.0
+# How long `ciao service start` waits for the engine it started to answer as
+# itself before calling the start unconfirmed (#1938). Measured on 2026-10-23:
+# a cold `python -m ciao run` from a checkout served /api/startup-status after
+# 4.1 s and was fully ready at 4.7 s on an Apple Silicon Mac, so the previous
+# 2 s deadline expired before every engine had bound its port. A launchd-spawned
+# install pays for a fresh interpreter and the first import on top of that;
+# the installer script allows 60 s for the same wait. 30 s leaves room for a
+# slow disk without making a dead start wait a minute to be reported.
+START_SETTLE_TIMEOUT_S = 30.0
+# One HTTP probe never waits longer than this, so the deadline above is what
+# bounds the whole wait, not the sum of stalled probes.
+START_PROBE_TIMEOUT_S = 2.0
+START_POLL_INTERVAL_S = 0.5
+SERVER_LOCK_NAME = "server.lock"
 # Test seam: the teardown poll sleeps through this, so tests run without waiting.
 _sleep: Callable[[float], None] = time.sleep
 
@@ -168,12 +181,17 @@ class ServiceResult:
 
 
 def read_dotenv(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
     except OSError:
-        return values
-    for raw in lines:
+        return {}
+    return parse_dotenv(text)
+
+
+def parse_dotenv(text: str) -> dict[str, str]:
+    """Parse ``KEY=value`` lines; the caller decides how the file was read."""
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -305,6 +323,51 @@ def _loaded_definition(uid: int, runner: Runner) -> tuple[bool, list[str] | None
     return loaded, arguments
 
 
+_LAUNCHCTL_LIST_HEADER = ("pid", "status", "label")
+
+
+_SIGNED_STATUS = re.compile(r"-?\d+")
+
+
+def parse_launchctl_list(stdout: str) -> set[str]:
+    """Labels from ``launchctl list``; unrecognised output is an error.
+
+    ``launchctl list`` always prints the ``PID Status Label`` header, even with
+    no jobs loaded, so an empty or differently shaped response is not evidence
+    that nothing is registered. Rows are ``PID``, exit status (both ``-`` or a
+    number, and the status is negative when the job was killed by a signal) and
+    the label.
+    """
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if not lines or tuple(field.casefold() for field in lines[0].split()) != _LAUNCHCTL_LIST_HEADER:
+        raise RuntimeError("launchctl list returned unrecognised output")
+    labels: set[str] = set()
+    for line in lines[1:]:
+        fields = line.split()
+        if (
+            len(fields) != 3
+            or not (fields[0] == "-" or fields[0].isdigit())
+            or not (fields[1] == "-" or _SIGNED_STATUS.fullmatch(fields[1]))
+        ):
+            raise RuntimeError(f"launchctl list returned a malformed row: {line!r}")
+        labels.add(fields[2])
+    return labels
+
+
+def server_job_registered() -> bool:
+    """Strictly query launchd for the engine label; uncertainty is an error."""
+    try:
+        completed = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False, timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Could not query launchd: {exc}") from exc
+    if completed.returncode != 0:
+        raise RuntimeError(f"launchctl list failed: {(completed.stderr or '').strip()}")
+    return SERVER_LABEL in parse_launchctl_list(completed.stdout or "")
+
+
 def _loaded_job(
     uid: int, runner: Runner
 ) -> tuple[bool, list[str] | None, int | None]:
@@ -327,6 +390,12 @@ def _loaded_job(
         parse_launchctl_print_arguments(printed),
         parse_launchctl_last_exit_code(printed),
     )
+
+
+def server_last_exit_code(*, uid: int | None = None, runner: Runner = subprocess.run) -> int | None:
+    """Read launchd's last observed server exit code without changing service state."""
+    _loaded, _arguments, exit_code = _loaded_job(_getuid() if uid is None else uid, runner)
+    return exit_code
 
 
 def _plist_matches_loaded(
@@ -591,20 +660,175 @@ def server_reachable(port: int, *, timeout: float = 2.0) -> bool:
         return False
 
 
-def wait_for_engine(runtime: DesktopRuntime) -> None:
-    """Give the engine time to come up, or to record that it could not.
+@dataclass(frozen=True, slots=True)
+class StartOutcome:
+    """What `wait_for_engine` could establish about the engine it waited for.
 
-    Bounded: the engine is starting in the background, and a start that
-    waits forever is a start that never answers. The wait ends as soon as
-    the engine serves its port or records a bind failure.
+    ``state`` is one of ``started`` (the new engine answered as itself),
+    ``port_in_use`` (it recorded that it could not bind), ``denied`` (macOS
+    refused it the workspace) or ``timeout`` (nothing could be confirmed
+    before the deadline). A timeout is not a start: it is the absence of
+    evidence, and the caller reports it as a failure (#1938).
     """
-    deadline = time.monotonic() + START_SETTLE_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if read_port_in_use():
-            return
-        if server_reachable(runtime.port):
-            return
-        time.sleep(0.5)
+
+    state: str
+    message: str
+    startup_id: str | None = None
+    pid: int | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.state == "started"
+
+
+def read_lock_owner(runtime: DesktopRuntime) -> dict[str, Any] | None:
+    """The metadata the engine wrote into its runtime lock, or ``None``.
+
+    The engine writes ``server.lock`` under its runtime directory when it
+    takes the lock (:class:`ciao.instance_lock.WorkspaceInstanceLock`): pid,
+    port, workspace, runtime, status and a ``startup_id`` fresh for every run.
+    The file is advisory and diagnostic: a missing, unreadable or malformed
+    one reads as "no owner known", never as an error.
+    """
+    path = Path(runtime.runtime_root) / SERVER_LOCK_NAME
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def engine_identity(port: int, *, timeout: float = START_PROBE_TIMEOUT_S) -> dict[str, Any] | None:
+    """The startup-status payload of whatever answers ``port``, if it is an engine.
+
+    ``None`` unless the answer is a JSON object carrying a ``startup_id``: an
+    unrelated listener on the port, a bare 2xx, or an engine too old to
+    report an identity all count as "no engine identified". A 2xx alone
+    satisfied the old wait, which is how an unrelated service could make a
+    failed start read as a success.
+    """
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{port}/api/startup-status",
+            timeout=timeout,
+        ) as response:
+            if not 200 <= int(response.status) < 300:
+                return None
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    startup_id = payload.get("startup_id")
+    if not isinstance(startup_id, str) or not startup_id:
+        return None
+    return payload
+
+
+def _fresh_lock_owner(
+    runtime: DesktopRuntime,
+    previous_startup_id: str | None,
+) -> dict[str, Any] | None:
+    """The lock owner, when it is a new run of *this* install's engine.
+
+    Fresh means: status ``running``, a ``startup_id`` that is not the one the
+    previous run had, and the port and runtime directory this install is
+    configured with. Another Ciaobot runtime that happens to be running, or
+    the run that was there before the kickstart, is not evidence that the
+    engine just started.
+    """
+    owner = read_lock_owner(runtime)
+    if not owner or owner.get("status") != "running":
+        return None
+    startup_id = owner.get("startup_id")
+    if not isinstance(startup_id, str) or not startup_id or startup_id == previous_startup_id:
+        return None
+    if owner.get("port") != runtime.port:
+        return None
+    try:
+        same_runtime = Path(str(owner.get("runtime", ""))).resolve() == Path(runtime.runtime_root).resolve()
+    except OSError:
+        same_runtime = False
+    if not same_runtime:
+        return None
+    return owner
+
+
+def _denial_recorded_since(started_at: float) -> str:
+    """A workspace-access denial the engine recorded after ``started_at``.
+
+    The denial record is per user and the supervisor only clears it once it
+    has probed the workspace again, so for the first seconds of a start the
+    file may still carry an earlier run's verdict. An old one must not fail a
+    start that is still booting: only a record written since the kickstart
+    counts.
+    """
+    path = denial_path()
+    try:
+        if path.stat().st_mtime < started_at - 1.0:
+            return ""
+    except OSError:
+        return ""
+    return read_denial(path)
+
+
+def wait_for_engine(
+    runtime: DesktopRuntime,
+    *,
+    previous: dict[str, Any] | None = None,
+    started_at: float | None = None,
+    timeout: float = START_SETTLE_TIMEOUT_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> StartOutcome:
+    """Wait for the engine a kickstart just started to answer as itself.
+
+    ``previous`` is the lock owner read *before* the kickstart (see
+    :func:`read_lock_owner`), so the run that was there before cannot pass
+    for the new one. The start is confirmed only when the lock names a fresh
+    run of this install (:func:`_fresh_lock_owner`) *and* the engine on the
+    port reports that same ``startup_id`` (:func:`engine_identity`).
+
+    Bounded by ``timeout``: the engine is starting in the background, and a
+    start that waits forever is a start that never answers. A bind failure
+    or a workspace-access denial recorded during the wait ends it at once.
+    Reaching the deadline is reported as a timeout, never as a start.
+    ``clock`` and ``sleep`` are injectable so a test can run the whole wait
+    without wall-clock time.
+    """
+    previous_startup_id = previous.get("startup_id") if previous else None
+    if not isinstance(previous_startup_id, str):
+        previous_startup_id = None
+    since = time.time() if started_at is None else started_at
+    deadline = clock() + timeout
+    while True:
+        reason = read_port_in_use()
+        if reason:
+            return StartOutcome("port_in_use", reason)
+        denied = _denial_recorded_since(since)
+        if denied:
+            return StartOutcome("denied", denied)
+        owner = _fresh_lock_owner(runtime, previous_startup_id)
+        if owner is not None:
+            remaining = deadline - clock()
+            probe = max(0.1, min(START_PROBE_TIMEOUT_S, remaining))
+            payload = engine_identity(runtime.port, timeout=probe)
+            if payload is not None and payload.get("startup_id") == owner["startup_id"]:
+                pid = payload.get("pid")
+                return StartOutcome(
+                    "started",
+                    "Ciaobot engine started.",
+                    startup_id=str(owner["startup_id"]),
+                    pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+                )
+        if clock() >= deadline:
+            return StartOutcome(
+                "timeout",
+                f"The engine did not confirm its start within {timeout:g}s. It may still be "
+                "booting, or it may have exited: run `ciao service status`, and read "
+                "the engine log if it stays down.",
+            )
+        sleep(START_POLL_INTERVAL_S)
 
 
 def port_in_use_reason(

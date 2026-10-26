@@ -8,9 +8,13 @@ from pathlib import Path
 # in PWA_API.md → Agent recipes. Each entry needs a one-line reason so future
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
+    "/api/onboarding": "browser-only resumable lifecycle progress; signed session, no settings/readiness writes",
+    "/api/onboarding/interview": "browser-only explicit first-run interview; signed session, creates only the interview chat",
+    "/api/onboarding/complete": "browser-only onboarding completion; signed session, no host actions",
     "/api/terminal/unlock": (
-        "browser-only password re-entry; signed session and exact origin/transport "
-        "policy, grant travels only in an HttpOnly cookie, never a command or path"
+        "browser-only grant issue; signed session and exact origin/transport "
+        "policy, no body and no secret, grant travels only in an HttpOnly cookie, "
+        "never a command or path"
     ),
     "/api/welcome/open-folder": (
         "Home welcome card's Show in Finder; host-only (session + host_browser_request), "
@@ -49,6 +53,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/schedules/{schedule_id}": "agents edit schedules via the schedule_* MCP tools, not curl",
     "/api/status": "internal status PATCH",
     "/api/settings/keyboard": "user-owned keyboard preferences are managed through Settings",
+    "/api/settings/appearance": "user-owned appearance preferences are managed through Settings",
     "/api/push/subscribe": "browser push registration",
     "/api/push/unsubscribe": "browser push registration",
     "/api/admin/snapshot": "admin internal; deploy is the agent-callable wrapper",
@@ -66,7 +71,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/client-secret": "browser GWS integration client_secret upload",
     "/api/integrations/gws/auth-url": "browser GWS integration auth url request",
     "/api/integrations/gws/exchange": "browser GWS integration oauth token exchange",
-    "/api/integrations/gws/disconnect": "browser GWS integration disconnect/removal",
     "/api/integrations/gws/profiles/add": "browser Settings action; registers a Google account for linking",
     "/api/integrations/gws/profiles/remove": "browser Settings action; deletes a Google account and its local credentials",
     "/api/import/preview": "browser Memory import selection; reads the chosen conversations on the engine host to state what would be processed",

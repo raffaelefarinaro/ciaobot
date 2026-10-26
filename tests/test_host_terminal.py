@@ -102,7 +102,7 @@ def test_ps_quote_doubles_every_powershell_quote_character() -> None:
 
 
 def test_frontend_copy_names_the_gws_install_command() -> None:
-    for rel in ("web/src/components/settings/GwsSetupChecklist.vue", "web/src/components/SettingsView.vue"):
+    for rel in ("web/src/components/settings/GoogleConnectDialog.vue", "web/src/composables/useGwsAccounts.ts"):
         text = (REPO_ROOT / rel).read_text(encoding="utf-8")
         assert host_terminal.GWS_INSTALL_COMMAND in text, rel
 

@@ -1,3 +1,5 @@
+import type { AppearancePayload } from './appearance'
+
 export type WorkspaceName = string
 
 /**
@@ -50,6 +52,9 @@ export interface WorkspaceProviderOption {
   default_model?: string
 }
 
+export type ProviderOverrideField = 'model' | 'thinking' | 'permission_mode' | 'insights_model'
+export type ProviderOverrides = Record<string, Partial<Record<ProviderOverrideField, string>>>
+
 export interface WorkspaceInfo {
   name: WorkspaceName
   vault_root: string
@@ -57,12 +62,16 @@ export interface WorkspaceInfo {
   disallowed_tools?: string[] | null
   // Whether the workspace's Claude chats load the claude.ai connectors. Missing → on.
   claude_ai_connectors?: boolean
+  /** Operator-only; absent or 'off': shadow verdicts only. */
+  memory_handover?: MemoryHandover
   gws_profile: string
-  // PWA accent preset: amber | pink | cyan | emerald | violet. Missing → amber (Ciao orange).
+  // PWA accent preset: amber | pink | cyan | emerald | violet | blue | teal | lime | fuchsia. Missing → amber (Ciao orange).
   color?: string
   // Filesystem scope for the agent and its shell. Absent or null: the workspace
   // never chose one and runs under the engine's default_agent_fs_scope.
   agent_fs_scope?: 'workspace' | 'machine' | null
+  // Operator-only; sparse: {provider: {field: value}}. Missing = engine default.
+  provider_overrides?: ProviderOverrides
 }
 
 export interface WorkspacesResponse {
@@ -119,13 +128,13 @@ export interface McpProviderInventory {
   available: boolean
   inventory_state: 'loaded' | 'unknown'
   servers: McpNativeServer[]
-  setup: { add: string; authenticate: string }
 }
 
 export interface McpStatus {
   workspace: string
   agent_root: string
   providers: McpProviderInventory[]
+  shell: { kind: 'posix' | 'powershell'; cd_prefix: string }
 }
 
 /** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */
@@ -317,6 +326,11 @@ export interface ChatInfo {
   pinned_file_path?: string
   dismissed_pin_paths?: string[]
   pin_revision?: number
+  // The chat's transient suggested command, when the assistant offered one.
+  // `null` when there is none. Optional only so the older fixture factories
+  // keep compiling; an absent field is read as "no offer", never as "keep
+  // what we had".
+  terminal_offer?: TerminalOffer | null
   // Server sends `{}` for no location; test `repo_location.path`, not the object.
   repo_location?: Partial<RepoLocation>
   // G1: always sent; optional for older payloads/test stubs.
@@ -336,6 +350,21 @@ export interface ChatPinState {
   path: string
   dismissed_paths: string[]
   revision: number
+}
+
+/**
+ * A command the assistant suggested in a chat.
+ *
+ * The command is untrusted, model-authored plain text: the engine never
+ * verifies it, the PWA never runs it, and the user reads it and runs it
+ * themselves. `id` is a random 128-bit hex minted for every accepted
+ * change; it is what a dismissal presents, so a stale tab cannot dismiss a
+ * newer offer of the same text. The command is shown as escaped text and is
+ * never parsed, linked or executed.
+ */
+export interface TerminalOffer {
+  id: string
+  command: string
 }
 
 /** The memory pass's step on an archived chat's postprocess record. */
@@ -360,7 +389,7 @@ export interface ChatRetryInfo {
 
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
 export type TurnOrigin =
-  | 'background_run' | 'cli_task_wake' | 'schedule' | 'task_delegation'
+  | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
   | 'task_resume' | 'webhook' | 'update_task'
 
 export interface ChatMessage {
@@ -476,7 +505,7 @@ export interface RunningSubagentsResponse {
 // What a queued message will do: wait for the next turn, or be handed to the
 // running one through the provider's native steering.
 export type QueueDelivery = 'queue' | 'steer'
-export type SteerFallbackReason = 'no_turn' | 'not_running' | 'finished' | 'stopped'
+export type SteerFallbackReason = 'no_turn' | 'not_running' | 'finished' | 'stopped' | 'send_id_limit'
 
 export type WsEvent =
   // parent_tool_use_id is set when the event came from inside a Task
@@ -615,9 +644,14 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
   | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
+  | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
+  // A chat's suggested command changed: the offer, or `null` when the engine
+  // dropped it. Global (it travels on `/ws/events`, not the per-chat socket),
+  // because the engine can change a chat's offer from any session.
+  | { type: 'chat_terminal_offer_changed'; chat_id: string; terminal_offer: TerminalOffer | null }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
@@ -891,15 +925,21 @@ export interface ModelsResponse {
   // Keyed by runtime provider; Claude and opencode levels may be narrowed by
   // model_reasoning_levels.
   thinking_levels?: Record<string, string[]>
+  provider_catalog_evidence?: Record<string, ProviderCatalogEvidence>
+}
+
+export interface ProviderCatalogEvidence {
+  status: 'observed' | 'unknown'
+  source: 'claude_initialize' | 'opencode_catalog' | null
+  models: Array<{ id: string; label: string }>
+  reason: 'not_observed' | 'expired' | 'invalid_response' | 'no_models_reported' | null
 }
 
 export interface MoveToBackgroundResponse { moved: boolean }
 
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
-// model overrides (Settings → Models tab).
+// model overrides (Settings → Providers tab).
 export interface RoutineSettings {
-  insights_enabled?: boolean
-
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
   provider_default_models?: Record<string, string>
@@ -1270,6 +1310,8 @@ export interface SetupStatus {
   mode: string
   workspace_root: string
   vault_root: string
+  /** The installer's folder suggestion on a fresh install; null otherwise. */
+  suggested_workspace: string | null
   checks: SetupCheck[]
   providers: Record<string, SetupProviderStatus>
   provider_ready: boolean
@@ -1458,6 +1500,8 @@ export interface Task {
    * instead of looking the chat up.
    */
   chat_archived?: boolean
+  /** `'agent'` for a task the agent filed, else `null`. Nothing renders it. */
+  created_by?: 'agent' | null
 }
 
 /**
@@ -1750,6 +1794,9 @@ export interface ProposalRow {
   leak_warning?: boolean
   rehome?: RehomeSignal
   target?: string
+  /** Who the memory pass said should settle this: `nightly` (more context would) or `you`. Absent on rows filed without one. */
+  decider?: 'nightly' | 'you'
+  decide_reason?: string
   /** A `note_edit` row: a note verification the autonomy rule would not apply,
    * queued for a person to decide. `target` is the note it is about (the queue
    * bullet's own payload is a sidecar id), and this is what the accept needs
@@ -1767,6 +1814,8 @@ export interface ProposalRow {
     receipt_id: string
     can_accept: boolean
     reason: string
+    /** The bullet an entry operation is about, as filed; empty for a whole-note edit. */
+    entry?: string
   }
   /** A `skill` row: the versioned record the queue owns, not a bullet.
    *
@@ -2021,6 +2070,38 @@ export interface ProposalDismissOlderResponse {
 /** Who made the decision: through the app, the curation agent, or on its own. */
 export type ProposalHistoryVia = 'pwa' | 'agent' | 'auto' | ''
 
+export type MemoryHandover = 'off' | 'dismiss' | 'all'
+
+export interface ProposalPrediction {
+  verdict: 'accept' | 'dismiss'
+  reason: string
+  ts: string
+  match: boolean
+}
+
+export interface HandoverAgreement {
+  decided: number
+  matched: number
+  /** Null with no decisions. */
+  rate: number | null
+  window: number
+  min_decisions: number
+  threshold: number
+  predicted_accept: number
+  accept_matched: number
+  predicted_dismiss: number
+  dismiss_matched: number
+  suggest_handover: boolean
+}
+
+export interface HandoverResponse {
+  workspace: string
+  handover: MemoryHandover
+  /** Whether the unattended run can act on this install at all (false when no trusted service definition registers the workspace). */
+  acting_available: boolean
+  agreement: HandoverAgreement
+}
+
 /**
  * One decided proposal from `GET /api/proposals/history`. Read side of the
  * per-workspace decision sidecar `record_dismissal`/`record_promotion` write
@@ -2047,6 +2128,8 @@ export interface ProposalHistoryRow {
   learning_id?: string
   /** Which finding within that learning, when the decision named one. */
   finding?: string
+  /** The operator's optional "why" (or the agent's, when `via` is `agent`). Absent or empty when none was given. Evidence text: render as text, never markup. */
+  reason?: string
   /** The archive transcript this fact came from, when one is still on disk. */
   source_path?: string
   /** The receipt that performed this decision. ABSENT — not falsy — for every
@@ -2054,6 +2137,8 @@ export interface ProposalHistoryRow {
    * "No change snapshot available" rather than offering an undo it cannot
    * honour. */
   change?: ProposalHistoryChange
+  /** Present only for a [memory]/[profile] row the nightly run predicted before it was decided. ABSENT, not null, otherwise. */
+  prediction?: ProposalPrediction
   /**
    * The `note_edit` record behind this decision, when the server could still
    * read it. ABSENT for a `note_edit` whose sidecar is gone or unreadable —

@@ -84,16 +84,39 @@ function chat(workspace, n, projectId, title, extra = {}) {
     pinned_file_path: '',
     dismissed_pin_paths: [],
     pin_revision: 0,
+    // The transient suggested command. Always present, null when the chat
+    // holds none — the wire shape the engine sends.
+    terminal_offer: null,
     code_mode: false,
     ...extra,
   }
+}
+
+/**
+ * Where an archived chat's transcript lives, in the shape the real server
+ * writes it: `<logs_root>/Chats/<chat-id>/<provider>/<stem>.md`, relative to
+ * the workspace root.
+ *
+ * The shape is not decoration. The file viewer reads the chat id back out of
+ * the path to decide whether the file is a transcript it can continue
+ * (FileViewerModal.vue), so a synthetic path that does not look like this
+ * can never reach the "Continue this chat" button — the browser suite could
+ * not exercise it at all (#1710). The real chat ids start with `chat-`; the
+ * fixture's are `<workspace>-chat-<n>`, so the folder carries that prefix.
+ * The folder is therefore not the row's `chat_id`: a spec must not read the
+ * button's target as the archived chat it listed.
+ */
+function transcriptPath(chatId, stem = '2026-01-01T09-00-00') {
+  return `memory-vault/Logs/Chats/chat-${chatId}/claude/${stem}-${chatId}.md`
 }
 
 function passHelper(sourceChatId, sourceTitle, state) {
   return {
     kind: 'memory_pass',
     source_chat_id: sourceChatId,
-    archive_path: `/synthetic/${sourceChatId.split('-')[0]}/archive/${sourceChatId}.jsonl`,
+    // The transcript this pass is distilling: the same file the archived
+    // conversation carries, so the two rows agree on what is being read.
+    archive_path: transcriptPath(sourceChatId),
     doc_path: '',
     source_title: sourceTitle,
     source_project: '',
@@ -126,7 +149,7 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
     ? [
       chat(workspace.name, 3, `${workspace.name}-general`, `${workspace.name} archived conversation`, {
         archived: true,
-        archive_path: '/synthetic/alpha/archive/alpha-chat-3.jsonl',
+        archive_path: transcriptPath('alpha-chat-3'),
         postprocess: { steps: { memory_pass: { status: 'ok', extra: { chat_id: 'alpha-chat-2' } } } },
       }),
       // A running memory pass and the archived conversation it is distilling.
@@ -136,7 +159,7 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
       // activity times, newest last, so the section's order is assertable.
       chat(workspace.name, 4, `${workspace.name}-general`, `${workspace.name} conversation with a running memory pass`, {
         archived: true,
-        archive_path: '/synthetic/alpha/archive/alpha-chat-4.jsonl',
+        archive_path: transcriptPath('alpha-chat-4'),
         last_activity_at: '2026-01-01T11:00:00Z',
         postprocess: { steps: { memory_pass: { status: 'running', extra: { chat_id: 'alpha-chat-5' } } } },
       }),
@@ -149,7 +172,7 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
       // state are on screen in the same journey.
       chat(workspace.name, 6, `${workspace.name}-general`, `${workspace.name} conversation waiting on the pass`, {
         archived: true,
-        archive_path: '/synthetic/alpha/archive/alpha-chat-6.jsonl',
+        archive_path: transcriptPath('alpha-chat-6'),
         last_activity_at: '2026-01-01T10:00:00Z',
       }),
       chat(workspace.name, 7, `${workspace.name}-memory`, 'Memory pass · conversation waiting on the pass', {
@@ -405,6 +428,10 @@ export function snapshotFrame(activeStreams) {
     chat_pins: {
       'beta-chat-1': { path: '/synthetic/beta/pinned-report.md', dismissed_paths: [], revision: 1 },
     },
+    // The transient suggested-command map. Complete, like the pin map: a
+    // chat it does not name holds no offer. Empty in the base frame; the
+    // fixture server fills it from the session's offers before sending.
+    chat_terminal_offers: {},
   }
 }
 

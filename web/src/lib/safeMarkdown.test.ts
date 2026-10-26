@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
+import * as loopback from './loopback'
 import { renderFileMarkdown, renderMarkdown, renderUserMarkdown } from './safeMarkdown'
 
 describe('safe markdown rendering', () => {
@@ -300,6 +301,57 @@ describe('chat markdown file links', () => {
   })
 })
 
+// Issue #1768: a message that names another conversation links to it, under
+// its human title. The link is the app's own: it opens in this tab, and the
+// raw id stays in the tooltip and in `data-chat-id`.
+describe('chat markdown chat references', () => {
+  const KNOWN = new Map([['chat-0123abcd', 'Budget review']])
+
+  function render(input: string): HTMLElement {
+    const el = document.createElement('div')
+    el.innerHTML = renderMarkdown(input, [], KNOWN)
+    return el
+  }
+
+  it('links a known reference to its title and keeps the raw id', () => {
+    const link = render('see chat-0123abcd for the numbers').querySelector('a.chat-link')!
+    expect(link.getAttribute('href')).toBe('/chat/chat-0123abcd')
+    expect(link.getAttribute('title')).toBe('chat-0123abcd')
+    expect(link.getAttribute('data-chat-id')).toBe('chat-0123abcd')
+    expect(link.textContent).toBe('Budget review')
+  })
+
+  it('keeps the reference in the app instead of opening a new tab', () => {
+    const html = renderMarkdown('see chat-0123abcd', [], KNOWN)
+    expect(html).not.toContain('target="_blank"')
+  })
+
+  it('leaves an unknown id plain', () => {
+    const html = renderMarkdown('see chat-ffffffff', [], KNOWN)
+    expect(html).not.toContain('chat-link')
+    expect(html).toContain('chat-ffffffff')
+  })
+
+  it('links a reference in a user bubble too', () => {
+    const el = document.createElement('div')
+    el.innerHTML = renderUserMarkdown('see chat-0123abcd', [], KNOWN)
+    expect(el.querySelector('a.chat-link')?.textContent).toBe('Budget review')
+  })
+
+  it('leaves the file-link pipeline alone', () => {
+    const html = renderMarkdown('see [notes](notes.md) and chat-0123abcd', [], KNOWN)
+    expect(html).toContain('data-file-path="notes.md"')
+    expect(html).toContain('data-chat-id="chat-0123abcd"')
+  })
+
+  it('never rewrites an existing anchor', () => {
+    const id = '0123456789abcdef0123456789abcdef'
+    const html = renderMarkdown(`[chat-0123abcd](/tasks/${id})`, [], KNOWN)
+    expect(html).toContain(`href="/tasks/${id}"`)
+    expect(html).not.toContain('chat-link')
+  })
+})
+
 describe('chat code blocks and long links', () => {
   it('gives a fenced block a header with its language and the copy button', () => {
     const html = renderMarkdown('```json\n{"a": 1}\n```')
@@ -334,6 +386,85 @@ describe('chat code blocks and long links', () => {
 // through, so `<p id=out>` used to disappear from the bubble and split the line.
 // User text must read as text; the only markup allowed in it is what the app
 // itself writes (the comment-context tags).
+describe('chat URLs', () => {
+  const EXTERNAL = 'target="_blank" rel="noopener noreferrer"'
+
+  it('links a code span that is one URL and keeps its code styling', () => {
+    const html = renderMarkdown('See `https://github.com/foo` for the source.')
+    expect(html).toContain(
+      `<a href="https://github.com/foo" ${EXTERNAL}><code>https://github.com/foo</code></a>`,
+    )
+  })
+
+  it('keeps the query string of a code-span URL intact in the href', () => {
+    const html = renderMarkdown('`https://example.com/search?q=1&r=2#top`')
+    expect(html).toContain('href="https://example.com/search?q=1&amp;r=2#top"')
+    expect(html).toContain('<code>https://example.com/search?q=1&amp;r=2#top</code>')
+  })
+
+  it('escapes a quote inside a code-span URL instead of breaking the attribute', () => {
+    const html = renderMarkdown('`https://example.com/?q="x"`')
+    expect(html).toContain('href="https://example.com/?q=&quot;x&quot;"')
+    expect(html).not.toContain('href="https://example.com/?q=""')
+  })
+
+  it('takes the span literally, so punctuation inside the backticks stays in the href', () => {
+    // Prose drops a trailing dot; a code span is what the author typed.
+    const html = renderMarkdown('`https://example.com/x.`')
+    expect(html).toContain('href="https://example.com/x."')
+  })
+
+  it('leaves a code span alone when it holds more than the URL', () => {
+    const html = renderMarkdown('`curl https://example.com/x` and `not a url`')
+    expect(html).not.toContain('<a')
+    expect(html).toContain('<code>curl https://example.com/x</code>')
+    expect(html).toContain('<code>not a url</code>')
+  })
+
+  it('leaves URLs inside fenced code blocks as plain text', () => {
+    const html = renderMarkdown('```\nhttps://example.com/x\n```')
+    expect(html).not.toContain('<a')
+    expect(html).toContain('https://example.com/x')
+  })
+
+  it('never links an unsafe scheme written in a code span', () => {
+    const html = renderMarkdown('`javascript:alert(1)` `file:///etc/passwd`')
+    expect(html).not.toContain('<a')
+  })
+
+  it('does not turn a code-span URL ending in a file name into a workspace file link', () => {
+    const html = renderMarkdown('`https://example.com/docs/readme.md`')
+    expect(html).not.toContain('file-link')
+    expect(html).toContain('href="https://example.com/docs/readme.md"')
+  })
+
+  it('links a code-span URL in a user bubble too', () => {
+    const html = renderUserMarkdown('try `https://example.com/x`')
+    expect(html).toContain(
+      `<a href="https://example.com/x" ${EXTERNAL}><code>https://example.com/x</code></a>`,
+    )
+  })
+
+  it('links every bare URL in prose and leaves trailing punctuation outside', () => {
+    const html = renderMarkdown(
+      'See https://example.com/a, then https://example.com/b; done (https://example.com/c). Wow https://example.com/d!',
+    )
+    for (const path of ['a', 'b', 'c', 'd']) {
+      expect(html).toContain(`<a href="https://example.com/${path}" ${EXTERNAL}>https://example.com/${path}</a>`)
+    }
+    expect(html).toContain('</a>, then')
+    expect(html).toContain('</a>; done (<a')
+    expect(html).toContain('</a>). Wow')
+    expect(html).toContain('</a>!')
+  })
+
+  it('keeps balanced parentheses inside a bare URL', () => {
+    const html = renderMarkdown('https://en.wikipedia.org/wiki/Foo_(bar) is it')
+    expect(html).toContain('href="https://en.wikipedia.org/wiki/Foo_(bar)"')
+    expect(html).toContain('>https://en.wikipedia.org/wiki/Foo_(bar)</a> is it')
+  })
+})
+
 describe('renderUserMarkdown', () => {
   function render(input: string): HTMLElement {
     const el = document.createElement('div')
@@ -428,5 +559,170 @@ describe('renderUserMarkdown', () => {
     const el = document.createElement('div')
     el.innerHTML = renderMarkdown('<p id=out>')
     expect(el.querySelector('#out')).not.toBeNull()
+  })
+})
+
+// A link whose target the sanitizer refuses must not survive as a link.
+// DOMPurify drops a `file:`, `javascript:` or `data:` href, but the anchor
+// used to stay behind: still painted with the accent colour and an
+// underline, still swallowing the click, and pointing nowhere.
+//
+// A refused link is inert text — except a local file path on the engine's
+// own machine, and only in a surface that opted in (`{ openLocal: true }`).
+// There the engine itself can act on it, so it is rendered as a clickable
+// button that opens the path with the OS default application. A surface
+// without a click handler for that button must not opt in: a control that
+// looks clickable and does nothing is the defect this whole change is about.
+describe('links the sanitizer refuses', () => {
+  // The folder link from the report that started this.
+  const FILE_LINK =
+    '[zendesk-code39-93-itf-images](file:///Users/raffaelefarinaro/Documents/zendesk-code39-93-itf-images)'
+  const FILE_PATH = '/Users/raffaelefarinaro/Documents/zendesk-code39-93-itf-images'
+
+  function host(html: string): HTMLElement {
+    const el = document.createElement('div')
+    el.innerHTML = html
+    return el
+  }
+
+  it('shows a local file link as a button the engine can open, with the path still readable', () => {
+    // The opt-in a surface with a delegated handler passes. The path list
+    // and the chat map are filled in deliberately: the option is the fourth
+    // positional argument.
+    const html = renderMarkdown(FILE_LINK, [], new Map(), { openLocal: true })
+    const el = host(html)
+
+    // Still no anchor: the path must never be navigable from the browser.
+    expect(el.querySelector('a')).toBeNull()
+    const button = el.querySelector('button.markdown-dead-link--openable')
+    expect(button).not.toBeNull()
+    expect(button?.getAttribute('type')).toBe('button')
+    expect(button?.getAttribute('data-local-path')).toBe(FILE_PATH)
+    expect(button?.getAttribute('title')).toBe('Open on this computer')
+    // The label stays readable, and the path stays visible and copyable.
+    expect(el.textContent).toContain('zendesk-code39-93-itf-images')
+    expect(el.textContent).toContain(FILE_PATH)
+    // Nothing in the markup can navigate to the folder.
+    expect(html).not.toContain('href=')
+    expect(html).not.toContain('file://')
+  })
+
+  it('shows the same in a user bubble', () => {
+    const el = host(renderUserMarkdown(FILE_LINK, [], new Map(), { openLocal: true }))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('button.markdown-dead-link--openable')).not.toBeNull()
+    expect(el.textContent).toContain(FILE_PATH)
+  })
+
+  it('shows the same in a note', () => {
+    const el = host(renderFileMarkdown(FILE_LINK, {
+      resolveImageSrc: (href) => href,
+      openLocal: true,
+    }))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('button.markdown-dead-link--openable')).not.toBeNull()
+    expect(el.textContent).toContain(FILE_PATH)
+  })
+
+  it('keeps the authority of a network path', () => {
+    const el = host(renderMarkdown('[share](file://server/share/notes.md)', [], new Map(), { openLocal: true }))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.textContent).toContain('//server/share/notes.md')
+    // The host is part of the path: `/share/notes.md` is a different place.
+    expect(el.textContent).not.toContain('(/share/notes.md)')
+    // The engine is asked for the whole authority-qualified path.
+    expect(el.querySelector('button.markdown-dead-link--openable')?.getAttribute('data-local-path'))
+      .toBe('//server/share/notes.md')
+  })
+
+  it('keeps the inline formatting of the label', () => {
+    const el = host(renderMarkdown('[**bold** label](file:///tmp/notes.md)', [], new Map(), { openLocal: true }))
+
+    expect(el.querySelector('.markdown-dead-link strong')?.textContent).toBe('bold')
+  })
+
+  it('leaves a local link without a path segment inert', () => {
+    // `file://myhost` is a machine name, not a file to open.
+    const html = renderMarkdown('[server](file://myhost)', [], new Map(), { openLocal: true })
+    const el = host(html)
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('button')).toBeNull()
+    expect(html).not.toContain('data-local-path')
+    expect(el.textContent).toContain('server')
+  })
+
+  it('keeps a local link inert off the engine\'s own machine', () => {
+    // A phone or another computer on the LAN: the engine would open the file
+    // on a screen nobody is looking at, so the affordance is not rendered.
+    const spy = vi.spyOn(loopback, 'isLoopbackPage').mockReturnValue(false)
+    try {
+      const html = renderMarkdown(FILE_LINK, [], new Map(), { openLocal: true })
+      const el = host(html)
+
+      expect(el.querySelector('a')).toBeNull()
+      expect(el.querySelector('button')).toBeNull()
+      expect(el.querySelector('.markdown-dead-link')?.textContent).toContain(FILE_PATH)
+      expect(html).not.toContain('data-local-path')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('keeps a local link inert in a surface that did not opt in', () => {
+    // No opt-in: this surface has no click handler for the button, so the
+    // link stays copyable text rather than a control that goes nowhere.
+    const html = renderMarkdown(FILE_LINK, [], new Map())
+    const el = host(html)
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('button')).toBeNull()
+    expect(html).not.toContain('data-local-path')
+    expect(el.querySelector('.markdown-dead-link')?.textContent).toContain(FILE_PATH)
+  })
+
+  it('turns a raw anchor without a target into inert text', () => {
+    const el = host(renderMarkdown('<a>plain</a>'))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('.markdown-dead-link')?.textContent).toBe('plain')
+  })
+
+  it('turns a raw anchor with a refused target into inert text', () => {
+    const el = host(renderMarkdown('<a href="file:///tmp/x">raw</a>'))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('.markdown-dead-link')?.textContent).toBe('raw')
+  })
+
+  it('refuses javascript and data links, and keeps no trace of the target', () => {
+    const html = renderMarkdown(
+      '[bad](javascript:alert(1)) [also](data:text/html;base64,PHNjcmlwdD4=)',
+    )
+    const el = host(html)
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.textContent).toContain('bad')
+    expect(el.textContent).toContain('also')
+    expect(html).not.toContain('javascript:')
+    expect(html).not.toContain('data:')
+  })
+
+  it('leaves the links a reader can follow alone', () => {
+    const html = renderMarkdown([
+      '[web](https://example.com/guide)',
+      '[mail](mailto:me@example.com)',
+      '[app](/tasks)',
+      '[note](notes.md)',
+    ].join('\n'))
+
+    expect(html).toContain('href="https://example.com/guide"')
+    expect(html).toContain('href="mailto:me@example.com"')
+    expect(html).toContain('href="/tasks"')
+    expect(html).toContain('data-file-path="notes.md"')
+    expect(html).not.toContain('markdown-dead-link')
   })
 })

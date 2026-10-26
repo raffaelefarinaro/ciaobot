@@ -12,6 +12,10 @@ Chat file-link regressions cover separate agent roots, exact identities across
 text/image/binary/HTML previews, failed pins preserving the modal, and stale pin
 completions not dismissing a newer file (#1167).
 
+`ChatPanelUserMessage.test.ts` covers chat-reference link eligibility against
+the same openable-chat list used by the mention picker, and preserves the
+link-map identity when a chat-list poll changes only activity time (#1807).
+
 Page-load behavior is covered by `tests/test_static_asset_compression.py` and
 `web/src/lib/chatComponents.test.ts`, plus `AppEngineOffline.test.ts` for the
 bounded startup request and display delay. Static gzip is limited to hashed
@@ -27,7 +31,7 @@ small browser fixture; asset readiness alone does not measure Home's data wait.
 
 Linux production and every installer-managed macOS install restart the engine
 from Settings through `POST /api/admin/restart`; developer mode (Settings →
-General → Developer, with the source checkout set there) on a source checkout
+Advanced → Developer, with the source checkout set there) on a source checkout
 retains the source deploy workflow.
 
 ```bash
@@ -40,7 +44,10 @@ ciao run
 
 `python -m ciao <command>` runs the same CLI as the `ciao` console script, from any interpreter that has the package installed.
 
-`ciao setup` is idempotent. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. On Windows the same flag renders the Task Scheduler XML under `%LOCALAPPDATA%\Ciaobot\service` and registers it, so `--load-launchd` now means macOS **or** Windows. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
+`ciao setup` is idempotent and defers Git history unless explicitly requested with `--initialize-git`. That option creates local history and an initial commit of nonignored workspace and external-vault contents; it configures no remote and uploads nothing. `--yes` is not Git consent. Existing repositories still receive missing ignore guards. It writes the initial `.env` (including the selected port), seeds stock workspace files, copies the editable `AGENTS.md` workspace guide (both providers discover it natively; nothing writes a `CLAUDE.md` any more) and copies `CIAO_CUSTOMIZATION.md`. On macOS it also renders the server plist under `~/Library/LaunchAgents/` and removes retired launcher bundles. Existing custom `AGENTS.md` files and configuration values are preserved. By default setup does not load launchd; add `--load-launchd` on macOS to run `launchctl`. On Windows the same flag renders the Task Scheduler XML under `%LOCALAPPDATA%\Ciaobot\service` and registers it, so `--load-launchd` now means macOS **or** Windows. Linux setup creates no desktop/service files unless an explicit `--launch-agents-dir` requests an offline plist export. See [Linux hosting](LINUX.md) for systemd and HTTPS deployment.
+
+Onboarding lifecycle is recorded separately in the owner-private `.runtime/onboarding.json` receipt; it is not the provisioning timestamp or welcome-password flag. A fresh supported setup starts `in_progress`; an existing receipt is always preserved. Receipt-less established installs are marked `legacy_exempt`, based on setup registry/legacy workspace evidence or durable runtime state—not notes-folder contents, unrelated `.env` files, or bootstrap auth/lock files. Startup creates a pending receipt for a fresh configured install before importing legacy workspace configuration. Invalid existing receipts fail closed and are never overwritten.
+A genuinely new install also writes `backup_enabled: false` into its app settings before the engine starts: adopting a folder that already sits inside a repository with an `origin` must not begin unattended commits or uploads. Existing installs, explicit choices and unreadable settings files are left untouched, and local history (`--initialize-git`) is not consent to backup. An operator turns backup on later from Settings → Memory (the backup settings route) or by running the guided backup setup, both of which are explicit actions.
 
 `ciao service status|start|stop|restart` drives that background service on both
 platforms: the LaunchAgent on macOS, the per-user logon task on Windows. `start
@@ -51,13 +58,32 @@ desktop-shell actions (`login`, `migrate`, `migration-classify`, `rollback`) and
 `update-engine` are not available on Windows and say so; `stop` and `restart`
 refuse while a chat would be interrupted (working, or holding an open question/approval card) unless `--force` is given.
 
+`ciao service start` on macOS reports two different things, and its exit code
+tells them apart. The launchd submission (`enable`, `bootstrap`, `kickstart`)
+is what `start_service()` does and what the move and update workers consume:
+it returns as soon as launchd accepted the job. The CLI then waits for the
+engine it started to answer *as itself*: the runtime's `server.lock` must name
+a new run (a fresh `startup_id`, this install's port and runtime directory,
+status `running`) and `/api/startup-status` on the port must report that same
+`startup_id`. A bare 2xx from whatever listens on the port, the run that was
+there before the kickstart, or another Ciaobot runtime do not count. The wait
+ends early on a recorded bind failure or a workspace-access denial written
+since the kickstart, and reports those. Reaching the deadline
+(`START_SETTLE_TIMEOUT_S`, 30 s) is `"start_outcome": "timeout"` with exit
+code 1 — an unconfirmed start, never "started". The deadline rests on a
+measurement: a cold `python -m ciao run` from a checkout served its port after
+4.1 s and was ready at 4.7 s (2026-10-23, Apple Silicon), so the previous 2 s
+wait expired before some engines had bound at all; a launchd-spawned install
+adds interpreter start-up and first import on top. A verified start carries
+`"verified": true` with the `startup_id` and `pid` it confirmed.
+
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 
 A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
 PWA. Existing-folder setup preserves the selected notes in place so the
 onboarding agent can inspect them; `ciao os-audit` then offers a model-guided,
-backed-up migration into the standard named folder. Settings → Workspaces →
+backed-up migration into the standard named folder. Settings → Manage workspaces →
 Archive never deletes or merges a workspace: it moves the folder intact to
 `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/` and unregisters it
 (`ciao/workspace_archive.py`); tests for it live in
@@ -93,6 +119,12 @@ On recent macOS, `scripts/run-ciao.sh` and the `scripts/dev.sh` wrapper source `
 No manual step is needed; `ensure-deps.sh` handles both. If you set up the venv by hand and hit either error, run `scripts/ensure-deps.sh` once to repair `activate`.
 
 ### End-user distribution
+
+Installer bootstrap is guarded by a read-only freshness check before setup:
+it refuses when an existing workspace, live service definition, or registered
+macOS LaunchAgent/Windows scheduled task is found, and also refuses if the
+service query cannot verify absence. Export-directory overrides do not affect
+the live service paths checked by this guard.
 
 The supported macOS release path is the one-line installer:
 
@@ -159,8 +191,59 @@ wheel with `uv tool install`; writes the install receipt with absolute paths;
 then runs `ciao setup` and `ciao service start` and prints the one-time login URL
 to the terminal. It refuses to take over an engine the retired app manages
 unless it is re-run with `--migrate`, and refuses to overwrite a `ciao` it did
-not install. `--migrate`
-is the app→terminal hand-over (#576): after the same manifest and digest
+not install. After a successful install, the installer adds a marked PATH entry
+to the current user's supported shell startup file (zsh, bash or fish), if the
+resolved executable directory is not already on `PATH`, so a new terminal can
+run `ciao`. The zsh/bash block checks membership when each shell starts. Use
+`--no-modify-path` to leave shell files unchanged;
+the installer prints a quoted command for the current terminal either way. The
+installer process cannot change the PATH of the terminal that launched it. The
+managed block can be removed from the named startup file to undo the change.
+`ciao run --installer-bootstrap [--installer-run-id <uuid>]` is the installer's
+foreground browser bootstrap and is not an operator command: it refuses to start
+when it cannot prove the machine is fresh (an installed service definition or
+job, an inherited workspace redirect, or an existing workspace), runs from
+`~/.ciao/installer-bootstrap/launcher` with a scratch configuration that ignores
+`.env` and discovery, and never re-execs. When the wizard completes it writes one
+owner-only handoff result (run id, startup id, destination, service backend and
+definition, port) and exits 0 instead of handing the server to the service
+manager. The installer parent then runs `ciao installer activate --run-id
+<uuid>`, which starts the service only when the result belongs to that run, the
+recorded definition is the live one, that definition names the same destination,
+and the destination is a completed workspace; otherwise it reports what is
+uncertain and starts nothing.
+
+A fresh macOS install classifies the machine before creating anything: with no
+engine definition and no configured workspace it skips folder creation,
+`ciao setup` and service registration, runs `ciao run --installer-bootstrap` in
+the foreground (a `--workspace` is passed only as
+`--installer-suggest-workspace`), and activates the service from the matching
+handoff result with `ciao installer activate --json`. The Mac activation
+response uses the service backend name `macos`, not the install
+receipt's separate `launchd` name. The printed and opened
+browser URL uses the port in that verified activation response, including a
+custom port chosen in Advanced setup; malformed output refuses success rather
+than falling back to port 8443. A busy default port warns the user to choose
+another port in Advanced setup instead of blocking the wizard. After activation,
+the installer retains the verified workspace and waits for the selected port to
+answer before reporting a running engine or opening its URL. Fresh-install polls
+require duplicate-free startup JSON for the installed version and startup API 1,
+real boolean flags, a live startup UUID in `WorkspaceInstanceLock`'s canonical
+32-character lowercase hexadecimal (`uuid.uuid4().hex`) format and positive PID, and the
+`server_starting` phase marked `done` with `overall_ready: true` and no bind
+failure. The live startup UUID is not the foreground bootstrap's UUID. HTTP 200
+from an unrelated listener, malformed JSON, or an unfinished bind is not
+readiness. Each fresh poll is capped at five seconds and 64 KiB; a failed curl
+discards its partial response. Established-install and migration checks retain
+their existing behavior. If the fresh engine cannot bind
+or answer, setup remains saved, recovery guidance is printed, and the fresh
+install exits unsuccessfully. A cancel or guard refusal leaves
+a complete binary install that resumes with `ciao run --installer-bootstrap`,
+and `--no-start` provisions nothing. Migration and existing-workspace installs
+keep the `ciao setup` + `ciao service start` path; this installer runs on
+macOS only.
+
+`--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool
 environment in `~/.local/state/ciaobot/migration/before/` (an absent file is
@@ -365,6 +448,103 @@ while the server is running, because the live schedule store may be writing it.
   `>>` continuation line open and the next command joins that block instead
   of running — which is exactly what made the Ctrl-C case look like a dead
   terminal on the first native run.
+  What a `0x03` byte does inside a pseudoconsole is decided by the console
+  host and by the operating system, not by the adapter, and the chain is
+  worth writing down before anyone tries to fix the interrupt from this
+  side. It has four links.
+
+  1. **The host decodes the byte.** The host reads the input pipe, matches
+     the ETX while it decodes that stream and synthesises a Ctrl+C key
+     event; with the console's input mode off `ENABLE_PROCESSED_INPUT` the
+     byte stays in the console's input queue as an ordinary character.
+  2. **The host raises the event.** The `CTRL_C_EVENT` is raised **only
+     when the console's input mode has `ENABLE_PROCESSED_INPUT` set**. The
+     input mode belongs to the *client*: the console host never writes it,
+     the only writer is the client's own `SetConsoleMode`, and the
+     `CreatePseudoConsole` flags (`PSEUDOCONSOLE_INHERIT_CURSOR`,
+     `PSEUDOCONSOLE_AMBIGUOUS_IS_WIDE`, `PSEUDOCONSOLE_GLYPH_WIDTH_*`) do
+     not touch it. There is no adapter-side way to write it either: the
+     pseudoconsole's input handle on the client side is the *pipe* the
+     client writes to, `SetConsoleMode` refuses a pipe, and the public
+     ConPTY API (`conpty-static.h`) exposes no way to reach the console's
+     input mode — Windows Terminal's own ConPTY client
+     (`src/cascadia/TerminalConnection/ConptyConnection.cpp`) makes no
+     console-mode call at all.
+  3. **The operating system delivers the event, to the console host's
+     process group.** Microsoft's own summary of the mechanism says "In
+     order for Ctrl-C to work, thus, the pseudoconsole process must be in
+     the same process group as the processes you are trying to control",
+     and a child created with `CREATE_NEW_PROCESS_GROUP` is guaranteed
+     never to receive it.
+  4. **The operating system skips a process that ignores Ctrl+C.** The
+     "ignore Ctrl+C" attribute is set with
+     `SetConsoleCtrlHandler(NULL, TRUE)`, cleared with
+     `SetConsoleCtrlHandler(NULL, FALSE)`, and — Microsoft's own words —
+     "this attribute of ignoring or processing CTRL+C is **inherited by
+     child processes**". A process that has it set is not delivered to at
+     all: no handler runs, no read is aborted, and the process is not even
+     terminated by the default handler. Nothing inside the shell can undo
+     it, because the attribute belongs to the process and is read by the
+     operating system.
+
+  The `?9001h` sequence the host emits at start-up is a request *from* the
+  host *to* the terminal, and the key records it asks for are decoded by
+  the same state machine and dispatched through the same gate, so the
+  handshake cannot change the interrupt either.
+
+  What the measurements decided. The first one
+  (`tests/test_os_terminal_windows.py::test_the_console_state_behind_the_interrupt_is_measured`)
+  measured link 2 from inside the pseudoconsole: the input mode is on and
+  the shell's input is the console's own, at the prompt and while a program
+  runs, so the gate is open. (Its "running program" is a nested shell,
+  which handles Ctrl+C itself and cancels it, so it cannot tell "the event
+  was never delivered" from "the program swallowed it".) The second
+  (`tests/test_os_terminal_windows.py::test_the_interrupt_is_measured_against_the_console_host`)
+  measured links 3 and 4 together: a reader inside the pseudoconsole
+  registers a `Console.CancelKeyPress` handler and then reads one key, so
+  the log says whether the byte arrived as an ordinary character (the host
+  raised nothing), whether the read was aborted and the handler did not
+  run (the host raised the event and the operating system did not deliver
+  it), or whether the handler ran (the event was raised and delivered) —
+  and it measures the raw ETX next to the win32-input-mode key record the
+  host asks for, so the encoding is ruled in or out in the same run. The
+  numbers were: the raw ETX never arrived as a character and never ran the
+  handler, while the win32 key record arrived as text — so the host
+  consumed the ETX and turned it into the control event, and the *delivery*
+  was where the chain stopped. The third measurement
+  (`tests/test_os_terminal_windows.py::test_the_ignore_ctrl_c_attribute_decides_whether_the_event_is_delivered`)
+  isolated link 4: the same reader, with the "ignore Ctrl+C" attribute
+  put in a known state. With the attribute set the event does not arrive;
+  with it cleared it does. The attribute was the blocker, and the engine
+  had inherited it from whatever started it (a POSIX-flavoured shell sets
+  it, so that its own Ctrl+C arrives as a signal rather than as a console
+  control event).
+
+  The fix follows from that: the shell is started by a **helper**
+  (`ciao/os_support/terminal_child_windows.py`), a fresh `-I -S` process
+  that is attached to the pseudoconsole, clears the attribute in itself
+  (`SetConsoleCtrlHandler(NULL, FALSE)`) and then creates the shell, so the
+  shell inherits the cleared state. The engine's own attribute is never
+  touched — clearing it in the engine would change how the engine itself
+  answers a Ctrl+C — and the helper swallows the control event it shares
+  with the shell, so it outlives the interrupt it hands on. The byte the
+  user typed is still `0x03` and `write()` is unchanged; what changed is the
+  attribute the shell inherits.
+
+  How the helper reaches the pseudoconsole is worth writing down, because
+  the obvious way round does not work. The pseudoconsole's handle is not an
+  ordinary kernel handle: `SetHandleInformation` on it fails with "the
+  handle is invalid", so it cannot be made inheritable and cannot be
+  handed to a child as an inherited handle. A child is attached to a
+  pseudoconsole the other way round — `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+  in the process attribute list — and that is what the adapter does for
+  the helper. The shell then reaches the pseudoconsole the ordinary way: a
+  process attached to a console passes that console on to its children, so
+  the shell, created by the helper without `CREATE_NEW_CONSOLE` and without
+  `DETACHED_PROCESS`, inherits the helper's console, which is the
+  pseudoconsole. No handle is inherited by anybody, and the helper's own
+  standard handles are the console's — so it prints nothing, ever: a
+  failure is a status, and only a status.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
@@ -519,7 +699,7 @@ file outside the scope is not, a clean run creates nothing). `tests/test_local_r
 covers the three routes. The five-minute interval is the named constant
 `BACKUP_INTERVAL_S` in `ciao/backup_service.py`, and its runs are recorded in
 `job_runs` under the id `branch_backup`.
-Settings → General shows a compact online backup state and last successful upload;
+Settings → Advanced shows a compact online backup state and last successful upload;
 the configured scope, repository, and raw diagnostic are in a native "Backup details"
 disclosure ("Review details" when attention is needed). A coverage gap — paths git
 already tracks that the scope refuses to commit, so a repository that is also a
@@ -529,6 +709,8 @@ sentence, and it never reddens a backed-up install (#733). The five-minute caden
 in the section description. There is no separate backup guide.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
+
+For whole-install workspace moves, `tests/test_workspace_move.py` uses a temporary source, target, service definition and operation state; never test by moving the operator's live workspace. The detached worker probes destination write/delete access before draining, and macOS may deny that access without showing a prompt. When destination startup exits with 78 or records a fresh access denial, the operation saves its diagnosis before rolling back; a successful source restart may clear the shared denial notice without erasing that operation evidence. Run `tests/test_workspace_move.py` and `tests/test_macos_service.py` for changes to this flow.
 
 For engine-update changes, `tests/test_engine_update.py` is the contract: launchd, uv, the service starter, the engine's HTTP surface, the clock and sleep are all doubles, so nothing in it may start a real service, move a real environment or open a socket. An update that a reboot or a killed job interrupted is picked up by a durable `com.ciao.recover` LaunchAgent that `apply_update` installs (from the staged interpreter, `StartInterval` 30) *before* the engine is stopped, and that `run_apply` re-points at the retained `previous-env` the instant the live env is renamed aside — so the swap never consumes the directory the net runs from — the crash window where the live env is renamed aside leaves the engine unable to start, so a recovery reached from inside the engine is a recovery that cannot run. Its program is `run-recover --operation <id>`: `recover_apply` takes the lock without waiting, stands down for a tick when a swap holds it, never posts (it owns no drain) and never mutates a record it did not find stranded, retires its own job and plist when there is nothing left to recover or once the rollback has settled, and otherwise runs the same total `_rollback` the apply would have, using the retained `previous-env` as the evidence that the move happened. `recover_interrupted_apply` from `ciao/main.py` (macOS only) stays as the fast path for the cases where the engine does come back: it recognises the record and bootstraps the detached `com.ciao.updater` job in `run-recover` mode. The rollback is never the engine's own doing, because it cannot boot itself out and restore the env it is running out of. In the other direction, `run_apply` refuses an apply when the loaded `com.ciao.server` does not run the env the install receipt names. Staging resolves the release once, into a real `uv tool env` under `<stage>/tool/<dist>` with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` pinned to the stage dir, and records the resolved set as `Operation.env_freeze`; the apply then *moves* that env into the live env's place instead of installing the wheel again, re-pointing only what a move breaks (the `bin` shebangs and the `bin_dir` entry points), so the swap needs no network and cannot pick up a dependency released since staging. Do not run `ciao update apply`, `run-apply`, `run-recover` or real `launchctl` against your own install to check any of it.
 
@@ -552,7 +734,7 @@ For **After this update** changes (Home's update-task group, or the Settings
 history), the separation is the thing to preserve: `HousekeepingStrip.vue` renders
 the operator-action tiles and the update-task group as two sibling sections, and a
 blocking tile must stay above both, unmissable, with no "hide it" button of its
-own. The group and Settings → Update task history read the same
+own. The group and Settings → Overview → Update task history read the same
 `GET /api/update-tasks?workspace=` rows, so a change to one state has to be checked
 in both: `offered` starts, `in_progress` resumes, `waiting_review` offers Review
 proposals (the real queue at `/memory/review?show=suggested`) *and* Resume,

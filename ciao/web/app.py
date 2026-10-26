@@ -22,12 +22,14 @@ from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao.package_version import make_cached_package_status
 from ciao.provider_versions import make_cached_checks
 from ciao.terminal_auth import TerminalGrantStore
+from ciao.terminal_sessions import TerminalSessionManager
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
     mcp_status_endpoint,
     mcp_usage_endpoint,
 )
 from ciao.web.auth import AuthMiddleware, make_serializer
+from ciao.web.request_limits import ApiRequestBodyLimitMiddleware
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
     create_command_endpoint,
@@ -113,7 +115,6 @@ from ciao.web.routes_api import (
     gws_save_client_secret,
     gws_auth_url,
     gws_exchange_code,
-    gws_disconnect,
     gws_add_profile,
     gws_remove_profile,
     gws_relogin_start,
@@ -121,6 +122,7 @@ from ciao.web.routes_api import (
     gws_relogin_cancel,
     provider_connection_action,
     provider_config_settings,
+    settings_appearance,
     settings_keyboard,
     settings_routines,
     setup_finish_endpoint,
@@ -162,18 +164,21 @@ from ciao.web.routes_api import (
     proposal_implement,
     proposal_preview,
     proposals_batch,
+    proposals_handover,
     proposals_history,
     run_schedule_now,
     schedule_detail,
     startup_status_endpoint,
     menubar_chats_endpoint,
     status_endpoint,
+    reorder_workspaces,
     upsert_workspace_setting,
     vault_backlinks,
     vault_delete_note,
     vault_graph,
     vault_review,
     vault_markdown_paths,
+    system_prompt,
     workspace_binary,
     workspace_file,
     workspace_html,
@@ -199,12 +204,20 @@ from ciao.web.routes_push import (
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
 from ciao.web.routes_host_terminal import host_terminal_launch, host_terminal_status
 from ciao.web.routes_terminal import terminal_status, terminal_unlock
+from ciao.web.routes_terminal_sessions import (
+    terminal_sessions_create,
+    terminal_sessions_end,
+    terminal_sessions_list,
+)
+from ciao.web.routes_terminal_ws import terminal_stream
 from ciao.web.routes_welcome import (
     welcome_dismiss,
     welcome_open_folder,
     welcome_password,
     welcome_status,
 )
+from ciao.web.routes_onboarding import complete_onboarding, get_onboarding, patch_onboarding
+from ciao.web.routes_api import onboarding_interview
 from ciao.web.routes_import import (
     import_batch_cancel,
     import_batch_delete,
@@ -386,7 +399,17 @@ def _spa_catchall(request):
     return FileResponse(STATIC_DIR / "index.html", status_code=404, headers=headers)
 
 
-def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
+def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None) -> Starlette:
+    import uuid
+    if installer_bootstrap and not config.bootstrap_mode:
+        raise ValueError("installer bootstrap requires bootstrap-mode config")
+    if installer_bootstrap:
+        try:
+            uuid.UUID(installer_run_id or "")
+        except ValueError as exc:
+            raise ValueError("installer bootstrap requires a valid run id") from exc
+    elif installer_run_id is not None:
+        raise ValueError("installer run id requires installer bootstrap mode")
     serializer = make_serializer(config.pwa_auth_token)
 
     routes = [
@@ -400,6 +423,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Projects
         Route("/api/workspaces", list_workspaces, methods=["GET"]),
         Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
+        Route("/api/workspaces/reorder", reorder_workspaces, methods=["POST"]),
         Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
         # Literal `archived` paths precede the {name} pattern. DELETE is kept as
         # an alias of archive for existing scripts: it no longer deletes.
@@ -464,6 +488,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Host file viewer/editor. Absolute paths are intentional; endpoints
         # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
+        Route("/api/system-prompt", system_prompt, methods=["GET"]),
         # Preview side of the same file for artifacts: text/html under a
         # sandboxing CSP, so the panel can embed the rendered page.
         Route("/api/workspace-html", workspace_html, methods=["GET"]),
@@ -481,6 +506,18 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/host/terminal", host_terminal_launch, methods=["POST"]),
         Route("/api/terminal/unlock", terminal_unlock, methods=["POST"]),
         Route("/api/terminal/status", terminal_status, methods=["GET"]),
+        # The browser terminal's sessions: the wire half of the one manager
+        # in ciao/terminal_sessions.py. The same gate order as the unlock —
+        # the terminal policy, the signed session, a fresh grant — so no
+        # session is reachable before the password, and a body that names
+        # a target never names a path or a command.
+        Route("/api/terminal/sessions", terminal_sessions_list, methods=["GET"]),
+        Route("/api/terminal/sessions", terminal_sessions_create, methods=["POST"]),
+        Route(
+            "/api/terminal/sessions/{session_id}",
+            terminal_sessions_end,
+            methods=["DELETE"],
+        ),
         # host-only reads/opens: session + host_browser_request; never in _LOOPBACK_ONLY_API
         Route("/api/welcome", welcome_status, methods=["GET"]),
         Route("/api/welcome/password", welcome_password, methods=["GET"]),
@@ -546,6 +583,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/agent-assets/audit", os_audit_endpoint, methods=["GET"]),
         Route("/api/proposals", list_proposals, methods=["GET"]),
         Route("/api/proposals/history", proposals_history, methods=["GET"]),
+        Route("/api/proposals/handover", proposals_handover, methods=["GET"]),
         Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
         Route("/api/proposals/{id}/preview", proposal_preview, methods=["GET"]),
         # Before the `{action}` route: Starlette matches in order, and
@@ -584,6 +622,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
         Route("/api/settings/keyboard", settings_keyboard, methods=["GET", "PATCH"]),
+        Route("/api/settings/appearance", settings_appearance, methods=["GET", "PATCH"]),
         Route("/api/settings/providers", provider_config_settings, methods=["GET"]),
         Route(
             "/api/settings/providers/{provider}/{action}",
@@ -594,7 +633,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/integrations/gws/client-secret", gws_save_client_secret, methods=["POST"]),
         Route("/api/integrations/gws/auth-url", gws_auth_url, methods=["POST"]),
         Route("/api/integrations/gws/exchange", gws_exchange_code, methods=["POST"]),
-        Route("/api/integrations/gws/disconnect", gws_disconnect, methods=["POST"]),
         Route("/api/integrations/gws/profiles/add", gws_add_profile, methods=["POST"]),
         Route("/api/integrations/gws/profiles/remove", gws_remove_profile, methods=["POST"]),
         Route("/api/integrations/gws/relogin/start", gws_relogin_start, methods=["POST"]),
@@ -604,6 +642,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
         Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
+        Route("/api/onboarding", get_onboarding, methods=["GET"]),
+        Route("/api/onboarding/interview", onboarding_interview, methods=["POST"]),
+        Route("/api/onboarding", patch_onboarding, methods=["PATCH"]),
+        Route("/api/onboarding/complete", complete_onboarding, methods=["POST"]),
         Route("/api/addresses", addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
@@ -720,6 +762,11 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # WebSocket
         WebSocketRoute("/ws/chat/{chat_id}", ws_chat),
         WebSocketRoute("/ws/events", ws_events),
+        # The browser terminal's byte stream. The same door as the HTTP
+        # half — the terminal policy, the signed session, a live grant —
+        # and the one manager in ciao/terminal_sessions.py behind it. The
+        # socket detaches when it goes; it never ends the session.
+        WebSocketRoute("/ws/terminal/{session_id}", terminal_stream),
     ]
 
     # The agent CLI loopback is mounted before the SPA catch-all. Its own
@@ -765,6 +812,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     middleware = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer),
+        Middleware(ApiRequestBodyLimitMiddleware),
     ]
 
     @asynccontextmanager
@@ -781,6 +829,17 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
 
         await asyncio.to_thread(login_shell_path)
 
+        # The one terminal session manager, started with the app: its
+        # sweeper is what prunes the sessions nobody is attached to. It is
+        # read off the app state, so the manager the routes use and the
+        # manager this lifespan owns are the same one.
+        terminal_sessions: TerminalSessionManager = _app.state.terminal_sessions
+        await terminal_sessions.start()
+
+        async def _shutdown_terminal_sessions() -> None:
+            """Close every shell the browser terminal still holds."""
+            await terminal_sessions.shutdown()
+
         try:
             yield
         finally:
@@ -788,7 +847,13 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             # cancellation (not just a normal shutdown message), so provider
             # subprocesses and background runs are not leaked across an
             # abnormal restart.
-            for callback in getattr(_app.state, "shutdown_callbacks", ()):
+            #
+            # The terminal sessions' own shutdown is appended to the
+            # callbacks the server registered, so it runs with them and
+            # never replaces them.
+            callbacks = list(getattr(_app.state, "shutdown_callbacks", ()))
+            callbacks.append(_shutdown_terminal_sessions)
+            for callback in callbacks:
                 # One failing callback must not skip the ones after it. Shutdown
                 # is the last chance to terminate provider subprocesses and
                 # background runs; leaking them because an earlier hook raised is
@@ -803,9 +868,15 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.serializer = serializer
     app.state.config = config
+    app.state.installer_bootstrap = installer_bootstrap
+    app.state.installer_run_id = installer_run_id
     app.state.terminal_clock = time.monotonic
     app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
-    # Runtime-mutable settings store (Settings → Models tab). None in
+    # The one owner of every terminal shell the browser opens. It is built
+    # here, published here, started by the lifespan and closed by it; the
+    # routes read this one and there is no second registry.
+    app.state.terminal_sessions = TerminalSessionManager()
+    # Runtime-mutable settings store (Settings → Providers tab). None in
     # tests that build the app without one; the route 503s in that case.
     app.state.app_settings = app_settings
     app.state.mcp_service = mcp_service

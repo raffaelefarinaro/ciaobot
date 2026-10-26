@@ -262,12 +262,20 @@ def test_the_core_prompt_points_at_the_same_block() -> None:
     assert "a note that fits none is a new-category question" in core
 
 
+def test_unattended_policy_summary_names_the_handover_exception() -> None:
+    summary = mp.unattended_policy().summary
+    assert "never promotes a NEW region fact" in summary
+    assert "handover=all" in summary
+    assert "undo receipt" in summary
+
+
 def test_curation_schedule_defers_and_never_hard_caps() -> None:
     skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
     assert "You are an unattended run: defer, never ask, never route around" in skill
     assert "The region cap is advisory." in skill
     # The consolidation contract the architecture test also pins must survive.
     assert "Do not promote new facts into the bounded" in skill
+    assert "unless `curation-begin` reports `handover: all`" in skill
     assert "Workspace/Memory-Consolidations.md" in skill
 
 
@@ -345,7 +353,7 @@ def test_the_care_schedule_no_longer_instructs_unattended_promotion_or_settlemen
     assert "Route an entry at x3 or more" in prompt
     assert "An x3 is a priority order, not permission to edit" in prompt
     assert "You never edit a skill or this workspace's guide body" in prompt
-    assert "you never settle a proposal" in prompt
+    assert "you never settle a skill proposal or a guide-body proposal" in prompt
     assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
     assert "ciao skill-draft-add --input-file FILE" in prompt
     assert "ciao skill-drafts" in prompt
@@ -429,7 +437,7 @@ def test_the_capabilities_catalog_describes_the_memory_backup() -> None:
     """The catalog has to name the three entry points a user will look for in
     Settings, and say that the engine then runs on its own."""
     skill = " ".join(_stock("skills/ciao-capabilities/references/memory.md").split())
-    assert "**Memory backup** (Settings → General → Memory backup)" in skill
+    assert "**Memory backup** (Settings → Advanced → Memory backup)" in skill
     assert "**Set up in Ciaobot**" in skill
     assert "**Copy setup prompt**" in skill
     assert "GitHub CLI signed in" in skill

@@ -7,6 +7,10 @@ import inspect
 import io
 import json
 import os
+import shlex
+import stat
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -206,7 +210,8 @@ def _task_service(tmp_path: Path, *, mode: str = "auto"):
 
         def __init__(self) -> None:
             self.chat = SimpleNamespace(
-                mode=mode, user_turn_count=1, user_turn_unattended={}
+                mode=mode, user_turn_count=1, user_turn_unattended={},
+                user_turn_origin={}, helper={},
             )
 
         def _workspace_vault_root(self, workspace: str) -> Path:
@@ -267,11 +272,14 @@ def test_task_operations_register_reads_writes_and_destructive_delete(
         ), name
 
 
-def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path) -> None:
+def test_an_agent_can_file_and_move_a_task_but_completes_only_with_a_reason(
+    tmp_path: Path,
+) -> None:
     """The store's completion rule, end to end through the CLI surface.
 
-    Filing and moving work; completing does not, however it is spelled, and the
-    refusal leaves the record exactly where it was.
+    Filing and moving work; completing does not unless the user's reason comes
+    with it, however it is spelled, and a refusal leaves the record exactly
+    where it was.
     """
     service = _task_service(tmp_path)
     token = _token(service)
@@ -309,6 +317,15 @@ def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path
         )
         assert edited.json()["error"]["code"] == "task_completion_requires_user"
         assert _post(client, token, "task_get", {"task_id": task["id"]}).json()["data"]["status"] == "in_progress"
+
+        # With the user's reason, `complete` is the one route that closes it.
+        done = _post(
+            client, token, "task_action",
+            {"action": "complete", "task_id": task["id"], "expected_revision": revision,
+             "reason": "The user said it shipped."},
+        )
+        assert done.status_code == 200, done.text
+        assert done.json()["data"]["status"] == "done"
 
 
 def test_a_stale_task_revision_is_a_retryable_refusal_over_the_cli(tmp_path: Path) -> None:
@@ -362,16 +379,25 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         assert response.json()["error"]["code"] == "plan_mode_read_only"
 
 
-def test_task_delete_cli_mapping() -> None:
-    """One task id and the revision read with it; nothing that widens the blast radius."""
+def test_task_delete_cli_mapping(tmp_path: Path) -> None:
+    """One task id, the revision read with it and the user's reason; nothing that widens the blast radius."""
     parser = agent_cli.build_parser()
+    reason = tmp_path / "why.txt"
+    reason.write_text("I never use it.", encoding="utf-8")
     assert agent_cli.resolve(
-        parser.parse_args(["task", "delete", "a" * 32, "--revision", "rev1"])
-    ) == ("task_delete", {"task_id": "a" * 32, "expected_revision": "rev1"})
+        parser.parse_args(
+            ["task", "delete", "a" * 32, "--revision", "rev1", "--reason-file", str(reason)]
+        )
+    ) == (
+        "task_delete",
+        {"task_id": "a" * 32, "expected_revision": "rev1", "reason": "I never use it."},
+    )
 
     for argv in (
-        ["task", "delete", "a" * 32],
-        ["task", "delete", "--revision", "rev1"],
+        ["task", "delete", "a" * 32, "--reason-file", str(reason)],
+        ["task", "delete", "--revision", "rev1", "--reason-file", str(reason)],
+        # The reason is required on the agent surface.
+        ["task", "delete", "a" * 32, "--revision", "rev1"],
     ):
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(argv)
@@ -379,9 +405,32 @@ def test_task_delete_cli_mapping() -> None:
     for flag in ("--force", "--workspace", "--path"):
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(
-                ["task", "delete", "a" * 32, "--revision", "rev1", flag, "x"]
+                ["task", "delete", "a" * 32, "--revision", "rev1",
+                 "--reason-file", str(reason), flag, "x"]
             )
         assert excinfo.value.code == 2
+
+
+def test_task_complete_cli_requires_a_reason(tmp_path: Path) -> None:
+    parser = agent_cli.build_parser()
+    reason = tmp_path / "why.txt"
+    reason.write_text("The user said it shipped.", encoding="utf-8")
+    assert agent_cli.resolve(
+        parser.parse_args(
+            ["task", "complete", "a" * 32, "--revision", "rev1", "--reason-file", str(reason)]
+        )
+    ) == (
+        "task_action",
+        {
+            "action": "complete",
+            "task_id": "a" * 32,
+            "expected_revision": "rev1",
+            "reason": "The user said it shipped.",
+        },
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["task", "complete", "a" * 32, "--revision", "rev1"])
+    assert excinfo.value.code == 2
 
 
 def test_task_delete_is_destructive_and_mutating(tmp_path: Path) -> None:
@@ -401,7 +450,7 @@ def test_task_delete_is_destructive_and_mutating(tmp_path: Path) -> None:
             client,
             token,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert response.status_code == 200, response.text
         assert response.json() == {
@@ -411,6 +460,65 @@ def test_task_delete_is_destructive_and_mutating(tmp_path: Path) -> None:
         gone = _post(client, token, "task_get", {"task_id": created["id"]})
     assert gone.status_code == 422
     assert gone.json()["error"]["code"] == "task_not_found"
+
+
+@pytest.mark.parametrize("reason", [None, "", "  \n"])
+def test_task_delete_without_a_reason_is_refused_and_keeps_the_task(
+    tmp_path: Path, reason: str | None
+) -> None:
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Keep me"}).json()["data"]
+        path = (
+            service.control_plane.config.workspace_vault_root("personal")
+            / "Workspace" / "Tasks" / f"{created['id']}.md"
+        )
+        arguments: dict[str, Any] = {
+            "task_id": created["id"], "expected_revision": created["revision"],
+        }
+        if reason is not None:
+            arguments["reason"] = reason
+        refused = _post(client, token, "task_delete", arguments)
+        assert refused.status_code in (400, 422), refused.text
+        assert refused.json()["ok"] is False
+        assert path.is_file()
+
+
+@pytest.mark.parametrize("reason", [None, "", "  "])
+def test_task_complete_without_a_reason_is_refused_and_leaves_the_task_open(
+    tmp_path: Path, reason: str | None
+) -> None:
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Still open"}).json()["data"]
+        arguments: dict[str, Any] = {
+            "action": "complete", "task_id": created["id"],
+            "expected_revision": created["revision"],
+        }
+        if reason is not None:
+            arguments["reason"] = reason
+        refused = _post(client, token, "task_action", arguments)
+        assert refused.status_code in (400, 422), refused.text
+        assert refused.json()["ok"] is False
+        got = _post(client, token, "task_get", {"task_id": created["id"]}).json()["data"]
+        assert got["status"] == "backlog"
+
+
+def test_an_empty_reason_file_reaches_the_refusal_instead_of_dropping_the_key(
+    tmp_path: Path,
+) -> None:
+    empty = tmp_path / "empty.txt"
+    empty.write_text("", encoding="utf-8")
+    parser = agent_cli.build_parser()
+    for verb in ("delete", "complete"):
+        _name, arguments = agent_cli.resolve(
+            parser.parse_args(
+                ["task", verb, "a" * 32, "--revision", "rev1", "--reason-file", str(empty)]
+            )
+        )
+        assert arguments["reason"] == ""
 
 
 def test_an_unattended_turn_cannot_delete_task(tmp_path: Path) -> None:
@@ -437,7 +545,7 @@ def test_an_unattended_turn_cannot_delete_task(tmp_path: Path) -> None:
             client,
             token,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert refused.status_code == 422
         assert refused.json()["error"]["code"] == "unattended_forbidden"
@@ -449,7 +557,7 @@ def test_an_unattended_turn_cannot_delete_task(tmp_path: Path) -> None:
             client,
             token,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert allowed.status_code == 200, allowed.text
         assert allowed.json()["data"] == {"id": created["id"], "deleted": True}
@@ -475,7 +583,7 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             client,
             token,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert denied.status_code == 422
         assert denied.json()["error"]["code"] == "plan_mode_read_only"
@@ -485,7 +593,7 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             client,
             "",
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert unauthenticated.status_code == 401
         assert unauthenticated.json()["error"]["code"] == "unauthorized"
@@ -497,7 +605,7 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             client,
             other_workspace,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert cross.status_code == 422
         assert cross.json()["error"]["code"] == "task_not_found"
@@ -607,16 +715,8 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "status": "in_review"}),
         ),
         (
-            ["task", "delete", "a1b2", "--revision", "rev1"],
-            ("task_delete", {"task_id": "a1b2", "expected_revision": "rev1"}),
-        ),
-        (
             ["task", "move", "a1b2", "--to", "in_progress", "--revision", "rev1"],
             ("task_action", {"action": "move", "task_id": "a1b2", "status": "in_progress", "expected_revision": "rev1"}),
-        ),
-        (
-            ["task", "complete", "a1b2", "--revision", "rev1"],
-            ("task_action", {"action": "complete", "task_id": "a1b2", "expected_revision": "rev1"}),
         ),
         (
             ["task", "link-chat", "a" * 32, "--revision", "r"],
@@ -700,6 +800,9 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
     # rather than the placeholder names the flag-only rows get.
     summary = tmp_path / "summary.md"
     summary.write_text("did the thing\n", encoding="utf-8")
+    # `chat terminal-offer` reads its command at parse time too.
+    command = tmp_path / "command.txt"
+    command.write_text("ls -la\n", encoding="utf-8")
     required = {
         "memory update": ["--region", "memory", "--action", "add"],
         "vault search": ["q"], "vault review show": ["p"],
@@ -708,12 +811,13 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
         "note related": ["People/Mo.md"], "note verify": ["--payload-file", "p.json"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
+        "chat terminal-offer": ["--command-file", str(command)],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
         "project complete": ["p"], "project delete": ["p"], "task create": ["--title", "t"],
         "task get": ["a" * 32], "task update": ["a" * 32, "--revision", "r"],
-        "task delete": ["a" * 32, "--revision", "r"],
+        "task delete": ["a" * 32, "--revision", "r", "--reason-file", str(summary)],
         "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
-        "task complete": ["a" * 32, "--revision", "r"],
+        "task complete": ["a" * 32, "--revision", "r", "--reason-file", str(summary)],
         "task delegate": ["a" * 32, "--revision", "r"],
         "task add-update": ["a" * 32, "--revision", "r", "--text-file", str(summary)],
         "task link-chat": ["a" * 32, "--revision", "r"],
@@ -1368,3 +1472,1166 @@ def test_handover_messages_refuse_credential_paths(tmp_path: Path) -> None:
     plain = tmp_path / "notes.json"
     plain.write_text('[{"role": "user"}]', encoding="utf-8")
     assert agent_cli._handover_messages(f"@{plain}") == [{"role": "user"}]
+
+
+def test_task_body_refuses_nested_runtime_and_env_variant(tmp_path: Path) -> None:
+    """`Path.match` only caught a direct child of `.runtime/`, so a deeper file
+    or a `.env.*` variant could be read into a vault-persisted task body (#1746)."""
+    nested = tmp_path / ".runtime" / "a" / "b" / "file.txt"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("token", encoding="utf-8")
+    with pytest.raises(agent_cli.UsageError, match="credential"):
+        agent_cli._task_body(f"@{nested}")
+
+    env_local = tmp_path / ".env.local"
+    env_local.write_text("TOKEN=x", encoding="utf-8")
+    with pytest.raises(agent_cli.UsageError, match="credential"):
+        agent_cli._task_body(f"@{env_local}")
+
+
+# ── Decision reasons (#1726) ─────────────────────────────────────────
+
+
+def test_task_delete_reason_file_is_read_and_sent_as_reason(tmp_path: Path) -> None:
+    reason = tmp_path / "why.txt"
+    reason.write_text("dismissed: not mine\n", encoding="utf-8")
+    parser = agent_cli.build_parser()
+    name, arguments = agent_cli.resolve(
+        parser.parse_args(
+            ["task", "delete", "a" * 32, "--revision", "rev1", "--reason-file", str(reason)]
+        )
+    )
+    assert name == "task_delete"
+    assert arguments == {
+        "task_id": "a" * 32,
+        "expected_revision": "rev1",
+        "reason": "dismissed: not mine\n",
+    }
+
+
+def test_task_attempt_reason_file_is_passed_for_detach(tmp_path: Path) -> None:
+    reason = tmp_path / "why.txt"
+    reason.write_text("not a task", encoding="utf-8")
+    parser = agent_cli.build_parser()
+    name, arguments = agent_cli.resolve(
+        parser.parse_args(["task", "attempt", "b" * 32, "detach", "--reason-file", f"@{reason}"])
+    )
+    assert name == "task_attempt_action"
+    assert arguments == {"attempt_id": "b" * 32, "action": "detach", "reason": "not a task"}
+
+
+def test_reason_file_refuses_a_credential_adjacent_path(tmp_path: Path) -> None:
+    secret = tmp_path / ".env"
+    secret.write_text("TOKEN=1", encoding="utf-8")
+    parser = agent_cli.build_parser()
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli.resolve(
+            parser.parse_args(
+                ["task", "delete", "a" * 32, "--revision", "rev1", "--reason-file", str(secret)]
+            )
+        )
+    assert "--reason-file" in str(excinfo.value)
+
+
+def test_attempt_without_a_reason_file_sends_no_reason_key() -> None:
+    parser = agent_cli.build_parser()
+    _name, attempt = agent_cli.resolve(parser.parse_args(["task", "attempt", "b" * 32, "detach"]))
+    assert "reason" not in attempt
+
+
+def test_mcp_task_attempt_action_refuses_a_reason_on_non_detach(tmp_path: Path) -> None:
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        response = _post(
+            client,
+            token,
+            "task_attempt_action",
+            {"attempt_id": "b" * 32, "action": "stop", "reason": "x"},
+        )
+    # A refusal raised inside the op itself reaches the agent as a tool error.
+    assert response.status_code == 400
+    assert "reason is only recorded by detach" in response.json()["error"]["message"]
+
+
+# ── The suggested terminal command (#1842) ─────────────────────────────────
+#
+# An offer is *guidance*: the command the assistant proposes so the user can
+# read it, copy it and run it themselves. It is never executed, never typed
+# into a shell and never sent to a host terminal, and the engine holds it in
+# memory only (#1840).
+#
+# Two properties decide the shape of this surface. First, the offer belongs to
+# the chat that asked for it: the operation has no chat argument at all, so
+# there is no way to put a command on a screen the user did not ask for. The
+# chat is resolved from the token's principal by its exact id — never by a
+# title, because a title is a name the caller chose and an offer is not
+# something a caller may aim at another chat.
+#
+# Second, the command is untrusted, model-authored text. It can carry a
+# credential, so every refusal the agent *sees* is static and never quotes
+# the text back. A malformed *type* is the schema's refusal, and the raw
+# FastMCP error does carry the value that was submitted — what keeps it out
+# of the engine's HTTP envelope, its log and its telemetry is the
+# dispatcher's first-line sanitizer. A schema *constraint* on the text is
+# deliberately not part of that schema, because a constraint would put a
+# rejected command inside the validation error itself; the engine validates
+# the text instead.
+
+
+def _offer_config(tmp_path: Path):
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    return CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal"),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+
+
+def _offer_service(tmp_path: Path):
+    """A real control plane over a real chat manager, plus a dispatcher.
+
+    The manager is the real one on purpose: the offer's id, the "same text is
+    not a change" rule and the published events are its behaviour, and a stub
+    would only agree with itself about them.
+    """
+    from ciao.control_plane import CiaoControlPlane
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+
+    config = _offer_config(tmp_path)
+    runtime = tmp_path / ".runtime"
+    manager = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    service, _fake = _service(tmp_path)
+    service.bind(
+        CiaoControlPlane(
+            config, project_chat_manager=manager, schedule_manager=SimpleNamespace()
+        )
+    )
+    return service, manager, config
+
+
+def _offer_chat(manager, workspace: str = "personal"):
+    project = manager.create_project(f"Offers {workspace}", workspace=workspace)
+    chat = manager.create_chat(project.project_id, title="Offered")
+    return project, chat
+
+
+def _offer_token(service, chat, project, workspace: str = "personal") -> str:
+    token, _principal = service.registry.issue(
+        chat_id=chat.chat_id,
+        project_id=project.project_id,
+        workspace=workspace,
+        provider="claude",
+    )
+    return token
+
+
+def _telemetry(service) -> list[dict]:
+    path = Path(service._telemetry_path)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _marker_command(marker: Path) -> str:
+    """A command that would create *marker* if anything ever ran it.
+
+    Portable by construction: it names the interpreter that is running this
+    test, so it needs no shell, no ``touch`` and nothing installed, and it
+    behaves the same on Windows and on a POSIX box. The quoting is the
+    platform's own, so the marker path survives the round trip through a
+    command line.
+
+    The command is never executed here. It is text: the point is that it is
+    a command whose *effect* would be visible if some code decided to run it.
+    """
+    script = "import pathlib,sys;pathlib.Path(sys.argv[1]).touch()"
+    argv = [sys.executable, "-c", script, str(marker)]
+    if os.name == "nt":
+        return subprocess.list2cmdline(argv)
+    return " ".join(shlex.quote(part) for part in argv)
+
+
+def test_a_terminal_offer_is_a_read_with_no_caller_target() -> None:
+    """The operation takes the command and nothing else.
+
+    A chat argument would be a target: an offer is a command on a screen, and
+    the screen is the chat that asked. `_READ` says what it is — guidance, not
+    an execution — and the default is not mutating, so a plan-mode chat may
+    still offer (the same classification `file surface` has).
+    """
+    from ciao import mcp_server
+
+    operation = mcp_server.OPERATIONS_BY_NAME["chat_terminal_offer"]
+    assert operation.annotations == mcp_server._READ
+    assert set(inspect.signature(operation.fn).parameters) == {"service", "command"}
+
+
+def test_a_terminal_offer_lands_in_the_calling_chat(tmp_path: Path) -> None:
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": "npm install -g ciao"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"]["chat_id"] == chat.chat_id
+    offer = body["data"]["terminal_offer"]
+    assert offer["command"] == "npm install -g ciao"
+    assert len(offer["id"]) == 32
+    # The state the manager holds is the state the caller was told about.
+    assert manager.get_chat(chat.chat_id).terminal_offer.id == offer["id"]
+
+
+def test_a_terminal_offer_cannot_target_another_chat(tmp_path: Path) -> None:
+    """A sibling chat id in the arguments changes nothing.
+
+    The schema has no chat argument, so an extra one is ignored and the offer
+    lands on the calling chat — the only chat the caller may offer to.
+    """
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    sibling = manager.create_chat(project.project_id, title="Sibling")
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(
+            client,
+            token,
+            "chat_terminal_offer",
+            {"command": "ls -la", "chat_id": sibling.chat_id, "path": "/etc/passwd"},
+        )
+    assert response.status_code == 200
+    assert response.json()["data"]["chat_id"] == chat.chat_id
+    assert manager.get_chat(sibling.chat_id).terminal_offer is None
+
+
+def test_a_terminal_offer_refuses_an_archived_chat(tmp_path: Path) -> None:
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    manager.get_chat(chat.chat_id).archived = True
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "chat_archived"
+
+
+def test_a_terminal_offer_refuses_an_unattended_turn(tmp_path: Path) -> None:
+    """A schedule must not put a command in front of a user who is not there."""
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    chat.user_turn_count = 1
+    chat.user_turn_unattended = {"0": True}
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "unattended_forbidden"
+    assert manager.get_chat(chat.chat_id).terminal_offer is None
+
+
+@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task"])
+def test_a_terminal_offer_refuses_a_turn_the_person_did_not_type(
+    tmp_path: Path, origin: str
+) -> None:
+    """A webhook payload must not put a command card in front of the user (#2076)."""
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    chat.user_turn_count = 1
+    chat.user_turn_origin = {"0": origin}
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "unattended_forbidden"
+    assert manager.get_chat(chat.chat_id).terminal_offer is None
+
+
+def test_a_terminal_offer_refuses_a_chat_in_another_workspace(tmp_path: Path) -> None:
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager, workspace="work")
+    token = _offer_token(service, chat, project, workspace="personal")
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "project_not_found"
+
+
+def test_a_terminal_offer_resolves_only_an_exact_chat_id(tmp_path: Path) -> None:
+    """A title is a name the caller chose; an offer is not aimed by name.
+
+    The principal's chat id is resolved exactly. `_chat_scope` would fall back
+    to an unambiguous title, which is right for `chat get` and wrong here: the
+    offer belongs to the chat that asked, so a principal whose id is a title
+    finds no chat.
+    """
+    from ciao.control_plane import ControlPlaneError
+
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    title = manager.get_chat(chat.chat_id).title
+    principal = SimpleNamespace(
+        token_id="t",
+        chat_id=title,
+        project_id=project.project_id,
+        workspace="personal",
+        provider="claude",
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        service.control_plane.chat_terminal_offer(principal, "ls -la")
+    assert excinfo.value.code == "chat_not_found"
+
+
+def test_a_terminal_offer_needs_a_calling_chat(tmp_path: Path) -> None:
+    from ciao.control_plane import ControlPlaneError
+
+    service, manager, _config = _offer_service(tmp_path)
+    principal = SimpleNamespace(
+        token_id="t", chat_id="", project_id="", workspace="personal", provider="claude"
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        service.control_plane.chat_terminal_offer(principal, "ls -la")
+    assert excinfo.value.code == "chat_required"
+
+
+def test_a_terminal_offer_is_allowed_in_plan_mode(tmp_path: Path) -> None:
+    """Guidance is not mutation: a plan-mode chat may still suggest a command.
+
+    The operation is a read, so the plan-mode gate does not fire — the same
+    classification `file surface` has, and the same reason: the user reviews
+    the text and runs it themselves.
+    """
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    manager.get_chat(chat.chat_id).mode = "plan"
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+    assert response.status_code == 200
+    assert response.json()["data"]["terminal_offer"]["command"] == "ls -la"
+
+
+def test_an_invalid_command_is_refused_without_echoing_it(tmp_path: Path) -> None:
+    """A refused command is not quoted back: it can carry a credential."""
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    sentinel = "s3cr3t-token-value"
+    with _client(service) as client:
+        response = _post(
+            client,
+            token,
+            "chat_terminal_offer",
+            {"command": f"curl -H 'Authorization: {sentinel}'\x00"},
+        )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "invalid_terminal_command"
+    assert sentinel not in json.dumps(body)
+    assert manager.get_chat(chat.chat_id).terminal_offer is None
+    # The telemetry names the operation and the reason, not the text.
+    records = _telemetry(service)
+    assert records[-1]["tool"] == "chat_terminal_offer"
+    assert records[-1]["error_code"] == "invalid_terminal_command"
+    assert sentinel not in json.dumps(records)
+
+
+def test_a_successful_terminal_offer_leaves_no_command_in_the_telemetry(
+    tmp_path: Path,
+) -> None:
+    """The command is absent from the telemetry on the *success* path too.
+
+    The failure row is the easy one: a refused command never became state.
+    This one is the real case — the offer was accepted, the chat carries the
+    text, and the row the service wrote at the dispatcher boundary still must
+    not quote it. A command can carry a credential, and
+    `mcp_tool_calls.jsonl` is a file that gets copied into backups.
+
+    The row is read from the file the service actually writes, after a real
+    HTTP dispatch through `/agent/v1/{op}`.
+    """
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    sentinel = "npm install -g ciao-SENTINEL-4f2a9c"
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": sentinel})
+    assert response.status_code == 200
+    # The user does get the text: the offer is the point.
+    assert response.json()["data"]["terminal_offer"]["command"] == sentinel
+
+    path = Path(service._telemetry_path)
+    assert path.name == "mcp_tool_calls.jsonl"
+    text = path.read_text(encoding="utf-8")
+    assert sentinel not in text
+    records = [json.loads(line) for line in text.splitlines() if line.strip()]
+    row = records[-1]
+    assert row["tool"] == "chat_terminal_offer"
+    assert row["status"] == "ok"
+    assert row["chat_id"] == chat.chat_id
+    assert row["surface"] == "cli"
+    # The row names the operation, the chat and the outcome — never the
+    # argument, under any key.
+    assert not [key for key in row if "command" in key.lower()]
+    assert not [key for key in row if "result" in key.lower()]
+    assert not [
+        key
+        for key in row
+        if key in {"arguments", "args", "value", "input", "payload", "text", "offer"}
+    ]
+
+
+def test_a_wrong_type_command_never_echoes_the_value(tmp_path: Path) -> None:
+    """A schema constraint would put the rejected text in pydantic's error.
+
+    The argument is a plain string, so the only validation that ever sees the
+    value is the engine's — and the answer it gives is static.
+    """
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": 12345})
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert "12345" not in json.dumps(body)
+    assert manager.get_chat(chat.chat_id).terminal_offer is None
+
+
+def test_the_same_command_offered_twice_keeps_the_offer_id(tmp_path: Path) -> None:
+    """Re-offering the same text is not a change: the id stays and no event
+    is published, so a dismissal the user is holding stays valid."""
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    published: list[dict] = []
+    hub = manager._events
+    original = hub.publish
+    hub.publish = published.append  # type: ignore[method-assign]
+    try:
+        with _client(service) as client:
+            first = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+            second = _post(client, token, "chat_terminal_offer", {"command": "ls -la"})
+    finally:
+        hub.publish = original  # type: ignore[method-assign]
+    assert first.json()["data"]["terminal_offer"]["id"] == second.json()["data"]["terminal_offer"]["id"]
+    offers = [event for event in published if event["type"] == "chat_terminal_offer_changed"]
+    assert len(offers) == 1
+
+
+def test_a_terminal_offer_never_touches_the_host_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing is launched, unlocked, typed or read back.
+
+    The offer is a suggestion the user runs themselves. The terminal surface
+    — the host launcher, the session manager, the grant store — must not be
+    reachable from it at all.
+
+    The managed surface is not the only way to run a command, though. A
+    stray ``subprocess.run(command, shell=True)``, an ``os.system`` or an
+    ``asyncio.create_subprocess_shell`` would execute the suggestion and
+    leave no trace in the managed modules at all. So the process entry
+    points are trapped as well, and the suggested command is one that
+    *would* leave a marker file behind if it ever ran. Nothing is executed
+    and no shell has to be installed: the traps refuse before anything is
+    spawned, and the marker is the independent check that nothing slipped
+    past them.
+    """
+    import ciao.host_terminal as host_terminal
+    import ciao.terminal_auth as terminal_auth
+    import ciao.terminal_sessions as terminal_sessions
+
+    reached: list[str] = []
+
+    def _refuse(name: str):
+        def _inner(*_args, **_kwargs):
+            reached.append(name)
+            raise AssertionError(f"{name} was reached from a terminal offer")
+
+        return _inner
+
+    monkeypatch.setattr(host_terminal, "launch", _refuse("host_terminal.launch"))
+    monkeypatch.setattr(
+        terminal_sessions.TerminalSessionManager, "create", _refuse("session.create")
+    )
+    monkeypatch.setattr(
+        terminal_sessions.TerminalSessionManager,
+        "write_input",
+        _refuse("session.write_input"),
+    )
+    monkeypatch.setattr(
+        terminal_auth.TerminalGrantStore, "issue", _refuse("grant.issue")
+    )
+    # The unmanaged ways to run a string.
+    monkeypatch.setattr(subprocess, "run", _refuse("subprocess.run"))
+    monkeypatch.setattr(subprocess, "Popen", _refuse("subprocess.Popen"))
+    monkeypatch.setattr(subprocess, "call", _refuse("subprocess.call"))
+    monkeypatch.setattr(subprocess, "check_call", _refuse("subprocess.check_call"))
+    monkeypatch.setattr(subprocess, "check_output", _refuse("subprocess.check_output"))
+    monkeypatch.setattr(subprocess, "getoutput", _refuse("subprocess.getoutput"))
+    monkeypatch.setattr(os, "system", _refuse("os.system"))
+    monkeypatch.setattr(os, "popen", _refuse("os.popen"))
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_shell", _refuse("asyncio.create_subprocess_shell")
+    )
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", _refuse("asyncio.create_subprocess_exec")
+    )
+
+    marker = tmp_path / "executed.marker"
+    command = _marker_command(marker)
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    with _client(service) as client:
+        response = _post(client, token, "chat_terminal_offer", {"command": command})
+    assert not reached, f"a terminal offer reached {reached}"
+    assert response.status_code == 200
+    # The suggestion was stored for the user to read — and never run.
+    assert response.json()["data"]["terminal_offer"]["command"] == command
+    assert not marker.exists()
+
+
+# ── The CLI surface of the suggested terminal command (#1842) ──────────────
+#
+# The command travels in a file, never as a shell argument: it is text the
+# shell would mangle (`$()`, backticks, quotes) and it would sit in the
+# process table. Every refusal is static — neither the path nor the text
+# appears in it, because a command can carry a credential and an error string
+# ends up in a log line.
+
+
+def _command_file(tmp_path: Path, text: str, *, name: str = "command.txt") -> Path:
+    path = tmp_path / name
+    # `newline=""` keeps the on-disk bytes equal to the string: the default
+    # translates every "\n" to `os.linesep`, so a fixture built to an exact
+    # byte count would be longer on Windows and the bound would refuse it.
+    path.write_text(text, encoding="utf-8", newline="")
+    return path
+
+
+def test_chat_terminal_offer_takes_only_a_command_file(tmp_path: Path) -> None:
+    """One required flag, and no way to name a chat.
+
+    The offer belongs to the chat that asked, so there is no `--chat`; and the
+    command is text, so it travels in a file rather than inline.
+    """
+    parser = agent_cli.build_parser()
+    path = _command_file(tmp_path, "npm install -g ciao")
+    assert agent_cli.resolve(parser.parse_args(["chat", "terminal-offer", "--command-file", str(path)])) == (
+        "chat_terminal_offer",
+        {"command": "npm install -g ciao"},
+    )
+    for forbidden in ("--chat", "--command"):
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(["chat", "terminal-offer", forbidden, "x"])
+        assert excinfo.value.code == 2
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["chat", "terminal-offer"])
+    assert excinfo.value.code == 2
+
+
+def test_the_command_file_is_read_literally(tmp_path: Path) -> None:
+    """The text crosses byte for byte: no shell parsing, no interpolation.
+
+    `$()`, backticks, quotes and a Unicode command are exactly what a shell
+    would eat, and a tab or a line feed inside a multi-line command is
+    ordinary.
+    """
+    parser = agent_cli.build_parser()
+    command = "echo \"$HOME\" `whoami` 'quoted' — ünïcode\n\tindented"
+    path = _command_file(tmp_path, command)
+    _op, arguments = agent_cli.resolve(
+        parser.parse_args(["chat", "terminal-offer", "--command-file", str(path)])
+    )
+    assert arguments == {"command": command}
+
+
+def test_the_command_file_accepts_the_at_prefix(tmp_path: Path) -> None:
+    parser = agent_cli.build_parser()
+    path = _command_file(tmp_path, "ls -la")
+    _op, arguments = agent_cli.resolve(
+        parser.parse_args(["chat", "terminal-offer", "--command-file", f"@{path}"])
+    )
+    assert arguments == {"command": "ls -la"}
+
+
+#: The static reasons the CLI answers a bad ``--command-file`` with. They are
+#: a closed set on purpose: a refusal is a *reason*, never a quotation of the
+#: path or of the text it refused. A command can carry a credential, and the
+#: refusal ends up in a log line and in the agent's transcript.
+_TERMINAL_OFFER_REFUSALS = {
+    "unreadable": "--command-file cannot be read.",
+    "credential": "--command-file refuses a credential-adjacent path.",
+    "not_regular": "--command-file must be an ordinary file.",
+    "oversize": "--command-file holds more text than a command may.",
+    "encoding": "--command-file must be UTF-8 text.",
+    "characters": "--command-file holds text a command may not contain.",
+    "empty": "--command-file holds no command text.",
+}
+
+
+def _assert_static_refusal(
+    excinfo: pytest.ExceptionInfo,
+    reason: str,
+    *,
+    secrets: tuple[str, ...] = (),
+) -> None:
+    """The refusal is the static reason, and it quotes nothing.
+
+    ``secrets`` are the strings that must not appear: the path that was
+    refused, the text that was refused, a token inside it. The literal
+    invisible characters are checked as themselves — a control character, a
+    bidi override — because a word that stands for one proves nothing.
+    """
+    message = str(excinfo.value)
+    assert message == reason
+    # The exception carries the reason and nothing else.
+    assert excinfo.value.args == (reason,)
+    for secret in secrets:
+        assert secret not in message
+    for character in ("\x00", "\u202e", "\u202c", "\n", "\r"):
+        assert character not in message
+
+
+def test_an_unreadable_command_file_is_a_usage_error(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.txt"
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(missing))
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["unreadable"], secrets=(str(missing),)
+    )
+
+
+def test_a_credential_adjacent_command_file_is_refused(tmp_path: Path) -> None:
+    """A `.env` (or anything under `.runtime/`/`secrets/`) is a credential
+    store, not a place to keep a command to suggest."""
+    secret = tmp_path / ".env"
+    secret.write_text("TOKEN=x", encoding="utf-8")
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(secret))
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(secret), "TOKEN")
+    )
+
+    nested = tmp_path / ".runtime" / "a" / "b" / "command.txt"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("ls -la", encoding="utf-8")
+    with pytest.raises(agent_cli.UsageError) as nested_info:
+        agent_cli._terminal_offer_command(str(nested))
+    _assert_static_refusal(
+        nested_info,
+        _TERMINAL_OFFER_REFUSALS["credential"],
+        secrets=(str(nested),),
+    )
+
+
+def test_a_credential_adjacent_command_file_is_refused_before_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The credential check comes before the file is read.
+
+    A `.env` is refused as a credential store, not as a file that happens to
+    be unreadable, and the refusal must not depend on the file's contents.
+    The file must not be *read* at all: a check that came after the read
+    would already have pulled the secret into the process. That the check
+    also comes before the stat is pinned portably by the missing-`.env`
+    case below — a stat-first ordering answers "cannot be read" there.
+    """
+    secret = tmp_path / ".env"
+    secret.write_text("TOKEN=x", encoding="utf-8")
+    resolved = secret.resolve()
+    opened = _record_path_calls(monkeypatch, "open", resolved)
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(secret))
+    assert not opened, "the credential file was opened"
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(secret), "TOKEN")
+    )
+
+
+def test_a_missing_credential_adjacent_path_is_still_a_credential_refusal(
+    tmp_path: Path,
+) -> None:
+    """The refusal is about the *name*, not about the file being there.
+
+    A `.env` that does not exist is refused as a credential store. If the
+    check came after the stat or the open, this path would answer "cannot
+    be read" instead — which is exactly how a stat-first or open-first
+    ordering shows itself.
+    """
+    missing = tmp_path / ".env"
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(missing))
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(missing),)
+    )
+
+
+def test_a_command_path_that_aliases_a_credential_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check is on the *resolved* path, not on the one that was typed.
+
+    A path that looks harmless can still name a credential store: a symlink
+    to a `.env`, or an alias that resolves there. The check follows the
+    resolution, so the file the command would be read from is the file that
+    was judged.
+
+    A real symlink is used where the OS allows one, and a deterministic
+    ``resolve`` spy covers the same property everywhere else, so the test
+    never skips and never depends on a platform privilege.
+    """
+    protected = tmp_path / ".env"
+    protected.write_text("TOKEN=1", encoding="utf-8")
+    # The alias does not exist yet: a symlink has to be created at a free
+    # name, and the refusal happens before anything is read anyway.
+    safe = tmp_path / "offer.txt"
+    try:
+        os.symlink(protected, safe)
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    else:
+        with pytest.raises(agent_cli.UsageError) as excinfo:
+            agent_cli._terminal_offer_command(str(safe))
+        _assert_static_refusal(
+            excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
+        )
+
+    real_resolve = Path.resolve
+
+    def _resolve(self, *args, **kwargs):
+        if self == safe:
+            return protected
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(safe))
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
+    )
+
+
+def test_an_aliased_credential_path_is_refused_before_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alias resolves to the credential, and nothing is read.
+
+    The check follows the resolution *and* comes first: the file the alias
+    names is never opened, so a secret behind a harmless-looking name is
+    never pulled into the process. The missing-`.env` case above is what
+    pins the check ahead of the stat, which resolution itself may touch.
+    """
+    protected = tmp_path / ".env"
+    protected.write_text("TOKEN=1", encoding="utf-8")
+    target = protected.resolve()
+    # Created at a free name so the real-symlink branch actually runs; the
+    # deterministic resolve spy below covers platforms that refuse it.
+    safe = tmp_path / "offer.txt"
+    try:
+        os.symlink(protected, safe)
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    else:
+        opened = _record_path_calls(monkeypatch, "open", target)
+        with pytest.raises(agent_cli.UsageError) as excinfo:
+            agent_cli._terminal_offer_command(str(safe))
+        assert not opened, "the aliased credential was opened"
+        _assert_static_refusal(
+            excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
+        )
+
+    # And deterministically, where the OS will not make a symlink.
+    real_resolve = Path.resolve
+
+    def _resolve(self, *args, **kwargs):
+        if self == safe:
+            return target
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _resolve)
+    opened = _record_path_calls(monkeypatch, "open", target)
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(safe))
+    assert not opened, "the aliased credential was opened"
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
+    )
+
+
+def test_an_invalid_utf8_command_file_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "command.txt"
+    path.write_bytes(b"TOKEN-SENTINEL-\xff\xfe-secret")
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(path))
+    _assert_static_refusal(
+        excinfo,
+        _TERMINAL_OFFER_REFUSALS["encoding"],
+        secrets=(str(path), "TOKEN-SENTINEL", "\ufffd"),
+    )
+
+
+def test_an_oversize_command_file_is_refused(tmp_path: Path) -> None:
+    from ciao.terminal_offer import TERMINAL_OFFER_MAX_BYTES
+
+    path = tmp_path / "command.txt"
+    path.write_text(
+        "OVERSIZE-SENTINEL-" + "a" * TERMINAL_OFFER_MAX_BYTES, encoding="utf-8"
+    )
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(path))
+    _assert_static_refusal(
+        excinfo,
+        _TERMINAL_OFFER_REFUSALS["oversize"],
+        secrets=(str(path), "OVERSIZE-SENTINEL"),
+    )
+
+
+def test_a_command_file_at_the_byte_bound_is_accepted(tmp_path: Path) -> None:
+    """Exactly the bound is inside it, and one byte more is not.
+
+    The bound is counted on the bytes read, before the text is trimmed, so a
+    file that is exactly at the limit is accepted even when the whitespace
+    around the command is what fills it. The limit is not off by one.
+    """
+    from ciao.terminal_offer import TERMINAL_OFFER_MAX_BYTES
+
+    body = "npm install -g ciao"
+    filler = TERMINAL_OFFER_MAX_BYTES - len(body)
+    raw = " " * (filler // 2) + body + "\n " * ((filler - filler // 2) // 2)
+    raw += " " * (TERMINAL_OFFER_MAX_BYTES - len(raw.encode("utf-8")))
+    assert len(raw.encode("utf-8")) == TERMINAL_OFFER_MAX_BYTES
+    path = _command_file(tmp_path, raw)
+    assert agent_cli._terminal_offer_command(str(path)) == body
+
+    over = _command_file(tmp_path, raw + " ", name="over.txt")
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(over))
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["oversize"], secrets=(str(over),)
+    )
+
+
+def test_a_command_file_with_an_invisible_character_is_refused(tmp_path: Path) -> None:
+    """A control character or a bidi override is invisible on the card and
+    changes what the user copies into their shell."""
+    for text in ("ls -la\x00", "ls \u202e -la", "ls \u202c -la"):
+        path = _command_file(tmp_path, text)
+        with pytest.raises(agent_cli.UsageError) as excinfo:
+            agent_cli._terminal_offer_command(str(path))
+        _assert_static_refusal(
+            excinfo,
+            _TERMINAL_OFFER_REFUSALS["characters"],
+            secrets=(str(path), text),
+        )
+
+
+def test_an_empty_command_file_is_refused(tmp_path: Path) -> None:
+    path = _command_file(tmp_path, "   \n")
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(path))
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["empty"], secrets=(str(path), "   \n")
+    )
+
+
+def test_the_command_file_is_read_with_a_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The read is bounded, exactly, and it is not `read_text`.
+
+    An unbounded read is how a 2 GB file becomes a 2 GB argument on the way to
+    the engine, and `read_text` decodes the whole thing before anything can
+    refuse it. The bound is the command's own byte limit *plus the one byte
+    that says there is more*: reading exactly that much is what lets an
+    oversize file be refused without being read.
+    """
+    from pathlib import Path as _Path
+
+    from ciao.terminal_offer import TERMINAL_OFFER_MAX_BYTES
+
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError("the command file was read without a bound")
+
+    real_open = _Path.open
+    reads: list[int] = []
+
+    class _Recording:
+        """The real file, with every read size written down."""
+
+        def __init__(self, handle) -> None:
+            self._handle = handle
+
+        def read(self, size: int = -1) -> bytes:
+            reads.append(size)
+            return self._handle.read(size)
+
+        def fileno(self) -> int:
+            return self._handle.fileno()
+
+        def __enter__(self):
+            self._handle.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+    def _recording_open(self, *args, **kwargs):
+        return _Recording(real_open(self, *args, **kwargs))
+
+    path = _command_file(tmp_path, "ls -la")
+    monkeypatch.setattr(_Path, "open", _recording_open)
+    monkeypatch.setattr(_Path, "read_text", _refuse)
+    monkeypatch.setattr(_Path, "read_bytes", _refuse)
+
+    assert agent_cli._terminal_offer_command(str(path)) == "ls -la"
+    # One read, of exactly the bound plus the byte that says "there is more".
+    # An unbounded read (no size) or a larger one would show up here.
+    assert reads == [TERMINAL_OFFER_MAX_BYTES + 1]
+
+
+# ── A path that fails before it is a path (#1842, R1 security) ─────────────
+#
+# Three ways a `--command-file` can be a bad name rather than a bad file, and
+# one way a file can be a bad *file*. `expanduser` raises `RuntimeError` for a
+# `~user` that names nobody; `resolve`, `stat` and `open` raise `ValueError`
+# for an embedded NUL. And a FIFO, a device or a socket answers an open with a
+# read that never ends — the byte bound does not help, because the read
+# blocks before it counts anything.
+
+
+def _patch_path_operation(
+    monkeypatch: pytest.MonkeyPatch, name: str, target: Path, replacement
+) -> None:
+    """Patch one ``Path`` method for one path only.
+
+    pytest asks the filesystem about its own files while it renders a
+    failure, so a patch that answers *every* path breaks the reporting
+    rather than the code under test. The target is the path the operation
+    would really be asked about.
+    """
+    real = getattr(Path, name)
+
+    def _wrapper(self, *args, **kwargs):
+        if self == target:
+            return replacement(self, *args, **kwargs)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, name, _wrapper)
+
+
+def _record_path_calls(
+    monkeypatch: pytest.MonkeyPatch, name: str, target: Path
+) -> list[str]:
+    """Record every call to one ``Path`` method made about one path.
+
+    The call is still made — the real method runs — so what is recorded is
+    that the code *reached* the file, not that the file refused to open.
+    Only the path under test is recorded: pytest asks the filesystem about
+    its own files while it renders a failure.
+    """
+    real = getattr(Path, name)
+    calls: list[str] = []
+
+    def _wrapper(self, *args, **kwargs):
+        if self == target:
+            calls.append(str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, name, _wrapper)
+    return calls
+
+
+def test_an_unknown_home_user_command_file_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A ``~user`` that names nobody is a path that cannot be resolved.
+
+    The expansion fails with a `RuntimeError` on POSIX; on Windows the name
+    is left alone and the file simply does not exist. Either way the answer
+    is the same static refusal, and the name never comes back.
+    """
+    raw = "~no-such-user-1842/command.txt"
+    assert agent_cli.main(["chat", "terminal-offer", "--command-file", raw]) == 2
+    captured = capsys.readouterr()
+    assert f"error: {_TERMINAL_OFFER_REFUSALS['unreadable']}" in captured.err
+    assert raw not in captured.err
+    assert "no-such-user-1842" not in captured.err
+    assert captured.out == ""
+
+
+def test_a_nul_in_the_command_file_path_is_refused(tmp_path: Path) -> None:
+    """A NUL in the path is refused by the OS, not by us — with a reason.
+
+    `resolve`, `stat` and `open` all raise `ValueError` for an embedded NUL.
+    The refusal is the static one, and it quotes nothing: not the path, not
+    the NUL.
+    """
+    raw = str(tmp_path / "command.txt") + "\x00"
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(raw)
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["unreadable"], secrets=(raw, "\x00")
+    )
+
+
+@pytest.mark.parametrize("operation", ["expanduser", "resolve", "stat", "open"])
+@pytest.mark.parametrize("failure", [OSError, RuntimeError, ValueError])
+def test_a_path_operation_failure_is_a_static_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, failure: type[Exception]
+) -> None:
+    """Whatever a path operation raises, the answer is the same reason.
+
+    The three families are the ones a path can produce: an I/O error, the
+    `RuntimeError` an unknown ``~user`` raises, and the `ValueError` an
+    embedded NUL raises. None of them may escape as a traceback, and none of
+    them may name the path.
+    """
+    path = _command_file(tmp_path, "ls -la")
+    target = path if operation in {"expanduser", "resolve"} else path.resolve()
+
+    def _fail(*_args, **_kwargs):
+        raise failure("path operation failed")
+
+    _patch_path_operation(monkeypatch, operation, target, _fail)
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(path))
+    _assert_static_refusal(
+        excinfo,
+        _TERMINAL_OFFER_REFUSALS["unreadable"],
+        secrets=(str(path), "path operation failed"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "mode"),
+    [
+        ("fifo", stat.S_IFIFO | 0o600),
+        ("character device", stat.S_IFCHR | 0o600),
+        ("directory", stat.S_IFDIR | 0o755),
+        ("socket", stat.S_IFSOCK | 0o600),
+    ],
+)
+def test_a_non_regular_command_file_is_refused_without_being_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, mode: int
+) -> None:
+    """A FIFO or a device answers an open with a read that never ends.
+
+    The byte bound does not save it: the read blocks before it counts
+    anything. So the mode is checked first and the file is never opened —
+    which is the whole point, so the test asserts that no open happened.
+    """
+    path = _command_file(tmp_path, "ls -la")
+    resolved = path.resolve()
+    opened: list[str] = []
+
+    def _mode(*_args, **_kwargs):
+        return SimpleNamespace(st_mode=mode)
+
+    def _open(self, *args, **kwargs):
+        opened.append(str(self))
+        raise AssertionError(f"a {kind} command file was opened")
+
+    _patch_path_operation(monkeypatch, "stat", resolved, _mode)
+    _patch_path_operation(monkeypatch, "open", resolved, _open)
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(path))
+    assert not opened, f"the {kind} was opened"
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["not_regular"], secrets=(str(path),)
+    )
+
+
+def test_a_command_file_that_cannot_be_inspected_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file the OS will not stat is a file we will not read."""
+    path = _command_file(tmp_path, "ls -la")
+
+    def _deny(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    _patch_path_operation(monkeypatch, "stat", path.resolve(), _deny)
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(path))
+    _assert_static_refusal(
+        excinfo,
+        _TERMINAL_OFFER_REFUSALS["unreadable"],
+        secrets=(str(path), "Permission denied"),
+    )
+
+
+def test_a_command_file_whose_handle_is_not_ordinary_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handle has to be an ordinary file too.
+
+    The mode is checked before the open and again on the handle that came
+    back. The second check does not close the window between the two — it
+    only refuses a handle that is not an ordinary file — so it is worth
+    having and worth pinning.
+    """
+    path = _command_file(tmp_path, "ls -la")
+    monkeypatch.setattr(
+        os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFCHR | 0o600)
+    )
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli._terminal_offer_command(str(path))
+    _assert_static_refusal(
+        excinfo, _TERMINAL_OFFER_REFUSALS["not_regular"], secrets=(str(path),)
+    )
+
+
+def test_a_bad_command_file_exits_2_before_any_request(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A usage error is caught before the engine is contacted."""
+    monkey = tmp_path / "missing.txt"
+    assert agent_cli.main(["chat", "terminal-offer", "--command-file", str(monkey)]) == 2
+    captured = capsys.readouterr()
+    assert "--command-file" in captured.err
+    assert captured.out == ""
+
+
+def test_a_terminal_offer_crosses_from_the_file_to_the_chat(tmp_path: Path) -> None:
+    """The whole path, once: a file, the CLI, the engine, the chat.
+
+    The command is read from the file here, travels as one argument, and
+    lands on the calling chat — and it lands nowhere else. The engine's own
+    registry never sees it: a command can name a credential, and a registry
+    file is the wrong place for that.
+    """
+    service, manager, _config = _offer_service(tmp_path)
+    project, chat = _offer_chat(manager)
+    token = _offer_token(service, chat, project)
+    path = _command_file(tmp_path, "npm install -g ciao\n")
+    parser = agent_cli.build_parser()
+    operation, arguments = agent_cli.resolve(
+        parser.parse_args(["chat", "terminal-offer", "--command-file", str(path)])
+    )
+    with _client(service) as client:
+        response = _post(client, token, operation, arguments)
+    assert response.status_code == 200
+    assert response.json()["data"]["terminal_offer"]["command"] == "npm install -g ciao"
+    registry = (tmp_path / ".runtime" / "web_projects.json").read_text(encoding="utf-8")
+    assert "npm install -g ciao" not in registry

@@ -41,14 +41,55 @@ class FixtureSocket {
     this.socket = socket
     this.pathname = pathname
     this.closed = false
+    /** The client's JSON frames, when the caller wants to read them. */
+    this.onMessage = null
+    this.buffer = Buffer.alloc(0)
     socket.on('close', () => { this.closed = true })
     socket.on('error', () => { this.closed = true })
     socket.on('data', (chunk) => this._read(chunk))
   }
 
   _read(chunk) {
-    // Opcode 0x8 is a close frame; anything else from this client is noise.
-    if (chunk.length > 0 && (chunk[0] & 0x0f) === 0x8) this.drop()
+    this.buffer = Buffer.concat([this.buffer, chunk])
+    // Client frames are masked, and they can arrive split across chunks, so
+    // they are decoded rather than guessed at.
+    for (;;) {
+      if (this.buffer.length < 2) return
+      const opcode = this.buffer[0] & 0x0f
+      const masked = (this.buffer[1] & 0x80) !== 0
+      let length = this.buffer[1] & 0x7f
+      let offset = 2
+      if (length === 126) {
+        if (this.buffer.length < 4) return
+        length = this.buffer.readUInt16BE(2)
+        offset = 4
+      } else if (length === 127) {
+        if (this.buffer.length < 10) return
+        length = Number(this.buffer.readBigUInt64BE(2))
+        offset = 10
+      }
+      let mask = null
+      if (masked) {
+        if (this.buffer.length < offset + 4) return
+        mask = this.buffer.subarray(offset, offset + 4)
+        offset += 4
+      }
+      if (this.buffer.length < offset + length) return
+      const payload = Buffer.from(this.buffer.subarray(offset, offset + length))
+      if (mask) {
+        for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4]
+      }
+      this.buffer = this.buffer.subarray(offset + length)
+      // Opcode 0x8 is a close frame; anything else from this client is noise
+      // unless the caller asked to read it.
+      if (opcode === 0x8) {
+        this.drop()
+        return
+      }
+      if (opcode === 0x1 && this.onMessage) {
+        try { this.onMessage(payload.toString('utf8')) } catch { /* a bad frame is ignored */ }
+      }
+    }
   }
 
   send(message) {

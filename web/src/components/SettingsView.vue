@@ -28,7 +28,7 @@
         :error="engineUpdateOperation?.error"
       />
     </div>
-    <PaneHeader :page-tag="settingsTabLabel(route.path)" @open-sidebar="emit('open-sidebar')" />
+    <PaneHeader :page-tag="pageTag" @open-sidebar="emit('open-sidebar')" />
     <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
       <div class="page-grid settings-grid">
       <div ref="mainEl" class="page-main settings-main">
@@ -69,8 +69,7 @@
                 {{ `Update to ${packageStatus.latest_version}` }}
               </button>
             </div>
-            <!-- Nothing to do: the status sits in the corner as a badge, the
-                 same markup the Google Workspace section uses for its state. -->
+            <!-- Nothing to do: the status sits in the corner as a badge. -->
             <span v-else-if="updatesCompact" class="badge badge--success">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
           </div>
           <SkeletonLoader v-if="packageLoading && !packageStatus" label="Checking package status" :count="2" />
@@ -229,6 +228,10 @@
               Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
             </p>
             <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
+            <p class="hint">
+              Dictation, keeping this computer awake, a browser for the agent and usage tracking are left to tools you choose.
+            </p>
+            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/companions.html" target="_blank" rel="noopener noreferrer">Tools to pair with Ciaobot</a>
           </div>
         </div>
 
@@ -241,18 +244,50 @@
 
         <SettingsKeyboardShortcuts />
 
-        <!-- Update task history. Below the device sections on purpose: it is
-             usually empty, and its long explanation would push them down. It is
-             still the record of what the Home "After this update" group offered,
-             so it stays on General, and it owns its own fetch because Home may
-             never have been opened in this session. -->
-        <SettingsUpdateTasks />
+        <!-- Start at sign-in. It changes whether the engine service starts at
+             the *next* sign-in, never the engine running now, and never the
+             optional app window SettingsAppInstall owns. -->
+        <SettingsEngineLogin />
 
+        <!-- Open source. The face image on the right appears only while the
+             GitHub-star ask is still live (housekeeping detects it via the
+             `starred` / snoozed receipt): once the user has starred or
+             dismissed, the card quiets back to prose. -->
+        <div class="card open-source-card" :class="{ 'open-source-card--with-face': showStarNudge }">
+          <div class="settings-card-header">
+            <p class="section-title">Open source</p>
+            <p class="hint">
+              Ciaobot is an open-source project. Support and contributions are welcome:
+              report issues, suggest features, or open a pull request on
+              <a href="https://github.com/raffaelefarinaro/ciaobot" target="_blank" rel="noopener">GitHub</a>.
+              You can browse without an account; submitting an issue or pull request requires a free GitHub account, and GitHub will prompt you to sign in or create one.
+            </p>
+            <div v-if="showStarNudge" class="open-source-actions">
+              <button
+                class="btn-primary btn-small"
+                :disabled="starPending"
+                @click="starOnGitHub"
+              >{{ starPending ? 'Starring…' : '★ Star on GitHub' }}</button>
+              <button class="btn-small" @click="dismissStarNudge">Later</button>
+            </div>
+          </div>
+          <img
+            v-if="showStarNudge"
+            class="open-source-face"
+            src="/face.png"
+            alt=""
+            draggable="false"
+          />
+        </div>
+      </template>
+
+      <!-- APPEARANCE TAB -->
+      <template v-if="currentTab === 'appearance'">
         <!-- Appearance -->
         <div class="card">
           <div class="settings-card-header">
             <p class="section-title">Appearance</p>
-            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
+            <p class="hint">Control the visual theme, text and type used across Ciaobot.</p>
           </div>
           <div class="setting-row setting-row--inline setting-row--flush">
             <div class="routine-info">
@@ -260,29 +295,12 @@
               <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
             </div>
             <div class="settings-control">
-              <div class="instance-toggle">
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'dark' }"
-                  @click="setTheme('dark')"
-                >
-                  Dark
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'light' }"
-                  @click="setTheme('light')"
-                >
-                  Light
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'system' }"
-                  @click="setTheme('system')"
-                >
-                  System
-                </button>
-              </div>
+              <SettingsRadioGroup
+                label="Theme"
+                :options="THEME_OPTIONS"
+                :model-value="activeTheme"
+                @update:model-value="setTheme"
+              />
             </div>
           </div>
           <div class="setting-row setting-row--inline">
@@ -299,8 +317,90 @@
               </div>
             </div>
           </div>
+          <SettingsAppearance />
+          <p v-if="appearanceError" class="action-result" role="alert">{{ appearanceError }}</p>
+        </div>
+      </template>
+
+      <!-- ACCESS & DEVICES TAB -->
+      <template v-if="currentTab === 'access'">
+        <!-- PWA password -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">PWA password</p>
+              <p class="hint">
+                Ciaobot is always password-protected — this is the password you type to open it,
+                and the one another device needs to sign in.
+                <a
+                  class="settings-help-link"
+                  href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Keeping it private</a>
+              </p>
+            </div>
+          </div>
+          <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
+          <template v-else>
+            <div class="settings-form-panel">
+              <label v-if="!authSettings.on_host" class="settings-field">
+                <span class="ws-label">Current password</span>
+                <input
+                  id="auth-current-password"
+                  v-model="authCurrentPassword"
+                  type="password"
+                  class="routine-input"
+                  autocomplete="current-password"
+                  :aria-invalid="authCurrentPasswordError ? 'true' : undefined"
+                  :aria-describedby="authCurrentPasswordError ? 'auth-current-password-error' : undefined"
+                  :disabled="authSettingsSaving"
+                />
+                <span v-if="authCurrentPasswordError" id="auth-current-password-error" class="hint hint--warn" role="alert">{{ authCurrentPasswordError }}</span>
+              </label>
+              <p v-if="authSettings.on_host" class="hint">You're on the computer running Ciaobot, so you don't need the current password here.</p>
+              <label class="settings-field">
+                <span class="ws-label">New password</span>
+                <input
+                  v-model="authNewPassword"
+                  type="password"
+                  class="routine-input"
+                  placeholder="at least 4 characters"
+                  autocomplete="new-password"
+                  :disabled="authSettingsSaving"
+                />
+              </label>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-primary btn-small"
+                  @click="saveAuthSettings"
+                  :disabled="authSettingsSaving || !canSaveAuthSettings"
+                >
+                  {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
+                </button>
+              </div>
+            </div>
+            <div v-if="authSettingsResult" class="action-result" :class="{ 'action-result--error': authSettingsError }">
+              {{ authSettingsResult }}
+            </div>
+          </template>
         </div>
 
+        <!-- Other devices — where to open Ciaobot from a phone or another
+             computer. The one place to set the trusted HTTPS address. -->
+        <SettingsDevices />
+
+        <!-- Network access: server settings that used to live in the workspace .env. -->
+        <SettingsServer
+          section="network"
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
+      </template>
+
+      <!-- ADVANCED TAB -->
+      <template v-if="currentTab === 'advanced'">
         <!-- Actions. This card is about the Ciaobot *program*: the checkout it
              runs from, and whether it is up to date. It shares a repository and
              a serialization with the memory backup below, but never the
@@ -349,12 +449,6 @@
           </div>
         </div>
 
-        <!-- Start at sign-in. The last host fact beside the program's own, and
-             a different thing from both: it changes whether the engine service
-             starts at the *next* sign-in, never the engine running now, and
-             never the optional app window SettingsAppInstall owns. -->
-        <SettingsEngineLogin />
-
         <!-- Memory backup. The unattended, one-way copy of the user's memory,
              right below the program's own repository controls so the two are
              read together and never confused. The panel owns its data and its
@@ -362,19 +456,13 @@
              so it emits the setup chat's id for this view to open. -->
         <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
 
-        <SettingsInsights
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
-
-        <!-- Main workspace -->
+        <!-- Ciaobot folder -->
         <div v-if="routines && routines.workspace_context" class="card">
           <div class="settings-card-header">
-            <p class="section-title">Main workspace</p>
+            <p class="section-title">Ciaobot folder</p>
             <p class="hint">
-              The server filesystem root for routines, skills, scripts, runtime state, and the <code>.env</code> file.
-              Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
+              The folder Ciaobot runs from: routines, skills, scripts, runtime state and the <code>.env</code> file.
+              Chat workspaces (the sidebar switcher) are managed from the workspace switcher: Manage workspaces.
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
@@ -447,75 +535,9 @@
           </div>
         </div>
 
-        <!-- PWA password -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">PWA password</p>
-              <p class="hint">
-                Ciaobot is always password-protected — this is the password you type to open it,
-                and the one another device needs to sign in.
-                <a
-                  class="settings-help-link"
-                  href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >Keeping it private</a>
-              </p>
-            </div>
-          </div>
-          <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
-          <template v-else>
-            <div class="settings-form-panel">
-              <label v-if="!authSettings.on_host" class="settings-field">
-                <span class="ws-label">Current password</span>
-                <input
-                  id="auth-current-password"
-                  v-model="authCurrentPassword"
-                  type="password"
-                  class="routine-input"
-                  autocomplete="current-password"
-                  :aria-invalid="authCurrentPasswordError ? 'true' : undefined"
-                  :aria-describedby="authCurrentPasswordError ? 'auth-current-password-error' : undefined"
-                  :disabled="authSettingsSaving"
-                />
-                <span v-if="authCurrentPasswordError" id="auth-current-password-error" class="hint hint--warn" role="alert">{{ authCurrentPasswordError }}</span>
-              </label>
-              <p v-if="authSettings.on_host" class="hint">You're on the computer running Ciaobot, so you don't need the current password here.</p>
-              <label class="settings-field">
-                <span class="ws-label">New password</span>
-                <input
-                  v-model="authNewPassword"
-                  type="password"
-                  class="routine-input"
-                  placeholder="at least 4 characters"
-                  autocomplete="new-password"
-                  :disabled="authSettingsSaving"
-                />
-              </label>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-primary btn-small"
-                  @click="saveAuthSettings"
-                  :disabled="authSettingsSaving || !canSaveAuthSettings"
-                >
-                  {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
-                </button>
-              </div>
-            </div>
-            <div v-if="authSettingsResult" class="action-result" :class="{ 'action-result--error': authSettingsError }">
-              {{ authSettingsResult }}
-            </div>
-          </template>
-        </div>
-
-        <!-- Other devices — where to open Ciaobot from a phone or another
-             computer. The one place to set the trusted HTTPS address. -->
-        <SettingsDevices />
-
-        <!-- Network access and the developer switches: server settings that
-             used to live in the workspace .env. -->
+        <!-- Developer switches: server settings that used to live in the workspace .env. -->
         <SettingsServer
+          section="developer"
           :routines="routines"
           :routines-saving="routinesSaving"
           :save-routines="saveRoutines"
@@ -537,44 +559,11 @@
           </div>
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
-
-        <!-- Open source. The face image on the right appears only while the
-             GitHub-star ask is still live (housekeeping detects it via the
-             `starred` / snoozed receipt): once the user has starred or
-             dismissed, the card quiets back to prose. -->
-        <div class="card open-source-card" :class="{ 'open-source-card--with-face': showStarNudge }">
-          <div class="settings-card-header">
-            <p class="section-title">Open source</p>
-            <p class="hint">
-              Ciaobot is an open-source project. Support and contributions are welcome:
-              report issues, suggest features, or open a pull request on
-              <a href="https://github.com/raffaelefarinaro/ciaobot" target="_blank" rel="noopener">GitHub</a>.
-              You can browse without an account; submitting an issue or pull request requires a free GitHub account, and GitHub will prompt you to sign in or create one.
-            </p>
-            <div v-if="showStarNudge" class="open-source-actions">
-              <button
-                class="btn-primary btn-small"
-                :disabled="starPending"
-                @click="starOnGitHub"
-              >{{ starPending ? 'Starring…' : '★ Star on GitHub' }}</button>
-              <button class="btn-small" @click="dismissStarNudge">Later</button>
-            </div>
-          </div>
-          <img
-            v-if="showStarNudge"
-            class="open-source-face"
-            src="/face.png"
-            alt=""
-            draggable="false"
-          />
-        </div>
-
       </template>
 
-      <!-- MODELS TAB: chat providers, then background models.
-           The old providers tab folded in here; /settings/providers
-           redirects to /settings/models#chat-providers (router.ts). -->
-      <template v-if="currentTab === 'models'">
+      <!-- PROVIDERS TAB: chat providers. The old models tab was renamed;
+           /settings/models redirects here (router.ts). -->
+      <template v-if="currentTab === 'providers'">
         <!-- Chat providers -->
         <div v-if="!providerKeysLoaded" class="card" role="status" aria-live="polite" aria-label="Loading providers">
           <div class="mm-loading-heading"><span class="history-loading-spinner" aria-hidden="true"></span><span>Loading providers…</span></div>
@@ -720,12 +709,13 @@
                 <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
-                    <span class="ws-label set-subrow-label">Default model</span>
+                    <span :id="`default-model-label-${connKey}`" class="ws-label set-subrow-label">Default model</span>
                     <div class="set-subrow-control">
                       <ModelSelector
                         v-if="getProviderSection(String(connKey))?.configurable"
                         :model-value="providerDefaultModelSelectorValue(String(connKey) as AliasProviderKey)"
                         :sections="providerDefaultModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :labelled-by="`default-model-label-${connKey}`"
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
                       />
@@ -734,6 +724,7 @@
                   </div>
                   <div class="set-subrow">
                     <span
+                      :id="`insights-model-label-${connKey}`"
                       class="ws-label set-subrow-label"
                       title="Reads archived chats, closed projects and task resolutions into memory, names new chats, and checks schedule results for this provider. Automatic uses the chat's own model; Claude schedule checks use Haiku."
                     >Session insights</span>
@@ -742,6 +733,7 @@
                         v-if="getProviderSection(String(connKey))?.configurable"
                         :model-value="providerInsightsModelSelectorValue(String(connKey) as AliasProviderKey)"
                         :sections="providerInsightsModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :labelled-by="`insights-model-label-${connKey}`"
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderInsightsModel(String(connKey) as AliasProviderKey, $event)"
                       />
@@ -868,706 +860,15 @@
           </div>
         </template>
 
-        <!-- Background models -->
-        <div v-if="!routinesLoaded" class="card"><SkeletonLoader label="Loading routines" :count="3" /></div>
-        <template v-else-if="routinesError">
-          <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
-        </template>
-        <template v-else-if="routines">
-          <!-- Background models (internal routines) -->
-          <div class="card">
-            <div class="settings-card-header">
-              <p class="section-title">Background models</p>
-              <p class="hint">
-                Session insights, the model that reads archived chats into memory, names new chats
-                and checks schedule results, is set on each provider above. Automatic uses the chat's
-                own model; choose a model to override it.
-              </p>
-            </div>
-          </div>
-          <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
-        </template>
+        <div v-if="routinesError" class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
       </template>
 
-      <!-- WORKSPACES TAB -->
+      <!-- WORKSPACE OVERVIEW TAB (the active workspace; /settings/workspace) -->
+      <template v-if="currentTab === 'workspace'"><SettingsWorkspaceOverview /></template>
+
+      <!-- WORKSPACES TAB (the list of all of them; /settings/workspaces) -->
       <template v-if="currentTab === 'workspaces'">
-        <div v-if="!workspacesLoaded" class="card"><SkeletonLoader label="Loading workspaces" :count="3" /></div>
-        <template v-else-if="workspacesError">
-          <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
-        </template>
-        <template v-else>
-          <div class="card">
-            <div class="settings-card-header settings-card-header--split">
-              <div>
-                <p class="section-title">Workspaces</p>
-                <p class="hint">
-                  Each workspace keeps its own projects, chats, memory, model defaults and Google account.
-                </p>
-              </div>
-              <button class="btn-small" :aria-expanded="showNewWorkspace" @click="showNewWorkspace = !showNewWorkspace">
-                {{ showNewWorkspace ? 'Cancel' : 'New workspace' }}
-              </button>
-            </div>
-
-            <div v-if="showNewWorkspace" id="new-workspace" class="workspace-card workspace-card--new settings-form-panel">
-              <div class="workspace-card-header">
-                <div>
-                  <p class="workspace-title">New workspace</p>
-                  <p class="hint hint--compact">Saved to <code>.runtime/workspaces.json</code> and applied immediately.</p>
-                </div>
-              </div>
-              <div class="settings-field-grid">
-                <label class="settings-field"><span class="ws-label">Name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
-                </label>
-                <label class="settings-field"><span class="ws-label">Vault name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
-                </label>
-                <div class="settings-field settings-field--wide">
-                  <span class="ws-label" id="new-workspace-color-label">Accent color</span>
-                  <div
-                    class="workspace-color-swatches"
-                    role="radiogroup"
-                    aria-labelledby="new-workspace-color-label"
-                  >
-                    <button
-                      v-for="preset in WORKSPACE_COLOR_PRESETS"
-                      :key="`new-color-${preset.id}`"
-                      type="button"
-                      class="workspace-color-swatch"
-                      role="radio"
-                      :aria-checked="newWorkspaceForm.color === preset.id"
-                      :aria-label="preset.label"
-                      :title="preset.label"
-                      :disabled="workspacesSaving === 'new'"
-                      :class="{ active: newWorkspaceForm.color === preset.id }"
-                      :style="{ '--swatch': preset.swatch }"
-                      @click="newWorkspaceForm.color = preset.id"
-                    />
-                  </div>
-                </div>
-                <label class="settings-field"><span class="ws-label">{{ workspaceProviderFieldLabel }}</span>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
-                    <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-                      {{ provider.label }}
-                    </option>
-                  </select>
-                </label>
-                <label class="settings-field"><span class="ws-label">File access</span>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.agent_fs_scope" :disabled="workspacesSaving === 'new'">
-                    <option value="">{{ fsScopeDefaultOptionLabel }}</option>
-                    <option value="workspace">Workspace only</option>
-                    <option value="machine">Whole machine</option>
-                  </select>
-                  <span class="hint hint--compact">{{ WORKSPACE_FS_SCOPE_COPY[newWorkspaceForm.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</span>
-                </label>
-                <label class="settings-field">
-                  <div class="settings-label-row">
-                    <span class="ws-label">Google profile</span>
-                    <details class="field-info">
-                      <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                      <div class="field-info-panel">
-                        <p>
-                          Selects which Google account this workspace uses. Accounts are added and connected in the Google Workspace card below.
-                        </p>
-                      </div>
-                    </details>
-                  </div>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
-                    <option value="">No Google account</option>
-                    <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
-                      {{ profile.label }} ({{ profile.email || profile.name }})
-                    </option>
-                    <option v-if="workspaceCustomGwsProfile(newWorkspaceForm.gws_profile)" :value="newWorkspaceForm.gws_profile">
-                      Custom: {{ newWorkspaceForm.gws_profile }}
-                    </option>
-                  </select>
-                </label>
-              </div>
-              <div class="action-row settings-actions">
-                <button class="set-link set-link--quiet" type="button" :disabled="workspacesSaving === 'new'" @click="showNewWorkspace = false">Cancel</button>
-                <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
-                  {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
-                </button>
-              </div>
-            </div>
-
-            <p v-if="workspaceLinkStatus" class="hint hint--warn workspace-link-status" role="status">
-              {{ workspaceLinkStatus }}
-            </p>
-
-            <div class="workspace-list set-list">
-              <div
-                v-for="form in workspaceForms"
-                :key="form.name"
-                :id="`workspace-row-${form.name}`"
-                class="workspace-card set-row"
-                :class="{
-                  'workspace-card--open': openWorkspace === form.name,
-                  'workspace-card--target': workspaceLinkTarget === form.name,
-                }"
-                @animationend.self="clearWorkspaceLinkHighlight(form.name)"
-              >
-                <div class="workspace-card-header set-row-head">
-                  <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
-                  <div class="set-row-main">
-                    <p class="workspace-title set-row-title">{{ form.name }}</p>
-                    <span v-if="workspaceFsScopeBadge(form.agent_fs_scope)" class="set-tag workspace-fs-tag">{{ workspaceFsScopeBadge(form.agent_fs_scope) }}</span>
-                    <p class="set-row-sub">{{ workspaceSummary(form) }}</p>
-                  </div>
-                  <div class="workspace-actions set-row-actions">
-                    <button
-                      v-if="openWorkspace !== form.name"
-                      type="button"
-                      class="set-link"
-                      :aria-label="`Edit workspace ${form.name}`"
-                      :aria-expanded="false"
-                      @click="openWorkspaceEditor(form.name)"
-                    >Edit</button>
-                    <DropdownMenuRoot
-                      v-if="workspaceArchivable(form.name)"
-                      :open="settingsMenu === `ws:${form.name}`"
-                      :modal="false"
-                      @update:open="setSettingsMenu(`ws:${form.name}`, $event)"
-                    >
-                      <DropdownMenuTrigger as-child>
-                        <button
-                          type="button"
-                          class="set-menu-btn"
-                          :aria-label="`Actions for workspace ${form.name}`"
-                          :disabled="archivingWorkspace === form.name"
-                        >&middot;&middot;&middot;</button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent as-child align="end" :side-offset="4" :collision-padding="8">
-                        <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
-                          <DropdownMenuItem as-child @select="archiveWorkspace(form.name)">
-                            <button
-                              type="button"
-                              class="settings-menu-item settings-menu-item--caution"
-                              :aria-label="`Archive workspace ${form.name}`"
-                            >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive' }}</button>
-                          </DropdownMenuItem>
-                        </div>
-                      </DropdownMenuContent>
-                    </DropdownMenuRoot>
-                  </div>
-                </div>
-
-                <div v-if="openWorkspace === form.name" class="set-row-body">
-                  <label class="settings-field set-subrow">
-                    <span class="ws-label set-subrow-label">Name</span>
-                    <input
-                      class="routine-input set-subrow-control"
-                      v-model="workspaceNameDraft"
-                      :disabled="workspacesSaving === form.name"
-                      :aria-describedby="`workspace-name-hint-${form.name}`"
-                    />
-                  </label>
-                  <p :id="`workspace-name-hint-${form.name}`" class="hint hint--compact set-subrow-hint">Letters, numbers, dashes, underscores.</p>
-                  <div class="set-subrow">
-                    <span class="set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
-                    <div
-                      class="workspace-color-swatches set-subrow-control"
-                      role="radiogroup"
-                      :aria-labelledby="`workspace-color-${form.name}`"
-                    >
-                      <button
-                        v-for="preset in WORKSPACE_COLOR_PRESETS"
-                        :key="`${form.name}-color-${preset.id}`"
-                        type="button"
-                        class="workspace-color-swatch"
-                        role="radio"
-                        :aria-checked="form.color === preset.id"
-                        :aria-label="preset.label"
-                        :title="preset.label"
-                        :disabled="workspacesSaving === form.name"
-                        :class="{ active: form.color === preset.id }"
-                        :style="{ '--swatch': preset.swatch }"
-                        @click="form.color = preset.id"
-                      />
-                    </div>
-                  </div>
-                  <label class="settings-field set-subrow">
-                    <span class="ws-label set-subrow-label">{{ workspaceProviderFieldLabel }}</span>
-                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
-                      <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-                        {{ provider.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label class="settings-field set-subrow" :id="`workspace-file-access-row-${form.name}`">
-                    <span class="ws-label set-subrow-label">File access</span>
-                    <select
-                      :id="`workspace-file-access-${form.name}`"
-                      class="routine-input routine-select workspace-select set-subrow-control"
-                      v-model="form.agent_fs_scope"
-                      :disabled="workspacesSaving === form.name"
-                    >
-                      <option value="">{{ fsScopeDefaultOptionLabel }}</option>
-                      <option value="workspace">Workspace only</option>
-                      <option value="machine">Whole machine</option>
-                    </select>
-                  </label>
-                  <p class="hint hint--compact set-subrow-hint">{{ WORKSPACE_FS_SCOPE_COPY[form.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</p>
-                  <div class="settings-switch-row set-subrow">
-                    <span class="ws-label set-subrow-label">claude.ai connectors</span>
-                    <button
-                      class="settings-switch"
-                      type="button"
-                      role="switch"
-                      :aria-checked="form.claude_ai_connectors"
-                      aria-label="claude.ai connectors"
-                      :disabled="workspacesSaving === form.name"
-                      @click="form.claude_ai_connectors = !form.claude_ai_connectors"
-                    >
-                      <span class="switch-word">{{ form.claude_ai_connectors ? 'On' : 'Off' }}</span>
-                      <span class="switch-track" aria-hidden="true"></span>
-                    </button>
-                  </div>
-                  <p class="hint hint--compact set-subrow-hint">Load your Claude account's connectors (Slack, Jira, …) in this workspace's Claude chats.</p>
-                  <label class="settings-field set-subrow">
-                    <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
-                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
-                      <option value="">No Google account</option>
-                      <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
-                        {{ profile.label }} ({{ profile.email || profile.name }})
-                      </option>
-                      <option v-if="workspaceCustomGwsProfile(form.gws_profile)" :value="form.gws_profile">
-                        Custom: {{ form.gws_profile }}
-                      </option>
-                    </select>
-                  </label>
-                  <div class="workspace-edit-actions">
-                    <button
-                      v-if="workspaceDirty(form)"
-                      type="button"
-                      class="btn-primary btn-small workspace-save"
-                      :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
-                      @click="saveWorkspace(form.name)"
-                    >{{ workspacesSaving === form.name ? 'Saving...' : 'Save changes' }}</button>
-                    <button
-                      type="button"
-                      class="set-link set-link--quiet"
-                      :disabled="workspacesSaving === form.name"
-                      @click="discardWorkspace(form.name)"
-                    >{{ workspaceDirty(form) ? 'Discard' : 'Done' }}</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
-
-            <section class="archived-workspaces" aria-labelledby="archived-workspaces-title">
-              <p id="archived-workspaces-title" class="subsection-title">Archived workspaces</p>
-              <p class="hint hint--compact">
-                Archived workspaces keep every file in <code>.archived-workspaces/</code> in the Ciaobot folder. Ciaobot does not read their notes or memory until you restore them.
-              </p>
-              <p v-if="archivedLoading && !archivedWorkspaces.length" class="hint">Loading&hellip;</p>
-              <div v-else-if="archivedLoadError" class="action-result action-result--error" role="alert">
-                {{ archivedLoadError }}
-                <button class="btn-small" type="button" @click="fetchArchivedWorkspaces">Retry</button>
-              </div>
-              <p v-else-if="!archivedWorkspaces.length" class="hint archived-empty">No archived workspaces.</p>
-              <ul v-if="archivedWorkspaces.length" class="archived-list">
-                <li
-                  v-for="item in archivedWorkspaces"
-                  :key="item.id"
-                  class="archived-item"
-                >
-                  <div class="archived-item-text">
-                    <p class="workspace-title">{{ item.name }}</p>
-                    <p class="hint hint--compact">
-                      Archived {{ formatArchivedAt(item.archived_at) }} &middot; <code>{{ item.path }}</code>
-                    </p>
-                    <p v-if="!item.restorable && item.blocked_reason" class="hint hint--warn hint--compact">
-                      {{ item.blocked_reason }}
-                    </p>
-                  </div>
-                  <button
-                    class="btn-small"
-                    type="button"
-                    :aria-label="`Restore workspace ${item.name}`"
-                    :disabled="!item.restorable || restoringArchiveId === item.id"
-                    @click="restoreWorkspace(item)"
-                  >{{ restoringArchiveId === item.id ? 'Restoring...' : 'Restore' }}</button>
-                </li>
-              </ul>
-            </section>
-          </div>
-
-          <!-- Google Workspace integration -->
-          <div class="card">
-            <div class="settings-card-header settings-card-header--split">
-              <div>
-                <div class="settings-label-row">
-                  <p class="section-title">Google Workspace</p>
-                  <details class="field-info">
-                    <summary aria-label="About Google Workspace integration" title="About Google Workspace integration">i</summary>
-                    <div class="field-info-panel">
-                      <p>
-                        Ciaobot uses the
-                        <a href="https://github.com/googleworkspace/cli" target="_blank" rel="noopener noreferrer">Google Workspace CLI (<code>gws</code>)</a>
-                        to reach Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks from chats and schedules.
-                        Stock <code>gws-*</code> skills ship with the app once <code>gws</code> is installed and authenticated.
-                      </p>
-                      <p>
-                        Add one account per Google login you use, and keep them separate so a
-                        personal chat never inherits work Drive or calendar access. Each
-                        workspace picks which account it uses.
-                      </p>
-                      <p><strong>Alternative setups</strong></p>
-                      <ul class="field-info-steps">
-                        <li>
-                          <strong>gcloud (no console needed):</strong> install the
-                          <a href="https://cloud.google.com/sdk/docs/install" target="_blank" rel="noopener noreferrer">gcloud CLI</a>,
-                          authenticate once, then run
-                          <code>ciao gws &lt;profile&gt; auth setup</code>. Ciaobot auto-detects the account.
-                        </li>
-                        <li>
-                          <strong>Bring your own client:</strong> in
-                          <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console &rarr; Credentials</a>
-                          create an OAuth client (Desktop app), download the JSON, and upload it as <code>client_secret.json</code>.
-                        </li>
-                      </ul>
-                      <p>
-                        Enable the APIs you need in your GCP project (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks).
-                      </p>
-                    </div>
-                  </details>
-                </div>
-                <p class="hint">
-                  Add one account per Google login you use, then link each workspace to the
-                  account it should use (the <strong>Google profile</strong> field above).
-                  Accounts are local <code>gws</code> profiles: Gmail, Calendar, Drive, Docs,
-                  Sheets, Slides, and Tasks.
-                </p>
-              </div>
-              <span
-                v-if="gwsIntegration"
-                class="badge"
-                :class="gwsIntegration.installed ? 'badge--success' : 'badge--error'"
-              >
-                {{ gwsIntegration.installed ? 'gws installed' : 'gws missing' }}
-              </span>
-            </div>
-
-            <SkeletonLoader v-if="!gwsIntegrationLoaded" label="Loading Google Workspace status" :count="2" />
-            <p v-else-if="gwsIntegrationError" class="hint hint--warn">
-              {{ gwsIntegrationError }}
-            </p>
-            <template v-else-if="gwsIntegration">
-              <div v-if="!gwsIntegration.installed" class="integration-warning">
-                <p class="hint hint--warn">
-                  Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
-                </p>
-                <div class="action-row">
-                  <button class="btn-primary btn-small" @click="installGwsInChat">Install in Chat</button>
-                  <HostTerminalButton action="gws-install" variant="small" label="Install in Terminal" />
-                </div>
-                <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
-              </div>
-              <GwsSetupChecklist :integration="gwsIntegration" />
-              <div class="gws-account-add">
-                <span class="ws-label">Add a Google account</span>
-                <div class="gws-account-add-row">
-                  <input
-                    class="routine-input"
-                    v-model="newGwsProfileName"
-                    placeholder="short name (e.g. personal, acme)"
-                    :disabled="gwsProfileAdding"
-                    @keyup.enter="addGwsProfile"
-                  />
-                  <input
-                    class="routine-input"
-                    v-model="newGwsProfileLabel"
-                    placeholder="display name (optional)"
-                    :disabled="gwsProfileAdding"
-                    @keyup.enter="addGwsProfile"
-                  />
-                  <button
-                    class="btn-primary btn-small"
-                    :disabled="!newGwsProfileName.trim() || gwsProfileAdding"
-                    @click="addGwsProfile"
-                  >
-                    {{ gwsProfileAdding ? 'Adding…' : 'Add account' }}
-                  </button>
-                </div>
-                <p class="hint hint--compact">
-                  The short name identifies the account in chats and in
-                  <code>secrets/gws-&lt;name&gt;/</code>. You connect the Google login in the
-                  card that appears.
-                </p>
-                <p v-if="gwsProfileActionError" class="hint hint--warn">{{ gwsProfileActionError }}</p>
-              </div>
-
-              <p v-if="!gwsIntegration.profiles?.length" class="hint hint--compact">
-                No Google accounts yet. Workspaces run without Google access until you add one.
-              </p>
-
-              <div class="gws-profile-list">
-                <div
-                  v-for="profile in gwsIntegration.profiles"
-                  :key="profile.name"
-                  class="gws-profile-card"
-                >
-                  <div class="gws-profile-header">
-                    <div class="gws-profile-heading">
-                      <p class="gws-profile-title">{{ profile.label }}</p>
-                      <p v-if="profile.email" class="gws-profile-email">{{ profile.email }}</p>
-                      <p class="hint hint--compact"><code>{{ profile.name }}</code> profile</p>
-                    </div>
-                    <span class="badge gws-profile-badge" :class="gwsProfileBadgeClass(profile)">
-                      {{ gwsProfileStatus(profile) }}
-                    </span>
-                    <button
-                      class="btn-small btn-danger gws-profile-remove"
-                      :disabled="gwsSavingProfile === profile.name"
-                      @click="removeGwsProfile(profile)"
-                    >Remove account</button>
-                  </div>
-                  <p class="gws-profile-purpose">{{ profile.purpose }}</p>
-                  <div v-if="profile.examples.length" class="gws-example-row">
-                    <span v-for="example in profile.examples" :key="example" class="gws-chip">
-                      {{ example }}
-                    </span>
-                  </div>
-                  <div class="gws-profile-meta">
-                    <div>
-                      <span class="dev-label">Used by</span>
-                      <span v-if="!profile.workspaces.length" class="muted-text">No workspace</span>
-                      <span v-else class="gws-workspace-chips">
-                        <span v-for="workspace in profile.workspaces" :key="workspace" class="gws-chip gws-chip--workspace">
-                          {{ workspace }}
-                        </span>
-                      </span>
-                    </div>
-                    <div v-if="profile.config_dir">
-                      <span class="dev-label">Config</span>
-                      <code>{{ profile.config_dir }}</code>
-                    </div>
-                    <div>
-                      <span class="dev-label">OAuth client</span>
-                      <span :class="profile.client_secret_present ? 'status-text--ok' : 'status-text--warn'">
-                        {{ profile.client_secret_present ? 'present' : 'missing' }}
-                      </span>
-                    </div>
-                  </div>
-
-                  <!--
-                    Terminal and headless commands are not the main path, so they
-                    sit in a closed disclosure on every card, whatever its state.
-                  -->
-                  <details
-                    v-if="profile.setup_command || profile.headless_auth_command"
-                    class="gws-advanced"
-                  >
-                    <summary class="gws-advanced-summary">Advanced / headless setup</summary>
-                    <div :id="`gws-manual-${profile.name}`" class="gws-profile-meta gws-advanced-panel">
-                      <div v-if="!profile.client_secret_present">
-                        <span class="dev-label">Create client</span>
-                        <code class="gws-command">ciao gws {{ profile.name }} auth setup</code>
-                        <span class="hint hint--compact">Needs the <a :href="gwsReloginHelpUrl()" target="_blank" rel="noopener noreferrer">gcloud CLI</a>.</span>
-                      </div>
-                      <div v-if="profile.setup_command">
-                        <span class="dev-label">Login</span>
-                        <code class="gws-command">{{ profile.setup_command }}</code>
-                      </div>
-                      <div v-if="profile.headless_auth_command">
-                        <span class="dev-label">Headless</span>
-                        <code class="gws-command">{{ profile.headless_auth_command }}</code>
-                      </div>
-                    </div>
-                  </details>
-
-                  <!-- Interactive account connection controls -->
-                  <div class="gws-profile-actions">
-                    <!-- State 1: Needs client_secret.json -->
-                    <template v-if="!profile.client_secret_present">
-                      <p class="gws-action-hint">
-                        Upload the OAuth client (<code>client_secret.json</code>) you created in
-                        <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console</a>.
-                      </p>
-                      <label class="btn-small file-upload-btn">
-                        Upload client_secret.json
-                        <input
-                          type="file"
-                          accept=".json"
-                          style="display: none;"
-                          @change="handleClientSecretUpload($event, profile.name)"
-                          :disabled="gwsSavingProfile === profile.name"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        class="btn-primary btn-small"
-                        disabled
-                        :aria-describedby="`gws-signin-reason-${profile.name}`"
-                      >Sign in with Google</button>
-                      <span :id="`gws-signin-reason-${profile.name}`" class="gws-action-hint">Upload an OAuth client first.</span>
-                    </template>
-
-                    <!-- State 2: Ready to authenticate -->
-                    <template v-else-if="!profile.configured">
-                      <div v-if="!gwsAuthUrls[profile.name] && !gwsReloginPending[profile.name]" class="gws-btn-group">
-                        <button
-                          v-if="profile.loopback_eligible"
-                          class="btn-primary btn-small"
-                          :disabled="gwsSavingProfile === profile.name"
-                          @click="gwsReloginStart(profile.name)"
-                        >
-                          Sign in with Google
-                        </button>
-                        <button
-                          class="btn-small"
-                          :disabled="gwsSavingProfile === profile.name"
-                          @click="startGwsAuth(profile.name)"
-                        >
-                          Manual connect (paste code)
-                        </button>
-                        <button
-                          class="btn-small btn-danger"
-                          @click="disconnectGwsProfile(profile.name, true)"
-                          :disabled="gwsSavingProfile === profile.name"
-                        >
-                          Remove OAuth Client
-                        </button>
-                      </div>
-                      <p v-if="gwsReloginPending[profile.name]" class="gws-action-hint">
-                        <template v-if="gwsAuthUrls[profile.name]">
-                          The sign-in tab was blocked. Open this link, then finish in the browser — it connects automatically:
-                          <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
-                        </template>
-                        <template v-else>
-                          Sign-in in progress: complete it in the browser tab that opened. It will connect automatically.
-                        </template>
-                        <button class="btn-small" @click="gwsReloginCancel(profile.name)">Cancel</button>
-                      </p>
-                      <p v-else-if="gwsReloginError[profile.name]" class="gws-action-hint hint--warn">{{ gwsReloginError[profile.name] }}</p>
-                      <div v-else-if="gwsAuthUrls[profile.name]" class="gws-auth-flow-box">
-                        <p class="gws-flow-step">
-                          1. Follow the Google auth flow. If the browser did not open, click here:
-                          <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
-                        </p>
-                        <p class="gws-flow-step">
-                          2. After signing in, copy the full redirect URL (even if it fails to load) or authorization code, and paste it below:
-                        </p>
-                        <input
-                          type="text"
-                          class="routine-input gws-auth-input"
-                          v-model="gwsRedirectUrls[profile.name]"
-                          placeholder="Paste redirect URL (http://localhost/?code=...) or code"
-                          :disabled="gwsSavingProfile === profile.name"
-                          @keyup.enter="exchangeGwsCode(profile.name)"
-                        />
-                        <div class="gws-flow-buttons">
-                          <button
-                            class="btn-primary btn-small"
-                            @click="exchangeGwsCode(profile.name)"
-                            :disabled="!gwsRedirectUrls[profile.name]?.trim() || gwsSavingProfile === profile.name"
-                          >
-                            {{ gwsSavingProfile === profile.name ? 'Connecting...' : 'Complete Sign-In' }}
-                          </button>
-                          <button
-                            class="btn-small"
-                            @click="cancelGwsAuth(profile.name)"
-                            :disabled="gwsSavingProfile === profile.name"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    </template>
-
-                    <!-- State 3: Authenticated -->
-                    <template v-else>
-                      <p v-if="profile.needs_relogin" class="gws-action-hint hint--warn">
-                        This login has expired or been revoked<span v-if="profile.token_error"> ({{ profile.token_error }})</span>.
-                        Sign back in to restore Gmail, Calendar, Drive, and scheduled Google tasks.
-                      </p>
-                      <div v-if="!gwsAuthUrls[profile.name] && !gwsReloginPending[profile.name]" class="gws-btn-group">
-                        <button
-                          v-if="profile.needs_relogin && profile.loopback_eligible"
-                          class="btn-primary btn-small"
-                          :disabled="gwsSavingProfile === profile.name"
-                          @click="gwsReloginStart(profile.name)"
-                        >
-                          Re-authenticate
-                        </button>
-                        <button
-                          v-if="profile.needs_relogin"
-                          class="btn-small"
-                          :disabled="gwsSavingProfile === profile.name"
-                          @click="startGwsAuth(profile.name)"
-                        >
-                          Manual connect (paste code)
-                        </button>
-                        <button
-                          class="btn-small btn-danger"
-                          @click="disconnectGwsProfile(profile.name, false)"
-                          :disabled="gwsSavingProfile === profile.name"
-                        >
-                          Disconnect Account
-                        </button>
-                        <button
-                          class="btn-small btn-outline-danger"
-                          @click="disconnectGwsProfile(profile.name, true)"
-                          :disabled="gwsSavingProfile === profile.name"
-                        >
-                          Remove Client & Credentials
-                        </button>
-                      </div>
-                      <p v-if="gwsReloginPending[profile.name]" class="gws-action-hint">
-                        <template v-if="gwsAuthUrls[profile.name]">
-                          The re-auth tab was blocked. Open this link, then finish in the browser — it connects automatically:
-                          <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
-                        </template>
-                        <template v-else>
-                          Re-authentication in progress: complete it in the browser tab that opened. It will connect automatically.
-                        </template>
-                        <button class="btn-small" @click="gwsReloginCancel(profile.name)">Cancel</button>
-                      </p>
-                      <p v-else-if="gwsReloginError[profile.name]" class="gws-action-hint hint--warn">{{ gwsReloginError[profile.name] }}</p>
-                      <div v-else-if="gwsAuthUrls[profile.name]" class="gws-auth-flow-box">
-                        <p class="gws-flow-step">
-                          1. Follow the Google auth flow. If the browser did not open, click here:
-                          <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
-                        </p>
-                        <p class="gws-flow-step">
-                          2. After signing in, copy the full redirect URL (even if it fails to load) or authorization code, and paste it below:
-                        </p>
-                        <input
-                          type="text"
-                          class="routine-input gws-auth-input"
-                          v-model="gwsRedirectUrls[profile.name]"
-                          placeholder="Paste redirect URL (http://localhost/?code=...) or code"
-                          :disabled="gwsSavingProfile === profile.name"
-                          @keyup.enter="exchangeGwsCode(profile.name)"
-                        />
-                        <div class="gws-flow-buttons">
-                          <button
-                            class="btn-primary btn-small"
-                            @click="exchangeGwsCode(profile.name)"
-                            :disabled="!gwsRedirectUrls[profile.name]?.trim() || gwsSavingProfile === profile.name"
-                          >
-                            {{ gwsSavingProfile === profile.name ? 'Connecting...' : 'Complete Sign-In' }}
-                          </button>
-                          <button
-                            class="btn-small"
-                            @click="cancelGwsAuth(profile.name)"
-                            :disabled="gwsSavingProfile === profile.name"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    </template>
-                  </div>
-                </div>
-              </div>
-            </template>
-          </div>
-        </template>
+        <SettingsManageWorkspaces />
       </template>
 
 
@@ -1954,14 +1255,14 @@
 
       <!-- Native provider MCP inventory, scoped to the selected workspace. -->
       <template v-if="currentTab === 'mcp'">
-        <SettingsMcpServers :mcp="mcp" />
+        <SettingsMcpServers :mcp="mcp" :default-provider="mcpDefaultProvider" @ask-ciao="createAssetViaChat('mcp')" />
       </template>
       </div>
 
       <!-- On this page: built from the rendered sections of the current tab,
            so it follows whatever the tab actually shows (conditional sections
            included) instead of a second hand-kept list. -->
-      <aside v-if="tocItems.length > 1 || assetRail" class="page-rail settings-rail" aria-label="About this page">
+      <aside v-if="tocItems.length > 1 || assetRail || providersStatusRail" class="page-rail settings-rail" aria-label="About this page">
         <section v-if="tocItems.length > 1" class="rail-section">
           <h2 id="settings-toc-title" class="rail-title">On this page</h2>
           <nav class="settings-toc" aria-label="Sections on this page">
@@ -1976,15 +1277,15 @@
             >{{ item.label }}</button>
           </nav>
         </section>
-        <!-- Models: a glance at whether each CLI is working. -->
+        <!-- Providers: a glance at whether each CLI is working. -->
         <section
-          v-if="currentTab === 'models' && providerKeys?.connections"
+          v-if="providersStatusRail"
           class="rail-section settings-rail-status"
           aria-labelledby="settings-rail-status-title"
         >
           <h2 id="settings-rail-status-title" class="rail-title">Status</h2>
           <div class="rail-kvs">
-            <div v-for="(conn, connKey) in providerKeys.connections" :key="`rail-${connKey}`" class="rail-kv">
+            <div v-for="(conn, connKey) in providerKeys?.connections" :key="`rail-${connKey}`" class="rail-kv">
               <span>{{ conn.label || connKey }}</span>
               <strong :class="{ 'rail-attention': !conn.ok }">{{ conn.ok ? 'Connected' : 'Not connected' }}</strong>
             </div>
@@ -1996,13 +1297,15 @@
           <div class="rail-kvs">
             <div class="rail-kv"><span>Custom</span><strong>{{ assetRail.custom }}</strong></div>
             <div class="rail-kv"><span>Built in</span><strong>{{ assetRail.builtin }}</strong></div>
+            <div v-if="assetRail.global" class="rail-kv"><span>Global</span><strong>{{ assetRail.global }}</strong></div>
+            <div v-if="assetRail.installed" class="rail-kv"><span>Installed</span><strong>{{ assetRail.installed }}</strong></div>
             <div v-if="assetRail.other" class="rail-kv"><span>Other</span><strong>{{ assetRail.other }}</strong></div>
           </div>
           <p class="rail-note">
             Saved in <code>{{ assetRail.folder }}</code>.
             <template v-if="currentTab === 'skills'">
               Skills you install directly in a CLI stay available too; see
-              <RouterLink to="/settings/models#chat-providers">Models &amp; providers</RouterLink>.
+              <RouterLink to="/settings/providers#chat-providers">Providers</RouterLink>.
             </template>
           </p>
         </section>
@@ -2014,8 +1317,9 @@
 
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
+import SettingsManageWorkspaces from './settings/SettingsManageWorkspaces.vue'
 import { formatConnectorLabel } from '../lib/mcpLabels'
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
@@ -2028,15 +1332,15 @@ import {
   useFontScale,
 } from '../composables/useFontScale'
 import { useModalFocus } from '../composables/useModalFocus'
+import { useAppearanceSettings } from '../composables/useAppearanceSettings'
+import { readLocalTheme, type Theme } from '../lib/appearance'
 import type {
   AgentAssetsResponse,
-  ArchivedWorkspace,
   CommandAsset,
   CommandsResponse,
   CreatedAgentAssetResponse,
   DebugIssueReport,
   DeployResult,
-  GwsIntegrationSettings,
   LocalStatus,
   ModelsResponse,
   ProviderConfigSettings,
@@ -2045,10 +1349,7 @@ import type {
   SkillInventory,
   SlashCommand,
   SubagentAsset,
-  WorkspaceInfo,
-  RuntimeProvider,
   WorkspaceHealthResponse,
-  WorkspaceProvider,
   PackageStatus,
   PackageChangelog,
   PackageUpdateResult,
@@ -2065,7 +1366,11 @@ import {
   updateStageInFlight,
 } from '../lib/engineUpdate'
 import { askConfirm } from '../lib/confirm'
-import { archiveConfirmMessage, restoreConfirmMessage, restoredMessage } from '../lib/workspaceArchive'
+import { GWS_ACCOUNTS_KEY, useGwsAccounts } from '../composables/useGwsAccounts'
+import {
+  WORKSPACE_ADMIN_KEY,
+  useWorkspaceAdmin,
+} from '../composables/useWorkspaceAdmin'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useHousekeepingStore } from '../stores/housekeeping'
@@ -2081,30 +1386,34 @@ import { useCommandCopy } from '../composables/useCommandCopy'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
-import SettingsInsights from './settings/SettingsInsights.vue'
+import {
+  DEFAULT_INSIGHTS_SELECTION,
+  DEFAULT_MODE_SELECTION,
+  DEFAULT_MODEL_SELECTION,
+  DEFAULT_THINKING_SELECTION,
+  PROVIDER_MODE_OPTIONS,
+  useProviderChoices,
+  type AliasProviderKey,
+} from '../composables/useProviderChoices'
 import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
-import GwsSetupChecklist from './settings/GwsSetupChecklist.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
+import SettingsAppearance from './settings/SettingsAppearance.vue'
+import SettingsRadioGroup from './settings/SettingsRadioGroup.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
-import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
+import SettingsWorkspaceOverview from './settings/SettingsWorkspaceOverview.vue'
 import type { ModelSection } from '../lib/modelSections'
-import { isLoopbackHostname } from '../lib/loopback'
+import { modelDisplayName } from '../lib/modelLabels'
 import { settingsTabLabel } from '../lib/settingsNav'
+import { workspaceLabel } from '../lib/workspaceLabel'
 import { parseWorkspaceFileAccessHref } from '../lib/appLinks'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
-import {
-  DEFAULT_WORKSPACE_COLOR,
-  WORKSPACE_COLOR_PRESETS,
-  normalizeWorkspaceColor,
-  type WorkspaceColorId,
-} from '../lib/workspaceColors'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -2116,10 +1425,17 @@ const housekeeping = useHousekeepingStore()
 
 // Native MCP inventory follows the sidebar's selected workspace.
 const mcp = useMcpServers({ api, workspace: () => projectStore.activeWorkspace })
+const mcpDefaultProvider = computed(() => projectStore.workspaceOptions.find(w => w.name === projectStore.activeWorkspace)?.default_provider)
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
 })
+// The Overview page is about one workspace, so its header names it.
+const pageTag = computed(() => (
+  currentTab.value === 'workspace'
+    ? `${workspaceLabel(projectStore.activeWorkspace)} · Overview`
+    : settingsTabLabel(route.path)
+))
 
 // ── Keyboard shortcuts: the common four, the rest behind a disclosure ────
 
@@ -2257,40 +1573,40 @@ const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 
 // ── Appearance settings ────────────────────────────────────────────────────
-const activeTheme = ref('system')
+const activeTheme = ref<Theme>('system')
 // The scale itself, its bounds, its step and its persistence live in
 // useFontScale, shared with the global zoom shortcuts. Only the displayed
 // percentage is Settings' own: the scale is anchored to the pre-rescale UI, so
 // DEFAULT_FONT_SCALE (1.2) reads as "100%".
 const { fontScale, adjust: adjustFontScale, reset: resetFontScale } = useFontScale()
+const appearance = useAppearanceSettings()
 const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
 function loadAppearanceSettings() {
-  try {
-    activeTheme.value = localStorage.getItem('ciao-theme') || 'system'
-  } catch {
-    // Ignore localStorage block
-  }
+  activeTheme.value = appearance.settings.value.theme ?? readLocalTheme()
 }
 
-function setTheme(theme: 'dark' | 'light' | 'system') {
-  activeTheme.value = theme
-  try {
-    localStorage.setItem('ciao-theme', theme)
-  } catch { /* localStorage blocked */ }
+// Theme and font size are engine-wide: apply here at once, then store on the
+// engine so every device follows. A failed save reloads the engine value.
+const THEME_OPTIONS: { value: Theme; label: string }[] = [
+  { value: 'dark', label: 'Dark' },
+  { value: 'light', label: 'Light' },
+  { value: 'system', label: 'System' },
+]
+const appearanceError = ref('')
+// Another device (or the first load) can move the engine theme while Settings is open.
+// While a choice is being saved the control shows that choice, not the engine's
+// answer to an earlier one.
+watch([() => appearance.settings.value.theme, appearance.themeSaves], ([theme, saves]) => {
+  if (theme && saves === 0) activeTheme.value = theme
+})
 
-  if (theme === 'light') {
-    document.documentElement.classList.add('theme-light')
-  } else if (theme === 'dark') {
-    document.documentElement.classList.remove('theme-light')
-  } else {
-    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    if (isDark) {
-      document.documentElement.classList.remove('theme-light')
-    } else {
-      document.documentElement.classList.add('theme-light')
-    }
-  }
+function setTheme(theme: Theme) {
+  activeTheme.value = theme
+  appearanceError.value = ''
+  void appearance.saveTheme(theme).catch((cause: unknown) => {
+    appearanceError.value = cause instanceof Error ? cause.message : 'Could not save appearance settings.'
+  })
 }
 
 function isSkillExpanded(name: string) {
@@ -2352,25 +1668,18 @@ const agentAssets = ref<AgentAssetsResponse | null>(null)
 const agentAssetsLoaded = ref(false)
 const agentAssetsError = ref('')
 
-// ── Routine settings (Models tab) ─────────────────────────────────────────
+// ── Routine settings (Providers tab) ─────────────────────────────────────────
 const routines = ref<RoutineSettings | null>(null)
-const routinesLoaded = ref(false)
 const routinesError = ref('')
 const routinesSaving = ref(false)
-const routinesResult = ref('')
+const workspaceModels = ref<ModelsResponse | null>(null)
 
-// Every provider with models is a runtime provider now.
-type AliasProviderKey = RuntimeProvider
-
-type AliasProviderSection = {
-  key: AliasProviderKey
-  label: string
-  options: string[]
-  configurable: boolean
-  // Whether the provider is signed in and reporting models. Routine selectors
-  // filter to available sections.
-  available: boolean
-}
+const {
+  getProviderSection,
+  providerSectionsWithDefault,
+  providerDefaultModelOverride,
+  providerThinkingOptions,
+} = useProviderChoices({ routines, workspaceModels })
 
 interface WorkspaceMoveOperation {
   phase: string
@@ -2432,130 +1741,30 @@ async function fetchRoutines() {
     routines.value = await api.get<RoutineSettings>('/api/settings/routines')
   } catch (e) {
     routinesError.value = `Failed to load model settings: ${errorMessage(e)}`
-  } finally {
-    routinesLoaded.value = true
   }
 }
 
 async function saveRoutines(patch: Record<string, unknown>) {
   routinesSaving.value = true
-  routinesResult.value = ''
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
   } catch (e) {
     const detail = errorMessage(e)
-    routinesResult.value = `Error: ${detail}`
     notifyFailed('Could not save model settings', detail)
   } finally {
     routinesSaving.value = false
   }
 }
 
-function parseModelList(raw: string): string[] {
-  const seen = new Set<string>()
-  const models: string[] = []
-  for (const item of raw.split(',')) {
-    const model = item.trim()
-    if (!model || seen.has(model)) continue
-    seen.add(model)
-    models.push(model)
-  }
-  return models
-}
-
-const aliasProviderSections = computed<AliasProviderSection[]>(() => {
-  const settings = routines.value
-  if (!settings) return []
-  // Filtered to available backends — used by the routine model selectors,
-  // which must not offer a backend that isn't configured.
-  const sections: AliasProviderSection[] = [
-    {
-      key: 'claude',
-      label: 'Anthropic (via Claude Code)',
-      // The Anthropic tiers are real model ids, and config._operator_default_model
-      // honors a `claude` entry in provider_default_models, so this picker edits
-      // the same override every other provider's does.
-      options: settings.model_options.anthropic || [],
-      configurable: true,
-      available: true,
-    },
-  ]
-  // opencode can serve routines once its catalog is non-empty.
-  const opencodeModels = parseModelList((
-    workspaceModels.value?.opencode_models
-    || workspaceModels.value?.provider_models?.opencode
-    || []
-  ).join(','))
-  if (opencodeModels.length) {
-    sections.push({
-      key: 'opencode',
-      label: 'opencode',
-      options: opencodeModels,
-      configurable: true,
-      available: true,
-    })
-  }
-  return sections
-})
-
-function getProviderSection(provider: string): AliasProviderSection | undefined {
-  return aliasProviderSections.value.find((s) => s.key === provider)
-}
-
-// ── Per-provider default model / thinking (Models tab) ─────────────────
-const DEFAULT_MODEL_SELECTION = '__ciao_default_model__'
-
-function providerDefaultModelOverride(provider: AliasProviderKey): string {
-  return routines.value?.provider_default_models?.[provider] || ''
-}
-
-// The alias-provider section entry (models + disabled state) is identical
-// wherever a picker offers one provider's catalog; only the surrounding
-// sections (e.g. the "Default"/Automatic entry above) differ per caller.
-function aliasSectionEntry(provider: string): ModelSection {
-  const section = aliasProviderSections.value.find((s) => s.key === provider)
-  return {
-    key: provider,
-    label: section?.label || provider,
-    models: section?.options || [],
-    disabled: !section?.available,
-  }
-}
-
-// One provider's catalog behind a single "Default" entry, which the caller
-// names (the sentinel it stores as "unset" and the label it shows).
-function providerSectionsWithDefault(
-  provider: AliasProviderKey,
-  sentinel: string,
-  label: (effective: string) => string,
-): ModelSection[] {
-  return [
-    {
-      key: 'default',
-      label: 'Default',
-      models: [sentinel],
-      modelLabels: { [sentinel]: label(providerDefaultModelEffective(provider)) },
-    },
-    aliasSectionEntry(provider),
-  ]
-}
-
+// ── Per-provider default model / thinking (Providers tab) ─────────────────
 function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  return providerSectionsWithDefault(provider, DEFAULT_MODEL_SELECTION, (effective) =>
-    effective ? `Automatic (${effective})` : 'Automatic',
+  return providerSectionsWithDefault(
+    provider,
+    DEFAULT_MODEL_SELECTION,
+    (effective) => (effective ? `Automatic (${modelDisplayName(effective)})` : 'Automatic'),
+    true, // the entry names the model Automatic resolves to
   )
-}
-
-function providerDefaultModelEffective(provider: AliasProviderKey): string {
-  const selected = providerDefaultModelOverride(provider)
-  if (selected) return selected
-  const explicit = workspaceModels.value?.provider_defaults?.[provider]
-  if (explicit) return explicit
-  // Fall back to the provider's first discovered model so a routine pick can
-  // store a concrete id even before an operator default is configured.
-  const section = aliasProviderSections.value.find((s) => s.key === provider)
-  return section?.options?.[0] || ''
 }
 
 function providerDefaultModelSelectorValue(provider: AliasProviderKey): string {
@@ -2574,25 +1783,12 @@ async function saveProviderDefaultModel(provider: AliasProviderKey, value: strin
   await fetchWorkspaceModels()
 }
 
-const DEFAULT_THINKING_SELECTION = '__ciao_thinking_default__'
-
 function providerDefaultThinkingOverride(provider: AliasProviderKey): string {
   return routines.value?.provider_default_thinking?.[provider] || ''
 }
 
 function providerDefaultThinkingValue(provider: AliasProviderKey): string {
   return providerDefaultThinkingOverride(provider) || DEFAULT_THINKING_SELECTION
-}
-
-function providerThinkingOptions(provider: AliasProviderKey): { value: string; label: string }[] {
-  const levels = workspaceModels.value?.thinking_levels?.[provider] || []
-  return [
-    {
-      value: DEFAULT_THINKING_SELECTION,
-      label: 'Automatic (provider default)',
-    },
-    ...levels.map((level) => ({ value: level, label: level })),
-  ]
 }
 
 /** Segment label: the automatic entry is just "Auto"; levels are capitalised. */
@@ -2611,17 +1807,7 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
   await saveRoutines({ provider_default_thinking: defaults })
 }
 
-// ── Per-provider default permission mode (Models tab) ────────────────
-const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
-
-// PWA-facing names; "manual" maps to the BridgeMode "normal" on the backend.
-const PROVIDER_MODE_OPTIONS = [
-  { value: DEFAULT_MODE_SELECTION, label: 'Automatic (app default)' },
-  { value: 'manual', label: 'Manual — ask for every action' },
-  { value: 'auto', label: 'Auto — allow safe work, ask on risky' },
-  { value: 'bypass', label: 'Bypass — allow everything' },
-]
-
+// ── Per-provider default permission mode (Providers tab) ────────────────
 function providerDefaultModeValue(provider: AliasProviderKey): string {
   return routines.value?.provider_default_modes?.[provider] || DEFAULT_MODE_SELECTION
 }
@@ -2635,11 +1821,9 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
   await saveRoutines({ provider_default_modes: modes })
 }
 
-// ── Per-provider Session insights model (Models tab) ────────────────
+// ── Per-provider Session insights model (Providers tab) ────────────────
 // Automatic reads the session with that chat's own model; a closed project
 // uses its last-active chat (ciao/insights.py::resolve_insights_model).
-const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
-
 function providerInsightsModelSelectorValue(provider: AliasProviderKey): string {
   return routines.value?.provider_insights_models?.[provider] || DEFAULT_INSIGHTS_SELECTION
 }
@@ -2659,382 +1843,16 @@ async function saveProviderInsightsModel(provider: AliasProviderKey, value: stri
   await saveRoutines({ provider_insights_models: models })
 }
 
-// ── Provider connections (Models tab, chat providers card) ───────────────────
+// ── Provider connections (Providers tab, chat providers card) ───────────────────
 const providerKeys = ref<ProviderConfigSettings | null>(null)
 const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
+const providersStatusRail = computed(() => currentTab.value === 'providers' && !!providerKeys.value?.connections)
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
-const gwsIntegration = ref<GwsIntegrationSettings | null>(null)
-const gwsIntegrationLoaded = ref(false)
-const gwsIntegrationError = ref('')
-
-type GwsProfile = GwsIntegrationSettings['profiles'][number]
-
-function gwsProfileStatus(profile: GwsProfile): string {
-  if (profile.configured && profile.needs_relogin) return 'Login expired'
-  if (profile.configured) return 'Authenticated'
-  if (profile.client_secret_present) return 'Ready to auth'
-  return 'Needs OAuth client'
-}
-
-function gwsProfileBadgeClass(profile: GwsProfile): string {
-  if (profile.configured && profile.needs_relogin) return 'badge--error'
-  if (profile.configured) return 'badge--success'
-  if (profile.client_secret_present) return 'badge--warn'
-  return 'badge--error'
-}
-
-// Only the accounts this install actually has. No built-in personal/work pair:
-// a fresh install has none until the user adds one below.
-const gwsProfileOptions = computed(() =>
-  (gwsIntegration.value?.profiles || []).map((profile) => ({
-    name: profile.name,
-    label: profile.label,
-    email: profile.email,
-  })),
-)
-
-function workspaceCustomGwsProfile(profile: string): boolean {
-  const name = profile.trim()
-  return Boolean(name) && !gwsProfileOptions.value.some((option) => option.name === name)
-}
-
-async function fetchGwsIntegration() {
-  gwsIntegrationError.value = ''
-  try {
-    gwsIntegration.value = await api.get<GwsIntegrationSettings>('/api/integrations/gws')
-  } catch (e) {
-    gwsIntegrationError.value = `Failed to load Google Workspace integration: ${errorMessage(e)}`
-  } finally {
-    gwsIntegrationLoaded.value = true
-  }
-}
-
-const newGwsProfileName = ref('')
-const newGwsProfileLabel = ref('')
-const gwsProfileAdding = ref(false)
-const gwsProfileActionError = ref('')
-
-async function addGwsProfile() {
-  const name = newGwsProfileName.value.trim()
-  if (!name || gwsProfileAdding.value) return
-  gwsProfileAdding.value = true
-  gwsProfileActionError.value = ''
-  try {
-    gwsIntegration.value = await api.post<GwsIntegrationSettings>(
-      '/api/integrations/gws/profiles/add',
-      { name, label: newGwsProfileLabel.value.trim() },
-    )
-    newGwsProfileName.value = ''
-    newGwsProfileLabel.value = ''
-  } catch (e) {
-    gwsProfileActionError.value = errorMessage(e, 'Failed to add the account')
-  } finally {
-    gwsProfileAdding.value = false
-  }
-}
-
-async function removeGwsProfile(profile: GwsProfile) {
-  const linked = profile.workspaces.length
-    ? ` ${profile.workspaces.join(', ')} will lose their Google access until you link another account.`
-    : ''
-  if (!await askConfirm(
-    `Remove ${profile.label} and delete its stored Google credentials from this machine?${linked}`,
-    { title: 'Remove Google account?', confirmLabel: 'Remove account', destructive: true },
-  )) {
-    return
-  }
-  gwsSavingProfile.value = profile.name
-  gwsProfileActionError.value = ''
-  try {
-    gwsIntegration.value = await api.post<GwsIntegrationSettings>(
-      '/api/integrations/gws/profiles/remove',
-      { profile: profile.name },
-    )
-    await fetchWorkspacesList()
-  } catch (e) {
-    gwsProfileActionError.value = errorMessage(e, 'Failed to remove the account')
-  } finally {
-    gwsSavingProfile.value = null
-  }
-}
-
-async function installGwsInChat() {
-  try {
-    await projectStore.fixError({
-      errorText:
-        'The @googleworkspace/cli (gws) is not installed on this machine, so Google Workspace tools are unavailable.',
-      context:
-        'Installing @googleworkspace/cli from Settings → Google Workspace → Install in Chat. Run `npm install -g @googleworkspace/cli` (Node.js/npm required; npm exit code 243 / EACCES is common when /usr/local is root-owned after a .pkg Node install). Walk the operator through the install; Ciaobot never runs package installs on its own.',
-      title: 'Install gws',
-    })
-  } catch (e) {
-    notifyFailed('Could not open install chat', errorMessage(e))
-  }
-}
-
-const gwsSavingProfile = ref<string | null>(null)
-const gwsAuthUrls = ref<Record<string, string>>({})
-// PKCE flow id issued alongside the auth URL (issue #354). The server holds the
-// code_verifier for this id and refuses an exchange that cannot name it, so the
-// id has to survive from `startGwsAuth` to `exchangeGwsCode` or manual connect
-// can never complete.
-const gwsFlowIds = ref<Record<string, string>>({})
-const gwsRedirectUrls = ref<Record<string, string>>({})
-
-// One-click "Sign in with Google" loopback flow (issue #145). Tracks, per
-// profile, whether a server-managed re-login is pending so the Settings card
-// can poll `relogin/status` until it completes instead of copy-pasting a
-// redirect URL. Mirrors the manual JSON-upload flow as the power-user path.
-const gwsReloginPending = ref<Record<string, boolean>>({})
-const gwsReloginError = ref<Record<string, string>>({})
-let gwsReloginTimer: ReturnType<typeof setInterval> | null = null
-// A tick can outlast its own interval: the completed branch awaits
-// fetchGwsIntegration(), which runs a health check that shells out per profile
-// with a 30s timeout. Without this, every 2s tick in that window starts another
-// round of status polls and another concurrent health scan.
-let gwsReloginPolling = false
-
-function gwsReloginHelpUrl(): string {
-  return 'https://cloud.google.com/sdk/docs/install'
-}
-
-// The loopback re-login listener binds to this engine's own 127.0.0.1, so the
-// consent redirect only reaches it when the browser is on that machine
-// (localhost). From a phone or a LAN browser the popup's redirect would target
-// the browser's own loopback and never arrive — those users must use the
-// manual paste flow instead.
-function gwsOnEngineHost(): boolean {
-  return isLoopbackHostname(window.location.hostname)
-}
-
-async function gwsReloginStart(profileName: string) {
-  gwsReloginError.value[profileName] = ''
-  if (!gwsOnEngineHost()) {
-    // On a remote browser the loopback redirect can never arrive. Open the
-    // manual paste flow directly so the button does something useful instead of
-    // just showing an error the user then has to act on.
-    await startGwsAuth(profileName)
-    return
-  }
-  gwsSavingProfile.value = profileName
-  // Open a placeholder tab synchronously so the browser does not treat it as a
-  // popup (blocked outside the click's user-activation window); navigate it to
-  // the consent URL once the backend hands one back. If the popup is blocked,
-  // surface the link so the flow can still proceed manually.
-  const tab = window.open('', '_blank')
-  try {
-    const res = await api.post<{ auth_url: string }>('/api/integrations/gws/relogin/start', {
-      profile: profileName,
-    })
-    gwsReloginPending.value[profileName] = true
-    if (tab && tab.location) {
-      tab.location.href = res.auth_url
-    } else {
-      gwsReloginError.value[profileName] =
-        'The sign-in tab was blocked by the browser. Open this link, then finish here:'
-      gwsAuthUrls.value[profileName] = res.auth_url
-    }
-    gwsPollRelogin()
-  } catch (e) {
-    if (tab) tab.close()
-    const msg = errorMessage(e, 'Could not start the sign-in flow.')
-    // Web OAuth clients reject the loopback redirect entirely. That is not a
-    // transient failure — retrying the same endpoint will never work. Fall
-    // through to the manual paste flow so the sign-in still completes.
-    if (/web app/i.test(msg)) {
-      await startGwsAuth(profileName)
-      return
-    }
-    gwsReloginError.value[profileName] = msg
-  } finally {
-    gwsSavingProfile.value = null
-  }
-}
-
-function gwsClearRelogin(profileName: string) {
-  delete gwsReloginPending.value[profileName]
-  delete gwsReloginError.value[profileName]
-  // The fallback auth URL belongs to a now-finished loopback session; clearing
-  // it keeps the card out of a stale manual-flow state and un-hides the
-  // authenticated controls on success.
-  delete gwsAuthUrls.value[profileName]
-  delete gwsRedirectUrls.value[profileName]
-}
-
-function gwsPollRelogin() {
-  if (gwsReloginTimer) return
-  gwsReloginTimer = setInterval(async () => {
-    if (gwsReloginPolling) return
-    const pending = Object.entries(gwsReloginPending.value)
-      .filter(([, p]) => p)
-      .map(([name]) => name)
-    if (!pending.length) {
-      if (gwsReloginTimer) {
-        clearInterval(gwsReloginTimer)
-        gwsReloginTimer = null
-      }
-      return
-    }
-    gwsReloginPolling = true
-    try {
-      for (const name of pending) {
-        try {
-          const status = await api.get<{ status: string; email?: string; error?: string }>(
-            `/api/integrations/gws/relogin/status?profile=${encodeURIComponent(name)}`,
-          )
-          if (status.status === 'completed') {
-            gwsClearRelogin(name)
-            await fetchGwsIntegration()
-            notifySaved('Google account connected.')
-          } else if (status.status === 'error' || status.status === 'none') {
-            const msg =
-              status.error ||
-              (status.status === 'none'
-                ? 'The sign-in timed out before you finished it. Try again.'
-                : 'The sign-in failed.')
-            gwsClearRelogin(name)
-            gwsReloginError.value[name] = msg
-            await fetchGwsIntegration()
-          }
-        } catch (e) {
-          const msg = errorMessage(e, 'Could not check the sign-in status.')
-          gwsClearRelogin(name)
-          gwsReloginError.value[name] = msg
-        }
-      }
-    } finally {
-      gwsReloginPolling = false
-    }
-  }, 2000)
-}
-
-function gwsReloginCancel(profileName: string) {
-  gwsClearRelogin(profileName)
-  api.post('/api/integrations/gws/relogin/cancel', { profile: profileName }).catch(() => {})
-}
-
-onUnmounted(() => {
-  if (gwsReloginTimer) {
-    clearInterval(gwsReloginTimer)
-    gwsReloginTimer = null
-  }
-})
-
-async function handleClientSecretUpload(event: Event, profileName: string) {
-  const target = event.target as HTMLInputElement
-  const file = target.files?.[0]
-  if (!file) return
-
-  gwsSavingProfile.value = profileName
-  try {
-    const content = await file.text()
-    const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/client-secret', {
-      profile: profileName,
-      client_secret: content,
-    })
-    gwsIntegration.value = updated
-  } catch (e) {
-    notifyFailed('Could not upload the client secret', errorMessage(e, 'The upload failed.'))
-  } finally {
-    gwsSavingProfile.value = null
-    target.value = ''
-  }
-}
-
-async function startGwsAuth(profileName: string) {
-  gwsSavingProfile.value = profileName
-  // A prior one-click failure (e.g. the remote-browser guard) leaves an error
-  // that would otherwise win over the manual-flow box and hide it.
-  delete gwsReloginError.value[profileName]
-  delete gwsReloginPending.value[profileName]
-  // Open a placeholder tab synchronously so the manual auth URL does not get
-  // blocked as a popup — `window.open` after an `await` is outside the click's
-  // user-activation window and most browsers block it, forcing the user to
-  // click the fallback link. Same pattern as `gwsReloginStart`.
-  const tab = window.open('', '_blank')
-  try {
-    const res = await api.post<{ auth_url: string; flow_id?: string }>('/api/integrations/gws/auth-url', {
-      profile: profileName,
-    })
-    gwsAuthUrls.value[profileName] = res.auth_url
-    // The auth URL carries a code_challenge; without the matching flow id the
-    // exchange has no verifier to send and the server refuses it outright.
-    gwsFlowIds.value[profileName] = res.flow_id || ''
-    gwsRedirectUrls.value[profileName] = ''
-    if (tab && tab.location) {
-      tab.location.href = res.auth_url
-    } else if (tab) {
-      tab.close()
-    }
-    // The in-card "Open authorization page" link remains as the fallback when
-    // the popup was blocked (tab is null). No extra error needed — the
-    // gws-auth-flow-box already shows it.
-  } catch (e) {
-    if (tab) tab.close()
-    notifyFailed('Could not generate the authorization URL', errorMessage(e, 'The request failed.'))
-  } finally {
-    gwsSavingProfile.value = null
-  }
-}
-
-async function exchangeGwsCode(profileName: string) {
-  const code = gwsRedirectUrls.value[profileName]?.trim()
-  if (!code) return
-
-  gwsSavingProfile.value = profileName
-  try {
-    const flowId = gwsFlowIds.value[profileName] || ''
-    const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/exchange', {
-      profile: profileName,
-      code: code,
-      // Omitted only when the auth URL predates PKCE; the server tells those
-      // apart from a flow it has forgotten, and needs the distinction.
-      ...(flowId ? { flow_id: flowId } : {}),
-    })
-    gwsIntegration.value = updated
-    delete gwsAuthUrls.value[profileName]
-    delete gwsFlowIds.value[profileName]
-    delete gwsRedirectUrls.value[profileName]
-  } catch (e) {
-    notifyFailed('Could not complete the connection', errorMessage(e, 'The request failed.'))
-  } finally {
-    gwsSavingProfile.value = null
-  }
-}
-
-function cancelGwsAuth(profileName: string) {
-  delete gwsAuthUrls.value[profileName]
-  delete gwsFlowIds.value[profileName]
-  delete gwsRedirectUrls.value[profileName]
-}
-
-async function disconnectGwsProfile(profileName: string, deleteClientSecret: boolean) {
-  const message = deleteClientSecret
-    ? `Are you sure you want to delete the OAuth Client Secret for the ${profileName} profile?`
-    : `Are you sure you want to disconnect/sign out the ${profileName} Google account?`
-
-  if (!await askConfirm(message, {
-    title: deleteClientSecret ? 'Delete OAuth Client Secret' : 'Disconnect Google account',
-    confirmLabel: deleteClientSecret ? 'Delete secret' : 'Disconnect',
-    destructive: true,
-  })) return
-
-  gwsSavingProfile.value = profileName
-  try {
-    const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/disconnect', {
-      profile: profileName,
-      delete_client_secret: deleteClientSecret,
-    })
-    gwsIntegration.value = updated
-    cancelGwsAuth(profileName)
-  } catch (e) {
-    notifyFailed('Could not update the profile connection', errorMessage(e, 'The request failed.'))
-  } finally {
-    gwsSavingProfile.value = null
-  }
-}
+const gwsAccounts = useGwsAccounts({ notifySaved, notifyFailed })
+const { gwsProfileOptions, fetchGwsIntegration } = gwsAccounts
+provide(GWS_ACCOUNTS_KEY, gwsAccounts)
 
 async function fetchProviderKeys() {
   try {
@@ -3047,7 +1865,7 @@ async function fetchProviderKeys() {
   }
 }
 
-// /settings/providers lands on /settings/models#chat-providers. The anchor
+// /settings/providers#chat-providers lands on the Chat providers card. The anchor
 // only exists once the connections have loaded, so the browser's own hash
 // jump misses it, and the router has no scrollBehavior for in-app links (this
 // view stays mounted across tabs). Scroll on the first load and on each
@@ -3061,14 +1879,18 @@ function scrollToChatProvidersIfLinked(): void {
 }
 watch(() => route.fullPath, scrollToChatProvidersIfLinked)
 
-// Home links land on these home-tab cards (#install-app from the setup
-// card's "How to install", #other-devices from "Phone setup"); the cards
-// are mounted with the home tab, so only the scroll needs waiting for.
-const HOME_TAB_ANCHORS = new Set(['#install-app', '#other-devices'])
+// Home links land on these cards (#install-app on General from the setup
+// card's "How to install", #other-devices on Access & devices from "Phone
+// setup"). A link mounts the tab and sets the hash in one navigation and the
+// cards mount after the tab flips, so the scroll re-runs on either change.
+const TAB_ANCHORS: Record<string, string[]> = {
+  home: ['#install-app'],
+  access: ['#other-devices'],
+}
 watch(
-  () => route.hash,
-  hash => {
-    if (!HOME_TAB_ANCHORS.has(hash)) return
+  [() => route.hash, currentTab],
+  ([hash, tab]) => {
+    if (!TAB_ANCHORS[tab]?.includes(hash)) return
     void nextTick(() => {
       document.getElementById(hash.slice(1))?.scrollIntoView?.({ block: 'start' })
     })
@@ -3224,14 +2046,20 @@ const customSkills = computed(() => {
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
 
-type AssetRail = { title: string; custom: number; builtin: number; other: number; folder: string }
+type AssetRail = { title: string; custom: number; builtin: number; global: number; installed: number; other: number; folder: string }
 
-function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<AssetRail, 'custom' | 'builtin' | 'other'> {
-  const counts = { custom: 0, builtin: 0, other: 0 }
+function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<AssetRail, 'custom' | 'builtin' | 'global' | 'installed' | 'other'> {
+  const counts = { custom: 0, builtin: 0, global: 0, installed: 0, other: 0 }
   for (const item of items) {
+    if (item.scope && !['custom', 'built-in', 'global', 'installed'].includes(item.scope)) {
+      counts.other += 1
+      continue
+    }
     const origin = commandOrigin(item)
     if (origin === 'custom') counts.custom += 1
     else if (origin === 'builtin') counts.builtin += 1
+    else if (origin === 'global') counts.global += 1
+    else if (origin === 'installed' && (item.scope === undefined || item.scope === 'installed')) counts.installed += 1
     else counts.other += 1
   }
   return counts
@@ -3240,7 +2068,7 @@ function originCounts(items: { editable?: boolean; scope?: string }[]): Pick<Ass
 // Rail content for the asset list tabs; null elsewhere or while loading.
 const assetRail = computed<AssetRail | null>(() => {
   if (currentTab.value === 'skills' && skillsLoaded.value && !skillsError.value) {
-    return { title: 'Skills', custom: customSkills.value.length, builtin: stockSkills.value.length, other: 0, folder: 'skills/' }
+    return { title: 'Skills', custom: customSkills.value.length, builtin: stockSkills.value.length, global: 0, installed: 0, other: 0, folder: 'skills/' }
   }
   if (!agentAssetsLoaded.value || agentAssetsError.value) return null
   if (currentTab.value === 'subagents') {
@@ -3597,6 +2425,10 @@ const ASSET_CHAT_PROMPTS = {
     title: 'New Slash Command',
     prompt: 'I want to create a new shared slash command. Please guide me through writing it under the commands/ directory.',
   },
+  mcp: {
+    title: 'Add an MCP server',
+    prompt: 'Add an MCP server to this workspace. Ask me which server and its URL, run the CLI command for the provider I use, help me sign in, then reload this chat.',
+  },
 } as const
 
 function createSkillViaChat() {
@@ -3628,7 +2460,7 @@ async function createAssetViaChat(kind: keyof typeof ASSET_CHAT_PROMPTS) {
 }
 
 
-// ── Workspaces settings (Workspaces tab) ───────────────────────────────────
+// ── Workspaces settings (Overview and Manage workspaces) ───────────────────────────────────
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
 // leaving persistent inline text under the form.
@@ -3641,25 +2473,34 @@ function notifySaved(body: string, title = 'settings') {
 function notifyFailed(title: string, detail: string) {
   projectStore.pushErrorToast(title, detail)
 }
-const workspaceProviderFieldLabel = 'Agent CLI/Runtime'
-const workspacesLoaded = ref(false)
-const workspacesError = ref('')
-const workspacesSaving = ref<string | null>(null)
-const workspacesResult = ref('')
-const archivingWorkspace = ref<string | null>(null)
-const primaryWorkspace = ref<string | null>(null)
-const archivedWorkspaces = ref<ArchivedWorkspace[]>([])
-const archivedLoading = ref(false)
-const archivedLoadError = ref('')
-const restoringArchiveId = ref<string | null>(null)
-const showNewWorkspace = ref(false)
+
+// The workspace registry, its editor state and actions live in a composable so
+// the workspace pages share one load and one set of drafts.
+const workspaceAdmin = useWorkspaceAdmin({
+  notifySaved,
+  notifyFailed,
+  gwsProfileOptions,
+  fetchGwsIntegration,
+})
+const {
+  workspacesLoaded,
+  workspacesError,
+  showNewWorkspace,
+  workspaceForms,
+  workspaceLinkStatus,
+  workspaceLinkTarget,
+  fetchWorkspacesList,
+  fetchArchivedWorkspaces,
+} = workspaceAdmin
 // The sidebar's "New workspace" links to /settings/workspaces#new-workspace:
 // open the form and bring it into view instead of landing on the list.
 watch(
-  () => route.hash,
-  hash => {
+  () => [route.hash, currentTab.value, workspacesLoaded.value] as const,
+  ([hash, tab, loaded]) => {
     if (hash !== '#new-workspace') return
     showNewWorkspace.value = true
+    // The form renders once the list has loaded, so wait for that to focus it.
+    if (tab !== 'workspaces' || !loaded) return
     void nextTick(() => {
       document.querySelector('.workspace-card--new')?.scrollIntoView?.({ block: 'start' })
       document.querySelector<HTMLInputElement>('.workspace-card--new input')?.focus()
@@ -3667,92 +2508,8 @@ watch(
   },
   { immediate: true },
 )
-const workspaceModels = ref<ModelsResponse | null>(null)
 const workspaceModelsError = ref('')
 
-type WorkspaceForm = {
-  name: string
-  vault_root: string
-  default_provider: WorkspaceProvider
-  gws_profile: string
-  disallowed_tools: string
-  // Whether the workspace's Claude chats load the claude.ai connectors.
-  claude_ai_connectors: boolean
-  color: WorkspaceColorId
-  // '' is "no choice": the key is left out of a create, and an update sends
-  // null, so the engine keeps or returns the workspace to its default.
-  agent_fs_scope: FsScopeChoice
-}
-
-type FsScopeChoice = 'workspace' | 'machine' | ''
-
-// Copy for the File access select. The default's name comes from the engine's
-// payload (default_agent_fs_scope), so the PWA never restates the platform rule.
-const WORKSPACE_FS_SCOPE_LABEL: Record<'workspace' | 'machine', string> = {
-  workspace: 'Workspace only',
-  machine: 'Whole machine',
-}
-const WORKSPACE_FS_SCOPE_COPY: Record<FsScopeChoice, string> = {
-  '': 'Uses the default this engine applies to workspaces with no File access choice.',
-  workspace: 'Workspace only. The agent and its shell cannot read outside this workspace.',
-  machine: 'Whole machine. The agent can read any file this user can read.',
-}
-const WORKSPACE_FS_SANDBOX_NOTE = 'If the engine cannot sandbox, a workspace-only chat refuses to start until you choose whole machine.'
-// The engine's default for File access, from /api/workspaces. Null until the
-// list has loaded, when the default option carries no name yet.
-const fsScopeEngineDefault = ref<'workspace' | 'machine' | null>(null)
-const fsScopeDefaultOptionLabel = computed(() => {
-  const label = fsScopeEngineDefault.value ? WORKSPACE_FS_SCOPE_LABEL[fsScopeEngineDefault.value] : ''
-  return label ? `Default (${label})` : 'Default'
-})
-
-function defaultWorkspaceProvider(): WorkspaceProvider {
-  return projectStore.workspaceProviderOptions[0]?.value || 'claude'
-}
-
-function blankWorkspaceForm(): WorkspaceForm {
-  return {
-    name: '',
-    vault_root: '',
-    default_provider: defaultWorkspaceProvider(),
-    gws_profile: '',
-    disallowed_tools: '',
-    claude_ai_connectors: true,
-    color: DEFAULT_WORKSPACE_COLOR,
-    agent_fs_scope: '',
-  }
-}
-
-function normalizeWorkspaceProvider(value: unknown): WorkspaceProvider {
-  // A stored provider outside the current registry (for example the removed
-  // pre-refactor "ollama") would render a native select with no selected
-  // option. Keep the form on a registry value so it can be saved cleanly.
-  const storedProvider = typeof value === 'string' ? value.trim() : ''
-  return projectStore.workspaceProviderOptions.some((option) => option.value === storedProvider)
-    ? storedProvider
-    : defaultWorkspaceProvider()
-}
-
-// A workspace that never chose has no stored scope, so it reads as '' (the default).
-function fsScopeChoice(raw: unknown): FsScopeChoice {
-  return raw === 'workspace' || raw === 'machine' ? raw : ''
-}
-
-function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
-  return {
-    name: ws.name,
-    vault_root: ws.vault_root || '',
-    default_provider: normalizeWorkspaceProvider(ws.default_provider),
-    gws_profile: ws.gws_profile || '',
-    disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
-    claude_ai_connectors: ws.claude_ai_connectors !== false,
-    color: normalizeWorkspaceColor(ws.color),
-    agent_fs_scope: fsScopeChoice(ws.agent_fs_scope),
-  }
-}
-
-const workspaceForms = ref<WorkspaceForm[]>([])
-const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
 // One row "..." menu open at a time, keyed by row. Esc closes it here and
 // marks the press handled: ChatLayout's window Esc handler leaves Settings
 // unless the event was already handled, and Reka's own window listener is
@@ -3768,30 +2525,12 @@ function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
   event.preventDefault()
   settingsMenu.value = null
 }
+provide(WORKSPACE_ADMIN_KEY, { ...workspaceAdmin, settingsMenu, setSettingsMenu, closeSettingsMenuOnEscape })
 
-// Rows are collapsed to a summary; Edit opens one in place. The baseline is
-// the saved form, so Save appears only once something actually changed.
-const openWorkspace = ref<string | null>(null)
-const workspaceBaseline = ref<Record<string, string>>({})
-// The Name field of the open row. It is a draft kept beside `form.name`, not
-// bound to it: `form.name` is the row's identity (baseline, key, PATCH path),
-// and changing it mid-edit would re-key the card and lose focus.
-const workspaceNameDraft = ref('')
-// A File access link (`/settings/workspaces?workspace=NAME#file-access`) only
-// locates the control. This is the status shown when it cannot: an unknown
-// workspace, or another row's unsaved draft in the way. It names the target,
-// never a value, and never claims a setting changed.
-const workspaceLinkStatus = ref('')
-// The row being pointed at, so the CSS animation has one source of truth.
-const workspaceLinkTarget = ref<string | null>(null)
 // Bumped on every route resolution so a delayed list load from a superseded
 // link cannot open, scroll to or focus the wrong row.
 let workspaceLinkRequest = 0
 const WORKSPACE_LINK_OFFSET = 16
-
-function clearWorkspaceLinkHighlight(name: string): void {
-  if (workspaceLinkTarget.value === name) workspaceLinkTarget.value = null
-}
 
 function scrollToWorkspaceFileAccess(name: string): void {
   const body = bodyEl.value
@@ -3834,82 +2573,31 @@ async function applyWorkspaceFileAccessLink(fullPath: string): Promise<void> {
     workspaceLinkStatus.value = `No workspace named "${name}" exists. No settings changed.`
     return
   }
-  const openName = openWorkspace.value
-  if (openName && openName !== name) {
-    const openForm = workspaceForms.value.find(f => f.name === openName)
-    // One editor and one name draft are open at a time. Switching would
-    // discard what the user typed, so ask them to save or discard first.
-    if (openForm && workspaceDirty(openForm)) {
-      workspaceLinkStatus.value =
-        `Save or discard your changes to "${openName}" before opening File access for "${name}".`
-      return
-    }
-  }
-  // Already open: keep its draft exactly as it is. Re-initialising here would
-  // silently undo an edit to the name the link happens to name.
-  if (openWorkspace.value !== name) openWorkspaceEditor(name)
-  await nextTick()
+  // The page shows one workspace, so the link makes the named one active. It
+  // never selects a value or saves. Leaving a draft with unsaved edits asks
+  // first (the store's switch guard); declining keeps the user where they are.
+  await projectStore.switchWorkspace(name, { transition: false })
   if (request !== workspaceLinkRequest) return
-  scrollToWorkspaceFileAccess(name)
-}
-
-function openWorkspaceEditor(name: string): void {
-  openWorkspace.value = name
-  workspaceNameDraft.value = name
-}
-
-function workspaceDirty(form: WorkspaceForm): boolean {
-  const saved = workspaceBaseline.value[form.name]
-  if (saved === undefined) return false
-  if (openWorkspace.value === form.name && workspaceNameDraft.value.trim() !== form.name) return true
-  return saved !== JSON.stringify(form)
-}
-
-function discardWorkspace(name: string): void {
-  const saved = workspaceBaseline.value[name]
-  const index = workspaceForms.value.findIndex((f) => f.name === name)
-  if (saved !== undefined && index >= 0) {
-    workspaceForms.value[index] = JSON.parse(saved) as WorkspaceForm
+  if (projectStore.activeWorkspace !== name) {
+    workspaceLinkStatus.value =
+      `File access for "${name}" was not opened: your unsaved changes to "${projectStore.activeWorkspace}" were kept.`
+    return
   }
-  openWorkspace.value = null
+  await router.replace({ path: '/settings/workspace', hash: '#file-access' })
 }
 
-function workspaceSwatch(color: WorkspaceColorId): string {
-  return WORKSPACE_COLOR_PRESETS.find((preset) => preset.id === color)?.swatch || 'var(--accent)'
-}
-
-// The File access a workspace actually gets: its own choice, else the engine's
-// default. Empty until the list has loaded, when the default is not yet known.
-function workspaceFsScopeBadge(choice: FsScopeChoice): string {
-  const effective = choice || fsScopeEngineDefault.value
-  return effective ? WORKSPACE_FS_SCOPE_LABEL[effective] : ''
-}
-
-function workspaceSummary(form: WorkspaceForm): string {
-  const provider = workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
-    || form.default_provider
-  const profile = form.gws_profile
-    ? gwsProfileOptions.value.find((option) => option.name === form.gws_profile)?.label || form.gws_profile
-    : ''
-  const parts = [provider, profile ? `Google: ${profile}` : 'No Google account']
-  if (form.name === primaryWorkspace.value) parts.push('Main workspace')
-  return parts.join(' · ')
-}
-
-const workspaceProviderOptions = computed(() =>
-  projectStore.workspaceProviderOptions.length
-    ? projectStore.workspaceProviderOptions
-    : [{ value: 'claude' as WorkspaceProvider, label: 'Claude' }]
+// The Overview page is the active workspace's editor. A File access link lands
+// here with #file-access: scroll to and focus the selector once the list is in.
+watch(
+  () => [route.hash, currentTab.value, workspacesLoaded.value] as const,
+  async ([hash, tab, loaded]) => {
+    if (tab !== 'workspace' || !loaded) return
+    await nextTick()
+    if (hash === '#file-access') scrollToWorkspaceFileAccess(projectStore.activeWorkspace)
+    else if (hash === '#workspace-name') document.getElementById('workspace-name-input')?.focus()
+  },
+  { immediate: true },
 )
-
-function disallowedToolsPayload(raw: string): string[] | null {
-  const cleaned = raw.trim()
-  if (!cleaned) return null
-  return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
-}
-
-
-
 
 // Platform MCP list only — exclude Ciaobot project servers from .mcp.json
 // (n8n_mcp, notion, ciaobot), which have their own MCP status section.
@@ -3935,28 +2623,6 @@ function connectionMcps(providerId: string): string[] {
   return result
 }
 
-
-async function fetchWorkspacesList() {
-  workspacesError.value = ''
-  try {
-    const res = await projectStore.fetchWorkspaces()
-    primaryWorkspace.value = res?.primary ?? null
-    fsScopeEngineDefault.value = res?.default_agent_fs_scope ?? null
-    workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
-    workspaceBaseline.value = Object.fromEntries(
-      workspaceForms.value.map((form) => [form.name, JSON.stringify(form)]),
-    )
-    if (openWorkspace.value && !workspaceForms.value.some((f) => f.name === openWorkspace.value)) {
-      openWorkspace.value = null
-    }
-    newWorkspaceForm.value.default_provider = normalizeWorkspaceProvider(newWorkspaceForm.value.default_provider)
-  } catch (e) {
-    workspacesError.value = `Failed to load workspaces: ${errorMessage(e)}`
-  } finally {
-    workspacesLoaded.value = true
-  }
-}
-
 // `force` bypasses the provider catalog caches, which costs a provider process
 // spawn. Opening Settings is exactly the moment a user has just connected a
 // provider elsewhere, so the tab does refresh -- but it renders from cache first
@@ -3972,192 +2638,58 @@ async function fetchWorkspaceModels(force = false) {
   }
 }
 
-function renameConfirmMessage(from: string, to: string): string {
-  const message = `Rename "${from}" to "${to}". Projects and automations keep their ids and follow the new name.`
-  // Without a workspace named `personal`, the first one in the list is the
-  // main workspace, and a rename keeps its place in the list (#1188).
-  const first = workspaceForms.value[0]?.name
-  if (from === 'personal' && first !== from) return `${message} "${first}" becomes the main workspace.`
-  // A workspace named `personal` is the main one whatever its place in the list.
-  if (to === 'personal' && (primaryWorkspace.value ?? first) !== from) return `${message} It becomes the main workspace.`
-  return message
-}
-
-async function saveWorkspace(name: string) {
-  const form = workspaceForms.value.find((f) => f.name === name)
-  if (!form) return
-  const target = workspaceNameDraft.value.trim()
-  const renaming = target !== name
-  // An empty name would otherwise be read by the server as "no rename" and
-  // dropped silently, so refuse it here.
-  if (renaming && !target) {
-    workspacesResult.value = 'Enter a workspace name.'
-    return
-  }
-  if (renaming && !await askConfirm(renameConfirmMessage(name, target), {
-    title: 'Rename workspace',
-    confirmLabel: 'Rename',
-    destructive: false,
-  })) return
-  workspacesSaving.value = name
-  workspacesResult.value = ''
-  try {
-    await projectStore.updateWorkspace(name, {
-      // Only a changed name is sent; an unchanged save is the plain patch.
-      ...(renaming ? { name: target } : {}),
-      // Send what the form holds. Overwriting it with the workspace name
-      // silently discarded any vault path the user had set, and reset an
-      // adopted workspace's `memory-vault/<name>` root to a bare name.
-      vault_root: form.vault_root.trim() || target,
-      default_provider: form.default_provider,
-      gws_profile: form.gws_profile,
-      disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
-      claude_ai_connectors: form.claude_ai_connectors,
-      color: form.color,
-      // Sent only when File access was changed. Picking the default again goes
-      // as null, which clears an earlier explicit choice.
-      ...(form.agent_fs_scope !== fsScopeChoice(projectStore.workspaces.find(w => w.name === name)?.agent_fs_scope)
-        ? { agent_fs_scope: form.agent_fs_scope || null }
-        : {}),
-    })
-    notifySaved(renaming ? `Workspace "${name}" renamed to "${target}".` : `Workspace "${name}" saved.`, 'Workspaces')
-    openWorkspace.value = null
-    await fetchWorkspacesList()
-    void fetchGwsIntegration()
-  } catch (e) {
-    const detail = apiErrorMessage(e, 'The workspace could not be saved.')
-    workspacesResult.value = `Error: ${detail}`
-    notifyFailed(`Workspace "${name}" not saved`, detail)
-  } finally {
-    workspacesSaving.value = null
-  }
-}
-
-async function createNewWorkspace() {
-  const form = newWorkspaceForm.value
-  if (!form.name.trim()) {
-    workspacesResult.value = 'Enter a workspace name.'
-    return
-  }
-  workspacesSaving.value = 'new'
-  workspacesResult.value = ''
-  try {
-    await projectStore.createWorkspace({
-      name: form.name.trim(),
-      // The "Vault name" field is optional and defaults to the workspace name.
-      vault_root: form.vault_root.trim() || form.name.trim(),
-      default_provider: form.default_provider,
-      gws_profile: form.gws_profile,
-      disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
-      color: form.color,
-      // Sent only when the user picked a value, so the server applies its default.
-      ...(form.agent_fs_scope ? { agent_fs_scope: form.agent_fs_scope } : {}),
-    })
-    notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
-    showNewWorkspace.value = false
-    newWorkspaceForm.value = blankWorkspaceForm()
-    await fetchWorkspacesList()
-    void fetchGwsIntegration()
-  } catch (e) {
-    const detail = apiErrorMessage(e, 'The workspace could not be created.')
-    workspacesResult.value = `Error: ${detail}`
-    notifyFailed(`Workspace "${form.name.trim()}" not created`, detail)
-  } finally {
-    workspacesSaving.value = null
-  }
-}
-
-// The primary workspace and the last one cannot be archived; the server
-// refuses both, so the button is not offered for them.
-function workspaceArchivable(name: string): boolean {
-  return workspaceForms.value.length > 1 && name !== primaryWorkspace.value
-}
-
-async function archiveWorkspace(name: string) {
-  if (!await askConfirm(archiveConfirmMessage(name), {
-    title: 'Archive workspace',
-    confirmLabel: 'Archive workspace',
-    // Recoverable, so not styled as a destructive delete (DESIGN.md).
-    destructive: false,
-  })) return
-  archivingWorkspace.value = name
-  workspacesResult.value = ''
-  try {
-    const res = await projectStore.archiveWorkspace(name)
-    const where = res.archived?.path ? ` Files are in ${res.archived.path}.` : ''
-    notifySaved(`Workspace "${name}" archived.${where}`, 'Workspaces')
-    await Promise.all([fetchWorkspacesList(), fetchArchivedWorkspaces()])
-  } catch (e) {
-    const detail = apiErrorMessage(e, 'The workspace could not be archived.')
-    workspacesResult.value = `Error: ${detail}`
-    notifyFailed(`Workspace "${name}" not archived`, detail)
-  } finally {
-    archivingWorkspace.value = null
-  }
-}
-
-async function fetchArchivedWorkspaces() {
-  archivedLoading.value = true
-  archivedLoadError.value = ''
-  try {
-    archivedWorkspaces.value = await projectStore.fetchArchivedWorkspaces()
-  } catch (e) {
-    archivedLoadError.value = `Could not load archived workspaces: ${errorMessage(e)}`
-  } finally {
-    archivedLoading.value = false
-  }
-}
-
-function formatArchivedAt(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return iso
-  return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-}
-
-async function restoreWorkspace(item: ArchivedWorkspace) {
-  // The archive's metadata syncs through git like any note, so show what the
-  // restore will apply (validated server-side) before applying it.
-  if (!await askConfirm(restoreConfirmMessage(item), {
-    title: 'Restore workspace',
-    confirmLabel: 'Restore workspace',
-    destructive: false,
-  })) return
-  restoringArchiveId.value = item.id
-  workspacesResult.value = ''
-  try {
-    const res = await projectStore.restoreArchivedWorkspace(item.id)
-    notifySaved(restoredMessage(item.name, res.restored?.schedules_paused ?? 0), 'Workspaces')
-    await Promise.all([fetchWorkspacesList(), fetchArchivedWorkspaces(), projectStore.fetchAll()])
-  } catch (e) {
-    const detail = apiErrorMessage(e, 'The workspace could not be restored.')
-    workspacesResult.value = `Error: ${detail}`
-    notifyFailed(`Workspace "${item.name}" not restored`, detail)
-  } finally {
-    restoringArchiveId.value = null
-  }
-}
 
 // Each tab loads only the data its visible controls use. A completed or
 // in-flight load is reused while this view stays mounted; workspace-scoped
 // tabs get a separate load after switching roots.
 const tabLoads = new Map<string, Promise<void>>()
+// The workspace list feeds both workspace pages. It loads once per registry
+// revision, not once per page: a second load would rebuild the forms and drop
+// the unsaved edits a user left on Overview when they open Workspaces.
+let workspaceListLoad: Promise<void> | null = null
+function ensureWorkspaceList(): Promise<void> {
+  workspaceListLoad ??= fetchWorkspacesList()
+  return workspaceListLoad
+}
 function loadSettingsTab(tab: string): Promise<void> {
-  const scoped = ['models', 'skills', 'subagents', 'commands', 'mcp'].includes(tab)
+  const scoped = ['providers', 'skills', 'subagents', 'commands', 'mcp'].includes(tab)
   const key = scoped ? `${tab}:${projectStore.activeWorkspace}` : tab
   const prior = tabLoads.get(key)
   if (prior) return prior
   let reads: Promise<unknown>[]
   switch (tab) {
     case 'home':
+      // The Updates card reads the package and update status; Session
+      // insights reads the routines.
+      reads = [fetchPackageStatus(), fetchUpdateStatus(), fetchRoutines()]
+      break
+    case 'appearance':
+      // The card is local: loadAppearanceSettings() runs on mount.
+      reads = []
+      break
+    case 'access':
+      // PWA password; Network access reads the routines. SettingsDevices
+      // owns its own loads.
+      reads = [fetchAuthSettings(), fetchRoutines()]
+      break
+    case 'advanced':
+      // The health card waits on the agent assets, so this tab has to read
+      // them: without this it stays on its loader until another tab happens
+      // to fetch the same data.
       reads = [fetchLocalStatus().then(() => {
         if (localStatus.value?.dev_mode) return refreshDebugIssues()
-      }), fetchAuthSettings(), fetchRoutines(), fetchWorkspaceMove(), fetchPackageStatus(), fetchUpdateStatus()]
+      }), fetchRoutines(), fetchWorkspaceMove(), fetchAgentAssets()]
       break
-    case 'models':
+    case 'providers':
       reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), mcp.fetchStatus(), fetchWorkspaceModels()]
       break
+    case 'workspace':
+      // Not scoped: the list covers every workspace. Handover and Update tasks
+      // reload themselves when the active workspace changes.
+      reads = [fetchGwsIntegration(), ensureWorkspaceList()]
+      break
     case 'workspaces':
-      reads = [fetchGwsIntegration(), fetchWorkspacesList(), fetchArchivedWorkspaces()]
+      reads = [fetchGwsIntegration(), ensureWorkspaceList(), fetchArchivedWorkspaces()]
       break
     case 'skills':
       reads = [fetchSkills()]
@@ -4198,7 +2730,10 @@ watch(currentTab, tab => { void loadSettingsTab(tab) })
 
 watch(() => projectStore.workspaceRegistryRevision, () => {
   tabLoads.delete('workspaces')
+  tabLoads.delete('workspace')
+  workspaceListLoad = null
   if (currentTab.value === 'workspaces') void loadSettingsTab('workspaces')
+  else if (currentTab.value === 'workspace') void loadSettingsTab('workspace')
 })
 
 watch(() => projectStore.activeWorkspace, () => {
@@ -4207,8 +2742,13 @@ watch(() => projectStore.activeWorkspace, () => {
   for (const key of tabLoads.keys()) {
     if (key.includes(':')) tabLoads.delete(key)
   }
-  if (['models', 'skills', 'subagents', 'commands', 'mcp'].includes(currentTab.value)) {
+  if (['providers', 'skills', 'subagents', 'commands', 'mcp'].includes(currentTab.value)) {
     void loadSettingsTab(currentTab.value)
+  } else if (currentTab.value === 'advanced') {
+    // The advanced tab's health card reads the same workspace-scoped agent
+    // assets, so a switch has to refresh them too. The advanced tab itself stays
+    // unscoped: its other reads do not belong to a workspace.
+    void fetchAgentAssets()
   }
 })
 
@@ -4332,7 +2872,7 @@ async function fixDeployErrorInChat() {
   const defaultWorkspace = projectStore.workspaceOptions[0]?.name || 'personal'
 
   if (projectStore.activeWorkspace !== defaultWorkspace) {
-    await projectStore.switchWorkspace(defaultWorkspace)
+    if ((await projectStore.switchWorkspace(defaultWorkspace)) === false) return
   }
 
   let project = projectStore.projects.find(p => p.workspace === defaultWorkspace)
@@ -4385,7 +2925,7 @@ async function fixIssuesInChat() {
 
     const defaultWorkspace = projectStore.workspaceOptions[0]?.name || 'personal'
     if (projectStore.activeWorkspace !== defaultWorkspace) {
-      await projectStore.switchWorkspace(defaultWorkspace)
+      if ((await projectStore.switchWorkspace(defaultWorkspace)) === false) return
     }
     let project = projectStore.projects.find(p => p.workspace === defaultWorkspace)
     if (!project) {
@@ -5414,45 +3954,6 @@ a.btn-secondary {
   overflow-x: auto;
 }
 
-.instance-toggle {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  margin-top: 0;
-  width: 100%;
-}
-/* A quiet segmented control: the current choice is a raised tile, not an
-   accent fill - the accent stays reserved for each section's one action. */
-.toggle-btn {
-  flex: 1;
-  min-height: 36px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 6px;
-  cursor: pointer;
-  background: transparent;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  transition: background 0.15s, color 0.15s;
-}
-.toggle-btn:hover:not(:disabled) {
-  color: var(--fg);
-}
-.toggle-btn.active {
-  background: var(--bg3);
-  color: var(--fg);
-}
-@media (pointer: coarse) {
-  .toggle-btn { min-height: var(--touch); }
-}
-.toggle-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
 .status-dot {
   display: inline-block;
   width: 8px;
@@ -5468,18 +3969,6 @@ a.btn-secondary {
   background: var(--error);
 }
 
-.routine-detail {
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  line-height: 1.35;
-}
-.routine-detail code {
-  font-size: var(--text-xs);
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--bg);
-  color: var(--fg);
-}
 .workspace-move-row {
   margin-top: var(--space-3);
 }
@@ -5539,11 +4028,6 @@ a.btn-secondary {
   margin-right: 10px;
   color: var(--fg3);
 }
-.settings-control {
-  width: min(100%, 430px);
-  min-width: 320px;
-  flex: 0 0 auto;
-}
 .tier-provider-section {
   padding-top: var(--space-3);
   margin-top: var(--space-3);
@@ -5563,45 +4047,6 @@ a.btn-secondary {
 .tier-provider-note {
   margin-top: var(--space-2);
 }
-.integration-warning {
-  margin-top: var(--space-3);
-}
-.gws-profile-list {
-  display: flex;
-  flex-direction: column;
-  margin-top: var(--space-3);
-}
-/* Account entries follow the flat settings-section rhythm rather than
-   competing card surfaces. */
-.gws-profile-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  min-width: 0;
-  padding: var(--space-4) 0;
-  border-bottom: 1px solid var(--border);
-}
-.gws-profile-card:first-child { padding-top: 0; }
-/* Title, status chip and Remove share one wrapping row. No absolute or
-   negative positioning: the title shrinks (min-width: 0) and the chip and
-   button hold their size, so nothing can ever overprint the title. */
-.gws-profile-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--space-2) var(--space-3);
-}
-/* `flex: 1 1 0` (not `auto`): flex wrapping is decided on the base size, so a
-   content-sized heading would push the chip and button onto their own line
-   instead of letting the title wrap inside the row. */
-.gws-profile-heading {
-  flex: 1 1 0;
-  min-width: 0;
-}
-.gws-profile-badge,
-.gws-profile-remove {
-  flex: 0 0 auto;
-}
 .gws-account-add {
   display: flex;
   flex-direction: column;
@@ -5610,222 +4055,6 @@ a.btn-secondary {
   border-bottom: 1px dashed var(--border);
   margin-bottom: var(--space-3);
 }
-.gws-account-add-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  align-items: center;
-}
-.gws-account-add-row .routine-input {
-  flex: 1 1 180px;
-  min-width: 0;
-}
-.gws-profile-title {
-  margin: 0;
-  min-width: 0;
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-weight: 700;
-  overflow-wrap: anywhere;
-}
-.gws-profile-purpose {
-  margin: 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.35;
-}
-.gws-example-row,
-.gws-workspace-chips {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  min-width: 0;
-}
-.gws-chip {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg3);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.35;
-}
-.gws-chip--workspace {
-  color: var(--fg);
-}
-.gws-profile-meta {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-}
-.gws-profile-meta > div {
-  display: grid;
-  grid-template-columns: 92px minmax(0, 1fr);
-  align-items: start;
-  gap: var(--space-2);
-  min-width: 0;
-}
-.gws-profile-meta .dev-label {
-  min-width: 0;
-}
-.gws-profile-meta code,
-.gws-command {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.gws-command {
-  display: inline-block;
-}
-.status-text--ok {
-  color: var(--success);
-}
-.status-text--warn {
-  color: var(--warning, #b7791f);
-}
-.gws-profile-email {
-  margin: 0;
-  color: var(--accent);
-  font-size: var(--text-xs);
-  font-weight: 500;
-}
-.gws-profile-actions {
-  padding-top: var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-/* Terminal and headless commands: a native disclosure drawn like the install
-   card's, so its summary is a real button with a 44px touch target. */
-.gws-advanced-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--touch);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  list-style: none;
-}
-.gws-advanced-summary::-webkit-details-marker { display: none; }
-.gws-advanced-summary::before {
-  content: '';
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  margin: 0 2px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: rotate(-45deg);
-  transition: transform 120ms var(--ease);
-}
-.gws-advanced[open] > .gws-advanced-summary::before { transform: rotate(45deg); }
-@media (prefers-reduced-motion: reduce) {
-  .gws-advanced-summary::before { transition: none; }
-}
-.gws-advanced-summary:hover { color: var(--fg); }
-.gws-advanced-summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
-}
-.gws-advanced-panel {
-  border-top: none;
-  padding-top: 0;
-}
-.gws-action-hint {
-  margin: 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-}
-.file-upload-btn {
-  display: block;
-  text-align: center;
-  cursor: pointer;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--text-xs);
-  color: var(--fg);
-  font-weight: 500;
-  width: 100%;
-}
-.file-upload-btn:hover {
-  background: var(--bg2);
-  border-color: var(--fg3);
-}
-/* One stacked, full-width block: every card's actions then have identical
-   widths whatever the column, and they stay comfortable on touch. */
-.gws-btn-group {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: var(--space-2);
-}
-.gws-btn-group > .btn-small,
-.gws-btn-group > .btn-primary {
-  width: 100%;
-}
-.gws-auth-flow-box {
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-.gws-flow-step {
-  margin: 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.4;
-}
-.gws-auth-link {
-  color: var(--accent);
-  text-decoration: underline;
-  font-weight: 500;
-}
-.gws-auth-link:hover {
-  color: var(--accent2);
-}
-.gws-auth-input {
-  font-size: var(--text-xs) !important;
-  padding: 4px 8px !important;
-}
-.gws-flow-buttons {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: var(--space-1);
-}
-.gws-flow-buttons > button {
-  flex: 1 1 0;
-  min-width: 0;
-}
-/* Touch layouts keep every card control at the 44px minimum. */
-@media (pointer: coarse) {
-  .gws-profile-card .btn-small,
-  .gws-profile-card .btn-primary,
-  .gws-profile-card .file-upload-btn,
-  .gws-advanced-summary {
-    min-height: var(--touch);
-  }
-}
-.btn-outline-danger {
-  background: transparent;
-  border: 1px solid var(--error);
-  color: var(--error);
-}
-.btn-outline-danger:hover {
-  background: color-mix(in srgb, var(--error) 10%, transparent);
-}
 @container (max-width: 720px) {
   .pane-body {
     padding: var(--space-3);
@@ -5833,14 +4062,6 @@ a.btn-secondary {
   .action-row--compact > button {
     flex: 1 1 100%;
     width: 100%;
-  }
-  .settings-control {
-    min-width: 0;
-    width: 100%;
-  }
-  /* The heading takes the full row; status and account actions wrap below. */
-  .gws-profile-heading {
-    flex: 1 1 100%;
   }
 }
 
@@ -5944,121 +4165,6 @@ a.btn-secondary {
   margin-top: var(--space-5);
 }
 
-.workspace-list {
-  display: flex;
-  flex-direction: column;
-  margin-top: var(--space-2);
-}
-/* One workspace = one collapsed hairline row (.set-row); Edit opens its
-   fields in place underneath. */
-.workspace-card {
-  display: flex;
-  flex-direction: column;
-  border-radius: 0;
-  background: transparent;
-}
-/* A File access link briefly tints the row it found. The animation carries no
-   meaning: the focus ring on the select is the durable cue, and reduced motion
-   keeps that while dropping the tint. */
-.workspace-card--target {
-  animation: workspace-link-target 1.6s var(--ease);
-}
-@keyframes workspace-link-target {
-  0% { background-color: color-mix(in srgb, var(--accent) 14%, transparent); }
-  100% { background-color: transparent; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .workspace-card--target { animation: none; }
-}
-.workspace-link-status {
-  margin: var(--space-2) 0;
-}
-/* The unsaved new workspace keeps a light frame: it is a draft form, and it
-   has to read as not-yet-real next to the saved rows. */
-.workspace-card--new {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-.workspace-card-header {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-.workspace-title {
-  margin: 0;
-  color: var(--fg);
-  font-size: var(--text-base);
-  font-weight: 600;
-}
-.workspace-edit-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
-.workspace-edit-actions .btn-small {
-  flex: 0 0 auto;
-}
-.workspace-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: 0 0 auto;
-}
-.workspace-actions .btn-small {
-  flex: 0 0 auto;
-}
-.archived-workspaces {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin-top: var(--space-4);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
-.archived-workspaces .subsection-title {
-  margin: 0;
-}
-.archived-list {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border-top: 1px solid var(--border);
-}
-.archived-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  min-height: 52px;
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--border);
-}
-.archived-item-text {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  min-width: 0;
-}
-.archived-item-text p {
-  margin: 0;
-}
-.archived-item-text code {
-  overflow-wrap: anywhere;
-}
-.archived-item .btn-small {
-  flex: 0 0 auto;
-}
-/* The reason is printed beside it; the dimming only confirms it. */
-.archived-item .btn-small:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-}
 .provider-defaults {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -6087,49 +4193,6 @@ a.btn-secondary {
   .provider-defaults {
     grid-template-columns: 1fr;
   }
-}
-.workspace-color-swatches {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-/* 26px swatch; the selected one carries a ring in the text colour so the
-   choice reads without relying on the swatch hue. */
-.workspace-color-swatch {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: var(--swatch);
-  cursor: pointer;
-  transition: box-shadow 120ms var(--ease), transform 120ms var(--ease);
-}
-.workspace-color-swatch:hover:not(:disabled) {
-  transform: scale(1.08);
-}
-.workspace-color-swatch.active {
-  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
-}
-@media (pointer: coarse) {
-  .workspace-color-swatch {
-    width: var(--touch);
-    height: var(--touch);
-    background: radial-gradient(circle at center, var(--swatch) 0 13px, transparent 14px);
-  }
-  .workspace-color-swatch.active {
-    box-shadow: none;
-    background: radial-gradient(circle at center, var(--swatch) 0 13px, var(--bg) 14px 15px, var(--fg) 16px 17px, transparent 18px);
-  }
-}
-.workspace-color-swatch:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.workspace-color-swatch:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
 }
 .field-info {
   position: relative;
@@ -6231,38 +4294,6 @@ a.btn-secondary {
 .field-info-panel a {
   color: var(--accent);
 }
-.workspace-select {
-  appearance: none;
-  -webkit-appearance: none;
-  -moz-appearance: none;
-  min-height: 36px;
-  padding: 7px 36px 7px 12px;
-  border-radius: var(--radius);
-  background-color: var(--bg-elev);
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%237a7a90' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
-  background-repeat: no-repeat;
-  background-position: right 12px center;
-  background-size: 12px 12px;
-  color: var(--fg);
-  font: inherit;
-  font-size: 14px;
-  cursor: pointer;
-  transition: background 120ms var(--ease), border-color 120ms var(--ease);
-}
-.workspace-select:hover:not(:disabled) {
-  background-color: var(--bg3);
-}
-.workspace-select:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-color: var(--accent);
-}
-.workspace-select:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-/* Must stay below the base .workspace-select rule: this block is scoped after settingsPanels.css. */
-@media (pointer: coarse) { .workspace-select { min-height: var(--touch); } }
 .settings-advanced {
   padding: var(--space-2);
   border: 1px solid var(--border);
@@ -6277,12 +4308,6 @@ a.btn-secondary {
 }
 .settings-advanced[open] summary {
   margin-bottom: var(--space-2);
-}
-@container (max-width: 720px) {
-  .archived-item {
-    flex-direction: column;
-    align-items: stretch;
-  }
 }
 .skill-source {
   color: var(--fg2);
@@ -6397,7 +4422,7 @@ a.btn-secondary {
 }
 
 /* "What this CLI brings": the per-provider MCP and skill chip lists, folded
-   away by default so the models tab stays scannable. The summary is the whole
+   away by default so the providers tab stays scannable. The summary is the whole
    touch target, so it keeps the 44px minimum. */
 .provider-brings > summary {
   display: inline-flex;

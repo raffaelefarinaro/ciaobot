@@ -5,7 +5,8 @@ A bare-shell invocation (`ciao health get` from any directory) has no
 install the operator actually has rather than manufacture a bootstrap workspace
 beside it. Before this module that question was answered by the macOS
 LaunchAgent alone, which on Windows meant the engine's own logon task was
-ignored and the bare shell fell back to the cwd.
+ignored and the bare shell fell back to the cwd. Linux reads the root-owned
+systemd unit the installer wrote.
 
 This is the one answer to that question, and both branches are read-only: they
 read the service definition the engine wrote and mint nothing. A definition
@@ -16,9 +17,14 @@ would recreate what the operator deleted.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ciao.config import CiaoConfig
 
 
 def _platform() -> str:
@@ -36,8 +42,10 @@ def discover_workspace(base: Mapping[str, str]) -> Path | None:
     ``schtasks`` query would be a second source of truth this read-only seam does
     not need.
 
-    The dispatch is Windows-aware: on Windows the engine's own logon task is
-    the install record, so it is read first. Everywhere else — and on Windows
+    The dispatch is platform-aware: on Windows the engine's own logon task is
+    the install record, so it is read first; on Linux it is the systemd unit,
+    trusted only when root-owned and not group- or world-writable, and never the
+    shell environment. Everywhere else — and on Windows
     when no task was found — the macOS LaunchAgent read runs, which is the
     behaviour-before-this-seam call every platform made and the call the
     existing tests patch. On a real Windows machine there is no plist, so that
@@ -52,6 +60,12 @@ def discover_workspace(base: Mapping[str, str]) -> Path | None:
         # seam must preserve on every platform, and on Windows it simply finds
         # no plist. Returning early here would bypass the patch target the
         # existing discovery tests install and break them on the Windows job.
+    elif _platform().startswith("linux"):
+        discovered = _discover_linux()
+        if discovered is not None:
+            return discovered
+        # Same fall-through as Windows: a bare shell as another user, or an
+        # install with no unit, keeps the behaviour it had before this branch.
     return _discover_macos(base)
 
 
@@ -80,3 +94,125 @@ def _discover_windows() -> Path | None:
     if workspace is None:
         return None
     return workspace if workspace.is_dir() else None
+
+
+def _discover_linux() -> Path | None:
+    from ciao import linux_service
+
+    workspace = linux_service.unit_workspace(linux_service.UNIT_PATH)
+    if workspace is None or not workspace.is_dir():
+        return None
+    # A workspace this user cannot read (0700 under the service account) is not
+    # this shell's install: fall through rather than point at it.
+    return workspace if os.access(workspace, os.R_OK | os.X_OK) else None
+
+
+def trusted_registry(name: str | None, vault: Path) -> CiaoConfig | None:
+    """The installed engine's registry, if it registers *name* at exactly *vault*.
+
+    The handover gate decides what an unattended agent may write into the
+    always-loaded regions, so it must not read a registry the agent can name.
+    ``--workspace``, ``CIAO_WORKSPACE`` and ``CIAO_RUNTIME_ROOT`` are caller
+    inputs and are dropped here: the install comes only from the service
+    definition (:func:`discover_workspace`), and nothing
+    is guessed when there is none. ``None`` when no install is found, the name
+    is not registered there, or the registered vault is not the one in hand.
+    """
+    if name is None:
+        return None
+    from ciao.config import CiaoConfig, installed_workspace_env
+
+    base = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT")
+    }
+    installed = discover_workspace(base)
+    if installed is None:
+        return None
+    # A placeholder keeps a read-only resolution from minting a session secret.
+    env_source = installed_workspace_env({**base, "CIAO_WORKSPACE": str(installed)})
+    if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+        env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
+    config = CiaoConfig.from_env(env_source)
+    if config.workspace(name) is None:
+        return None
+    try:
+        registered_vault = Path(config.workspace_vault_root(name)).resolve()
+    except (OSError, ValueError):
+        return None
+    return config if registered_vault == vault.resolve() else None
+
+
+class InstallerEntryRefused(RuntimeError):
+    """Installer bootstrap cannot prove that this is a fresh installation."""
+
+
+def _strict_exists(path: Path) -> bool:
+    """Whether ``path`` exists, refusing when that cannot be established.
+
+    ``os.path.lexists`` reports ``False`` for an unreadable parent directory, so
+    an install whose definition merely cannot be seen would look fresh. Only a
+    definite "not there" is absence. A dangling symlink still counts as present.
+    """
+    try:
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        raise InstallerEntryRefused(f"Could not inspect {path}: {exc}") from exc
+    return True
+
+
+def _strict_set_up_workspace(root: Path) -> bool:
+    """``is_set_up_workspace`` for the guard: I/O errors refuse, never read as absent."""
+    from ciao.setup_marker import RUNTIME_DIR_NAME, WORKSPACE_REGISTRY_FILENAME
+
+    if _strict_exists(root / RUNTIME_DIR_NAME / WORKSPACE_REGISTRY_FILENAME):
+        return True
+    env_path = root / ".env"
+    try:
+        text = env_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InstallerEntryRefused(f"Could not read {env_path}: {exc}") from exc
+    from ciao.macos_service import parse_dotenv
+
+    return bool(parse_dotenv(text).get("CIAO_WORKSPACES", "").strip())
+
+
+def require_fresh_installer_entry(*, environ: Mapping[str, str], cwd: Path) -> None:
+    """Raise unless installer bootstrap is demonstrably safe. Read-only."""
+    platform = _platform()
+    if platform not in ("darwin", "win32"):
+        raise InstallerEntryRefused(f"Installer bootstrap is unsupported on {platform}")
+    if any(environ.get(key, "").strip() for key in (
+        "CIAO_WORKSPACE", "CIAO_WORKSPACES", "CIAO_RUNTIME_ROOT", "CIAO_MEMORY_DIR",
+        "CIAO_VAULT_DIR", "CIAO_VAULT_ROOT",
+    )):
+        raise InstallerEntryRefused("Inherited workspace or storage redirect is present")
+    if _strict_set_up_workspace(cwd):
+        raise InstallerEntryRefused("Current directory is an existing Ciaobot workspace")
+    home_root = Path.home() / "Ciaobot"
+    if _strict_set_up_workspace(home_root):
+        raise InstallerEntryRefused("Default Ciaobot workspace already exists")
+    try:
+        if platform == "darwin":
+            from ciao import macos_service
+            definition = macos_service.live_launch_agents_dir() / f"{macos_service.SERVER_LABEL}.plist"
+            if _strict_exists(definition):
+                raise InstallerEntryRefused("Live LaunchAgent definition already exists")
+            registered = macos_service.server_job_registered()
+        else:
+            from ciao import windows_service
+            definition = windows_service.live_task_dir() / windows_service.TASK_FILE_NAME
+            if _strict_exists(definition):
+                raise InstallerEntryRefused("Live scheduled-task definition already exists")
+            registered = windows_service.engine_task_registered()
+        if registered:
+            raise InstallerEntryRefused("Engine service is already registered")
+    except InstallerEntryRefused:
+        raise
+    except Exception as exc:
+        raise InstallerEntryRefused(f"Could not verify fresh installation state: {exc}") from exc

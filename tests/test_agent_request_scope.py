@@ -317,3 +317,454 @@ def test_a_linked_repo_with_code_mode_off_is_not_granted(tmp_path: Path) -> None
 
     assert request.linked_repo == ""
     assert str(repo.resolve()) not in request.agent_roots
+
+
+def test_workspace_scope_request_grants_runtime_files_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="workspace")
+    project = manager.create_project("scoped", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    runtime = config.state_path.parent
+    expected = (
+        str(runtime / "migration" / "workspace-rooting.json"),
+        str(runtime / "workspaces.json"),
+    )
+    assert request.agent_read_only == expected
+    assert not set(expected) & set(request.agent_roots)
+
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="machine")
+    assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+def _workspace_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ProjectChatManager, ChatInfo]:
+    # Never depend on whether gws is installed on the host running the tests.
+    monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="workspace")
+    project = manager.create_project("scoped", workspace="personal")
+    return manager, manager.create_chat(project.project_id, provider="claude")
+
+
+def test_workspace_scope_request_grants_gws_tool_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gws_bin = tmp_path / "gws-bin"
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [gws_bin])
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    runtime = manager._config.state_path.parent
+    assert request.agent_read_only == (
+        str(runtime / "migration" / "workspace-rooting.json"),
+        str(runtime / "workspaces.json"),
+        str(gws_bin),
+    )
+    assert str(gws_bin) not in request.agent_roots
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+def test_workspace_scope_grants_gh_config_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gh_dir = tmp_path / "gh-config"
+    gh_dir.mkdir()
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_config_read_root", lambda env: gh_dir)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(gh_dir) in request.agent_read_only
+    assert str(gh_dir) not in request.agent_roots
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+def test_workspace_scope_injects_gh_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", lambda gh, env, **kw: "tok")
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: "/bin/gh")
+
+    assert manager.build_agent_request(chat, prompt="hi").extra_env["GH_TOKEN"] == "tok"
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    assert "GH_TOKEN" not in manager.build_agent_request(chat, prompt="hi").extra_env
+
+
+def _credentials_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, linked: bool = True
+):
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        manager, "_workspace_gws_profile", lambda workspace: "personal" if linked else ""
+    )
+    return manager, chat
+
+
+def test_workspace_scope_grants_linked_gws_credentials_dir_writable_with_pinned_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.gws_auth import profile_config_dir
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    try:
+        manager, chat = _credentials_request(tmp_path, monkeypatch)
+        creds = profile_config_dir(manager._config, "personal")
+        assert creds is not None
+        creds.mkdir(parents=True)
+        secret = creds.resolve() / "client_secret.json"
+        refresh = creds.resolve() / "credentials.json"
+        secret.write_text("{}", encoding="utf-8")
+        refresh.write_text("{}", encoding="utf-8")
+
+        request = manager.build_agent_request(chat, prompt="hi")
+
+        assert request.agent_roots.count(str(creds.resolve())) == 1
+        assert str(creds.resolve()) not in request.agent_read_only
+        assert request.agent_read_only.count(str(secret)) == 1
+        assert request.agent_read_only.count(str(refresh)) == 1
+
+        secret.unlink()
+        request = manager.build_agent_request(chat, prompt="hi")
+        assert str(secret) not in request.agent_read_only
+        assert str(refresh) in request.agent_read_only
+    finally:
+        reset_reroot_cache()
+
+
+def test_workspace_scope_pins_gws_secrets_when_dir_already_under_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.gws_auth import profile_config_dir
+
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    creds = profile_config_dir(manager._config, "personal")
+    assert creds is not None
+    creds.mkdir(parents=True)
+    (creds / "client_secret.json").write_text("{}", encoding="utf-8")
+    (creds / "credentials.json").write_text("{}", encoding="utf-8")
+    agent_root = Path(manager._config.agent_root("personal")).resolve()
+    assert creds.resolve().is_relative_to(agent_root)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(creds.resolve()) not in request.agent_roots
+    assert str(creds.resolve() / "client_secret.json") in request.agent_read_only
+    assert str(creds.resolve() / "credentials.json") in request.agent_read_only
+
+
+def test_workspace_scope_skips_unlinked_gws_credentials_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.gws_auth import profile_config_dir
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    try:
+        manager, chat = _credentials_request(tmp_path, monkeypatch, linked=False)
+        creds = profile_config_dir(manager._config, "personal")
+        assert creds is not None
+        creds.mkdir(parents=True)
+        unlinked = tmp_path / ".runtime" / "gws-unlinked" / "personal"
+        unlinked.mkdir(parents=True)
+        (creds / "client_secret.json").write_text("{}", encoding="utf-8")
+        (unlinked / "client_secret.json").write_text("{}", encoding="utf-8")
+
+        request = manager.build_agent_request(chat, prompt="hi")
+
+        granted = {*request.agent_read_only, *request.agent_roots}
+        assert str(creds.resolve()) not in granted
+        assert str(unlinked.resolve()) not in granted
+        assert str(creds.resolve() / "client_secret.json") not in granted
+        assert str(unlinked.resolve() / "client_secret.json") not in granted
+    finally:
+        reset_reroot_cache()
+
+
+def test_workspace_scope_skips_missing_gws_credentials_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.gws_auth import profile_config_dir
+
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    creds = profile_config_dir(manager._config, "personal")
+    assert creds is not None and not creds.exists()
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    granted = {*request.agent_read_only, *request.agent_roots}
+    assert str(creds.resolve()) not in granted
+    assert str(creds.resolve() / "client_secret.json") not in granted
+
+
+def test_workspace_scope_refuses_symlinked_gws_credentials_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform == "win32":
+        return  # Creating a symlink needs a privilege Windows does not grant by default.
+    from ciao.gws_auth import profile_config_dir
+
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    creds = profile_config_dir(manager._config, "personal")
+    assert creds is not None
+    target = tmp_path / "elsewhere" / "ssh"
+    target.mkdir(parents=True)
+    (target / "client_secret.json").write_text("{}", encoding="utf-8")
+    creds.parent.mkdir(parents=True, exist_ok=True)
+    creds.symlink_to(target, target_is_directory=True)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    granted = {*request.agent_read_only, *request.agent_roots}
+    assert str(creds) not in granted
+    assert str(target.resolve()) not in granted
+    assert str(target.resolve() / "client_secret.json") not in granted
+    assert str(creds / "client_secret.json") not in granted
+
+
+def test_workspace_scope_refuses_symlinked_secrets_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if sys.platform == "win32":
+        return  # Creating a symlink needs a privilege Windows does not grant by default.
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    target = tmp_path / "elsewhere" / "secrets"
+    (target / "gws-personal").mkdir(parents=True)
+    (target / "gws-personal" / "client_secret.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "secrets").symlink_to(target, target_is_directory=True)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    granted = {*request.agent_read_only, *request.agent_roots}
+    assert str(target.resolve()) not in granted
+    assert str((target / "gws-personal").resolve()) not in granted
+    assert str(tmp_path / "secrets" / "gws-personal") not in granted
+    assert str(target.resolve() / "gws-personal" / "client_secret.json") not in granted
+    assert str(tmp_path / "secrets" / "gws-personal" / "client_secret.json") not in granted
+
+
+def _gh_token_spy(monkeypatch: pytest.MonkeyPatch, token: str = "tok") -> list[object]:
+    calls: list[object] = []
+
+    def spy(gh, env, **kwargs):
+        calls.append(gh)
+        return token
+
+    monkeypatch.setattr("ciao.fs_sandbox.gh_token_for_sandbox", spy)
+    return calls
+
+
+def test_memory_pass_gets_no_gh_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    calls = _gh_token_spy(monkeypatch)
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: "/bin/gh")
+    monkeypatch.setattr("ciao.web.project_chats.is_memory_pass_chat", lambda chat, project: True)
+
+    assert "GH_TOKEN" not in manager._build_extra_env(chat)
+    assert calls == []
+
+
+def test_unresolvable_gh_gets_no_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    calls = _gh_token_spy(monkeypatch)
+
+    def broken(cmd):
+        raise OSError("broken shim")
+
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", broken)
+
+    assert "GH_TOKEN" not in manager._build_extra_env(chat)
+    assert calls == []
+
+
+def test_gh_inside_a_root_gets_no_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    calls = _gh_token_spy(monkeypatch)
+    _, roots = manager._agent_fs_scope_for_chat(chat)
+    planted = Path(roots[0]) / "gh"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text("#!/bin/sh\n")
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: str(planted))
+
+    assert "GH_TOKEN" not in manager._build_extra_env(chat)
+    assert calls == []
+
+
+def test_warm_gh_token_runs_off_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    manager, chat = _workspace_manager(tmp_path, monkeypatch)
+    monkeypatch.setattr("ciao.tool_path.resolve_tool", lambda cmd: "/bin/gh")
+    calls = _gh_token_spy(monkeypatch)
+    threaded: list[object] = []
+    real_to_thread = asyncio.to_thread
+
+    async def to_thread(func, *args, **kwargs):
+        threaded.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr("ciao.web.project_chats.asyncio.to_thread", to_thread)
+
+    asyncio.run(manager.warm_gh_token(chat))
+    assert len(threaded) == 1
+    assert calls == ["/bin/gh"]
+
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+    asyncio.run(manager.warm_gh_token(chat))
+    assert len(threaded) == 1
+
+
+def _linked_account(manager: ProjectChatManager) -> Path:
+    from ciao.gws_auth import profile_config_dir
+
+    creds = profile_config_dir(manager._config, "personal")
+    assert creds is not None
+    creds.mkdir(parents=True)
+    (creds / "credentials.json").write_text("{}", encoding="utf-8")
+    return creds.resolve()
+
+
+def test_pre_reroot_request_denies_secrets_and_regrants_linked_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    creds = _linked_account(manager)
+    (tmp_path / "secrets" / "gws-other").mkdir()
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == (str((tmp_path / "secrets").resolve()),)
+    assert request.agent_denied_except == (str(creds),)
+
+
+def test_rerooted_request_has_no_denied_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    try:
+        manager, chat = _credentials_request(tmp_path, monkeypatch)
+        _linked_account(manager)
+
+        request = manager.build_agent_request(chat, prompt="hi")
+
+        assert request.agent_denied == ()
+        assert request.agent_denied_except == ()
+    finally:
+        reset_reroot_cache()
+
+
+def test_code_mode_linked_repo_covering_secrets_denies_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    try:
+        manager, chat = _credentials_request(tmp_path, monkeypatch)
+        creds = _linked_account(manager)
+        project = manager._projects[chat.project_id]
+        project.repo_path = str(tmp_path)
+        chat.code_mode = True
+
+        request = manager.build_agent_request(chat, prompt="hi")
+
+        assert str(tmp_path.resolve()) in request.agent_roots
+        assert request.agent_denied == (str((tmp_path / "secrets").resolve()),)
+        assert request.agent_denied_except == (str(creds),)
+    finally:
+        reset_reroot_cache()
+
+
+def test_machine_scope_request_has_no_denied_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch)
+    _linked_account(manager)
+    config = manager._config
+    config.workspaces["personal"] = dataclasses.replace(
+        config.workspaces["personal"], agent_fs_scope="machine"
+    )
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == ()
+    assert request.agent_denied_except == ()
+
+
+def test_unlinked_chat_denies_secrets_with_no_regrant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch, linked=False)
+    (tmp_path / "secrets").mkdir()
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == (str((tmp_path / "secrets").resolve()),)
+    assert request.agent_denied_except == ()
+
+
+def test_symlinked_secrets_inside_a_root_denies_the_resolved_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch, linked=False)
+    target = tmp_path / "vault" / "real-secrets"
+    target.mkdir(parents=True)
+    (tmp_path / "secrets").symlink_to(target, target_is_directory=True)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == (str(target.resolve()),)
+    assert request.agent_denied_except == ()
+
+
+def test_symlinked_secrets_pointing_outside_every_root_is_not_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat = _credentials_request(tmp_path, monkeypatch, linked=False)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (tmp_path / "secrets").symlink_to(outside, target_is_directory=True)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_denied == ()

@@ -311,6 +311,18 @@ def _one_line(value: str) -> str:
     return " ".join(value.split())
 
 
+DECIDE_REASON_MAX_CHARS = 200
+
+
+def render_decide_tail(decider: str, reason: str) -> str:
+    """``  _(decide: you; reason)_``: reason flattened, parentheses stripped, capped."""
+    flat = _one_line(reason).replace(")", "").replace("(", "")[:DECIDE_REASON_MAX_CHARS].strip()
+    return f"  _(decide: {decider}; {flat})_" if flat else f"  _(decide: {decider})_"
+
+
+_DECIDE_TAIL_RE = re.compile(r"\s+_\(decide:[^\n]*?\)_\s*$", re.IGNORECASE)
+
+
 @dataclass(slots=True, frozen=True)
 class MemoryProposal:
     """One proposed memory entry with its routing target."""
@@ -332,6 +344,10 @@ class MemoryProposal:
     # failure this field exists to remove. Only the ``[learnings]`` accept reads
     # it, and only to hand it to ``append_learning``.
     request: str = ""
+    # Who should settle this item (``nightly`` or ``you``) and a one-line
+    # reason, rendered as the last ``_(decide: …)_`` tail. Empty means no tail.
+    decider: str = ""
+    decide_reason: str = ""
 
     def as_bullet(self) -> str:
         # Deliberately total: an unknown target is written through rather than
@@ -350,6 +366,8 @@ class MemoryProposal:
         if self.request.strip():
             request = _one_line(self.request).replace(")", "")
             bullet += f"  _(request: {request})_"
+        if self.decider:
+            bullet += render_decide_tail(self.decider, self.decide_reason)
         return bullet
 
 
@@ -1687,9 +1705,6 @@ def append_proposals(
         write_queue_atomically(out_path, existing + "\n" + block)
         return out_path
 
-# Matches a bullet written by ``MemoryProposal.as_bullet``.
-_BULLET_RE = re.compile(r"^- \[[^\]]+\] (.+?)  _\(from: [^)]*\)_\s*$")
-
 # Matches a timestamped batch header written by ``_proposals_header_block``.
 _BATCH_HEADER_RE = re.compile(r"^## \d{4}-\d{2}-\d{2}T\S+")
 
@@ -1722,11 +1737,13 @@ def _sweep_empty_batches(lines: list[str]) -> list[str]:
 
 def _existing_proposal_texts(file_text: str) -> set[str]:
     """Return the set of proposal texts already recorded in the file."""
+    from ciao.proposal_kinds import parse_bullet
+
     out: set[str] = set()
     for line in file_text.splitlines():
-        m = _BULLET_RE.match(line)
-        if m:
-            out.add(m.group(1).strip())
+        bullet = parse_bullet(line)
+        if bullet is not None:
+            out.add(bullet.text)
     return out
 
 
@@ -1757,6 +1774,7 @@ def record_dismissal(
     receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
+    reason: str = "",
     once: bool = False,
 ) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
@@ -1799,6 +1817,7 @@ def record_dismissal(
         receipt_id=receipt_id,
         learning_id=learning_id,
         finding=finding,
+        reason=reason,
         once=once,
     )
 
@@ -1816,6 +1835,7 @@ def record_promotion(
     receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
+    reason: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1841,6 +1861,7 @@ def record_promotion(
         receipt_id=receipt_id,
         learning_id=learning_id,
         finding=finding,
+        reason=reason,
         once=once,
         history_only=history_only,
     )
@@ -1860,6 +1881,7 @@ def _record_decision(
     receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
+    reason: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1910,6 +1932,10 @@ def _record_decision(
         entry["learning_id"] = learning_id
     if finding:
         entry["finding"] = finding
+    if reason:
+        # One line: _sidecar_entries splits on str.splitlines(), which also
+        # breaks on U+2028/U+2029/U+0085 that ensure_ascii=False writes raw.
+        entry["reason"] = _one_line(reason)
     if history_only:
         # Ledger-only row: it records that a pass ran and decided nothing new,
         # so the dedupe readers must not treat it as a decision. Without this
@@ -2057,8 +2083,10 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
 
     Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
     text-only rows into one shape: ``{ts, action, via, kind, text, source,
-    destination, outcome, proposal_id, receipt_id, learning_id, finding, log,
-    seq}``. ``receipt_id`` is empty for every row written before it was
+    destination, outcome, proposal_id, receipt_id, learning_id, finding,
+    reason, log, seq}``. ``reason`` is the optional single-line "why" recorded
+    with the decision, empty for every decision recorded without one.
+    ``receipt_id`` is empty for every row written before it was
     recorded, and for every decision made outside the receipt protocol, and
     ``learning_id``/``finding`` are empty for every decision about a whole row
     rather than one derived finding. This is the read side of the decision
@@ -2103,6 +2131,7 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
                     "receipt_id": str(entry.get("receipt_id", "")),
                     "learning_id": str(entry.get("learning_id", "")),
                     "finding": str(entry.get("finding", "")),
+                    "reason": str(entry.get("reason", "")),
                     "log": suffix,
                     "seq": seq,
                 }
@@ -2185,8 +2214,9 @@ def list_proposals(
     Reuses the shared proposal-kind grammar so the CLI, the web layer, and the
     audit always agree on what a bullet is. Each row carries the raw ``kind``,
     the bullet ``text``, the optional ``source`` tag, the optional ``target``
-    payload (a person name or doc path) and the optional ``request`` id a
-    ``/remember`` of a lesson carries.
+    payload (a person name or doc path), the optional ``request`` id a
+    ``/remember`` of a lesson carries, and the ``decider`` (``nightly``,
+    ``you`` or empty) with its one-line ``decide_reason``.
     """
     from ciao.proposal_kinds import parse_bullet
 
@@ -2203,6 +2233,8 @@ def list_proposals(
                     "source": bullet.source,
                     "target": bullet.target,
                     "request": bullet.request,
+                    "decider": bullet.decider or "",
+                    "decide_reason": bullet.decide_reason,
                 }
             )
     return rows
@@ -2235,6 +2267,47 @@ def find_proposal_matches(proposals_path: Path, needle: str) -> list[int]:
         for index, line in enumerate(lines)
         if parse_bullet(line) is not None and folded in line.casefold()
     ]
+
+
+def set_proposal_decider(
+    proposals_path: Path,
+    needles: tuple[str, ...],
+    decider: str,
+    reason: str,
+) -> tuple[str, str] | None:
+    """Re-tag ONE queued bullet's decide tail in place; return (kind, text) or None.
+
+    Under queue_lock: union of find_proposal_matches over every needle form;
+    exactly one row or None. Strips any existing decide tail, appends
+    render_decide_tail(decider, reason), re-parses and refuses (None) unless
+    kind/text/source/target/request are unchanged. Writes via
+    write_queue_atomically. No receipt: a retag is not a decision.
+    """
+    from ciao.memory_receipts import queue_lock, write_queue_atomically
+    from ciao.proposal_kinds import parse_bullet
+
+    if not proposals_path.exists():
+        return None
+    with queue_lock(proposals_path):
+        matches: set[int] = set()
+        for needle in needles:
+            matches.update(find_proposal_matches(proposals_path, needle))
+        if len(matches) != 1:
+            return None
+        index = next(iter(matches))
+        lines = proposals_path.read_text(encoding="utf-8").splitlines()
+        before = parse_bullet(lines[index])
+        if before is None:
+            return None
+        retagged = _DECIDE_TAIL_RE.sub("", lines[index]) + render_decide_tail(decider, reason)
+        after = parse_bullet(retagged)
+        if after is None or (
+            after.kind, after.text, after.source, after.target, after.request
+        ) != (before.kind, before.text, before.source, before.target, before.request):
+            return None
+        lines[index] = retagged
+        write_queue_atomically(proposals_path, "\n".join(lines).rstrip() + "\n")
+        return after.kind, after.text
 
 
 def remove_proposal_by_substring(

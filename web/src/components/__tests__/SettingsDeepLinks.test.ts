@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-// Settings > Workspaces: an assistant's File access link locates the exact
-// workspace row and never acts on it. Opening the editor is navigation; the
-// engine's saved value, the active workspace and the settings file stay as
-// they were.
+// File access links (`/settings/workspaces?workspace=NAME#file-access`) switch
+// the active workspace to NAME and land on Workspace > Overview with the File
+// access selector focused. Following one is navigation: it never chooses a
+// value and never writes. Leaving a workspace with unsaved edits asks first.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -34,9 +34,24 @@ vi.mock('../../lib/api', () => {
       return Promise.resolve(state.workspaces)
     }
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
+    if (path.startsWith('/api/proposals/handover')) {
+      return Promise.resolve({
+        workspace: 'personal',
+        handover: 'off',
+        acting_available: true,
+        agreement: {
+          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
+          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
+          suggest_handover: false,
+        },
+      })
+    }
+    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     if (path === '/api/integrations/gws') {
       return Promise.resolve({ installed: false, binary_path: '', cli_available: false, profiles: [] })
     }
+    // The Overview's Chats and models card reads the engine defaults.
+    if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})
   })
   return {
@@ -58,6 +73,7 @@ vi.mock('../../lib/push', () => ({
 
 const Stub = defineComponent({ render: () => h('div') })
 const WORKSPACES = '/settings/workspaces'
+const OVERVIEW = '/settings/workspace'
 
 function response(): WorkspacesResponse {
   return {
@@ -115,11 +131,13 @@ async function mountSettings(path = WORKSPACES): Promise<{
   return { wrapper, router }
 }
 
-function cardFor(wrapper: VueWrapper, name: string) {
-  const card = wrapper.findAll('.workspace-list .workspace-card')
-    .find(c => c.find('.workspace-title').text() === name)
-  expect(card, `no card for ${name}`).toBeTruthy()
-  return card!
+function nameInput(wrapper: VueWrapper) {
+  return wrapper.find('#workspace-name-input')
+}
+
+async function activeWorkspace(): Promise<string> {
+  const { useProjectStore } = await import('../../stores/projects')
+  return useProjectStore().activeWorkspace
 }
 
 function fsSelect(wrapper: VueWrapper, name: string) {
@@ -152,6 +170,8 @@ let windowScrollTo: ReturnType<typeof vi.fn>
 let reduceMotion = false
 
 beforeEach(() => {
+  // switchWorkspace persists the active workspace; start every test on personal.
+  localStorage.clear()
   setActivePinia(createPinia())
   state.workspaces = response()
   state.error = null
@@ -182,15 +202,17 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-describe('Settings > Workspaces File access deep link', () => {
-  it('opens the linked workspace, focuses File access and writes nothing', async () => {
-    const { wrapper } = await mountSettings(target('work'))
+describe('Settings > Workspace File access deep link', () => {
+  it('switches to the linked workspace, focuses File access and writes nothing', async () => {
+    const { wrapper, router } = await mountSettings(target('work'))
     try {
       await settle()
 
-      const card = cardFor(wrapper, 'work')
-      expect(card.find('.set-row-body').exists()).toBe(true)
-      expect(card.classes()).toContain('workspace-card--target')
+      expect(router.currentRoute.value.fullPath).toBe(`${OVERVIEW}#file-access`)
+      expect(await activeWorkspace()).toBe('work')
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('work')
+      const row = wrapper.find('#workspace-file-access-row-work')
+      expect(row.classes()).toContain('workspace-card--target')
       const select = fsSelect(wrapper, 'work')
       expect(select.exists()).toBe(true)
       expect((select.element as HTMLSelectElement).value).toBe('machine')
@@ -199,8 +221,6 @@ describe('Settings > Workspaces File access deep link', () => {
       expect(scrollTo).toHaveBeenCalledTimes(1)
       expect(vi.mocked(scrollTo).mock.contexts[0]).toBe(wrapper.find('.pane-body').element)
       expect(windowScrollTo).not.toHaveBeenCalled()
-      const { useProjectStore } = await import('../../stores/projects')
-      expect(useProjectStore().activeWorkspace).toBe('personal')
       await expectNoWrites()
     } finally {
       wrapper.unmount()
@@ -213,19 +233,22 @@ describe('Settings > Workspaces File access deep link', () => {
       await settle()
       scrollTo.mockClear()
 
+      // Clear the hash first so the next link is a fresh arrival on the page.
+      await router.replace(OVERVIEW)
+      await settle()
+      scrollTo.mockClear()
+
       const body = wrapper.find('.pane-body').element as HTMLElement
-      const card = wrapper.find('#workspace-row-work').element as HTMLElement
+      const card = wrapper.find('.card').element as HTMLElement
       const fieldRow = wrapper.find('#workspace-file-access-row-work').element as HTMLElement
       // Distinct rects make the two candidates unambiguous: measuring the
-      // header would scroll 500px short of the field row.
+      // card would scroll 500px short of the field row.
       Object.defineProperty(body, 'scrollTop', { configurable: true, value: 500 })
       body.getBoundingClientRect = () => rect(40)
       card.getBoundingClientRect = () => rect(200)
       fieldRow.getBoundingClientRect = () => rect(700)
 
-      await router.push(WORKSPACES)
-      await settle()
-      await router.push(target('work'))
+      await router.replace(`${OVERVIEW}#file-access`)
       await settle()
 
       // 500 (pane) + 700 - 40 (measured field row) - 16 (offset).
@@ -235,7 +258,7 @@ describe('Settings > Workspaces File access deep link', () => {
     }
   })
 
-  it('waits for a delayed workspace list before opening the row', async () => {
+  it('waits for a delayed workspace list before switching', async () => {
     state.defer = true
     const { wrapper, router } = await mountSettings()
     try {
@@ -244,13 +267,16 @@ describe('Settings > Workspaces File access deep link', () => {
 
       await router.push(target('work'))
       await nextTick()
-      expect(wrapper.find('.set-row-body').exists()).toBe(false)
+      expect(router.currentRoute.value.path).toBe(WORKSPACES)
+      expect(await activeWorkspace()).toBe('personal')
 
+      state.defer = false
       state.pending!.resolve(state.workspaces)
       state.pending = null
       await settle()
 
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(true)
+      expect(router.currentRoute.value.fullPath).toBe(`${OVERVIEW}#file-access`)
+      expect(await activeWorkspace()).toBe('work')
       expect(document.activeElement).toBe(fsSelect(wrapper, 'work').element)
       await expectNoWrites()
     } finally {
@@ -262,13 +288,14 @@ describe('Settings > Workspaces File access deep link', () => {
     const { wrapper, router } = await mountSettings(target('personal'))
     try {
       await settle()
-      expect(cardFor(wrapper, 'personal').find('.set-row-body').exists()).toBe(true)
+      expect(await activeWorkspace()).toBe('personal')
+      expect(fsSelect(wrapper, 'personal').exists()).toBe(true)
 
       await router.push(target('work'))
       await settle()
 
-      expect(cardFor(wrapper, 'personal').find('.set-row-body').exists()).toBe(false)
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(true)
+      expect(await activeWorkspace()).toBe('work')
+      expect(fsSelect(wrapper, 'personal').exists()).toBe(false)
       expect(document.activeElement).toBe(fsSelect(wrapper, 'work').element)
     } finally {
       wrapper.unmount()
@@ -284,24 +311,24 @@ describe('Settings > Workspaces File access deep link', () => {
       await router.push(target('work'))
       await nextTick()
 
+      state.defer = false
       state.pending!.resolve(state.workspaces)
       state.pending = null
       await settle()
 
-      expect(cardFor(wrapper, 'personal').find('.set-row-body').exists()).toBe(false)
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(true)
+      expect(await activeWorkspace()).toBe('work')
+      expect(fsSelect(wrapper, 'personal').exists()).toBe(false)
       expect(document.activeElement).toBe(fsSelect(wrapper, 'work').element)
     } finally {
       wrapper.unmount()
     }
   })
 
-  it('keeps the same editor draft when that workspace is linked again', async () => {
+  it('keeps the same draft when that workspace is linked again', async () => {
     const { wrapper, router } = await mountSettings(target('work'))
     try {
       await settle()
-      const nameInput = cardFor(wrapper, 'work').find('.set-row-body input.routine-input')
-      await nameInput.setValue('work-renamed')
+      await nameInput(wrapper).setValue('work-renamed')
       await fsSelect(wrapper, 'work').setValue('workspace')
       await nextTick()
 
@@ -310,9 +337,8 @@ describe('Settings > Workspaces File access deep link', () => {
       await router.push(target('work'))
       await settle()
 
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(true)
-      expect((cardFor(wrapper, 'work').find('.set-row-body input.routine-input').element as HTMLInputElement).value)
-        .toBe('work-renamed')
+      expect(router.currentRoute.value.fullPath).toBe(`${OVERVIEW}#file-access`)
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('work-renamed')
       expect((fsSelect(wrapper, 'work').element as HTMLSelectElement).value).toBe('workspace')
       await expectNoWrites()
     } finally {
@@ -320,49 +346,87 @@ describe('Settings > Workspaces File access deep link', () => {
     }
   })
 
-  it('refuses to open another workspace over a different unsaved name draft', async () => {
-    const { wrapper, router } = await mountSettings()
+  it('asks before leaving a different workspace with an unsaved name draft, and stays when declined', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    const { wrapper, router } = await mountSettings(OVERVIEW)
     try {
       await settle()
-      await cardFor(wrapper, 'personal').find('[aria-label="Edit workspace personal"]').trigger('click')
-      await nextTick()
-      await cardFor(wrapper, 'personal').find('.set-row-body input.routine-input').setValue('home')
+      await nameInput(wrapper).setValue('home')
 
       await router.push(target('work'))
       await settle()
 
-      const personal = cardFor(wrapper, 'personal')
-      expect(personal.find('.set-row-body').exists()).toBe(true)
-      expect((personal.find('.set-row-body input.routine-input').element as HTMLInputElement).value).toBe('home')
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(false)
+      expect(pendingConfirm.value).toBeTruthy()
+      expect(pendingConfirm.value!.message).toBe('Discard unsaved changes to personal?')
+      pendingConfirm.value!.resolve(false)
+      await settle()
+
+      expect(await activeWorkspace()).toBe('personal')
+      expect(router.currentRoute.value.path).toBe(WORKSPACES)
       const status = wrapper.find('.workspace-link-status')
       expect(status.exists()).toBe(true)
       expect(status.text()).toContain('personal')
       expect(status.text()).toContain('work')
-      expect(status.text()).toContain('Save or discard')
+      expect(status.text()).toContain('kept')
       expect(scrollTo).not.toHaveBeenCalled()
+
+      // The draft is still there when the user goes back.
+      await router.push(OVERVIEW)
+      await settle()
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('home')
       await expectNoWrites()
     } finally {
       wrapper.unmount()
     }
   })
 
-  it('also refuses over an unsaved File access change alone', async () => {
-    const { wrapper, router } = await mountSettings()
+  it('switches and drops the draft when the discard is confirmed', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    const { wrapper, router } = await mountSettings(OVERVIEW)
     try {
       await settle()
-      await cardFor(wrapper, 'personal').find('[aria-label="Edit workspace personal"]').trigger('click')
-      await nextTick()
+      await nameInput(wrapper).setValue('home')
+
+      await router.push(target('work'))
+      await settle()
+      pendingConfirm.value!.resolve(true)
+      await settle()
+
+      expect(await activeWorkspace()).toBe('work')
+      expect(router.currentRoute.value.fullPath).toBe(`${OVERVIEW}#file-access`)
+      expect(document.activeElement).toBe(fsSelect(wrapper, 'work').element)
+
+      const { useProjectStore } = await import('../../stores/projects')
+      await useProjectStore().switchWorkspace('personal', { transition: false })
+      await settle()
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('personal')
+      expect(wrapper.find('.workspace-save').exists()).toBe(false)
+      await expectNoWrites()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('also asks over an unsaved File access change alone', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    const { wrapper, router } = await mountSettings(OVERVIEW)
+    try {
+      await settle()
       await fsSelect(wrapper, 'personal').setValue('machine')
       await nextTick()
 
       await router.push(target('work'))
       await settle()
 
-      expect(cardFor(wrapper, 'personal').find('.set-row-body').exists()).toBe(true)
+      expect(pendingConfirm.value!.message).toBe('Discard unsaved changes to personal?')
+      pendingConfirm.value!.resolve(false)
+      await settle()
+
+      expect(await activeWorkspace()).toBe('personal')
+      expect(wrapper.find('.workspace-link-status').text()).toContain('kept')
+      await router.push(OVERVIEW)
+      await settle()
       expect((fsSelect(wrapper, 'personal').element as HTMLSelectElement).value).toBe('machine')
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(false)
-      expect(wrapper.find('.workspace-link-status').text()).toContain('Save or discard')
       await expectNoWrites()
     } finally {
       wrapper.unmount()
@@ -379,11 +443,12 @@ describe('Settings > Workspaces File access deep link', () => {
         `${WORKSPACES}?workspace=work#other`,
         `${WORKSPACES}?workspace=work&action=save#file-access`,
         `${WORKSPACES}?workspace=work&workspace=personal#file-access`,
-        `/settings/models?workspace=work#file-access`,
+        `/settings/providers?workspace=work#file-access`,
       ]) {
         await router.push(path)
         await settle()
-        expect(wrapper.findAll('.set-row-body'), path).toHaveLength(0)
+        expect(router.currentRoute.value.fullPath, path).toBe(path)
+        expect(await activeWorkspace(), path).toBe('personal')
         expect(wrapper.find('.workspace-link-status').exists(), path).toBe(false)
       }
       expect(scrollTo).not.toHaveBeenCalled()
@@ -398,7 +463,8 @@ describe('Settings > Workspaces File access deep link', () => {
     try {
       await settle()
 
-      expect(wrapper.findAll('.set-row-body')).toHaveLength(0)
+      expect(router.currentRoute.value.path).toBe(WORKSPACES)
+      expect(await activeWorkspace()).toBe('personal')
       const status = wrapper.find('.workspace-link-status')
       expect(status.exists()).toBe(true)
       expect(status.text()).toContain('ghost')
@@ -416,13 +482,13 @@ describe('Settings > Workspaces File access deep link', () => {
 
   it('reports a load failure as an error rather than a missing workspace', async () => {
     state.error = new Error('boom')
-    const { wrapper } = await mountSettings(target('work'))
+    const { wrapper, router } = await mountSettings(target('work'))
     try {
       await settle()
 
       expect(wrapper.text()).toContain('Failed to load workspaces: boom')
       expect(wrapper.find('.workspace-link-status').exists()).toBe(false)
-      expect(wrapper.findAll('.set-row-body')).toHaveLength(0)
+      expect(router.currentRoute.value.path).toBe(WORKSPACES)
       await expectNoWrites()
     } finally {
       wrapper.unmount()
@@ -437,7 +503,7 @@ describe('Settings > Workspaces File access deep link', () => {
 
       expect(document.activeElement).toBe(fsSelect(wrapper, 'work').element)
       expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ behavior: 'auto' }))
-      expect(cardFor(wrapper, 'work').classes()).toContain('workspace-card--target')
+      expect(wrapper.find('#workspace-file-access-row-work').classes()).toContain('workspace-card--target')
     } finally {
       wrapper.unmount()
     }

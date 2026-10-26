@@ -138,8 +138,9 @@ bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 (`ciao run …`), schedules (`ciao schedule …`), the task board
 (`ciao task …`, including `task delegate` and `task report`), note
 verification (`ciao note verify`), webhook triggers (`ciao webhook …`),
-Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), and file
-surfacing (`ciao file surface`). Browser-session administration,
+Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), file
+surfacing (`ciao file surface`), and the suggested terminal command
+(`ciao chat terminal-offer`). Browser-session administration,
 login/OAuth secrets, and raw server deploy endpoints remain PWA/operator-only.
 
 That sentence is a summary, not a second catalog: the exhaustive list is the
@@ -152,7 +153,11 @@ evals cannot name.
 The proposals queue is reviewed and dismissed through the PWA, with one
 deliberate CLI exception the nightly curation agent drives because one shell
 command beats a synchronous request per row: `ciao memory-proposal-add`,
-`ciao memory-proposals`, and `ciao memory-proposal-dismiss --text-file <file>`.
+`ciao memory-proposals`, `ciao memory-proposal-dismiss --text-file <file> [--reason-file <file>]`, and
+`ciao memory-proposal-escalate --text-file <file> --reason-file <file>`. For `[memory]`/`[profile]`
+rows the run records a verdict with `ciao memory-proposal-predict --text-file <file> --verdict accept|dismiss --reason-file <file>`
+and acts on it only as the operator's handover setting allows, through `ciao memory-proposal-dismiss --handover`
+and `ciao memory-proposal-accept --text-file <file>`.
 
 The skill-proposal queue has the same pair, for the same reason, and files
 rather than dismisses are the interesting half: `ciao skill-proposal-add NAME
@@ -176,6 +181,61 @@ them back) with `--applied`), `--interrupted` when the work stopped part-way,
 which is neither and leaves the proposal queued with its chat bound to it, and
 the plain form for a decision against it. Never record `--applied` for a chat
 that simply finished: a turn ending is not a verified edit.
+
+## The suggested terminal command
+
+`ciao chat terminal-offer --command-file FILE` is the one operation whose
+argument is *text the model wrote for the user to run*. It records a
+suggested command on the calling chat; the user reads it, copies it and runs
+it themselves. Nothing is executed, no terminal is opened, nothing is
+unlocked, no output is collected, and the operation never reaches the
+terminal session manager, the grant store or the host launcher (#1842).
+
+Four properties decide the shape of the surface.
+
+- **No target.** The operation takes the command and nothing else: there is
+  no chat id, no label, no kind, no path and no URL. The suggestion belongs
+  to the chat that asked for it, and an argument that could aim it elsewhere
+  is the one thing that would put a command on a screen the user did not ask
+  for. The chat is the token's principal's own, resolved by its **exact** id
+  — not by a title, which is a name the caller chose.
+- **Guidance, not mutation.** The operation is classified `_READ`, like
+  `file surface`, so a plan-mode chat may still offer: the text is reviewed
+  by a person before anything runs. An unattended turn (a schedule) is
+  refused with `unattended_forbidden` — there is nobody in front of the
+  screen to review it. An archived chat is refused with `chat_archived`.
+- **Untrusted text.** The command is model-authored and can carry a
+  credential or a private path. It is validated by the shared text contract
+  (`ciao/terminal_offer.py`): printable text only, bounded at 4096 UTF-8
+  bytes, normalized. A refusal is static — `invalid_terminal_command` with a
+  closed reason — and never quotes the rejected text, because an error string
+  ends up in a log line and in a telemetry field. The argument is a plain
+  string so that no schema *constraint* on the text can put a rejected
+  command inside a validation error; the engine validates the text itself.
+  A malformed *type* is the schema's refusal, and the raw tool error does
+  carry the submitted value: what keeps it out of the engine's HTTP
+  envelope, its log and its telemetry is the dispatcher, which answers with
+  the error's first line only. The raw exception still holds the value, so a
+  transport that surfaced it whole would show it. On the CLI the text is
+  read from a file with a bound (never as a shell argument, never from a
+  credential-adjacent path, and never from anything that is not an ordinary
+  file — a FIFO or a device would block the read) and validated locally as
+  well.
+- **No promise of safety.** The command is untrusted, user-reviewed text.
+  Ciaobot does not verify it, does not classify it as safe, and does not
+  denylist it. The label on the card is fixed ("Suggested command — review
+  before running").
+
+The command is not written to the engine's chat registry, its audit log or a
+backup of either: the offer is transient, in memory only, and ends with the
+conversation it was made in (archive, new session, handover) or with an
+explicit dismissal. A provider's own transcript is the provider's record of
+what it was handed, and the engine does not rewrite it — do not rely on the
+engine to scrub it. The operation's telemetry row names the operation, the
+chat and the outcome — never its argument.
+
+For a provider Ciaobot already supports, its own login or install step
+belongs in Settings; an offer is for the commands Settings does not cover.
 
 ## Skills and system-prompt policy
 

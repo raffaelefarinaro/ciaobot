@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Terminal · Ciaobot</title>
+  <meta name="description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, what your signed-in session already allows, and what a session does.">
+  <link rel="canonical" href="https://www.raffaelefarinaro.com/ciaobot/terminal.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Ciaobot">
+  <meta property="og:title" content="Browser Terminal · Ciaobot">
+  <meta property="og:description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, what your signed-in session already allows, and what a session does.">
+  <meta property="og:url" content="https://www.raffaelefarinaro.com/ciaobot/terminal.html">
+  <meta property="og:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Ciaobot — a personal assistant that remembers.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Browser Terminal · Ciaobot">
+  <meta name="twitter:description" content="The terminal panel in Ciaobot opens a real shell on the computer running Ciaobot: where it runs, what your signed-in session already allows, and what a session does.">
+  <meta name="twitter:image" content="https://www.raffaelefarinaro.com/ciaobot/assets/img/og.png">
+  <link rel="icon" href="assets/img/favicon.png">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="inner">
+      <a class="brand" href="./"><img src="assets/img/logo.png" alt="">Ciaobot</a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="./">Home</a>
+        <a href="guide.html">Get started</a>
+        <a href="features.html">Features</a>
+        <a href="memory.html">Memory</a>
+        <a href="terminal.html" aria-current="page">Terminal</a>
+        <a href="companions.html">Companions</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot/releases">What's new</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="narrow">
+    <section>
+      <p class="eyebrow">Advanced</p>
+      <h1>A shell on the computer running Ciaobot</h1>
+      <p class="lead">The terminal panel opens a real shell on the machine Ciaobot runs on. Here is where that shell lives, what it is allowed to do, and how long a session lasts.</p>
+      <ul class="toc" aria-label="On this page">
+        <li><a href="#where">Where it runs</a></li>
+        <li><a href="#access">What gets you in</a></li>
+        <li><a href="#open">Opening a terminal</a></li>
+        <li><a href="#sessions">Hide, End and the fifteen minutes</a></li>
+        <li><a href="#phone">From a phone</a></li>
+        <li><a href="#scrollback">Scrollback is bounded</a></li>
+        <li><a href="#not">What it is not</a></li>
+      </ul>
+    </section>
+
+    <section id="where">
+      <h2>Where it runs</h2>
+      <p>The panel is not a shell that lives in the browser. It is a process on the computer Ciaobot runs on, started by the engine, with the account the engine runs as. What you see in the panel is the bytes that process writes, sent to your browser as they arrive.</p>
+      <p>The shell it starts is the engine account's login shell on macOS and Linux, and PowerShell on Windows.</p>
+      <div class="note"><strong>It is not sandboxed, and it is not confined to your notes folder.</strong> Whatever the engine's account can read, the terminal can read, and the workspace's <strong>File access</strong> setting does not apply to it. <a href="features.html#file-access">How file access works →</a></div>
+      <p>That matters most on a shared or rented machine, where the engine runs as the service's own account. Treat the terminal panel as a full shell on that machine, and treat anyone who can sign in to Ciaobot on this engine as someone who can open it.</p>
+    </section>
+
+    <section id="access">
+      <h2>What gets you in</h2>
+      <p>Your signed-in session is what opens the terminal. There is no second password prompt: the same browser session that can talk to the agent can open the panel, because on this engine those are already the same level of access.</p>
+      <p>The panel still holds a separate, short-lived permission in a cookie your page's own script cannot read: a grant that lasts fifteen minutes and belongs to this browser. It is how the panel knows which browser may hold the socket. Signing out of Ciaobot ends it, and so does changing your password: a new password ends every grant, on every device, including the one that changed it. While the panel is open and the engine closes the socket, it asks for a fresh grant for itself, so the fifteen minutes bound a grant rather than an open pane.</p>
+      <div class="note"><strong>A workspace that denies the agent a shell does not deny you one.</strong> If a workspace removes the agent's Bash tool, or confines its shell to the workspace, the browser terminal still opens the engine account's own shell. The signed-in session is the boundary; keep that account, and who can sign in to it, as the thing you protect.</div>
+    </section>
+
+    <section id="open">
+      <h2>Opening a terminal</h2>
+      <p>A terminal belongs to one chat or one project. Open the panel from the chat you are in, or from the project, and the shell starts in the folder Ciaobot resolves for that target: the chat's code-mode worktree if the chat has one, otherwise the project's linked repository, otherwise the workspace folder. You do not pick the folder, and neither can the agent.</p>
+      <p>The panel lists the sessions opened for that chat or project, so a shell you left running is still there to come back to.</p>
+    </section>
+
+    <section id="sessions">
+      <h2>Hide, End and the fifteen minutes</h2>
+      <ul>
+        <li><strong>Hide detaches.</strong> The panel closes and the shell keeps running on the machine. Open the panel again and the session is there, with what it has printed since.</li>
+        <li><strong>End closes the shell</strong> and removes the session. It is the only action that stops the process.</li>
+        <li><strong>A session nobody is attached to is reclaimed after fifteen minutes.</strong> The clock is fixed: a session that keeps printing is reclaimed on the same clock as one that sits idle, and output does not push the deadline back.</li>
+        <li><strong>At most four terminal sessions exist at once</strong>, counted across your chats and projects.</li>
+      </ul>
+    </section>
+
+    <section id="phone">
+      <h2>From a phone</h2>
+      <p>The terminal is a panel in the app, so it works from a phone or another computer the same way it works on the machine Ciaobot runs on: the shell is on that machine, and the panel is a window onto it.</p>
+      <p>One rule comes with it. From another device the connection has to be HTTPS; plain HTTP is accepted only from a browser on the engine's own machine. On a host you reach over the network, run <code>tailscale serve --bg 8443</code> and use the <code>https</code> address it prints. <a href="remote.html">How to reach a remote Ciaobot →</a></p>
+      <p>On a phone the on-screen keyboard sends text and Return, and it has no Ctrl key, so use the shell's own commands to stop a running program.</p>
+    </section>
+
+    <section id="scrollback">
+      <h2>Scrollback is bounded</h2>
+      <p>To be able to come back to a session, Ciaobot keeps its last 256 KB of output. That is the whole history it has of what the shell printed.</p>
+      <p>If a session has produced more than that, the earliest output is gone. The panel says the replay was truncated and shows the bytes that are left; it does not rebuild a screen from bytes it no longer has. A long-running session can therefore lose the beginning of its scrollback.</p>
+    </section>
+
+    <section id="not">
+      <h2>What the terminal is not</h2>
+      <ul>
+        <li><strong>Not the agent's shell.</strong> The agent works under the workspace's File access setting. The terminal panel is yours, and the agent cannot drive it.</li>
+        <li><strong>Not a background job.</strong> A long command you want reported back in a chat belongs in a background run, not in a terminal session that nobody is watching.</li>
+        <li><strong>Not a terminal window on the engine's desktop.</strong> Opening a real window on that machine is a different feature, and only a browser on that machine may ask for it.</li>
+      </ul>
+    </section>
+
+    <nav class="next-page" aria-label="Next pages">
+      <a class="btn" href="features.html">← Features</a>
+      <a class="btn btn-primary" href="builtin.html">What's built in →</a>
+    </nav>
+  </main>
+
+  <footer class="site-footer">
+    <div class="inner">
+      <span>Ciaobot is open source.</span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>

@@ -12,6 +12,11 @@ import { canReconcile, descriptorFor, kindLabel, rehomeMode } from '../lib/propo
 import { CHANGE_FILTERS, changeFor, isRegionPreview, type ProposalChange, type ProposalChangeType } from '../lib/proposalChange'
 import type { ProposalMergeFallback } from '../lib/proposalKinds'
 import ProposalHistoryList from './ProposalHistoryList.vue'
+import DecisionReason from './DecisionReason.vue'
+import { MEMORY_REASON_CHIPS } from '../lib/memoryDecisionReasons'
+import { cleanReason } from '../lib/decisionReasons'
+import { DISCUSSION_WORDS, discussionChatTitle, discussionState, entryExcerpt, type DiscussionState } from '../lib/proposalDiscussion'
+import ActivityGlyph from './ActivityGlyph.vue'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
@@ -63,7 +68,7 @@ const olderThanDays = ref(30)
  * would take the reason and the competing entries away the moment they became
  * relevant, and the retry that resolves it belongs next to them.
  */
-const deferredById = ref<Record<string, { reason: string; competing: string[]; text?: string; expectedRevision?: string }>>({})
+const deferredById = ref<Record<string, { reason: string; competing: string[]; text?: string; expectedRevision?: string; decisionReason?: string }>>({})
 
 function deferredFor(row: ProposalRow) {
   return deferredById.value[row.id]
@@ -90,9 +95,78 @@ function clearDeferred(id: string) {
 // replaces the row's actions in place, the same shape the leak confirmation
 // already used (which now folds into the card rather than stacking a second
 // confirmation on top of it).
+//
+// The reason is on that card, not behind a disclosure: the decision log is
+// only as good as the reasons in it, and a "Why?" nobody opened is a reason
+// nobody gave. It stays optional — a blank reason is a decision to skip it,
+// and the button says so.
+const CONTINUE_WITHOUT_REASON = 'Continue without a reason'
 const previewId = ref('')
 const editingPreview = ref(false)
 const editBuffer = ref('')
+// The optional "why" typed on a decision card, per row. It lives only as long
+// as the card: Cancel discards it, a switch to another row discards it, and a
+// successful decision discards it. A dismissal carries its own, and the two
+// never share: an acceptance rationale is not a reason to dismiss.
+const reasonById = ref<Record<string, string>>({})
+
+/** The row whose dismissal is being confirmed.
+ *
+ * One at a time: the card replaces the row's actions, so two open cards would
+ * leave two rows half-decided with no clear way back to either.
+ */
+const dismissId = ref('')
+
+function reasonFor(id: string): string {
+  return cleanReason(reasonById.value[id] ?? '')
+}
+
+function clearReason(id: string) {
+  delete reasonById.value[id]
+}
+
+/** The decision cards on screen, so the focus can be put in the one that just
+ * opened. Keyed by row, and kept apart per kind: a card that is closing must
+ * never take the place of the one that is opening. */
+const acceptCards = new Map<string, HTMLElement>()
+const dismissCards = new Map<string, HTMLElement>()
+
+function bindAcceptCard(id: string, el: unknown) {
+  if (el instanceof HTMLElement) acceptCards.set(id, el)
+  else acceptCards.delete(id)
+}
+
+function bindDismissCard(id: string, el: unknown) {
+  if (el instanceof HTMLElement) dismissCards.set(id, el)
+  else dismissCards.delete(id)
+}
+
+/** Put the focus in the field a card is asking about.
+ *
+ * The reason is what the card adds, and a keyboard user who opened it is
+ * there to answer it: the focus lands where the answer goes, not back on the
+ * row it came from. */
+function focusField(scope: HTMLElement | undefined, selector = '.decision-reason textarea') {
+  scope?.querySelector<HTMLElement>(selector)?.focus()
+}
+
+/** Hand the focus back to a row's own action.
+ *
+ * The control that opened the card is gone by then — the card replaced the
+ * row's actions — so the row's action of the same kind takes the focus. When
+ * the row has none, the row itself does: it is focusable, and a keyboard user
+ * is never left with the focus on the body. */
+function focusRowAction(id: string, actions: string[]) {
+  const row = rowEls.get(id)
+  for (const action of actions) {
+    const button = row?.querySelector<HTMLElement>(`[data-pr-action="${action}"]`)
+    if (button) {
+      button.focus()
+      return
+    }
+  }
+  row?.focus()
+}
 
 const openPreview = computed(() => (previewId.value ? store.previews[previewId.value] : undefined))
 
@@ -101,15 +175,36 @@ function isPreviewOpen(row: ProposalRow): boolean {
   return previewId.value === row.id
 }
 
-async function reviewAccept(row: ProposalRow) {
+/** Which row, if any, is showing its dismissal confirmation. */
+function isDismissOpen(row: ProposalRow): boolean {
+  return dismissId.value === row.id
+}
+
+/** Which row action opened the card now open, so Cancel can give the focus
+ *  back to it. */
+const previewTrigger = ref('accept')
+
+async function reviewAccept(row: ProposalRow, trigger = 'accept') {
   // Moving to another row's card walks away from this one: close it the same
   // way Cancel does, so an edited wording it re-previewed does not stay on its
   // row as the preview the row's own accept button would then commit.
   if (previewId.value && previewId.value !== row.id) closePreview()
+  // A dismissal being confirmed is walked away from too, and its reason with
+  // it: one decision card at a time, and no reason carried across the switch.
+  if (dismissId.value) closeDismiss()
   previewId.value = row.id
+  previewTrigger.value = trigger
   editingPreview.value = false
   editBuffer.value = row.text
-  await store.loadPreview(row.id)
+  // The row's prefetched preview is already what the operator is looking at,
+  // and its revision is what the accept pins. Re-fetching it here would add a
+  // round trip they wait behind, and a failed one would strip a working
+  // preview from under the card. A destination that moved since is refused by
+  // the revision check, and the conflict path re-shows the refreshed preview
+  // with the reason still typed — so freshness does not depend on this call.
+  if (!store.previews[row.id]) await store.loadPreview(row.id)
+  await nextTick()
+  focusField(acceptCards.get(row.id))
 }
 
 function closePreview() {
@@ -118,6 +213,7 @@ function closePreview() {
   editingPreview.value = false
   editBuffer.value = ''
   if (!id) return
+  clearReason(id)
   // The row shows its preview, so closing the card keeps it — unless the card
   // re-previewed an edited wording. That preview describes a write the
   // operator walked away from, so the row goes back to the original bullet's.
@@ -129,11 +225,23 @@ function closePreview() {
   }
 }
 
+/** Close the card and give the focus back to the row it was opened from. */
+async function cancelPreview() {
+  const id = previewId.value
+  const trigger = previewTrigger.value
+  closePreview()
+  await nextTick()
+  focusRowAction(id, [trigger, 'accept', 'review'])
+}
+
 /** Open the card straight into editing: the row's "Edit first". */
 async function editFirst(row: ProposalRow) {
-  await reviewAccept(row)
+  await reviewAccept(row, 'edit')
   // Another card may have been opened while the preview loaded.
-  if (previewId.value === row.id) startEditingPreview()
+  if (previewId.value !== row.id) return
+  startEditingPreview()
+  await nextTick()
+  focusField(acceptCards.get(row.id), '.pr-card-edit-input')
 }
 
 function startEditingPreview() {
@@ -170,6 +278,31 @@ function previewPrimaryLabel(row: ProposalRow): string {
   return `Save to ${preview.destination || 'memory'}`
 }
 
+/** The words on the one primary action.
+ *
+ * With a reason typed, the button names the destination it writes to. With no
+ * reason, it says plainly that the decision goes through without one: the
+ * reason is optional, and a button that named the destination anyway would
+ * read as if one were required to get there. */
+function confirmLabel(row: ProposalRow): string {
+  return reasonFor(row.id) ? previewPrimaryLabel(row) : CONTINUE_WITHOUT_REASON
+}
+
+/** The same for a dismissal, whose reason is optional in exactly the same way. */
+function dismissLabel(row: ProposalRow): string {
+  return reasonFor(row.id) ? 'Dismiss' : CONTINUE_WITHOUT_REASON
+}
+
+/** What the decision will do, in a sentence above the button.
+ *
+ * The button says "Continue without a reason" when nothing was typed, so the
+ * card itself has to name the action: what the decision does, and where it
+ * lands, in one line. */
+function pendingAction(row: ProposalRow): string {
+  const label = previewPrimaryLabel(row)
+  return `This will ${label.charAt(0).toLowerCase()}${label.slice(1)}.`
+}
+
 const OPERATION_LABELS: Record<string, string> = {
   add: 'Add',
   update: 'Update',
@@ -191,13 +324,21 @@ function previewChanges(preview: ProposalPreview): LineChange[] {
  * computed against. A destination that moved since then comes back as a
  * conflict with a refreshed preview, and the card stays open on it. */
 async function confirmPreview(row: ProposalRow, workspace = '', reconcile = false) {
+  // A second press on a button that is already writing would queue the same
+  // decision twice.
+  if (store.isBusy(row.id)) return
   const preview = store.previews[row.id]
   if (!preview) return
   const edited = preview.text !== row.text ? preview.text : ''
+  // Read before the card can close: a refusal closes it, and the deferral
+  // below keeps the reason for the retry (as `decisionReason`: a deferral already
+  // has a `reason` of its own).
+  const reason = reasonFor(row.id)
   const result = await store.act(row.id, 'accept', workspace, {
     expectedRevision: preview.revision,
     text: edited,
     reconcile,
+    reason,
   })
   if (result.conflict) return
   if (result.ok) {
@@ -209,6 +350,7 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
     }
     store.dropPreview(row.id)
     clearDeferred(row.id)
+    clearReason(row.id)
     return
   }
   // A refusal that is not a conflict (an over-cap guard, a people note that
@@ -216,10 +358,14 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   // The pending edit rides along into the deferral: without it the retry
   // below would resend the original bullet, silently replacing the wording
   // the operator just approved.
+  // The deferral below keeps its own copy (`decisionReason`); leaving this one
+  // behind would post a refused accept's reason on a later Dismiss.
+  clearReason(row.id)
   if (previewId.value === row.id) closePreview()
   await handleAcceptRefusal(row, result.error || '', result.payload, {
     text: edited || undefined,
     expectedRevision: preview.revision,
+    decisionReason: reason || undefined,
   })
 }
 
@@ -283,7 +429,7 @@ async function openChat(chatId: string) {
   // which may not be the one the review list is currently scoped to.
   const project = projectStore.projectFor(chatId)
   if (project && project.workspace !== projectStore.activeWorkspace) {
-    await projectStore.switchWorkspace(project.workspace)
+    if ((await projectStore.switchWorkspace(project.workspace)) === false) return
   }
   await projectStore.switchChat(chatId)
 }
@@ -291,6 +437,17 @@ async function openChat(chatId: string) {
 async function openDiscussion(row: ProposalRow) {
   const chat = discussionChat(row)
   if (chat) await openChat(chat.chat_id)
+}
+
+/** Where this row's discussion stands, read from the same signals Home uses. */
+function rowDiscussionState(row: ProposalRow): DiscussionState | null {
+  const chat = discussionChat(row)
+  if (!chat) return null
+  return discussionState({
+    working: projectStore.chatIsWorking(chat.chat_id),
+    needsYou: projectStore.chatNeedsYou(chat.chat_id),
+    unread: projectStore.chatUnread(chat.chat_id) > 0,
+  })
 }
 
 function linkedChatId(rowId: string): string | undefined {
@@ -472,6 +629,8 @@ watch(
  * and this list cannot disagree about what is in scope.
  */
 const scopeFiltered = computed(() => store.visibleRows(projectStore.activeWorkspace))
+/** The All chip's count ignores the Needs you toggle, so pressing it does not renumber All. */
+const allCount = computed(() => store.visibleRows(projectStore.activeWorkspace, false).length)
 
 // -- Change type ------------------------------------------------------------
 //
@@ -534,6 +693,22 @@ watch(changeCounts, (chips) => {
     changeFilter.value = 'all'
   }
 })
+
+/** The "Needs you" chip earns its place only when it would filter something
+ * out: at least one row in scope is marked `nightly`. */
+const needsYouChipShown = computed(() => {
+  const ws = projectStore.activeWorkspace
+  return store.needsYouCount(ws) > 0
+    && store.scopedRows(ws).some(r => r.decider === 'nightly')
+})
+
+watch(needsYouChipShown, (shown) => {
+  if (!shown) store.decideFilter = 'all'
+})
+
+function toggleNeedsYou() {
+  store.decideFilter = store.decideFilter === 'needs-you' ? 'all' : 'needs-you'
+}
 
 function clearAllFilters() {
   changeFilter.value = 'all'
@@ -800,7 +975,22 @@ function rowTitle(row: ProposalRow): string {
   if (isSkill(row)) {
     return (row.problem || row.title || row.text).trim() || row.text
   }
-  return row.text
+  // An entry verdict's own text names the note and an entry digest, so two
+  // bullets of one note read as the same row. The bullet is what is decided on.
+  const entry = isNoteEdit(row) ? entryExcerpt(row.note_edit?.entry ?? '') : ''
+  return entry || row.text
+}
+
+/** The note an entry-level row is about, by file name, for the meta line. */
+function entryNote(row: ProposalRow): string {
+  if (!isNoteEdit(row) || !row.note_edit?.entry || !row.target) return ''
+  return pathLeaf(row.target)
+}
+
+/** The consequence line repeats the change line's qualifier on a row that has
+ * no preview, which printed the same sentence twice. */
+function consequenceShown(row: ProposalRow): boolean {
+  return !(rowChange(row).label && changeQualifier(row) === rowConsequence(row))
 }
 
 /** Split text on `backtick` spans so they can render as inline code. */
@@ -949,9 +1139,11 @@ async function retryReconcile(row: ProposalRow) {
     reconcile: true,
     expectedRevision: pending?.expectedRevision,
     text: pending?.text,
+    reason: pending?.decisionReason,
   })
   if (result.ok) {
     clearDeferred(row.id)
+    clearReason(row.id)
     return
   }
   if (result.conflict) {
@@ -1026,7 +1218,7 @@ async function handleAcceptRefusal(
   row: ProposalRow,
   msg: string,
   payload?: unknown,
-  pending?: { text?: string; expectedRevision?: string },
+  pending?: { text?: string; expectedRevision?: string; decisionReason?: string },
 ) {
   const deferral = deferralFrom(payload)
   if (deferral) {
@@ -1091,8 +1283,51 @@ function moveTargets(row: ProposalRow): string[] {
   return [...new Set(ordered)]
 }
 
+/** Open the confirmation for a dismissal.
+ *
+ * A dismissal used to write straight from the row: the reason was optional and
+ * hidden behind a disclosure nobody opened, so the decision log recorded that
+ * the proposal was dropped and never why. The confirmation asks first, and the
+ * answer stays optional — a blank reason is a decision to skip it, not a
+ * blocked one.
+ */
 function doDismiss(row: ProposalRow) {
-  void store.act(row.id, 'dismiss')
+  // The card that is open walks away: one decision card at a time, and no
+  // reason carried across the switch (an acceptance rationale is not a reason
+  // to dismiss).
+  if (previewId.value) closePreview()
+  if (dismissId.value && dismissId.value !== row.id) closeDismiss()
+  dismissId.value = row.id
+  void nextTick(() => focusField(dismissCards.get(row.id)))
+}
+
+/** Close the dismissal confirmation and throw away what was typed in it. */
+function closeDismiss() {
+  const id = dismissId.value
+  dismissId.value = ''
+  if (id) clearReason(id)
+}
+
+/** Cancel: no write, and the focus goes back to the row action that opened
+ * the confirmation. */
+async function cancelDismiss() {
+  const id = dismissId.value
+  closeDismiss()
+  await nextTick()
+  focusRowAction(id, ['dismiss'])
+}
+
+/** Write the dismissal, with the reason the confirmation collected.
+ *
+ * A refusal keeps the card and the reason: the operator wrote that reason for
+ * THIS dismissal, and a retry that lost it would ask for the same sentence
+ * again. A success closes the card and clears it. */
+async function confirmDismiss(row: ProposalRow) {
+  if (store.isBusy(row.id)) return
+  const reason = reasonFor(row.id)
+  const result = await store.act(row.id, 'dismiss', '', { reason })
+  if (!result.ok) return
+  closeDismiss()
 }
 
 async function openWorkspaceChatInBackground(workspace: string, title: string, helper: ProposalHelper) {
@@ -1188,8 +1423,12 @@ async function refreshChatListFor(chatId: string) {
   if (projectStore.chats.some((c) => c.chat_id === chatId)) return
   try {
     const { api } = await import('../lib/api')
+    // Captured before the request, not when it lands: the list hydrates the
+    // transient terminal offers, and a payload that raced a newer offer
+    // change must not roll it back.
+    const readStartedAt = projectStore.terminalOfferReadStart()
     const next = await api.get<any[]>('/api/chats')
-    if (Array.isArray(next)) projectStore.reconcileChatList(next)
+    if (Array.isArray(next)) projectStore.reconcileChatList(next, readStartedAt)
   } catch {
     /* the next chat sync will carry it */
   }
@@ -1203,11 +1442,12 @@ async function discuss(row: ProposalRow) {
   if (chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(row.workspace, 'Proposal review', reviewHelper(row.id))
+    const title = discussionChatTitle(rowTitle(row))
+    const chat = await openWorkspaceChatInBackground(row.workspace, title, reviewHelper(row.id))
     if (!chat) return
     linkDiscussion([row.id], chat.chat_id)
     projectStore.sendMessage(chat.chat_id, discussPrompt(row))
-    pushBackgroundToast(chat.chat_id, 'Discussion in background', 'Proposal review — click to open the chat')
+    pushBackgroundToast(chat.chat_id, 'Discussion in background', `${title} — click to open the chat`)
   } finally {
     chatBusy.value = false
   }
@@ -1280,7 +1520,8 @@ async function batchDiscuss() {
   if (!rows.length || chatBusy.value) return
   chatBusy.value = true
   try {
-    const chat = await openWorkspaceChatInBackground(projectStore.activeWorkspace, 'Proposal review', reviewHelper(...rows.map(row => row.id)))
+    const title = discussionChatTitle(rows.length === 1 ? rowTitle(rows[0]) : '', rows.length)
+    const chat = await openWorkspaceChatInBackground(projectStore.activeWorkspace, title, reviewHelper(...rows.map(row => row.id)))
     if (!chat) return
     linkDiscussion(rows.map(row => row.id), chat.chat_id)
     const lines = rows.map((r, i) => `${i + 1}. [${r.kind}] ${r.text}`).join('\n')
@@ -1291,7 +1532,7 @@ async function batchDiscuss() {
         'or should be dropped. Do not edit any region or move any file until I ' +
         'decide.\n\n' + DISCUSS_RESOLUTION,
     )
-    pushBackgroundToast(chat.chat_id, 'Discussion in background', `${rows.length} proposals — click to open the chat`)
+    pushBackgroundToast(chat.chat_id, 'Discussion in background', `${title} — click to open the chat`)
   } finally {
     chatBusy.value = false
   }
@@ -1386,7 +1627,7 @@ watch(
         What archived chats taught Ciaobot that it would not save on its own. Each one
         says what it will do: create a note, add to one, or change one that is already there.
         <button
-          v-if="store.kindFilter !== 'all' || store.search"
+          v-if="store.kindFilter !== 'all' || store.search || store.decideFilter !== 'all'"
           type="button"
           class="pr-clear-filter"
           @click="clearAllFilters()"
@@ -1478,7 +1719,7 @@ watch(
       <p v-if="filtersHideEverything" class="pr-empty">
         No proposals match the current filters.
         <button
-          v-if="store.kindFilter !== 'all' || store.search || changeFilter !== 'all'"
+          v-if="store.kindFilter !== 'all' || store.search || store.decideFilter !== 'all' || changeFilter !== 'all'"
           type="button"
           class="pr-clear-filter"
           @click="clearAllFilters()"
@@ -1501,9 +1742,16 @@ watch(
           <button
             type="button"
             class="mr-chip"
-            :aria-pressed="changeFilter === 'all'"
-            @click="changeFilter = 'all'"
-          >All <span class="mr-chip-count">{{ scopeFiltered.length }}</span></button>
+            :aria-pressed="changeFilter === 'all' && store.decideFilter === 'all'"
+            @click="changeFilter = 'all'; store.decideFilter = 'all'"
+          >All <span class="mr-chip-count">{{ allCount }}</span></button>
+          <button
+            v-if="needsYouChipShown"
+            type="button"
+            class="mr-chip"
+            :aria-pressed="store.decideFilter === 'needs-you'"
+            @click="toggleNeedsYou"
+          >Needs you <span class="mr-chip-count">{{ store.needsYouCount(projectStore.activeWorkspace) }}</span></button>
           <button
             v-for="chip in changeCounts"
             :key="chip.type"
@@ -1575,7 +1823,10 @@ watch(
             <p class="pr-row-meta">
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
               <template v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</template>
+              <template v-if="row.decider"> · decide: {{ row.decider }}</template>
+              <template v-if="entryNote(row)"> · in <span class="pr-meta-note" :title="row.target">{{ entryNote(row) }}</span></template>
             </p>
+            <p v-if="row.decide_reason" class="pr-row-reason">Why: {{ row.decide_reason }}</p>
             <div class="pr-row-top">
               <!-- Backtick spans render as inline code rather than raw backticks;
                    built from segments, never v-html, since the text is model-written. -->
@@ -1617,8 +1868,12 @@ watch(
               </template>
               <!-- No preview yet (or none to be had): what keeping it does, in
                    words, until the server says exactly. -->
-              <p v-else class="pr-row-sub" :title="rowSubtitle(row)">
-                {{ rowConsequence(row) }}
+              <p
+                v-else-if="consequenceShown(row) || store.isPreviewLoading(row.id) || store.previewErrors[row.id] || (row.leak_warning && !rowChange(row).label)"
+                class="pr-row-sub"
+                :title="rowSubtitle(row)"
+              >
+                <template v-if="consequenceShown(row)">{{ rowConsequence(row) }}</template>
                 <span v-if="store.isPreviewLoading(row.id)" class="pr-checking" role="status"> · checking what it changes…</span>
                 <template v-else-if="store.previewErrors[row.id]">
                   <span class="pr-preview-error"> · could not read the destination.</span>
@@ -1647,20 +1902,63 @@ watch(
                     <span v-if="line.op !== 'context'" class="mr-sr-only">{{ line.op }}</span>
                   </li>
                 </ol>
-                <p v-if="rowDiff(row)!.more" class="mr-box-foot">{{ rowDiff(row)!.more }} more {{ rowDiff(row)!.more === 1 ? 'line' : 'lines' }}. <button type="button" class="mr-link" @click="reviewAccept(row)">Show all</button></p>
+                <p v-if="rowDiff(row)!.more" class="mr-box-foot">{{ rowDiff(row)!.more }} more {{ rowDiff(row)!.more === 1 ? 'line' : 'lines' }}. <button type="button" class="mr-link" data-pr-action="show-all" @click="reviewAccept(row, 'show-all')">Show all</button></p>
                 <p v-if="rowDiff(row)!.note" class="mr-box-foot">{{ rowDiff(row)!.note }}</p>
               </div>
               <p v-if="rowReason(row)" class="pr-row-reason">{{ rowReason(row) }}</p>
             </template>
+
+            <!-- A discussion chat for this row: its state in words with the
+                 live glyph, and the one way into it. The row stays queued, so
+                 the band sits under what is being discussed rather than in
+                 place of the row's actions. -->
+            <div
+              v-if="rowDiscussionState(row)"
+              class="pr-discussion"
+              :class="`pr-discussion--${rowDiscussionState(row)}`"
+              role="status"
+            >
+              <span class="pr-discussion-state">
+                <ActivityGlyph v-if="rowDiscussionState(row) === 'working'" kind="working" />
+                <span v-else class="pr-discussion-dot" aria-hidden="true" />
+                <span class="pr-discussion-word">{{ DISCUSSION_WORDS[rowDiscussionState(row)!] }}</span>
+                <span class="pr-discussion-chat" :title="discussionChat(row)!.title">{{ discussionChat(row)!.title }}</span>
+              </span>
+              <button
+                type="button"
+                class="pr-discussion-open"
+                :aria-label="`Open the discussion chat ${discussionChat(row)!.title}`"
+                @click="openDiscussion(row)"
+              >Open chat &rarr;</button>
+            </div>
           </div>
 
           <!-- The decision card: "Edit first", or a row with no preview yet.
                It replaces the row's actions until answered, confirms against the
                revision it shows, and keeps edit, check, discuss and dismiss as
                its secondaries. The leak warning rides on it too. -->
-          <div v-if="isPreviewOpen(row)" class="pr-card" role="group" :aria-label="`Review ${rowTitle(row)}`">
-            <p v-if="store.isPreviewLoading(row.id) && !store.previews[row.id]" class="pr-card-note" role="status">Reading the destination…</p>
-            <p v-else-if="store.previewErrors[row.id]" class="pr-card-error" role="alert">{{ store.previewErrors[row.id] }}</p>
+          <div
+            v-if="isPreviewOpen(row)"
+            class="pr-card"
+            role="group"
+            :aria-label="`Review ${rowTitle(row)}`"
+            :ref="el => bindAcceptCard(row.id, el)"
+          >
+            <div v-if="store.isPreviewLoading(row.id) && !store.previews[row.id]" class="pr-card-status">
+              <p class="pr-card-note" role="status">Reading the destination…</p>
+              <div class="pr-actions pr-actions--card">
+                <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
+              </div>
+            </div>
+            <div v-else-if="store.previewErrors[row.id]" class="pr-card-status">
+              <p class="pr-card-error" role="alert">{{ store.previewErrors[row.id] }}</p>
+              <!-- A preview that could not be read is not a decision: the card
+                   replaced the row's actions, so it owes the operator a way
+                   back instead of trapping the row behind an error. -->
+              <div class="pr-actions pr-actions--card">
+                <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
+              </div>
+            </div>
 
             <template v-else-if="store.previews[row.id]">
               <p v-if="store.conflictIds.has(row.id)" class="pr-card-conflict" role="alert">
@@ -1680,6 +1978,7 @@ watch(
               <p class="pr-card-meta">
                 <span v-if="row.source">from <span class="pr-card-source">{{ row.source }}</span></span>
                 <span v-else>no recorded source</span>
+                <span v-if="row.decider">decide: {{ row.decider }}<template v-if="row.decide_reason"> ({{ row.decide_reason }})</template></span>
                 <span v-if="store.previews[row.id].leak_warning" class="pr-badge --warn">visible in every workspace</span>
               </p>
 
@@ -1724,6 +2023,27 @@ watch(
 
               <p v-if="store.previews[row.id].reason" class="pr-card-reason">{{ store.previews[row.id].reason }}</p>
 
+              <!-- The reason, on the card itself: the decision log is only as
+                   good as the reasons in it, and a "Why?" behind a disclosure
+                   was a reason nobody gave. It stays optional — a blank answer
+                   is a decision to skip it, not a blocked one. -->
+              <div class="pr-card-why">
+                <DecisionReason
+                  :id="`pr-why-${row.id}`"
+                  label="Why keep this? (optional)"
+                  :chips="MEMORY_REASON_CHIPS"
+                  :id-prefix="`pr-why-${row.id}`"
+                  :model-value="reasonById[row.id] ?? ''"
+                  :disabled="store.isBusy(row.id)"
+                  @update:model-value="reasonById[row.id] = $event"
+                />
+              </div>
+
+              <!-- The pending action, named above the button that carries it
+                   out: with no reason typed the button only says it continues,
+                   so the card itself has to say what the decision does. -->
+              <p class="pr-confirm-action">{{ pendingAction(row) }}</p>
+
               <div class="pr-actions pr-actions--card">
                 <button
                   v-if="store.previews[row.id].can_accept"
@@ -1731,7 +2051,7 @@ watch(
                   class="btn-small btn-primary"
                   :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
                   @click="confirmPreview(row)"
-                >{{ store.isBusy(row.id) ? 'working…' : previewPrimaryLabel(row) }}</button>
+                >{{ store.isBusy(row.id) ? 'working…' : confirmLabel(row) }}</button>
                 <!-- The same write with a reconcile in front of it. A chip, not
                      a second primary: it costs a model call. -->
                 <button
@@ -1743,12 +2063,45 @@ watch(
                   @click="reconcileFirst(row)"
                 >{{ store.isBusy(row.id) ? 'working…' : 'Check first' }}</button>
                 <button v-if="!editingPreview && isEditable(row)" type="button" class="btn-small btn-chip" @click="startEditingPreview">Edit suggestion</button>
-                <button v-if="discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" @click="openDiscussion(row)">Open chat</button>
-                <button v-else type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
-                <button type="button" class="btn-small btn-chip" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
-                <button type="button" class="btn-small btn-chip" @click="closePreview">Cancel</button>
+                <button v-if="!discussionChat(row)" type="button" class="btn-small btn-chip pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+                <button type="button" class="btn-small btn-chip" data-pr-action="dismiss-card" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+                <button type="button" class="btn-small btn-chip" @click="cancelPreview">Cancel</button>
               </div>
             </template>
+          </div>
+
+          <!-- The dismissal confirmation: it names the proposal, asks why, and
+               writes nothing until it is confirmed. It is the same card shape
+               as the decision card, not a second modal over it. -->
+          <div
+            v-else-if="isDismissOpen(row)"
+            class="pr-card pr-card--dismiss"
+            role="group"
+            :aria-label="`Dismiss ${rowTitle(row)}`"
+            :ref="el => bindDismissCard(row.id, el)"
+          >
+            <p class="pr-card-text">{{ rowTitle(row) }}</p>
+            <div class="pr-card-why">
+              <DecisionReason
+                :id="`pr-dismiss-why-${row.id}`"
+                label="Why dismiss this? (optional)"
+                :chips="MEMORY_REASON_CHIPS"
+                :id-prefix="`pr-dismiss-why-${row.id}`"
+                :model-value="reasonById[row.id] ?? ''"
+                :disabled="store.isBusy(row.id)"
+                @update:model-value="reasonById[row.id] = $event"
+              />
+            </div>
+            <p class="pr-confirm-action">This will dismiss the proposal.</p>
+            <div class="pr-actions pr-actions--card">
+              <button
+                type="button"
+                class="btn-small btn-primary"
+                :disabled="store.isBusy(row.id)"
+                @click="confirmDismiss(row)"
+              >{{ store.isBusy(row.id) ? 'working…' : dismissLabel(row) }}</button>
+              <button type="button" class="btn-small btn-chip" @click="cancelDismiss">Cancel</button>
+            </div>
           </div>
 
           <!-- Deferred: the last accept reconciled this fact against the region
@@ -1787,9 +2140,8 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
-            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
-            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
 
           <!-- A skill proposal is a change to a skill that already exists: read
@@ -1812,9 +2164,8 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="implementSkill(row)"
             >{{ store.isBusy(row.id) ? 'starting…' : 'Improve skill' }}</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
-            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open discussion</button>
-            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
 
           <!-- Linked: a refused accept spawned a merge chat that is still active,
@@ -1827,38 +2178,44 @@ watch(
             <button type="button" class="mr-link" @click="clearLink(row.id)">Show actions</button>
           </div>
 
-          <div v-else class="mr-actions pr-actions">
+          <template v-else>
+          <div class="mr-actions pr-actions">
             <!-- The preview is on the row, so the row can accept it: the verb
                  names the change, and the accept is pinned to the revision the
                  row is showing (a destination that moved comes back as a
                  conflict with the new preview). Neutral, not pink: every row is
-                 the same routine choice. Before the preview arrives, Review
-                 opens the card that loads it. No accept at all when nothing
-                 backs a destination. -->
+                 the same routine choice. The verb opens the decision card,
+                 which is where the reason is asked for and the write is
+                 confirmed. Before the preview arrives, Review opens the card
+                 that loads it. No accept at all when nothing backs a
+                 destination. -->
             <button
               v-if="canAccept(row) && store.previews[row.id] && rowChange(row).verb"
               type="button"
               class="mr-btn pr-row-accept"
+              data-pr-action="accept"
               :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
-              @click="confirmPreview(row)"
+              @click="reviewAccept(row, 'accept')"
             >{{ store.isBusy(row.id) ? 'working…' : rowChange(row).verb }}</button>
             <button
               v-else-if="canAccept(row) && !store.previews[row.id]"
               type="button"
               class="mr-btn pr-row-action"
+              data-pr-action="review"
               :disabled="store.isBusy(row.id)"
-              @click="reviewAccept(row)"
+              @click="reviewAccept(row, 'review')"
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
             <button
               v-if="canAccept(row) && !isRehome(row) && isEditable(row)"
               type="button"
               class="mr-link pr-edit-first"
+              data-pr-action="edit"
               @click="editFirst(row)"
             >Edit first</button>
-            <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
-            <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
+          </template>
         </li>
         </ul>
       </template>
@@ -2226,6 +2583,35 @@ watch(
   font-size: 0.82rem;
 }
 
+.pr-row-reason {
+  margin-top: var(--space-2);
+  min-width: 0;
+}
+
+/* The reason is on the card itself now, so it takes the card's width: a
+   narrow field under a full-width card reads as an afterthought. */
+.pr-card-why {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+  min-width: 0;
+  width: 100%;
+}
+
+.pr-card-why :deep(.decision-reason textarea) {
+  width: 100%;
+}
+
+/* The pending action, named in words above the button that carries it out.
+   With no reason typed the button only says it continues, so the card itself
+   has to say what the decision does. */
+.pr-confirm-action {
+  margin: var(--space-2) 0 0;
+  color: var(--fg2);
+  font-size: 0.85rem;
+}
+
 /* The card's actions run across, not down: the column layout above exists to
    leave the text room, and here the card already owns the full width. */
 .pr-actions--card {
@@ -2470,7 +2856,7 @@ watch(
 .pr-row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
 }
 
 .pr-row--busy {
@@ -2558,6 +2944,93 @@ watch(
   color: var(--fg);
   font-family: var(--font-mono);
   font-size: 0.86em;
+}
+
+/* A live discussion about this row: the Task board's agent band, as a strip
+   under the fact. The state is the word and the glyph's shape first; the tint
+   only reinforces it, so a working chat reads from across the list. */
+.pr-discussion {
+  --band-tone: var(--fg3);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  max-width: 72ch;
+  margin-top: var(--space-2);
+  padding: 6px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+.pr-discussion--working {
+  --band-tone: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.pr-discussion--reply {
+  --band-tone: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.pr-discussion--needs-you {
+  --band-tone: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+.pr-discussion-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  /* A basis rather than `auto`, so a long chat title ellipsizes beside the
+     action instead of pushing it onto a second line. */
+  flex: 1 1 12rem;
+}
+.pr-discussion-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--band-tone);
+}
+.pr-discussion--idle .pr-discussion-dot {
+  background: none;
+  box-shadow: inset 0 0 0 1.5px var(--fg3);
+}
+.pr-discussion-word {
+  flex: none;
+  color: var(--fg);
+  font-weight: 600;
+}
+.pr-discussion--idle .pr-discussion-word { color: var(--fg2); font-weight: 500; }
+.pr-discussion-chat {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pr-discussion-chat::before { content: "· "; }
+.pr-discussion-open {
+  flex: none;
+  margin-inline-start: auto;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pr-discussion-open:hover { text-decoration: underline; text-underline-offset: 3px; }
+.pr-discussion-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+@media (pointer: coarse) {
+  .pr-discussion-open { min-height: var(--touch); }
+}
+
+.pr-meta-note {
+  color: var(--fg2);
 }
 
 .pr-row-sub {

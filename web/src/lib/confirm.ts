@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { cleanReason } from './decisionReasons'
 
 /**
  * Promise-based replacement for `window.confirm`.
@@ -18,6 +19,9 @@ export interface ConfirmRequest {
   confirmLabel: string
   cancelLabel: string
   destructive: boolean
+  /** Show the optional "Why?" field (#1730); `reason` is what the dialog collected. */
+  withReason: boolean
+  reason: string
   resolve: (confirmed: boolean) => void
 }
 
@@ -30,18 +34,21 @@ export interface ConfirmOptions {
   destructive?: boolean
 }
 
-export function askConfirm(message: string, options: ConfirmOptions = {}): Promise<boolean> {
+function openConfirm(message: string, options: ConfirmOptions, withReason: boolean): { promise: Promise<boolean>, request: ConfirmRequest } {
   // A second request would orphan the first one's promise, leaving its caller
   // awaiting forever. Resolve the outstanding one as cancelled first.
   pendingConfirm.value?.resolve(false)
-  return new Promise<boolean>(resolve => {
+  let request!: ConfirmRequest
+  const promise = new Promise<boolean>(resolve => {
     let settled = false
-    pendingConfirm.value = {
+    request = {
       message,
       title: options.title ?? 'Are you sure?',
       confirmLabel: options.confirmLabel ?? 'Confirm',
       cancelLabel: options.cancelLabel ?? 'Cancel',
       destructive: options.destructive ?? false,
+      withReason,
+      reason: '',
       resolve: (confirmed: boolean) => {
         if (settled) return
         settled = true
@@ -49,5 +56,23 @@ export function askConfirm(message: string, options: ConfirmOptions = {}): Promi
         resolve(confirmed)
       },
     }
+    pendingConfirm.value = request
   })
+  return { promise, request }
+}
+
+export function askConfirm(message: string, options: ConfirmOptions = {}): Promise<boolean> {
+  return openConfirm(message, options, false).promise
+}
+
+export interface ConfirmReasonResult {
+  confirmed: boolean
+  reason: string
+}
+
+/** A confirm carrying an optional "Why?" field. Skipping it costs no extra click. */
+export async function askConfirmReason(message: string, options: ConfirmOptions = {}): Promise<ConfirmReasonResult> {
+  const { promise, request } = openConfirm(message, options, true)
+  const confirmed = await promise
+  return { confirmed, reason: confirmed ? cleanReason(request.reason) : '' }
 }

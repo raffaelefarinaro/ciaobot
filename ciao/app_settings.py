@@ -27,15 +27,18 @@ effect on the next tick.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
+import math
 import logging
 import re
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, TypeGuard
 
 from ciao import provider_registry
+from ciao.config import PERMISSION_MODES
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +55,6 @@ def _clean_provider_map(raw: object) -> dict[str, str]:
     }
 
 
-# Execution (permission) modes a provider default may pin. ``manual`` is the
-# PWA-facing name for the BridgeMode ``normal`` (ask for every action);
-# ``plan`` stays chat-only and is not a settings default.
-_MODES = ("manual", "auto", "bypass")
 _KEYBOARD_SHORTCUT_IDS = {
     "newChat", "archiveChat", "toggleSidebar", "modelPicker",
     "fontIncrease", "fontDecrease", "closeChat",
@@ -73,7 +72,7 @@ def _clean_default_modes(raw: object) -> dict[str, str]:
         for provider_id, mode in raw.items()
         if str(provider_id) in known
         and isinstance(mode, str)
-        and mode.strip() in _MODES
+        and mode.strip() in PERMISSION_MODES
     }
 
 
@@ -91,7 +90,6 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_default_modes": _clean_default_modes,
 }
 _BOOLEAN_FIELDS = {
-    "insights_enabled",
     "backup_enabled",
     "backup_paused",
     "dev_mode",
@@ -185,12 +183,11 @@ class AppSettings:
     provider.
     """
 
-    insights_enabled: bool = True
-
     # The unattended backup service (ciao/backup_service.py). `backup_enabled`
-    # is the owner's standing decision and defaults on, so an existing install
-    # keeps the branch push it has always had, and a fresh one is backed up
-    # without anybody configuring anything; `backup_paused` is a hold they can
+    # is the owner's standing decision and defaults on for existing installs,
+    # so they keep the branch push they have always had; a genuinely new
+    # install is seeded to false at setup and enables backup explicitly (the
+    # backup settings and the guided setup). `backup_paused` is a hold they can
     # lift. The three timestamps/commit below are the service's own record of
     # what it has already done.
     #
@@ -232,6 +229,21 @@ class AppSettings:
     # follow-up turn), "steer" = injected into the running turn.
     mid_turn_delivery: str = ""
 
+    # Appearance preferences are engine-wide so every device agrees. "" and
+    # 0.0 mean "never stored": the first browser to load seeds theme and
+    # font_scale from its own local values, after which the engine wins.
+    # text_contrast: "" = normal, "soft" = dimmer body text.
+    text_contrast: str = ""
+    # body_font: "" = system sans, "serif" or "mono".
+    body_font: str = ""
+    # "dark", "light" or "system" (resolved per device from its OS).
+    theme: str = ""
+    font_scale: float = 0.0
+    # custom_colors: {"dark": {"bg", "fg"}, "light": {...}} as '#rrggbb'; either
+    # mode may be absent. The server checks the hex shape only; the readability
+    # (WCAG AA) check lives in the PWA's lib/contrast.ts.
+    custom_colors: dict[str, dict[str, str]] | None = None
+
     # The server's bind address; "" = DEFAULT_PWA_HOST. Read at startup only,
     # so a change takes effect after a restart. Was PWA_HOST.
     pwa_host: str = ""
@@ -252,6 +264,49 @@ class AppSettings:
     legacy_env_imported: bool = False
 
 
+THEMES = ("dark", "light", "system")
+_BODY_FONTS = ("serif", "mono")
+MIN_FONT_SCALE = 0.8
+MAX_FONT_SCALE = 1.5
+FONT_SCALE_STEP = 0.05
+
+
+def _valid_font_scale(value: object) -> TypeGuard[int | float]:
+    """A number inside the Settings range that sits on a 0.05 step."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        number = float(value)  # an int beyond float range raises OverflowError
+    except OverflowError:
+        return False
+    if not math.isfinite(number) or not MIN_FONT_SCALE - 1e-9 <= number <= MAX_FONT_SCALE + 1e-9:
+        return False
+    steps = (number - MIN_FONT_SCALE) / FONT_SCALE_STEP
+    return abs(steps - round(steps)) < 1e-6
+
+
+_HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+_COLOR_MODES = ("dark", "light")
+
+
+def _clean_custom_colors(value: object) -> dict[str, dict[str, str]] | None:
+    """``value`` as ``{mode: {bg, fg}}`` with lowercase hex, else ``None``.
+
+    Returns ``None`` for anything malformed (an unknown mode, a missing or
+    extra key, a value that is not ``#rrggbb``) and for an empty map.
+    """
+    if not isinstance(value, dict):
+        return None
+    cleaned: dict[str, dict[str, str]] = {}
+    for mode, pair in value.items():
+        if mode not in _COLOR_MODES or not isinstance(pair, dict) or set(pair) != {"bg", "fg"}:
+            return None
+        if not all(isinstance(c, str) and _HEX_COLOR.fullmatch(c) for c in pair.values()):
+            return None
+        cleaned[mode] = {"bg": pair["bg"].lower(), "fg": pair["fg"].lower()}
+    return cleaned or None
+
+
 def _parse_settings(raw: object) -> AppSettings:
     """``raw`` (the decoded JSON file) as validated settings. No side effects."""
     settings = AppSettings()
@@ -262,6 +317,7 @@ def _parse_settings(raw: object) -> AppSettings:
         for field in fields(AppSettings)
         if field.name not in _NESTED_CLEANERS
         and field.name not in _BOOLEAN_FIELDS
+        and field.name not in {"font_scale", "custom_colors"}
     }
     for key, value in raw.items():
         if key in string_fields and isinstance(value, str):
@@ -287,6 +343,16 @@ def _parse_settings(raw: object) -> AppSettings:
         settings.keyboard_send_mode = ""
     if settings.mid_turn_delivery != "steer":
         settings.mid_turn_delivery = ""
+    if settings.text_contrast != "soft":
+        settings.text_contrast = ""
+    if settings.body_font not in _BODY_FONTS:
+        settings.body_font = ""
+    if settings.theme not in THEMES:
+        settings.theme = ""
+    settings.custom_colors = _clean_custom_colors(raw.get("custom_colors"))
+    raw_scale = raw.get("font_scale")
+    if _valid_font_scale(raw_scale):
+        settings.font_scale = round(float(raw_scale), 2)
     # A hand-edited file must not hand uvicorn or the root logger garbage.
     if settings.pwa_host and not _valid_host(settings.pwa_host):
         logger.warning("Ignoring invalid pwa_host %r in app settings", settings.pwa_host)
@@ -335,6 +401,23 @@ def _migrate_global_insights_model(raw: dict, settings: AppSettings) -> bool:
         current[provider] = model
         settings.provider_insights_models = _clean_provider_map(current) or None
     return True
+
+
+def needs_new_install_backup_seed(path: Path) -> bool:
+    """Whether ``path`` still has no explicit backup decision.
+
+    Checked before constructing :class:`AppSettingsStore`, because loading it
+    runs schema migrations that rewrite the file: asking "may I seed?" must not
+    change the bytes of a settings file that already carries the owner's
+    choice. An unreadable or non-object file is not eligible either.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return isinstance(raw, dict) and not isinstance(raw.get("backup_enabled"), bool)
 
 
 class AppSettingsStore:
@@ -412,11 +495,11 @@ class AppSettingsStore:
                         str(mode)
                         for mode in value.values()
                         if not isinstance(mode, str)
-                        or (mode.strip() and mode.strip() not in _MODES)
+                        or (mode.strip() and mode.strip() not in PERMISSION_MODES)
                     )
                     if unknown:
                         raise ValueError(
-                            f"{key} entries must be one of {', '.join(_MODES)}"
+                            f"{key} entries must be one of {', '.join(PERMISSION_MODES)}"
                         )
                 setattr(updated, key, _NESTED_CLEANERS[key](value))
                 continue
@@ -446,6 +529,40 @@ class AppSettingsStore:
                     raise ValueError("mid_turn_delivery must be queue or steer")
                 updated.mid_turn_delivery = "steer" if value == "steer" else ""
                 continue
+            if key == "text_contrast":
+                if not isinstance(value, str) or value not in {"normal", "soft"}:
+                    raise ValueError("text_contrast must be normal or soft")
+                updated.text_contrast = "soft" if value == "soft" else ""
+                continue
+            if key == "body_font":
+                if not isinstance(value, str) or value not in {"system", *_BODY_FONTS}:
+                    raise ValueError("body_font must be system, serif or mono")
+                updated.body_font = "" if value == "system" else value
+                continue
+            if key == "theme":
+                if not isinstance(value, str) or value not in THEMES:
+                    raise ValueError("theme must be dark, light or system")
+                updated.theme = value
+                continue
+            if key == "custom_colors":
+                if value is None:
+                    updated.custom_colors = None
+                    continue
+                if not isinstance(value, dict):
+                    raise ValueError("custom_colors must be an object")
+                cleaned_colors = _clean_custom_colors(value)
+                if value and cleaned_colors is None:
+                    raise ValueError("custom_colors entries must be {bg, fg} hex colours")
+                updated.custom_colors = cleaned_colors
+                continue
+            if key == "font_scale":
+                if not _valid_font_scale(value):
+                    raise ValueError(
+                        f"font_scale must be a multiple of {FONT_SCALE_STEP} "
+                        f"between {MIN_FONT_SCALE} and {MAX_FONT_SCALE}"
+                    )
+                updated.font_scale = round(float(value), 2)
+                continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
@@ -464,21 +581,43 @@ class AppSettingsStore:
         self._save()
         return self.settings
 
-    def migrate_legacy_insights_enabled(
-        self, legacy_disabled: bool | None
-    ) -> bool | None:
-        if legacy_disabled is None:
-            return None
-        if "insights_enabled" in self._explicit_fields:
-            return None
-        self.settings.insights_enabled = not legacy_disabled
-        self._explicit_fields.add("insights_enabled")
-        self._save()
-        logger.warning(
-            "CIAO_INSIGHTS_DISABLED is no longer read; migrated it to Settings → "
-            "General once. Remove it from .env."
-        )
-        return self.settings.insights_enabled
+    def seed_new_install_backup_default(self) -> bool:
+        """Persist the opt-out default for a new install without overriding choice.
+
+        Only a genuinely new installation reaches this: the caller has already
+        checked the lifecycle receipt and the first-setup classification, and
+        an operator's explicit value wins here. A settings file that exists but
+        cannot be parsed is left alone rather than replaced with defaults.
+        """
+        if "backup_enabled" in self._explicit_fields:
+            return False
+        if self._path.exists():
+            try:
+                raw = json.loads(self._path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            if not isinstance(raw, dict):
+                return False
+        self.update({"backup_enabled": False})
+        return True
+
+    def appearance_payload(self) -> dict[str, object]:
+        """The engine-wide appearance preferences plus a content revision.
+
+        ``theme`` and ``font_scale`` are ``None`` until a browser first stores
+        one, which is the signal for that browser to seed them.
+        """
+        body: dict[str, object] = {
+            "text_contrast": self.settings.text_contrast or "normal",
+            "body_font": self.settings.body_font or "system",
+            "theme": self.settings.theme or None,
+            "font_scale": self.settings.font_scale or None,
+            "custom_colors": self.settings.custom_colors or {},
+        }
+        digest = hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return {**body, "revision": digest}
 
     def import_legacy_env(self, legacy: Mapping[str, str]) -> list[str]:
         """Copy the retired `.env` server variables into Settings, once.
@@ -551,7 +690,6 @@ class AppSettingsStore:
                 )
         d = self._defaults
         s = self.settings
-        config.insights_enabled = s.insights_enabled
         config.dev_mode = s.dev_mode
         config.app_repo = Path(s.app_repo).expanduser().resolve() if s.app_repo else None
         # Per-provider default models / thinking / routine models have no

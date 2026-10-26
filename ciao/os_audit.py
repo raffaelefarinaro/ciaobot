@@ -145,8 +145,83 @@ def audit_setup(
     }
 
 
+def _user_skill_roots() -> tuple[Path, ...]:
+    """User-global skill folders OpenCode also loads, in full, into every chat.
+
+    OpenCode's own global folder (``$XDG_CONFIG_HOME/opencode/skills``) plus the
+    Claude Code and ``.agents`` folders it reads the same way; the same set the
+    OpenCode sandbox exposes read-only (``_sandboxed_server_dirs``).
+    """
+    home = Path.home()
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return (
+        config_home / "opencode" / "skills",
+        home / ".claude" / "skills",
+        home / ".agents" / "skills",
+    )
+
+
+def _user_skill_warnings(workspace_skills: set[str], workspace_roots: Sequence[Path]) -> list[dict[str, Any]]:
+    """Over-budget SKILL.md files in the user-global skill folders.
+
+    Warnings only: these files live outside the workspace, so they never count
+    as workspace defects or scan errors, and the curation routine must not edit
+    them. A workspace skill of the same name shadows a global one.
+    """
+    warnings: list[dict[str, Any]] = []
+    seen_roots = set()
+    for root in workspace_roots:
+        try:
+            seen_roots.add(root.resolve())
+        except OSError:
+            continue
+    seen: set[str] = set(workspace_skills)
+    for base in _user_skill_roots():
+        try:
+            if not base.is_dir() or base.resolve() in seen_roots:
+                continue
+            seen_roots.add(base.resolve())
+            children = sorted(base.iterdir(), key=lambda path: path.name)
+        except OSError as exc:
+            warnings.append({
+                "type": "unreadable_user_skill_root",
+                "path": str(base),
+                "message": f"Could not list user skills in {base}: {exc}",
+            })
+            continue
+        for child in children:
+            if child.name.startswith(".") or child.name in seen:
+                continue
+            skill_md = child / "SKILL.md"
+            try:
+                if not skill_md.is_file():
+                    continue
+                size = skill_md.stat().st_size
+            except OSError:
+                continue
+            seen.add(child.name)
+            if size > MAX_SKILL_BYTES:
+                warnings.append({
+                    "type": "user_skill_over_budget",
+                    "skill": child.name,
+                    "path": str(skill_md),
+                    "size_bytes": size,
+                    "max_bytes": MAX_SKILL_BYTES,
+                    "message": (
+                        f"User skill '{child.name}' ({skill_md}) exceeds budget: "
+                        f"{size:,} bytes > {MAX_SKILL_BYTES:,} bytes"
+                    ),
+                })
+    return warnings
+
+
 def audit_skills(workspace_dir: Path) -> dict[str, Any]:
-    """Audit logical skills once across canonical and provider projections."""
+    """Audit logical skills once across canonical and provider projections.
+
+    The user-global folders (``~/.config/opencode/skills``,
+    ``~/.claude/skills``, ``~/.agents/skills``) are scanned too, as ``warnings``: OpenCode loads them in full like workspace
+    skills, but they are not the workspace's to fix.
+    """
     issues: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     skill_dirs: dict[str, Path] = {}
@@ -225,11 +300,16 @@ def audit_skills(workspace_dir: Path) -> dict[str, Any]:
                 }
             )
 
+    warnings = _user_skill_warnings(set(skill_dirs), roots)
     return {
         "total_skills": len(skill_dirs),
         "over_budget_count": sum(
             1 for issue in issues if issue["type"] == "skill_over_budget"
         ),
+        "user_over_budget_count": sum(
+            1 for warning in warnings if warning["type"] == "user_skill_over_budget"
+        ),
+        "warnings": warnings,
         "missing_skill_md_count": sum(
             1 for issue in issues if issue["type"] == "missing_skill_md"
         ),
@@ -1672,6 +1752,18 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         ])
         for issue in report["skill_audit"]["issues"]:
             lines.append(f"  - ⚠️ {issue['message']}")
+        user_warnings = report["skill_audit"].get("warnings", [])
+        over_budget = [w for w in user_warnings if w.get("type") == "user_skill_over_budget"]
+        if over_budget:
+            lines.append(
+                f"- User-global skills over {MAX_SKILL_BYTES // 1024} KiB "
+                f"(warning; OpenCode loads them in full): {len(over_budget)}"
+            )
+            for warning in over_budget:
+                lines.append(f"  - ⚠️ {warning['message']}")
+        for warning in user_warnings:
+            if warning.get("type") != "user_skill_over_budget":
+                lines.append(f"- ⚠️ {warning['message']}")
 
     if "rule_audit" in report:
         lines.extend(

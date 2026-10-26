@@ -162,7 +162,7 @@ async function openChat(action: OperatorAction): Promise<void> {
   try {
     const workspace = action.workspace || projectStore.activeWorkspace
     if (projectStore.activeWorkspace !== workspace) {
-      await projectStore.switchWorkspace(workspace)
+      if ((await projectStore.switchWorkspace(workspace)) === false) return
     }
     let project = projectStore.projects.find(
       p => p.workspace === workspace && p.is_auto,
@@ -202,7 +202,7 @@ const LIVE_ATTEMPT_STATES: string[] = ['in_progress', 'waiting_review', 'failed'
  * Three kinds of thing survive, and everything else is somebody else's history:
  *
  *  - a task the operator already decided about is not news. `dismissed` is
- *    hidden in this scope (and reopenable from Settings → Update task history),
+ *    hidden in this scope (and reopenable from Settings → Overview → Update task history),
  *    and `completed` is a verdict a completion check reached rather than
  *    something to re-offer.
  *  - an offer that *applies* here is new work, and so is one nobody could rule
@@ -260,7 +260,7 @@ onBeforeUnmount(() => noticeWindows.clearAvailable('housekeeping'))
  * operator cannot act on from this page). Silence is not a false "done": the
  * group has no all-clear state at all, so its absence never reads as a verdict.
  *
- * The one place a failed check *is* reported is Settings → Update task history,
+ * The one place a failed check *is* reported is Settings → Overview → Update task history,
  * which fetches for itself and owns the error, its retry, and the empty state. */
 const showUpdateGroup = computed(
   () => openUpdateTasks.value.length > 0 || groupStatus.value !== '',
@@ -470,9 +470,9 @@ async function dismissTask(task: UpdateTaskRow): Promise<void> {
   const message = hasChat
     ? 'Hide this task in this workspace? Its chat stays open and is not marked ' +
       'done — you can carry on in it, and reopen the task from Settings → ' +
-      'Update task history.'
+      'Overview → Update task history.'
     : 'Hide this task in this workspace? It stays hidden for this revision only, ' +
-      'and you can reopen it from Settings → Update task history.'
+      'and you can reopen it from Settings → Overview → Update task history.'
   if (!await askConfirm(message, {
     title: 'Hide this update task?',
     confirmLabel: 'Hide it',

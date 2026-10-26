@@ -45,7 +45,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
-from ciao import skill_proposals
+from ciao import decision_rules, skill_proposals
 from ciao.entity_types import EntityTypeRegistry
 from ciao.vault_index import vault_relative
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -86,6 +86,7 @@ PASS_LEARNINGS_CLEANUP = "learnings_cleanup"
 PASS_OBSERVATIONS = "observations"
 PASS_HYGIENE = "hygiene"
 PASS_GUIDE = "guide"
+PASS_RULES = "rules"
 PASS_LOGS = "logs"
 PASS_SKILL_PROPOSALS = "skill_proposals"
 
@@ -120,6 +121,10 @@ PASS_ORDER: tuple[str, ...] = (
     PASS_OBSERVATIONS,
     PASS_HYGIENE,
     PASS_GUIDE,
+    # Weekly, like the guide review, and independent of every pass before it: it
+    # only reads the two decision logs and writes two vault notes. It sits after
+    # the required hygiene keys so a short run never lets it delay them.
+    PASS_RULES,
     PASS_LOGS,
     PASS_SKILL_PROPOSALS,
 )
@@ -338,24 +343,48 @@ def _proposal_subject(bullet: Any, dup: int) -> str:
     return "\x00".join((bullet.kind, bullet.target, bullet.source, str(dup), bullet.text))
 
 
-def _proposal_items(vault_root: Path) -> list[WorklistItem]:
+def _proposal_items(vault_root: Path, handover: str) -> list[WorklistItem]:
+    from ciao.proposal_predictions import (
+        REGION_KINDS,
+        handover_allows,
+        latest_predictions,
+        prediction_key,
+    )
     from ciao.proposal_tracking import walk_proposal_queue
 
     try:
         text = (vault_root / PROPOSALS_RELATIVE).read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return []
-    # `[memory]`/`[profile]` rows stay queued for the user by contract, so they
-    # are not work: counting them would make every workspace with one pending
-    # cross-project fact look busy forever, and the nightly run would spend a
-    # model turn re-reading a row it is forbidden to act on. They are skipped
-    # after the walk, not before it, so leaving one out cannot renumber a later
-    # duplicate's ordinal.
-    keys = tuple(
-        item_key(PASS_PROPOSALS, _proposal_subject(entry.bullet, entry.dup))
-        for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text)
-        if entry.bullet.kind not in {"memory", "profile"}
-    )
+    # `[memory]`/`[profile]` rows are work only to record a verdict for, or to
+    # act on one when the operator's handover setting allows it; otherwise they
+    # stay queued, so a workspace with one decided-but-waiting cross-project fact
+    # does not look busy forever. A `decide: you` row is predicted but never
+    # acted on. The walk covers every row and a skipped row is only left out of
+    # the keys, so leaving one out cannot renumber a later duplicate's ordinal.
+    # The stage and verdict are part of a region row's subject, so a row that
+    # moves from predict to act, or whose verdict changes, gets a new key and an
+    # earlier `curation-progress` done-key cannot hide it. The key does not carry
+    # the handover setting: a predicted dismiss is `act:dismiss` under both
+    # `dismiss` and `all`. The item key never hashes the decider.
+    predictions = latest_predictions(vault_root / PROPOSALS_RELATIVE)
+    collected_keys: list[str] = []
+    for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text):
+        bullet = entry.bullet
+        subject = _proposal_subject(bullet, entry.dup)
+        if bullet.kind in REGION_KINDS:
+            predicted = predictions.get(prediction_key(bullet.kind, bullet.text))
+            if predicted is None:
+                stage = "predict"
+            elif bullet.decider != "you" and handover_allows(handover, predicted["verdict"]):
+                stage = f"act:{predicted['verdict']}"
+            else:
+                continue
+            subject = f"{subject}\x00{stage}"
+        elif bullet.decider == "you":
+            continue
+        collected_keys.append(item_key(PASS_PROPOSALS, subject))
+    keys = tuple(collected_keys)
     if not keys:
         return []
     return [
@@ -1304,6 +1333,29 @@ def _guide_items(*, weekly_due: bool) -> list[WorklistItem]:
     ]
 
 
+def _rules_items(vault_root: Path, *, weekly_due: bool, today: date) -> list[WorklistItem]:
+    """Weekly distillation of operator decisions into the two rules notes.
+
+    Planned per file only when it has enough operator decisions and they changed
+    since the note was last written, so a quiet vault plans nothing. It is not a
+    required hygiene key: skipping it never blocks ``last_full_pass``.
+    """
+    if not weekly_due:
+        return []
+    kinds = decision_rules.stale_kinds(vault_root, today=today)
+    if not kinds:
+        return []
+    return [
+        WorklistItem(
+            pass_id=PASS_RULES,
+            label="Distill operator decisions into review rules",
+            reason="the weekly pass is due and decisions changed since the rules were written",
+            keys=tuple(decision_rules.progress_key(kind) for kind in kinds),
+            weekly=True,
+        )
+    ]
+
+
 def _log_items(vault_root: Path) -> list[WorklistItem]:
     oversized: list[str] = []
     for relative in (CURATION_LOG_RELATIVE, WEEKLY_REVIEW_LOG_RELATIVE):
@@ -1361,8 +1413,13 @@ def build_worklist(
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
     workspace: str | None,
+    handover: str = "off",
 ) -> Worklist:
     """Compute tonight's work from files alone.
+
+    ``handover`` is the workspace's Memory handover setting (off, dismiss, all);
+    it decides whether a ``[memory]``/``[profile]`` row with a stored verdict is
+    act work. The caller reads it from the registry, never from the model.
 
     ``category_registry`` is the category list the cluster pass measures the
     notes against, and it is required rather than loaded from ``vault_root``
@@ -1428,7 +1485,7 @@ def build_worklist(
     # run that proposes a category would not count the row it just proposed. The
     # order the worklist is PRESENTED in is :data:`PASS_ORDER` either way.
     collected.extend(_category_cluster_items(vault_root, registry=category_registry))
-    collected.extend(_proposal_items(vault_root))
+    collected.extend(_proposal_items(vault_root, handover))
     collected.extend(
         _region_items(
             guide_path,
@@ -1513,6 +1570,7 @@ def build_worklist(
             notes.append(observation_note)
     collected.extend(_hygiene_items(weekly_due=weekly_due))
     collected.extend(_guide_items(weekly_due=weekly_due))
+    collected.extend(_rules_items(vault_root, weekly_due=weekly_due, today=today))
     collected.extend(_log_items(vault_root))
     collected.extend(_skill_proposal_items(vault_root))
 

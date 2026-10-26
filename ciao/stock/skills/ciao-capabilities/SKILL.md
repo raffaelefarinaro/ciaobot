@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Use for questions about what Ciaobot can do or how one of its features works, and for tours and onboarding of new users. Covers memory and the vault, Memory Map, vault review, schedules and webhook triggers, workspaces, projects, forks, subagents, files and pinned panels, file access, slash commands, keyboard shortcuts, document conversion, HTML artifacts and CSV tables, the task board, skills, MCP, models and providers, permission modes, notifications, updates, importing past conversations, and installing on macOS, Linux or Windows. Not for performing the action itself (scheduling, remembering, adding a task). Trigger on "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can ciaobot / can you / can I ...", "how does ... work in ciaobot", even when the word Ciaobot is not mentioned.
+description: Use for questions about what Ciaobot can do or how one of its features works, and for tours and onboarding of new users. Covers memory and the vault, Memory Map, vault review, schedules and webhook triggers, workspaces, projects, forks, subagents, files and pinned panels, file access, slash commands, keyboard shortcuts, document conversion, HTML artifacts and CSV tables, the task board, the browser terminal, skills, MCP, models and providers, permission modes, notifications, updates, importing past conversations, and installing on macOS, Linux or Windows. Not for performing the action itself (scheduling, remembering, adding a task). Trigger on "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can ciaobot / can you / can I ...", "how does ... work in ciaobot", even when the word Ciaobot is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -32,6 +32,12 @@ in the Ciaobot picker. Point users to the live
 [`INTEGRATIONS.md`](https://github.com/raffaelefarinaro/ciaobot/blob/main/INTEGRATIONS.md)
 for current commands; do not invent version-sensitive install or login syntax.
 
+When a user has to sign in, install a CLI, or set up an MCP server, read
+`references/install-and-settings.md`: it carries the current verified commands
+and the exact places in the app. The agent hands over a command to review and
+run — `ciao chat terminal-offer` puts one in the chat as a copyable card — and
+never runs a sign-in, an install or an MCP setup on the user's behalf.
+
 ## Capability areas
 
 Each area has a reference file next to this one. Open only the file the question needs.
@@ -39,16 +45,21 @@ Each area has a reference file next to this one. Open only the file the question
 | Area | What it covers | Read |
 |---|---|---|
 | Workspaces, projects, chats | hierarchy, file access, archiving a workspace, `ciao project`, linked repos, code mode, forks, subagents, background runs, plan mode, turn resilience | `references/workspaces-and-chats.md` |
-| Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, Memory Map, Vault Review, retirement candidates, conversation import, memory backup | `references/memory.md` |
+| Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, the optional reason on every decision, Memory Map, Vault Review, retirement candidates, conversation import, memory backup | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
 | Files | viewer and pinned panel, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
 | Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, queue and steer, `gws` | `references/models-and-extensions.md` |
 | Task board | the Tasks page, Delegate to agent, Approve Done, "After this update" tasks | `references/tasks.md` |
+| Terminal | the browser terminal panel: where it runs, the grant and the session it rides on, sessions, the socket protocol, how to offer a suggested command, and what an agent can and cannot do | `references/terminal.md` |
 | App and system | Settings page, MCP, installing and updating, other devices, forgotten password, Linux, Windows, local API | `references/install-and-settings.md` |
+
+## Left to companion tools
+
+Ciaobot deliberately does not build in dictation, keeping the host awake, an agent browser, or subscription usage tracking: those tools change fast, so the user picks their own. The maintainer's open-source picks, each installable by asking the agent: dictation, [FluidVoice](https://github.com/altic-dev/FluidVoice); keeping a Mac awake, [KeepingYouAwake](https://github.com/newmarcel/KeepingYouAwake); an agent browser, [ego lite](https://github.com/citrolabs/ego-lite); usage left, [OpenUsage](https://github.com/robinebers/openusage). The list lives at https://www.raffaelefarinaro.com/ciaobot/companions.html and is linked from Settings → What can Ciaobot do?.
 
 ## Privacy and trust posture
 
-Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, and no unattended run promotes a new always-loaded fact. An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. The agent's file access is set per workspace (File access, in `references/workspaces-and-chats.md`): under Workspace only it cannot read outside that workspace's folder, but the network is not restricted.
+Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, every individual accept or dismiss in the queue asks for an optional reason before it writes (picking a re-home destination is the exception; the destination is the answer), and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept). An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. The agent's file access is set per workspace (File access, in `references/workspaces-and-chats.md`): under Workspace only it cannot read outside that workspace's folder, but the network is not restricted.
 
 ## Guided tour (new users)
 
@@ -57,9 +68,9 @@ When onboarding someone, walk through these hands-on:
 1. **Orient** — workspaces → projects → chats; create or rename a project for something they're working on.
 2. **Chat** — model picker and project context the agent always sees.
 3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews.
-4. **Memory** — archive → memory pass; confident facts are filed, unsure ones wait, and no unattended run promotes a new always-loaded fact.
+4. **Memory** — archive → memory pass; confident facts are filed, unsure ones wait, and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept).
 5. **Schedules** — set up one small routine they'd actually use.
-6. **Task board** — file one task with a due date, open it and press **Delegate to agent**, watch the badge go running, open the chat it works in, then **Approve Done** when the result lands. The step worth stopping on is that the agent's turn finishing never marks the task done: that gesture is theirs.
+6. **Task board** — file one task with a due date, open it and press **Delegate to agent**, watch the badge go running, open the chat it works in, then **Approve Done** when the result lands. The step worth stopping on is that the agent's turn finishing never marks the task done: that gesture is theirs (an agent can close a manual task only when you tell it the task is done).
 7. **Webhooks** — point an external system at one trigger URL, if they have something that reports events.
 8. **Settings** — models & providers, package updates, and the engine's own service controls.
 

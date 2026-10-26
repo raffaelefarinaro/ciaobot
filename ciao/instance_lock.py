@@ -6,6 +6,7 @@ import errno
 import json
 import logging
 import os
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -44,6 +45,7 @@ class WorkspaceInstanceLock:
         self.path = Path(runtime_root) / "server.lock"
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self.port = int(port)
+        self.startup_id: str | None = None
         self._handle: TextIO | None = None
 
     def acquire(self) -> None:
@@ -72,6 +74,7 @@ class WorkspaceInstanceLock:
             ) from None
 
         self._handle = handle
+        self.startup_id = uuid.uuid4().hex
         try:
             self._write_metadata(
                 {
@@ -81,6 +84,7 @@ class WorkspaceInstanceLock:
                     "runtime": str(self.path.parent.resolve()),
                     "started_at": _now_iso(),
                     "status": "running",
+                    "startup_id": self.startup_id,
                 }
             )
         except OSError:
@@ -122,6 +126,7 @@ class WorkspaceInstanceLock:
                         "runtime": str(self.path.parent.resolve()),
                         "stopped_at": _now_iso(),
                         "status": "stopped",
+                        "startup_id": self.startup_id,
                     }
                 )
             except OSError:

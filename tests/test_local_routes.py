@@ -114,6 +114,8 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
                 default_model="",
                 disallowed_tools=None,
                 gws_profile="personal",
+                memory_handover="off",
+                provider_overrides={},
             ),
             "work": SimpleNamespace(
                 name="work",
@@ -121,6 +123,8 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
                 default_model="opus",
                 disallowed_tools=[],
                 gws_profile="work",
+                memory_handover="off",
+                provider_overrides={},
             ),
         },
     )
@@ -198,6 +202,8 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "claude_ai_connectors": True,
                 "color": "amber",
                 "agent_fs_scope": None,
+                "memory_handover": "off",
+                "provider_overrides": {},
             },
             {
                 "name": "work",
@@ -208,6 +214,8 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "claude_ai_connectors": True,
                 "color": "amber",
                 "agent_fs_scope": None,
+                "memory_handover": "off",
+                "provider_overrides": {},
             },
         ],
         "active": "personal",

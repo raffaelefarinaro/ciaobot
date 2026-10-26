@@ -10,12 +10,35 @@ import pytest
 from ciao.app_settings import AppSettings, AppSettingsStore
 
 
+def test_new_install_backup_seed_preserves_explicit_flags(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text('{"backup_enabled": true, "backup_paused": true}\n')
+    store = AppSettingsStore(path)
+    assert store.seed_new_install_backup_default() is False
+    assert path.read_text() == '{"backup_enabled": true, "backup_paused": true}\n'
+
+
+def test_backup_seed_is_byte_identical_when_already_explicit(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_bytes(b'{ "backup_enabled": false }\n')
+    store = AppSettingsStore(path)
+    assert store.seed_new_install_backup_default() is False
+    assert path.read_bytes() == b'{ "backup_enabled": false }\n'
+
+
+def test_backup_seed_does_not_overwrite_unreadable_settings(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_bytes(b'{invalid')
+    store = AppSettingsStore(path)
+    assert store.seed_new_install_backup_default() is False
+    assert path.read_bytes() == b'{invalid'
+
+
 class FakeConfig:
     """Just the fields apply_to_config touches."""
 
     def __init__(self) -> None:
         self.insights_model = "sonnet"
-        self.insights_enabled = True
         # Per-provider default models / thinking / routine models; no
         # env-backed defaults.
         self.provider_default_models: dict[str, str] = {}
@@ -26,29 +49,6 @@ class FakeConfig:
 def test_load_missing_file_gives_defaults(tmp_path):
     store = AppSettingsStore(tmp_path / "app_settings.json")
     assert store.settings == AppSettings()
-    assert store.settings.insights_enabled is True
-
-
-def test_insights_enabled_persists_and_applies(tmp_path):
-    path = tmp_path / "app_settings.json"
-    store = AppSettingsStore(path)
-    config = FakeConfig()
-
-    store.update({"insights_enabled": False})
-    store.apply_to_config(config)
-
-    assert config.insights_enabled is False
-    assert json.loads(path.read_text())["insights_enabled"] is False
-    assert AppSettingsStore(path).settings.insights_enabled is False
-
-    store.update({"insights_enabled": True})
-    assert json.loads(path.read_text())["insights_enabled"] is True
-
-
-def test_insights_enabled_rejects_non_boolean(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
-    with pytest.raises(ValueError, match="must be a boolean"):
-        store.update({"insights_enabled": "false"})
 
 
 def test_keyboard_preferences_persist_and_validate(tmp_path):
@@ -74,39 +74,20 @@ def test_keyboard_preferences_reject_invalid_values(tmp_path, changes):
         AppSettingsStore(tmp_path / "app_settings.json").update(changes)
 
 
-def test_legacy_insights_opt_out_migrates_once(tmp_path):
-    path = tmp_path / "app_settings.json"
-    store = AppSettingsStore(path)
-
-    assert store.migrate_legacy_insights_enabled(True) is False
-    assert json.loads(path.read_text())["insights_enabled"] is False
-    assert store.migrate_legacy_insights_enabled(False) is None
-    assert json.loads(path.read_text())["insights_enabled"] is False
-
-
-def test_explicit_insights_setting_wins_over_legacy_migration(tmp_path):
-    path = tmp_path / "app_settings.json"
-    path.write_text(json.dumps({"insights_enabled": True}))
-    store = AppSettingsStore(path)
-
-    assert store.migrate_legacy_insights_enabled(True) is None
-    assert store.settings.insights_enabled is True
-
-
 def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
     path = tmp_path / "app_settings.json"
     path.write_text(
         json.dumps(
             {
                 "bogus": "x",
-                "insights_enabled": "false",
+                "insights_enabled": False,
                 # Retired with trajectory capture: an old file still carries it.
                 "trajectories_enabled": "false",
             }
         )
     )
     store = AppSettingsStore(path)
-    assert store.settings.insights_enabled is True
+    assert not hasattr(store.settings, "insights_enabled")
     assert not hasattr(store.settings, "trajectories_enabled")
 
 
@@ -119,14 +100,14 @@ def test_load_corrupt_file_gives_defaults(tmp_path):
 def test_update_persists_and_roundtrips(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)
-    store.update({"insights_enabled": False, "ignored": "x"})
+    store.update({"dev_mode": True, "ignored": "x"})
     assert json.loads(path.read_text()) == {
-        "insights_enabled": False,
+        "dev_mode": True,
         "backup_enabled": True,
         "backup_paused": False,
     }
     # Fresh instance sees the persisted value.
-    assert AppSettingsStore(path).settings.insights_enabled is False
+    assert AppSettingsStore(path).settings.dev_mode is True
 
 
 def test_update_rejects_a_non_string_value(tmp_path):
@@ -173,9 +154,29 @@ def test_global_insights_model_moves_to_its_provider(tmp_path, legacy, existing,
 
 def test_a_file_without_the_global_insights_model_is_not_rewritten(tmp_path):
     path = tmp_path / "app_settings.json"
-    path.write_text('{"insights_enabled": false}')
+    path.write_text('{"backup_enabled": false}')
     AppSettingsStore(path)
+    assert path.read_text() == '{"backup_enabled": false}'
+
+
+def test_a_persisted_insights_enabled_key_is_ignored_and_dropped_on_next_save(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text('{"insights_enabled": false}')
+
+    store = AppSettingsStore(path)
+
+    assert not hasattr(store.settings, "insights_enabled")
     assert path.read_text() == '{"insights_enabled": false}'
+    store.update({"dev_mode": True})
+    assert "insights_enabled" not in json.loads(path.read_text())
+
+
+def test_update_ignores_insights_enabled(tmp_path):
+    path = tmp_path / "app_settings.json"
+
+    AppSettingsStore(path).update({"insights_enabled": False})
+
+    assert "insights_enabled" not in json.loads(path.read_text())
 
 
 def test_provider_routine_models_persist_and_apply(tmp_path):
@@ -191,7 +192,6 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
     assert config.provider_default_thinking == {"claude": "high"}
     path = tmp_path / "app_settings.json"
     assert json.loads(path.read_text()) == {
-        "insights_enabled": True,
         "backup_enabled": True,
         "backup_paused": False,
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
@@ -446,3 +446,139 @@ def test_non_string_composer_preferences_on_disk_load_as_default(tmp_path, key):
     path = tmp_path / "app_settings.json"
     path.write_text(json.dumps({key: ["steer"]}))
     assert getattr(AppSettingsStore(path).settings, key) == ""
+
+
+def test_text_contrast_roundtrip(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.appearance_payload()["text_contrast"] == "normal"
+
+    store.update({"text_contrast": "soft"})
+    assert AppSettingsStore(path).settings.text_contrast == "soft"
+    assert AppSettingsStore(path).appearance_payload()["text_contrast"] == "soft"
+
+    store.update({"text_contrast": "normal"})
+    assert AppSettingsStore(path).settings.text_contrast == ""
+
+
+def test_text_contrast_rejects_unknown(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    with pytest.raises(ValueError, match="text_contrast must be normal or soft"):
+        store.update({"text_contrast": "loud"})
+
+    path.write_text(json.dumps({"text_contrast": 5}))
+    assert AppSettingsStore(path).settings.text_contrast == ""
+    path.write_text(json.dumps({"text_contrast": "loud"}))
+    assert AppSettingsStore(path).settings.text_contrast == ""
+
+
+def test_theme_and_font_scale_start_unset_and_roundtrip(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    payload = store.appearance_payload()
+    assert payload["theme"] is None
+    assert payload["font_scale"] is None
+
+    store.update({"theme": "light", "font_scale": 1.35})
+    reloaded = AppSettingsStore(path).appearance_payload()
+    assert reloaded["theme"] == "light"
+    assert reloaded["font_scale"] == 1.35
+    assert reloaded["revision"] != payload["revision"]
+
+    # "system" is a stored choice, distinct from never having stored one.
+    store.update({"theme": "system"})
+    assert AppSettingsStore(path).appearance_payload()["theme"] == "system"
+
+
+@pytest.mark.parametrize("value", ["blue", "", 5, None, ["dark"]])
+def test_theme_rejects_unknown(tmp_path, value):
+    with pytest.raises(ValueError, match="theme must be dark, light or system"):
+        AppSettingsStore(tmp_path / "app_settings.json").update({"theme": value})
+
+
+@pytest.mark.parametrize("value", [0.5, 1.6, 1.07, "1.2", True, None, float("nan")])
+def test_font_scale_rejects_out_of_range_or_off_step(tmp_path, value):
+    with pytest.raises(ValueError, match="font_scale must be"):
+        AppSettingsStore(tmp_path / "app_settings.json").update({"font_scale": value})
+
+
+def test_theme_and_font_scale_garbage_on_disk_load_as_unset(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"theme": "blue", "font_scale": 9}))
+    payload = AppSettingsStore(path).appearance_payload()
+    assert payload["theme"] is None
+    assert payload["font_scale"] is None
+    path.write_text(json.dumps({"theme": ["x"], "font_scale": "1.2"}))
+    payload = AppSettingsStore(path).appearance_payload()
+    assert payload["theme"] is None
+    assert payload["font_scale"] is None
+
+
+def test_huge_integer_font_scale_is_invalid_not_a_crash(tmp_path):
+    path = tmp_path / "app_settings.json"
+    huge = 10 ** 400
+    with pytest.raises(ValueError, match="font_scale must be"):
+        AppSettingsStore(path).update({"font_scale": huge})
+    path.write_text('{"font_scale": 1' + "0" * 400 + "}")
+    assert AppSettingsStore(path).appearance_payload()["font_scale"] is None
+
+
+def test_body_font_roundtrip_and_rejects_unknown(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.appearance_payload()["body_font"] == "system"
+
+    for choice in ("serif", "mono"):
+        store.update({"body_font": choice})
+        assert AppSettingsStore(path).settings.body_font == choice
+        assert AppSettingsStore(path).appearance_payload()["body_font"] == choice
+    store.update({"body_font": "system"})
+    assert AppSettingsStore(path).settings.body_font == ""
+    assert AppSettingsStore(path).appearance_payload()["body_font"] == "system"
+
+    with pytest.raises(ValueError, match="body_font must be system, serif or mono"):
+        store.update({"body_font": "comic"})
+
+    path.write_text(json.dumps({"body_font": 5}))
+    assert AppSettingsStore(path).settings.body_font == ""
+    path.write_text(json.dumps({"body_font": "comic"}))
+    assert AppSettingsStore(path).settings.body_font == ""
+
+
+def test_custom_colors_validation(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.appearance_payload()["custom_colors"] == {}
+
+    store.update({"custom_colors": {"dark": {"bg": "#1A1A2E", "fg": "#e8e8f0"}}})
+    assert AppSettingsStore(path).settings.custom_colors == {
+        "dark": {"bg": "#1a1a2e", "fg": "#e8e8f0"}
+    }
+    assert AppSettingsStore(path).appearance_payload()["custom_colors"] == {
+        "dark": {"bg": "#1a1a2e", "fg": "#e8e8f0"}
+    }
+
+    for bad in (
+        {"dark": {"bg": "red", "fg": "#e8e8f0"}},
+        {"dark": {"bg": "#12345", "fg": "#e8e8f0"}},
+        {"dark": {"bg": "#1a1a2e"}},
+        {"dark": {"bg": "#1a1a2e", "fg": "#e8e8f0", "x": "#000000"}},
+        {"sepia": {"bg": "#1a1a2e", "fg": "#e8e8f0"}},
+        {"dark": "#1a1a2e"},
+    ):
+        with pytest.raises(ValueError, match="custom_colors entries must be"):
+            store.update({"custom_colors": bad})
+    with pytest.raises(ValueError, match="custom_colors must be an object"):
+        store.update({"custom_colors": "red"})
+
+    store.update({"custom_colors": {}})
+    assert AppSettingsStore(path).settings.custom_colors is None
+    store.update({"custom_colors": {"light": {"bg": "#ffffff", "fg": "#000000"}}})
+    store.update({"custom_colors": None})
+    assert AppSettingsStore(path).settings.custom_colors is None
+
+    path.write_text(json.dumps({"custom_colors": {"dark": {"bg": "red", "fg": "#fff"}}}))
+    assert AppSettingsStore(path).settings.custom_colors is None
+    path.write_text(json.dumps({"custom_colors": "nope"}))
+    assert AppSettingsStore(path).settings.custom_colors is None

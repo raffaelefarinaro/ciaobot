@@ -32,6 +32,8 @@
         <a href="guide.html" aria-current="page">Get started</a>
         <a href="features.html">Features</a>
         <a href="memory.html">Memory</a>
+        <a href="terminal.html">Terminal</a>
+        <a href="companions.html">Companions</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot/releases">What's new</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
@@ -116,8 +118,8 @@ opencode auth login</code></pre>
             <li><strong>Your AI tool</strong>: Claude Code.</li>
           </ul>
           <p>The installer does not print the password. It tells you the password is shown in the app: the first time you open Ciaobot, a card called <strong>Your Ciaobot</strong> on Home shows your folder (with a button to show it in Finder or Explorer), your password (<strong>Show</strong> and <strong>Copy</strong>) and your AI tool. Save the password in your password manager: you need it to sign in from other devices. Close the card when you are done. It then disappears on every device, and on other devices it only says that the password is shown on the computer running Ciaobot. The password is also kept in the file <code>.env</code> in your folder (see <a href="#password">I forgot my password</a>).</p>
-          <p>To use Ciaobot on your phone, open <strong>Settings → Other devices</strong>. On the computer running Ciaobot, the <strong>Set up this device</strong> card on Home also has a <strong>Use on your phone</strong> row that links there, until you close the card or install the app.</p>
-          <p>You can change all three later: the AI tool per workspace in <strong>Settings → Workspaces → Edit</strong>, the password in <strong>Settings → General → PWA password</strong>, and the folder with <strong>Settings → General → Main workspace → Move…</strong>.</p>
+          <p>To use Ciaobot on your phone, open <strong>Settings → Access &amp; devices → Other devices</strong>. On the computer running Ciaobot, the <strong>Set up this device</strong> card on Home also has a <strong>Use on your phone</strong> row that links there, until you close the card or install the app.</p>
+          <p>You can change these later: the AI tool in the workspace's settings, the password in <strong>Settings → Access &amp; devices → PWA password</strong>, and the folder in <strong>Settings → General → Main workspace</strong>.</p>
           <p>Ciaobot then opens a welcome chat and can give you a tour. Just say yes.</p>
           <p>A setup wizard that asks for the folder, a password and the AI tool appears only if you start Ciaobot by hand with <code>ciao run</code> before it has been set up, for example from a copy of the source code. The installers never show it.</p>
         </li>
@@ -131,7 +133,7 @@ opencode auth login</code></pre>
         <figcaption>Home. The workspace picker sits at the top of the sidebar, projects and their chats below; the middle has a box to start a task and lists what needs you.</figcaption>
       </figure>
       <p>Press the number keys <kbd>1</kbd>, <kbd>2</kbd>, … to jump between workspaces in the order they appear in the sidebar.</p>
-      <p>To limit what a workspace's agent can read on your computer, set its <strong>File access</strong> in Settings → Workspaces → Edit. <a href="features.html#file-access">More about file access →</a></p>
+      <p>To limit what a workspace's agent can read on your computer, open that workspace's settings and set <strong>File access</strong>. <a href="features.html#file-access">More about file access →</a></p>
     </section>
 
     <section>
@@ -219,13 +221,13 @@ opencode auth login</code></pre>
       <h3 id="password">I forgot my Ciaobot password. How do I get back in?</h3>
       <p>The installer picks a random password for you, so you may never have typed one. To get back in:</p>
       <ul>
-        <li><strong>On the computer running Ciaobot (the host):</strong> open the login page at <code>http://localhost:8443</code> and choose <strong>Sign in on this computer</strong>. Ciaobot opens a signed-in tab in your default browser. Then set a password you will remember in <strong>Settings → PWA password</strong>; on the host you don't need the old one.</li>
+        <li><strong>On the computer running Ciaobot (the host):</strong> open the login page at <code>http://localhost:8443</code> and choose <strong>Sign in on this computer</strong>. Ciaobot opens a signed-in tab in your default browser. Then set a password you will remember in <strong>Settings → Access &amp; devices → PWA password</strong>; on the host you don't need the old one.</li>
         <li><strong>Read it from the file:</strong> the password is the text after <code>PWA_AUTH_TOKEN=</code> in the file <code>.env</code> inside your Ciaobot folder (by default <code>~/Ciaobot</code>, so <code>~/Ciaobot/.env</code>). It is a hidden file. On a Mac, press <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>.</kbd> in Finder to show it, or run <code>grep PWA_AUTH_TOKEN ~/Ciaobot/.env</code> in the Terminal. On Windows, open <code>%USERPROFILE%\Ciaobot\.env</code> in Notepad.</li>
         <li><strong>Or use a one-time link:</strong> on the host, run <code>ciao setup-url --workspace ~/Ciaobot</code> in the Terminal (use your folder if you picked another one). It prints a link that signs you in when opened in a browser on that same computer.</li>
       </ul>
       <p>On a phone or another computer you need the password itself; get it on the host first. Keep it to yourself: anyone with the password can use your Ciaobot.</p>
       <h3>How do I update or uninstall?</h3>
-      <p>To update, run the one-line install command again, or use <strong>Settings → General</strong> in Ciaobot, which installs the new engine for you. To stop Ciaobot, run <code>ciao service stop</code> in the Terminal; your notes folder is kept. If you are still on the old macOS app, run the one-liner with <code>--migrate</code>: it installs the engine and removes the old app for you.</p>
+      <p>To update, run the one-line install command again, or use the update control in <strong>Settings → General</strong>, which installs the new engine for you. To stop Ciaobot, run <code>ciao service stop</code> in the Terminal; your notes folder is kept. If you are still on the old macOS app, run the one-liner with <code>--migrate</code>: it installs the engine and removes the old app for you.</p>
     </section>
 
     <nav class="next-page" aria-label="Next pages">

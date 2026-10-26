@@ -26,6 +26,7 @@ def _config(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",
+        workspaces={"personal": SimpleNamespace(gws_profile="personal")},
     )
 
 
@@ -54,6 +55,18 @@ def test_profile_config_dir_mapping(tmp_path: Path) -> None:
     assert gws_auth.profile_config_dir(cfg, "work") == tmp_path / "secrets" / "gws"
     assert gws_auth.profile_config_dir(cfg, "Client A!") == tmp_path / "secrets" / "gws-client-a"
     assert gws_auth.profile_config_dir(cfg, "!!!") is None
+
+
+def test_frontend_reserved_profile_names_mirror_backend() -> None:
+    import re
+
+    source = (
+        Path(__file__).resolve().parent.parent / "web" / "src" / "lib" / "gwsProfileId.ts"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"GWS_RESERVED_PROFILE_NAMES[^=]*=\s*\[([^\]]*)\]", source)
+    assert match, "GWS_RESERVED_PROFILE_NAMES array literal not found"
+    names = set(re.findall(r"'([^']+)'", match.group(1)))
+    assert names == set(gws_auth.GWS_SERVICE_NAMES)
 
 
 def test_scopes_cover_all_supported_services() -> None:
@@ -534,6 +547,81 @@ def test_health_monitor_debounces_and_rearms(tmp_path: Path) -> None:
     s5 = monitor.check_once()
     assert s5["notified"] == ["personal"]
     assert len(push.sent) == 2
+
+
+def test_health_monitor_warns_only_for_linked_profiles(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    # "orphan" has credentials but no workspace links it; "archived-only" is
+    # linked only by a workspace that left config.workspaces (archived).
+    cfg.workspaces = {
+        "personal": SimpleNamespace(gws_profile="personal"),
+        "blank": SimpleNamespace(gws_profile=""),
+    }
+    for profile in ("personal", "orphan", "archived-only"):
+        config_dir = gws_auth.profile_config_dir(cfg, profile)
+        config_dir.mkdir(parents=True)
+        (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+
+    invalid = {
+        "available": True,
+        "token_valid": False,
+        "token_error": "Token has been expired or revoked.",
+        "has_refresh_token": True,
+    }
+    probed: list[str] = []
+
+    def status_fn(config, profile):
+        probed.append(profile)
+        return invalid
+
+    push, events = _FakePush(), _FakeEvents()
+    monitor = gws_auth.GwsHealthMonitor(
+        cfg,
+        push_manager=push,
+        events_hub=events,
+        runtime_root=tmp_path / ".runtime",
+        status_fn=status_fn,
+        retry_delay=0,
+        notify_threshold=1,
+    )
+
+    summary = monitor.check_once()
+
+    assert set(summary["checked"]) == {"personal", "orphan", "archived-only"}
+    assert summary["notified"] == ["personal"]
+    assert set(probed) == {"personal", "orphan", "archived-only"}
+    assert [p["profile"] for p in push.sent] == ["personal"]
+    assert [e["profile"] for e in events.published] == ["personal"]
+
+
+def test_health_monitor_refreshes_stale_cache_for_unlinked_profile(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    cfg.workspaces = {}
+    config_dir = gws_auth.profile_config_dir(cfg, "acme")
+    config_dir.mkdir(parents=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+    runtime = tmp_path / ".runtime"
+    (runtime / "gws_health.json").write_text(
+        json.dumps({"profiles": {"acme": {
+            "token_valid": False, "notified_invalid": True, "consecutive_invalid": 3,
+        }}}),
+        encoding="utf-8",
+    )
+    push, events = _FakePush(), _FakeEvents()
+    monitor = gws_auth.GwsHealthMonitor(
+        cfg,
+        push_manager=push,
+        events_hub=events,
+        runtime_root=runtime,
+        status_fn=lambda config, profile: {"available": True, "token_valid": True},
+        retry_delay=0,
+    )
+
+    monitor.check_once()
+
+    assert gws_auth.read_health_cache(runtime)["acme"]["token_valid"] is True
+    assert push.sent == []
+    assert events.published == []
 
 
 def test_health_monitor_in_process_retry_suppresses_transient_invalid(tmp_path: Path) -> None:

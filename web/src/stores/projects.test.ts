@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, test, vi, type Mock } from 'vitest'
-import { createPinia as newPinia, setActivePinia } from 'pinia'
+import { createPinia as newPinia, getActivePinia, setActivePinia } from 'pinia'
 import type { ProjectInfo, ChatInfo, ChatMessage } from '../lib/types'
 import type { ServerRow } from '../lib/chatHistory'
 import {
@@ -1158,6 +1158,114 @@ describe('duplicate send suppression', () => {
     const userMsgs = (store.messages[chatId] || []).filter(m => m.role === 'user')
     expect(userMsgs).toHaveLength(1)
   })
+
+  test('a duplicate echo for the running turn does not clear its live stream', async () => {
+    // The engine answered a recovery resend of the turn that is still
+    // running: the echo is a repeat, but this turn owns the live buffer.
+    // Clearing it blanked the live text, the trace and the spinner until the
+    // next delta or a history reload came in (#1716).
+    const store = useProjectStore()
+    const chatId = 'chat-duplicate-echo-running'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'run it', sent_at: '2026-10-20T12:20:40Z', turn_index: 4 },
+          ],
+          total: 1, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    // The turn that is running: its user bubble carries the server's turn
+    // index, and the live stream is buffering the answer.
+    store.messages[chatId] = [
+      { role: 'user', content: 'run it', timestamp: '2026-10-20T12:20:40Z', turn_index: 4 },
+    ]
+    store.streaming[chatId] = true
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'tool_use', tool_name: 'Bash', tool_input: 'ls' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'text_delta', text: 'partial answer' }),
+    })
+    expect(store.currentTimeline).toHaveLength(1)
+
+    apiGet.mockClear()
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'run it',
+        send_id: 's-running',
+        duplicate: true,
+        turn_index: 4,
+      }),
+    })
+    await nextTick()
+
+    // The repeat echo leaves the live turn alone: the text, the trace and the
+    // spinner all survive it, and no history reload runs.
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.streamingText[chatId]).toBe('partial answer')
+    expect(store.currentTimeline).toHaveLength(1)
+    const reloads = apiGet.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/messages'))
+    expect(reloads).toHaveLength(0)
+  })
+
+  test('a duplicate echo naming a finished last turn still settles the client', async () => {
+    // The repeat names the transcript's last turn, but that turn is over: no
+    // live buffer is running, so the client settles — no streaming state, and
+    // one background reload of the authoritative transcript. The echo must not
+    // put the spinner back on a finished turn.
+    const store = useProjectStore()
+    const chatId = 'chat-duplicate-echo-finished'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'finished turn', sent_at: '2026-10-20T12:20:40Z', turn_index: 4 },
+          ],
+          total: 1, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.messages[chatId] = [
+      { role: 'user', content: 'finished turn', timestamp: '2026-10-20T12:20:40Z', turn_index: 4 },
+    ]
+    // Nothing is streaming: the turn this echo repeats is long over.
+    store.streaming[chatId] = false
+
+    apiGet.mockClear()
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'finished turn',
+        send_id: 's-finished',
+        duplicate: true,
+        turn_index: 4,
+      }),
+    })
+    await nextTick()
+
+    expect(store.streaming[chatId]).toBe(false)
+    const reloads = apiGet.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/messages'))
+    await vi.waitFor(() => expect(reloads).toHaveLength(1))
+    await new Promise((r) => setTimeout(r, 0))
+    // Nothing new was rendered: the turn is already on screen.
+    const userMsgs = (store.messages[chatId] || []).filter(m => m.role === 'user' && m.turn_index === 4)
+    expect(userMsgs).toHaveLength(1)
+  })
 })
 
 describe('deferred message sends', () => {
@@ -1402,6 +1510,92 @@ describe('deferred send visibility and re-send de-duplication', () => {
       const bubbles = userBubbles(store, chatId, 'echo me')
       expect(bubbles).toHaveLength(1)
       expect(bubbles[0].turn_index).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a promoted deferred send keeps one bubble when its echo arrives', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-echo-send-id'
+      store.activeChatId = chatId
+
+      // The socket is down, so the send is deferred and rendered as a pending
+      // bubble. It carries no send id yet: none was minted.
+      store.sendMessage(chatId, 'one turn only')
+      expect(userBubbles(store, chatId, 'one turn only')).toHaveLength(1)
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      // The promotion put the send on the wire under a minted send id.
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      const sendId = frames[0].send_id as string
+      expect(sendId).toBeTruthy()
+
+      // The broker echoes the turn back with its server-assigned index and the
+      // send id the frame carried. The echo reconciliation matches bubbles by
+      // send id, so a promoted bubble that never learned the id cannot be
+      // recognised and the echo pushes a second copy of the same turn.
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_echo', text: 'one turn only', turn_index: 0, send_id: sendId,
+        }),
+      })
+
+      const bubbles = userBubbles(store, chatId, 'one turn only')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].turn_index).toBe(0)
+      expect(bubbles[0].send_id).toBe(sendId)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a promoted deferred send without a rendered bubble still pushes one', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-wiped-bubble'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'wiped pending')
+      expect(userBubbles(store, chatId, 'wiped pending')).toHaveLength(1)
+
+      // A history reload lands while the retry chain is still waiting and
+      // wipes the optimistic bubble.
+      store.messages[chatId] = []
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      const sendId = frames[0].send_id as string
+      expect(sendId).toBeTruthy()
+
+      // The promotion had no bubble to promote, so it pushed one instead —
+      // carrying the send id, so the echo settles it rather than adding a
+      // second copy.
+      const bubbles = userBubbles(store, chatId, 'wiped pending')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].send_id).toBe(sendId)
+
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_echo', text: 'wiped pending', turn_index: 0, send_id: sendId,
+        }),
+      })
+
+      const settled = userBubbles(store, chatId, 'wiped pending')
+      expect(settled).toHaveLength(1)
+      expect(settled[0].turn_index).toBe(0)
+      expect(settled[0].send_id).toBe(sendId)
     } finally {
       vi.useRealTimers()
       vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -2251,6 +2445,7 @@ describe('server-owned chat pins', () => {
         type: 'snapshot',
         active_streams: [],
         chat_pins: { 'c-pin': { path: '', dismissed_paths: ['/workspace/report.md'], revision: 3 } },
+        chat_terminal_offers: {},
       }),
     })
     expect(store.pinnedFileFor('c-pin')).toBeUndefined()
@@ -2326,6 +2521,438 @@ describe('server-owned chat pins', () => {
     expect(store.toasts).toHaveLength(1)
     expect(store.toasts[0].title).toBe('Could not update pinned file')
     expect(store.toasts[0].errorText).toBe('Pinned file was changed on another device')
+  })
+})
+
+describe('transient terminal offers', () => {
+  // A command the assistant suggested in a chat. The engine owns it; this
+  // client holds a transient copy and reconciles it against three sources:
+  // a chat payload, a global event, and the reconnect snapshot. The rules
+  // below are the ones that keep a stale HTTP reply from undoing a newer
+  // change — a dismissed command coming back, or a fresh one disappearing.
+
+  function chatInfo(chatId: string, over: Partial<ChatInfo> = {}): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'T',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: false,
+      ...over,
+    }
+  }
+
+  const offer = (id: string, command = 'claude login') => ({ id, command })
+
+  function events(store: ReturnType<typeof useProjectStore>) {
+    store.connectEventsWs()
+    return fakeSockets[fakeSockets.length - 1]
+  }
+
+  const frame = (payload: unknown) => ({ data: JSON.stringify(payload) })
+
+  const snapshotFrame = (over: Record<string, unknown> = {}) => ({
+    type: 'snapshot',
+    active_streams: [],
+    chat_pins: {},
+    chat_terminal_offers: {},
+    ...over,
+  })
+
+  const offerChanged = (chatId: string, terminalOffer: unknown) => ({
+    type: 'chat_terminal_offer_changed',
+    chat_id: chatId,
+    terminal_offer: terminalOffer,
+  })
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (reason?: unknown) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+
+  test('a fresh client holds no offer', () => {
+    const store = useProjectStore()
+    expect(store.terminalOffers).toEqual({})
+  })
+
+  test('the snapshot replaces the offer map wholesale', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-1': offer('a') } })))
+    expect(store.terminalOffers['c-1']).toEqual({ id: 'a', command: 'claude login' })
+
+    // The map is complete, not a merge: a chat the next snapshot does not
+    // name holds no offer.
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-2': offer('b') } })))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+    expect(store.terminalOffers['c-2']).toEqual({ id: 'b', command: 'claude login' })
+  })
+
+  test('the snapshot keeps an offer for a chat the chat list has not named', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-unlisted': offer('a') } })))
+    store.reconcileChatList([chatInfo('c-listed')])
+    expect(store.terminalOffers['c-unlisted']).toEqual({ id: 'a', command: 'claude login' })
+  })
+
+  test('a read that started before the snapshot cannot roll it back', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    // The list was asked for before the snapshot arrived, so it answers with
+    // the older "no offer" it read.
+    const readStartedAt = store.terminalOfferReadStart()
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-1': offer('a') } })))
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: null })], readStartedAt)
+    expect(store.terminalOffers['c-1']).toEqual({ id: 'a', command: 'claude login' })
+  })
+
+  test('a read that started after the snapshot may clear it', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(snapshotFrame({ chat_terminal_offers: { 'c-1': offer('a') } })))
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: null })], readStartedAt)
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a stale read cannot roll back a newer event', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    const readStartedAt = store.terminalOfferReadStart()
+    sock.onmessage?.(frame(offerChanged('c-1', offer('new'))))
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: offer('old') })], readStartedAt)
+    expect(store.terminalOffers['c-1']?.id).toBe('new')
+  })
+
+  test('a later-started read heals an event this client missed', () => {
+    const store = useProjectStore()
+    // The event never arrived (the socket was down), so nothing latched it:
+    // the next read carries the offer and heals the gap.
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: offer('healed') })], readStartedAt)
+    expect(store.terminalOffers['c-1']?.id).toBe('healed')
+  })
+
+  test('a later read replaces an earlier event\'s offer — the event does not latch', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('first'))))
+    expect(store.terminalOffers['c-1']?.id).toBe('first')
+
+    // A read started after that event carries the engine's newer offer. The
+    // earlier event is not a latch: the chat follows the newest thing the
+    // client is told, not the first thing it happened to see.
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: offer('second') })], readStartedAt)
+    expect(store.terminalOffers['c-1']?.id).toBe('second')
+  })
+
+  test('an event for another chat does not suppress this chat\'s read', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    const readStartedAt = store.terminalOfferReadStart()
+    sock.onmessage?.(frame(offerChanged('c-other', offer('x'))))
+    store.reconcileChatList([chatInfo('c-1', { terminal_offer: offer('mine') })], readStartedAt)
+    expect(store.terminalOffers['c-1']?.id).toBe('mine')
+    expect(store.terminalOffers['c-other']?.id).toBe('x')
+  })
+
+  test('a chat row without the field carries no offer', () => {
+    const store = useProjectStore()
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1')], readStartedAt)
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a fresh payload that omits the offer field clears it — no keep-state fallback', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    // A payload read after that event whose row carries no `terminal_offer`
+    // field at all. The engine holds no offer, so the client's must go: an
+    // absent field is read as "no offer", never as "keep what we had". A
+    // keep-state reading would leave a dismissed command on screen.
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1')], readStartedAt)
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('an archived chat is not given an offer by a late event', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1', { archived: true })]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('an archived chat loses its offer and an archived row never brings it back', () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    sock.onmessage?.(frame({ type: 'chat_archived', chat_id: 'c-1', project_id: 'p1' }))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+
+    // A preserved archived row must not resurrect it either.
+    const readStartedAt = store.terminalOfferReadStart()
+    store.reconcileChatList([chatInfo('c-1', { archived: true, terminal_offer: offer('a') })], readStartedAt)
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a successful archive clears the offer and a failed one keeps it', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+
+    apiPost.mockRejectedValueOnce(new Error('archive refused'))
+    await expect(store.archiveChat('c-1')).rejects.toThrow('archive refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiPost.mockResolvedValueOnce({ ok: true })
+    await store.archiveChat('c-1')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a successful delete clears the offer and a failed one keeps it', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+
+    apiDel.mockRejectedValueOnce(new Error('delete refused'))
+    await expect(store.deleteChat('c-1')).rejects.toThrow('delete refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiDel.mockResolvedValueOnce({ deleted: true })
+    await store.deleteChat('c-1')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a deleted chat drops its offer', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    sock.onmessage?.(frame({ type: 'chat_deleted', chat_id: 'c-1', project_id: 'p1' }))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a deleted project drops its chats\' offers', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1'), chatInfo('c-2', { project_id: 'p2' })]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    sock.onmessage?.(frame(offerChanged('c-2', offer('b'))))
+    sock.onmessage?.(frame({ type: 'project_deleted', project_id: 'p1' }))
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+    expect(store.terminalOffers['c-2']?.id).toBe('b')
+  })
+
+  // Every place the store drops a chat has to drop its offer with it, and
+  // only once the mutation actually succeeded: a refused archive or delete
+  // leaves the chat, and the command it offered, alone.
+  function seedProjectWithOffer(store: ReturnType<typeof useProjectStore>, projectId: string) {
+    store.projects = [
+      { project_id: projectId, name: 'W', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
+    store.chats = [chatInfo('c-1', { project_id: projectId })]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('a'))))
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+  }
+
+  test('a deleted project clears its chats\' offers, and a refused delete keeps them', async () => {
+    const store = useProjectStore()
+    seedProjectWithOffer(store, 'p1')
+
+    apiDel.mockRejectedValueOnce(new Error('delete refused'))
+    await expect(store.deleteProject('p1')).rejects.toThrow('delete refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiDel.mockResolvedValueOnce({ ok: true, vault_entry_removed: false, removed_notes: 0, removed_files: 0, edited_backlinks: [] })
+    await store.deleteProject('p1')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a completed project clears its chats\' offers, and a refused completion keeps them', async () => {
+    const store = useProjectStore()
+    seedProjectWithOffer(store, 'p1')
+
+    apiPost.mockRejectedValueOnce(new Error('complete refused'))
+    await expect(store.completeProject('p1')).rejects.toThrow('complete refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiPost.mockResolvedValueOnce({ ok: true })
+    await store.completeProject('p1')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('an archived workspace clears its chats\' offers, and a refused archive keeps them', async () => {
+    const store = useProjectStore()
+    seedProjectWithOffer(store, 'p1')
+
+    apiPost.mockRejectedValueOnce(new Error('archive refused'))
+    await expect(store.archiveWorkspace('personal')).rejects.toThrow('archive refused')
+    expect(store.terminalOffers['c-1']?.id).toBe('a')
+
+    apiPost.mockResolvedValueOnce({ workspaces: [] })
+    await store.archiveWorkspace('personal')
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a workspace-registry refresh that drops a project clears its chats\' offers', async () => {
+    const store = useProjectStore()
+    seedProjectWithOffer(store, 'p1')
+
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/workspaces') {
+        return Promise.resolve({
+          workspaces: [{ name: 'personal', vault_root: '', default_provider: 'claude' }],
+          active: 'personal',
+        })
+      }
+      // The project is gone server-side, so the registry refresh drops it.
+      if (url === '/api/projects') return Promise.resolve([])
+      return Promise.resolve({})
+    })
+    const sock = events(store)
+    vi.useFakeTimers()
+    try {
+      sock.onmessage?.(frame({ type: 'workspaces_changed' }))
+      await vi.advanceTimersByTimeAsync(300)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(store.terminalOffers['c-1']).toBeUndefined()
+  })
+
+  test('a dismissal sends exactly the expected id and nothing else', async () => {
+    const store = useProjectStore()
+    apiPatch.mockResolvedValue(chatInfo('c-1', { terminal_offer: null }))
+    const result = await store.dismissTerminalOffer('c-1', 'a'.repeat(32))
+    expect(result).toBe('dismissed')
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/api/chats/c-1',
+      { terminal_offer: { expected_id: 'a'.repeat(32) } },
+    )
+  })
+
+  test('a dismissal encodes the chat id', async () => {
+    const store = useProjectStore()
+    apiPatch.mockResolvedValue(chatInfo('c-1'))
+    await store.dismissTerminalOffer('c/../evil', 'x')
+    expect(apiPatch).toHaveBeenCalledWith(
+      '/api/chats/c%2F..%2Fevil',
+      { terminal_offer: { expected_id: 'x' } },
+    )
+  })
+
+  test('a conflict adopts the engine offer and reports the conflict', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('old'))))
+
+    apiPatch.mockRejectedValue(Object.assign(new Error('terminal_offer_conflict'), {
+      status: 409,
+      payload: { error: 'terminal_offer_conflict', terminal_offer: offer('new') },
+    }))
+
+    await expect(store.dismissTerminalOffer('c-1', 'old')).resolves.toBe('conflict')
+    expect(store.terminalOffers['c-1']?.id).toBe('new')
+    // One write, no retry.
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+  })
+
+  test('a malformed conflict leaves the current offer and throws', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('old'))))
+
+    apiPatch.mockRejectedValue(Object.assign(new Error('terminal_offer_conflict'), {
+      status: 409,
+      payload: { error: 'terminal_offer_conflict', terminal_offer: { id: 'broken' } },
+    }))
+
+    await expect(store.dismissTerminalOffer('c-1', 'old')).rejects.toThrow('terminal_offer_conflict')
+    // Half an offer is not a state, and it is never repaired into "no offer".
+    expect(store.terminalOffers['c-1']?.id).toBe('old')
+  })
+
+  test('a deferred dismissal cannot roll back a newer event', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('old'))))
+
+    const pending = deferred<ChatInfo>()
+    apiPatch.mockReturnValue(pending.promise)
+    const dismissal = store.dismissTerminalOffer('c-1', 'old')
+    // Another device re-offers while the dismissal is in flight.
+    sock.onmessage?.(frame(offerChanged('c-1', offer('newer'))))
+    pending.resolve(chatInfo('c-1', { terminal_offer: null }))
+
+    await expect(dismissal).resolves.toBe('dismissed')
+    expect(store.terminalOffers['c-1']?.id).toBe('newer')
+  })
+
+  test('a deferred conflict cannot roll back a newer event', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged('c-1', offer('old'))))
+
+    const pending = deferred<ChatInfo>()
+    apiPatch.mockReturnValue(pending.promise)
+    const dismissal = store.dismissTerminalOffer('c-1', 'old')
+    sock.onmessage?.(frame(offerChanged('c-1', offer('newer'))))
+    pending.reject(Object.assign(new Error('terminal_offer_conflict'), {
+      status: 409,
+      payload: { error: 'terminal_offer_conflict', terminal_offer: offer('server') },
+    }))
+
+    await expect(dismissal).resolves.toBe('conflict')
+    expect(store.terminalOffers['c-1']?.id).toBe('newer')
+  })
+
+  test('a deferred rename response cannot roll back a newer offer', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-1')]
+    const sock = events(store)
+
+    const pending = deferred<ChatInfo>()
+    apiPatch.mockReturnValue(pending.promise)
+    const renaming = store.renameChat('c-1', 'renamed')
+    sock.onmessage?.(frame(offerChanged('c-1', offer('newer'))))
+    pending.resolve(chatInfo('c-1', { title: 'renamed', terminal_offer: offer('old') }))
+
+    await renaming
+    expect(store.terminalOffers['c-1']?.id).toBe('newer')
+  })
+
+  test('the offered command never reaches local storage', async () => {
+    const store = useProjectStore()
+    const sock = events(store)
+    sock.onmessage?.(frame(offerChanged(
+      'c-1',
+      offer('a', 'npm login --registry=https://example.test'),
+    )))
+    await store.dismissTerminalOffer('c-1', 'a')
+
+    expect(Object.values(localStorageData).join('\n')).not.toContain('npm login')
   })
 })
 
@@ -2975,6 +3602,59 @@ describe('optimistic user bubble reconciliation', () => {
     expect(userMsgs[0].turn_index).toBe(1)
   })
 
+  // #1663: a transcript-fallback history serves the user row with no
+  // turn_index, so the optimistic bubble cannot pair by index. The reload must
+  // still leave exactly one bubble. The flat shape takes the replace path; the
+  // envelope rows carry real absolute indexes (`i`) so the index-addressed
+  // merge and its text pairing run, not the wholesale window adoption.
+  test('loadMessages keeps one bubble when a flat fallback row has no turn_index', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-fallback-dup-flat'
+    store.messages[chatId] = [
+      { role: 'user', content: 'earlier', timestamp: '2026-10-20T11:00:00Z' },
+      { role: 'assistant', content: 'earlier reply', timestamp: '' },
+      { role: 'user', content: 'Still working?', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'earlier', sent_at: '2026-10-20T11:00:00Z' },
+      { role: 'assistant', content: 'earlier reply', sent_at: '' },
+      { role: 'user', content: 'Still working?', sent_at: '2026-10-20T12:08:41Z' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'Still working?',
+    )
+    expect(userMsgs.length).toBe(1)
+  })
+
+  test('loadMessages merges an envelope fallback row without turn_index onto the optimistic bubble', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-fallback-dup-envelope'
+    store.messages[chatId] = [
+      { i: 0, role: 'user', content: 'earlier', timestamp: '2026-10-20T11:00:00Z' },
+      { i: 1, role: 'assistant', content: 'earlier reply', timestamp: '' },
+      { role: 'user', content: 'Still working?', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'earlier', sent_at: '2026-10-20T11:00:00Z' },
+        { i: 1, role: 'assistant', content: 'earlier reply', sent_at: '' },
+        { i: 2, role: 'user', content: 'Still working?', sent_at: '2026-10-20T12:08:41Z' },
+      ],
+      total: 3, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    const userMsgs = msgs.filter(m => m.role === 'user' && m.content === 'Still working?')
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].i).toBe(2)
+    expect(msgs.map(m => m.i)).toEqual([0, 1, 2])
+  })
+
   test('loadMessages background reload does not wipe the optimistic bubble on a still-empty server window', async () => {
     // Regression for "first message can vanish on new chats": a background
     // reload (the 15s poll, say) landing before the first turn persisted
@@ -3263,6 +3943,46 @@ describe('optimistic user bubble reconciliation', () => {
 
     const userMsgs = store.messages[chatId].filter(m => m.role === 'user' && m.content === 'same words')
     expect(userMsgs).toHaveLength(1)
+  })
+
+  test('server history and the live bubble agree after a failed turn', async () => {
+    // Pins the merge rule this test relies on: two user rows that both carry a
+    // turn index pair only when the indices are equal. The fixture is the
+    // POST-fix payload (#1861). The pre-fix payload repeated the failed send's
+    // indexing, so the server row for "again?" arrived at turn_index 1 while
+    // the live bubble carried 2 — a different index each, so they could not
+    // pair and BOTH rendered, the duplicate the issue reports. No client
+    // behaviour change is expected; this test fails if the rule is weakened.
+    const store = useProjectStore()
+    const chatId = 'chat-failed-turn'
+    store.messages[chatId] = [
+      { role: 'user', content: 'why?', timestamp: '2026-10-22T11:52:58Z', turn_index: 1, i: 0 },
+      { role: 'assistant', content: 'Nothing is stuck.', timestamp: '2026-10-22T11:54:18Z', i: 1 },
+      // The live bubble for the send still in flight: no server index yet.
+      { role: 'user', content: 'again?', timestamp: '2026-10-22T12:00:00Z', turn_index: 2 },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'why?', sent_at: '2026-10-22T11:52:58Z', turn_index: 1 },
+        { i: 1, role: 'assistant', content: 'Nothing is stuck.', sent_at: '2026-10-22T11:54:18Z' },
+        { i: 2, role: 'user', content: 'again?', sent_at: '2026-10-22T12:00:00Z', turn_index: 2 },
+      ],
+      total: 3, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.map(m => `${m.role}:${m.content}`)).toEqual([
+      'user:why?',
+      'assistant:Nothing is stuck.',
+      'user:again?',
+    ])
+    // The live bubble adopted the server row for its own turn (index 2) instead
+    // of being left below the answer as a second copy.
+    const bubbles = msgs.filter(m => m.role === 'user')
+    expect(bubbles.map(m => m.turn_index)).toEqual([1, 2])
+    expect(msgs.at(-1)?.i).toBe(2)
   })
 
   test('a flat reload keeps both bubbles when the server holds the text twice', async () => {
@@ -4399,6 +5119,7 @@ describe('background agents indicator', () => {
         active_streams: [],
         background_agents: { 'c-live': 2 },
         chat_pins: {},
+        chat_terminal_offers: {},
       }),
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
@@ -4450,6 +5171,7 @@ describe('background agents indicator', () => {
         active_streams: [],
         background_runs: { 'c-live': [live] },
         chat_pins: {},
+        chat_terminal_offers: {},
       }),
     })
     expect(store.backgroundRuns['c-stale']).toBeUndefined()
@@ -4859,6 +5581,7 @@ describe('server restart overlay', () => {
         active_streams: [],
         restarting: true,
         chat_pins: {},
+        chat_terminal_offers: {},
       }),
     })
     expect(store.serverRestarting).toBe(true)
@@ -5749,6 +6472,42 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).not.toHaveBeenCalled()
   })
 
+  test('switchWorkspace asks the settings guard first and stays when it declines', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(guard)
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(guard).toHaveBeenCalledWith('work')
+    expect(store.activeWorkspace).toBe('work')
+
+    guard.mockResolvedValue(true)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+    expect(store.activeWorkspace).toBe('personal')
+    // Already there counts as switched.
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+
+    store.setWorkspaceSwitchGuard(null)
+    await store.switchWorkspace('work', { transition: false })
+    expect(guard).toHaveBeenCalledTimes(2)
+    expect(store.activeWorkspace).toBe('work')
+  })
+
+  test('clearWorkspaceSwitchGuard only clears the guard that is still installed', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const older = vi.fn().mockResolvedValue(false)
+    const newer = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(older)
+    store.setWorkspaceSwitchGuard(newer)
+    store.clearWorkspaceSwitchGuard(older)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(newer).toHaveBeenCalled()
+    store.clearWorkspaceSwitchGuard(newer)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+  })
+
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
     const store = useProjectStore()
     store.projects = [
@@ -6204,7 +6963,7 @@ describe('update-available notification', () => {
 })
 
 describe('gws health toast', () => {
-  test('surfaces an error toast whose Fix action routes to Settings → Workspaces', () => {
+  test('surfaces an error toast whose Fix action routes to Settings → Overview', () => {
     const store = useProjectStore()
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
@@ -6215,13 +6974,13 @@ describe('gws health toast', () => {
         token_valid: false,
         token_error: 'expired',
         title: 'Google Workspace login needs attention',
-        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Workspaces.',
+        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Overview → Google account (open the workspace that uses it).',
       }),
     })
 
     const toast = store.toasts.find(t => t.variant === 'error' && t.title.includes('Google Workspace'))
     expect(toast).toBeTruthy()
-    expect(toast?.fixRoute).toBe('/settings/workspaces')
+    expect(toast?.fixRoute).toBe('/settings/workspace')
     expect(toast?.fixLabel).toBe('Fix in Settings')
     expect(toast?.chat_id).toBe('')
   })
@@ -7049,14 +7808,14 @@ describe('older history pages', () => {
           }),
     )
     await store.loadMessages(chatId)
-    expect(store.canLoadOlder(chatId)).toBe(true)
+    expect(store.canLoadOlderByChat[chatId]).toBe(true)
 
     await store.loadOlderMessages(chatId)
 
     expect(store.messages[chatId].map(m => m.content)).toEqual([
       'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
     ])
-    expect(store.canLoadOlder(chatId)).toBe(false)
+    expect(store.canLoadOlderByChat[chatId]).toBe(false)
   })
 
   test('still reaches the oldest page after the history grows', async () => {
@@ -7096,7 +7855,56 @@ describe('older history pages', () => {
     expect(store.messages[chatId].map(m => m.content)).toEqual([
       'm0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7',
     ])
-    expect(store.canLoadOlder(chatId)).toBe(false)
+    expect(store.canLoadOlderByChat[chatId]).toBe(false)
+  })
+
+  test('pagination state reads do not replace the active pinia', async () => {
+    const piniaA = createPinia()
+    const storeA = useProjectStore(piniaA)
+    const chatId = 'chat-older-pinia'
+    apiGet.mockResolvedValue({
+      items: [{ role: 'user', content: 'old', i: 1, sent_at: '2026-08-24T10:00:00Z' }],
+      total: 2,
+      offset: 1,
+      limit: 1,
+      hasMore: true,
+      nextOffset: 1,
+    })
+    await storeA.loadMessages(chatId)
+
+    const piniaB = createPinia()
+    setActivePinia(piniaB)
+    useProjectStore(piniaB)
+
+    expect(storeA.canLoadOlderByChat[chatId]).toBe(true)
+    expect(storeA.isLoadingOlderByChat[chatId]).toBe(false)
+    expect(getActivePinia()).toBe(piniaB)
+  })
+
+  test('pagination state stays reactive while an older page is loading', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-older-reactive'
+    let resolvePage!: (value: unknown) => void
+    apiGet.mockImplementation((path: string) => path.includes('offset=')
+      ? new Promise(resolve => { resolvePage = resolve })
+      : Promise.resolve({
+          items: [{ role: 'user', content: 'new', i: 1, sent_at: '2026-08-24T10:00:00Z' }],
+          total: 2,
+          offset: 1,
+          limit: 1,
+          hasMore: true,
+          nextOffset: 1,
+        }))
+    await store.loadMessages(chatId)
+    expect(store.canLoadOlderByChat[chatId]).toBe(true)
+    expect(store.isLoadingOlderByChat[chatId]).toBe(false)
+
+    const loading = store.loadOlderMessages(chatId)
+    await nextTick()
+    expect(store.isLoadingOlderByChat[chatId]).toBe(true)
+    resolvePage({ items: [], total: 2, offset: 0, limit: 1, hasMore: false, nextOffset: null })
+    await loading
+    expect(store.isLoadingOlderByChat[chatId]).toBe(false)
   })
 })
 
@@ -7465,6 +8273,173 @@ describe('running subagent poll', () => {
   })
 })
 
+describe('running-row reconciliation while the engine count is zero', () => {
+  // The engine count (`backgroundAgents`, from chat_subagents_ready) and the
+  // cheap running list (/api/subagents/running) are separate owners. A row the
+  // list names while the count is 0 on an idle chat used to start nothing: the
+  // full-list poll was gated on the count alone and the running poll only
+  // started on a working edge.
+  const row = { agent_id: 'a1', description: 'digging', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }
+  let running: Record<string, unknown[]>
+  const calls = (suffix: string) => apiGet.mock.calls.filter(c => String(c[0]).endsWith(suffix)).length
+  function mockEndpoints(): void {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
+      if (path === '/api/chats/c1/subagents') return Promise.resolve([{ ...row, messages: [] }])
+      return Promise.resolve([])
+    })
+  }
+
+  beforeEach(() => {
+    running = { c1: [row] }
+    mockEndpoints()
+  })
+
+  test('known running rows keep an idle active chat refreshing when the event count is zero', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.backgroundAgents.c1).toBeUndefined()
+      expect(store.isStreaming).toBe(false)
+
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(calls('/subagents')).toBeGreaterThan(0)
+      expect(calls('/api/subagents/running')).toBeGreaterThan(0)
+      // The engine count is never written from the cheap list.
+      expect(store.backgroundAgents.c1).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('running-row discovery immediately refreshes the full active list once', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      apiGet.mockClear()
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
+      expect(store.subagents.c1).toHaveLength(1)
+
+      // A second refresh that still lists the row is not a new discovery.
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/chats/c1/subagents')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('completion and disposal stop both polls', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(4000)
+
+      running = {}
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(store.runningSubagents.c1).toBeUndefined()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+
+      // Disposal while rows are still known.
+      running = { c1: [row] }
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(4000)
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a failed running request does not clear the known rows or stop the poll', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      await store.refreshRunningSubagents()
+      apiGet.mockImplementation((path: string) =>
+        path === '/api/subagents/running' ? Promise.reject(new Error('offline')) : Promise.resolve([]))
+      await vi.advanceTimersByTimeAsync(8000)
+      expect(store.runningSubagents.c1).toHaveLength(1)
+
+      mockEndpoints()
+      running = {}
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(store.runningSubagents.c1).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a dedicated subagent view does not trigger full-list polling', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      store.setSubagentViewActive('c1')
+      apiGet.mockClear()
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(calls('/api/chats/c1/subagents')).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('rows for another chat do not poll the active chat', async () => {
+    vi.useFakeTimers()
+    try {
+      running = { other: [row] }
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      apiGet.mockClear()
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(calls('/api/chats/c1/subagents')).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('late old responses do not restore completed agents', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      store.activeChatId = 'c1'
+      const pending: Array<(v: unknown) => void> = []
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/subagents/running') return Promise.resolve({ chats: running })
+        if (path === '/api/chats/c1/subagents') return new Promise(resolve => pending.push(resolve))
+        return Promise.resolve([])
+      })
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(4000)
+      expect(pending.length).toBeGreaterThanOrEqual(2)
+      const last = pending.length - 1
+      pending[last]([{ ...row, status: 'completed', messages: [] }])
+      await vi.advanceTimersByTimeAsync(0)
+      pending[0]([{ ...row, status: 'running', messages: [] }])
+      await vi.advanceTimersByTimeAsync(0)
+      expect(store.subagents.c1?.[0]?.status).toBe('completed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('loadSubagent', () => {
   test('fetches one agent and merges it without dropping the others', async () => {
     const store = useProjectStore()
@@ -7658,7 +8633,12 @@ describe('delegated task signals', () => {
     const store = useProjectStore()
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    const snapshot = JSON.stringify({ type: 'snapshot', active_streams: [], chat_pins: {} })
+    const snapshot = JSON.stringify({
+      type: 'snapshot',
+      active_streams: [],
+      chat_pins: {},
+      chat_terminal_offers: {},
+    })
 
     // Before boot the workspace is not known yet; fetchAll reads it then.
     sock.onmessage?.({ data: snapshot })
@@ -7999,5 +8979,352 @@ describe('queue delivery: queue or steer', () => {
     expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('steer')
     sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'queue', revision: 'r2' }) })
     expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('queue')
+  })
+
+  it('appearance_settings_changed applies the value', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValue([])
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    document.documentElement.removeAttribute('data-text-contrast')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'appearance_settings_changed', text_contrast: 'soft', theme: 'dark', font_scale: 1.2, revision: 'r' }) })
+    expect(document.documentElement.dataset.textContrast).toBe('soft')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'appearance_settings_changed', text_contrast: 'normal', theme: 'dark', font_scale: 1.2, revision: 'r2' }) })
+    expect(document.documentElement.dataset.textContrast).toBeUndefined()
+  })
+
+  it('a snapshot carrying appearance applies the value', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValue([])
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    document.documentElement.removeAttribute('data-text-contrast')
+    sock.onmessage?.({ data: JSON.stringify({
+      type: 'snapshot', active_streams: [], chat_pins: {}, chat_terminal_offers: {},
+      appearance: { text_contrast: 'soft', theme: 'dark', font_scale: 1.2, revision: 'r' },
+    }) })
+    expect(document.documentElement.dataset.textContrast).toBe('soft')
+    document.documentElement.removeAttribute('data-text-contrast')
+  })
+})
+
+// ── The retry origin on the wire ─────────────────────────────────────────
+// A deliberate retry is a new turn the user asked for, not a repeat of the
+// words: it carries the 'retry' tag the engine records per turn, and it is a
+// NEW logical send, so it never inherits the id of an unacked ordinary send
+// that happens to carry the same text. The transport recovery of that retry
+// is the same logical send again: same id, same tag.
+describe('retry origin on the wire', () => {
+  function sentFrames(): Array<Record<string, unknown>> {
+    return fakeSockets
+      .flatMap(s => (s.send as Mock).mock.calls.map((c: unknown[]) => String(c[0])))
+      .map(raw => JSON.parse(raw) as Record<string, unknown>)
+      .filter(p => p.type === 'message')
+  }
+
+  // The prepared message a deliberate retry builds: the original text and
+  // images, plus the tag. Nothing else is client-chosen.
+  function retryPayload(text: string) {
+    return { composed: text, fileComments: [], chatComments: [], origin: 'retry' as const }
+  }
+
+  test('an ordinary send carries no origin at all', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-plain-send'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'plain words')
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect('origin' in frames[0]).toBe(false)
+  })
+
+  test('a retry carries the origin on the frame and on the optimistic bubble', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-retry-frame'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'try again', retryPayload('try again'))
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ type: 'message', text: 'try again', origin: 'retry' })
+    expect(frames[0].send_id).toBeTruthy()
+    // The bubble the user sees carries the tag too, so the renderer and the
+    // transcript agree on what this turn is.
+    const bubble = (store.messages[chatId] || []).find(m => m.role === 'user')
+    expect(bubble?.origin).toBe('retry')
+  })
+
+  test('a retry is a new logical send: a fresh id next to an unacked send with the same text', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-retry-fresh-id'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'same words')
+    const ordinaryId = sentFrames()[0].send_id
+    expect(ordinaryId).toBeTruthy()
+
+    store.sendMessage(chatId, 'same words', retryPayload('same words'))
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(2)
+    expect(frames[1].origin).toBe('retry')
+    // A new intent, so a new id: the engine must not read the retry as the
+    // ordinary send it never acknowledged.
+    expect(frames[1].send_id).not.toBe(ordinaryId)
+  })
+
+  test('an ordinary send of the same text keeps the tracked id and no origin', () => {
+    // The tag is the only thing that makes a send a new logical send: an
+    // ordinary duplicate still collapses onto the tracked one.
+    const store = useProjectStore()
+    const chatId = 'chat-plain-same-id'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'same words')
+    const firstId = sentFrames()[0].send_id
+    store.sendMessage(chatId, 'same words')
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(2)
+    expect(frames[1].send_id).toBe(firstId)
+    expect('origin' in frames[1]).toBe(false)
+  })
+
+  test('a queued retry carries the origin on the queue frame', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-retry-queued'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    // A turn is running: the send is queued behind it, not started.
+    store.streaming[chatId] = true
+
+    store.sendMessage(chatId, 'queued retry', retryPayload('queued retry'))
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({
+      type: 'message', mode: 'queue', text: 'queued retry', origin: 'retry',
+    })
+  })
+
+  test('a retry deferred while the socket is down keeps one tagged bubble and one tagged frame', async () => {
+    // A socket that stays CONNECTING until the test opens it, so the
+    // deferred window can be driven deterministically.
+    const lateSockets: LateSocket[] = []
+    class LateSocket {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSING = 2
+      static CLOSED = 3
+      readyState = LateSocket.CONNECTING
+      onopen: (() => void) | null = null
+      onmessage: ((e: { data: string }) => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      send = vi.fn()
+      close() { this.readyState = LateSocket.CLOSED; this.onclose?.() }
+      constructor(public url: string) { lateSockets.push(this) }
+      open() { this.readyState = LateSocket.OPEN; this.onopen?.() }
+    }
+    vi.stubGlobal('WebSocket', LateSocket)
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-retry-deferred'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'deferred retry', retryPayload('deferred retry'))
+
+      // The pending bubble is on screen and carries the tag.
+      const pending = (store.messages[chatId] || []).filter(m => m.role === 'user')
+      expect(pending).toHaveLength(1)
+      expect(pending[0].origin).toBe('retry')
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = (socket.send as Mock).mock.calls
+        .map(([raw]) => JSON.parse(String(raw)) as Record<string, unknown>)
+        .filter(p => p.type === 'message')
+      expect(frames).toHaveLength(1)
+      expect(frames[0]).toMatchObject({ text: 'deferred retry', origin: 'retry' })
+      // The pending bubble was promoted in place, not duplicated.
+      const bubbles = (store.messages[chatId] || []).filter(m => m.role === 'user')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].origin).toBe('retry')
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('the unacked record keeps the tag and the recovery resends the same id with it', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-retry-recovery'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'lost retry', retryPayload('lost retry'))
+    const first = sentFrames()[0]
+    expect(first.origin).toBe('retry')
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.origin).toBe('retry')
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(2)
+    // The same logical send: the same id, the same tag.
+    expect(frames[1].send_id).toBe(first.send_id)
+    expect(frames[1].origin).toBe('retry')
+    // The attempt count survives the recovery, so the one-retry cap holds.
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.attempts).toBe(1)
+  })
+
+  test('a persisted unacked retry restores the tag', async () => {
+    localStorageData['ciao-unacked-sends'] = JSON.stringify({
+      'chat-reload-retry': {
+        id: 'send-retry-1', text: 'survived the refresh', at: Date.now(), attempts: 0, origin: 'retry',
+      },
+    })
+    const store = useProjectStore()
+    store.restoreState()
+    const chatId = 'chat-reload-retry'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ text: 'survived the refresh', origin: 'retry' })
+    expect(frames[0].send_id).toBe('send-retry-1')
+  })
+
+  test('a persisted unacked send with any other origin is dropped, not defaulted', async () => {
+    // Only the exact 'retry' tag is honoured. An engine origin forged into
+    // the cache must not ride the wire.
+    localStorageData['ciao-unacked-sends'] = JSON.stringify({
+      'chat-forged-origin': {
+        id: 'send-forged', text: 'forged origin', at: Date.now(), attempts: 0, origin: 'schedule',
+      },
+    })
+    const store = useProjectStore()
+    store.restoreState()
+    const chatId = 'chat-forged-origin'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect(frames[0].text).toBe('forged origin')
+    expect('origin' in frames[0]).toBe(false)
+  })
+})
+
+describe('reorderWorkspaces', () => {
+  const ws = (name: string) => ({ name, vault_root: name, default_provider: 'claude' })
+  const optionNames = (store: ReturnType<typeof useProjectStore>) =>
+    store.workspaceOptions.map(w => w.name)
+
+  function seed(store: ReturnType<typeof useProjectStore>) {
+    store.workspaces = [ws('alpha'), ws('beta'), ws('gamma')] as typeof store.workspaces
+    store.activeWorkspace = 'beta'
+  }
+
+  test('posts the order, reorders at once and again from the response', async () => {
+    const store = useProjectStore()
+    seed(store)
+    let resolvePost: (value: unknown) => void = () => {}
+    apiPost.mockImplementation(() => new Promise(resolve => { resolvePost = resolve }))
+
+    const pending = store.reorderWorkspaces(['gamma', 'alpha', 'beta'])
+
+    expect(apiPost).toHaveBeenCalledWith('/api/workspaces/reorder', { order: ['gamma', 'alpha', 'beta'] })
+    expect(optionNames(store)).toEqual(['gamma', 'alpha', 'beta'])
+    resolvePost({ workspaces: [ws('gamma'), ws('beta'), ws('alpha')], active: 'gamma' })
+    await pending
+    expect(optionNames(store)).toEqual(['gamma', 'beta', 'alpha'])
+    expect(store.activeWorkspace).toBe('beta')
+  })
+
+  test('failure restores the previous order and rethrows', async () => {
+    const store = useProjectStore()
+    seed(store)
+    apiPost.mockRejectedValue(new Error('boom'))
+
+    await expect(store.reorderWorkspaces(['beta', 'alpha', 'gamma'])).rejects.toThrow('boom')
+
+    expect(optionNames(store)).toEqual(['alpha', 'beta', 'gamma'])
+    expect(store.activeWorkspace).toBe('beta')
+  })
+
+  test('does not post a list that is not the current workspaces', async () => {
+    const store = useProjectStore()
+    seed(store)
+
+    await store.reorderWorkspaces(['alpha', 'beta'])
+
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(optionNames(store)).toEqual(['alpha', 'beta', 'gamma'])
+  })
+
+  test('a workspaces_changed frame picks up an order set elsewhere', async () => {
+    const store = useProjectStore()
+    seed(store)
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') {
+        return { workspaces: [ws('gamma'), ws('alpha'), ws('beta')], active: 'gamma' }
+      }
+      if (path === '/api/projects') return []
+      return {}
+    })
+    const revision = store.workspaceRegistryRevision
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed' }) })
+
+    await vi.waitFor(() => {
+      expect(store.workspaceRegistryRevision).toBe(revision + 1)
+    })
+    expect(optionNames(store)).toEqual(['gamma', 'alpha', 'beta'])
+    expect(store.activeWorkspace).toBe('beta')
   })
 })

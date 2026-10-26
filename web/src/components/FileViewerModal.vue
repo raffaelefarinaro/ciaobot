@@ -101,7 +101,7 @@
       </header>
 
       <div class="fv-main" ref="mainEl">
-        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv }" ref="bodyEl">
+        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-csv': isCsv, 'fv-body-html': store.kind === 'html' }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
           <img
@@ -356,6 +356,7 @@ import { startFileDiscussion } from '../lib/fileDiscussion'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
 import { handleAppLinkClick } from '../lib/appLinks'
+import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
@@ -481,7 +482,7 @@ const metadata = computed(() => buildVaultDocumentMetadata(
   store.path,
   store.markdownPaths,
 ))
-const renderedMarkdown = computed(() => renderVaultMarkdown(metadata.value.body, store.path, store.markdownPaths))
+const renderedMarkdown = computed(() => renderVaultMarkdown(metadata.value.body, store.path, store.markdownPaths, true))
 
 function openRelated(path: string): void {
   const cid = store.chatId || ''
@@ -692,6 +693,7 @@ function onMdClick(e: MouseEvent): void {
   // The task opens behind this dialog, so the dialog closes first; a refused
   // close (unsaved edits kept) leaves the user where they were.
   if (handleAppLinkClick(e, () => store.close())) return
+  if (handleOpenLocalFileClick(e, (m) => projectsStore.pushErrorToast('Could not open file', m))) return
 
   const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
   if (fileLink) {
@@ -1973,6 +1975,9 @@ watch(
     width: 100vw;
   }
   .fv-body { padding: 14px 16px; }
+  .fv-body-html { padding: 0; }
+  .fv-body-html :deep(.hav-toolbar) { padding: 14px 16px 0; }
+  .fv-body-html :deep(.hav-code) { padding-right: 16px; padding-left: 16px; }
   .fv-md { max-width: none; }
   .fv-comment-pop {
     left: 8px !important;
@@ -1997,3 +2002,7 @@ watch(
 }
 
 </style>
+
+<!-- The openable dead link: a `file:` path rendered as a button the engine
+     can act on. Shared with the chat panel and the pinned-file panel. -->
+<style scoped src="./markdownDeadLink.css"></style>

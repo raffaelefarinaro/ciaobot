@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import os
+import re
 import secrets
 import sys
 from collections.abc import Mapping
@@ -19,7 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ciao.entity_types import stock_entity_type_registry
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
 from ciao.fs_sandbox import AGENT_FS_SCOPES
-from ciao.models import BridgeMode
+from ciao.models import THINKING_LEVELS, BridgeMode
 from ciao.os_support.paths import resolve_path
 from ciao.providers.opencode import OpencodeSettings
 
@@ -315,7 +316,9 @@ def _vault_evidence_score(path: Path) -> int:
 # Accent presets for the PWA. Missing/unknown values resolve to amber (Ciao
 # orange; the old pink default read as an error). Only accents shift; canvas
 # tokens stay stable.
-WORKSPACE_COLOR_IDS = ("amber", "pink", "cyan", "emerald", "violet")
+WORKSPACE_COLOR_IDS = (
+    "amber", "pink", "cyan", "emerald", "violet", "blue", "teal", "lime", "fuchsia",
+)
 DEFAULT_WORKSPACE_COLOR = "amber"
 
 
@@ -357,6 +360,107 @@ def coerce_agent_fs_scope(raw: object) -> str | None:
     )
 
 
+# Execution (permission) modes a provider default may pin. ``manual`` is the
+# PWA-facing name for the BridgeMode ``normal`` (ask for every action);
+# ``plan`` stays chat-only and is not a settings default.
+PERMISSION_MODES: tuple[str, ...] = ("manual", "auto", "bypass")
+
+MEMORY_HANDOVERS: tuple[str, ...] = ("off", "dismiss", "all")
+DEFAULT_MEMORY_HANDOVER = "off"
+# New user-created workspaces start with predicted memory suggestions enabled.
+# Keep the registry/load default above conservative so older workspaces whose
+# files omit this field remain unchanged.
+DEFAULT_NEW_WORKSPACE_MEMORY_HANDOVER = "all"
+
+
+def coerce_memory_handover(raw: object) -> str:
+    """Normalize a workspace handover. Missing/empty -> "off"; anything else unknown raises ValueError."""
+    if raw is None:
+        return DEFAULT_MEMORY_HANDOVER
+    cleaned = str(raw).strip()
+    if not cleaned:
+        return DEFAULT_MEMORY_HANDOVER
+    if cleaned in MEMORY_HANDOVERS:
+        return cleaned
+    raise ValueError(f"memory_handover must be one of: {', '.join(MEMORY_HANDOVERS)}")
+
+
+PROVIDER_OVERRIDE_FIELDS: tuple[str, ...] = (
+    "model",
+    "thinking",
+    "permission_mode",
+    "insights_model",
+)
+
+
+_FREE_TEXT_OVERRIDE_FIELDS = ("model", "insights_model")
+_OVERRIDE_ID_MAX_CHARS = 200
+_OVERRIDE_ID_RE = re.compile(r"[A-Za-z0-9._:/@\[\]-]+")
+
+
+def _clip(value: object) -> str:
+    """A repr of an untrusted key, cut short so it cannot flood an error or a log line."""
+    text = repr(value)
+    return text if len(text) <= 64 else text[:61] + "..."
+
+
+def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
+    """Normalize a workspace's provider overrides. None -> {}; unknown provider/key/value raises ValueError."""
+    from ciao import provider_registry
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("provider_overrides must be an object")
+    known = provider_registry.provider_ids()
+    for provider in raw:
+        if provider not in known:
+            raise ValueError(f"provider_overrides: unknown provider {_clip(provider)}")
+    cleaned: dict[str, dict[str, str]] = {}
+    for provider in known:
+        if provider not in raw:
+            continue
+        entry = raw[provider]
+        if not isinstance(entry, dict):
+            raise ValueError(f"provider_overrides.{provider} must be an object")
+        for key in entry:
+            if key not in PROVIDER_OVERRIDE_FIELDS:
+                raise ValueError(f"provider_overrides.{provider}: unknown key {_clip(key)}")
+        fields: dict[str, str] = {}
+        for key in PROVIDER_OVERRIDE_FIELDS:
+            if key not in entry:
+                continue
+            value = entry[key]
+            label = f"provider_overrides.{provider}.{key}"
+            if not isinstance(value, str):
+                raise ValueError(f"{label} must be a string")
+            value = value.strip()
+            if not value:
+                continue
+            if key in _FREE_TEXT_OVERRIDE_FIELDS and (
+                len(value) > _OVERRIDE_ID_MAX_CHARS
+                or not _OVERRIDE_ID_RE.fullmatch(value)
+            ):
+                # The value is never echoed: it may be hand-edited junk that
+                # ends up in a log line or an error toast.
+                raise ValueError(
+                    f"{label} must be at most {_OVERRIDE_ID_MAX_CHARS} characters "
+                    "of letters, digits and . _ : / @ [ ] -"
+                )
+            if key == "permission_mode" and value not in PERMISSION_MODES:
+                raise ValueError(
+                    f"{label} must be one of: {', '.join(PERMISSION_MODES)}"
+                )
+            if key == "thinking":
+                levels = THINKING_LEVELS.get(provider, ())
+                if value not in levels:
+                    raise ValueError(f"{label} must be one of: {', '.join(levels)}")
+            fields[key] = value
+        if fields:
+            cleaned[provider] = fields
+    return cleaned
+
+
 @dataclass(slots=True)
 class WorkspaceConfig:
     """Config for one logical chat workspace."""
@@ -381,6 +485,13 @@ class WorkspaceConfig:
     # default_agent_fs_scope() on whichever platform reads it. Only an explicit
     # value is persisted, so the platform default is never frozen into storage.
     agent_fs_scope: str | None = None
+    # Whether Workspace care may act on its own [memory]/[profile] verdicts
+    # (off, dismiss, all). Operator-only: never set from an agent surface.
+    memory_handover: str = DEFAULT_MEMORY_HANDOVER
+    # Operator-only per-provider overrides of the Providers defaults for new
+    # chats and schedules in this workspace. Empty/missing = engine default.
+    # Never set from an agent surface.
+    provider_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def effective_agent_fs_scope(self) -> str:
         """The scope the agent runs under: the explicit choice, else the platform default."""
@@ -418,6 +529,17 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
     except ValueError:
         agent_fs_scope = None
+    try:
+        memory_handover = coerce_memory_handover(data.get("memory_handover"))
+    except ValueError:
+        memory_handover = DEFAULT_MEMORY_HANDOVER
+    try:
+        provider_overrides = coerce_provider_overrides(data.get("provider_overrides"))
+    except ValueError as exc:
+        logging.getLogger(__name__).warning(
+            "Ignoring invalid provider_overrides for workspace %r: %s", name, exc
+        )
+        provider_overrides = {}
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
@@ -429,6 +551,8 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         agent_fs_scope=agent_fs_scope,
+        memory_handover=memory_handover,
+        provider_overrides=provider_overrides,
     )
 
 
@@ -626,6 +750,7 @@ class CiaoConfig:
     dev_mode: bool = False
     app_repo: Path | None = None
     bootstrap_mode: bool = False
+    suggested_workspace: Path | None = None
     vault_root: Path = Path("memory-vault")
     claude_default_model: str = CLAUDE_MODELS[0]
     # Per-workspace default models and tool denylists live on the WorkspaceConfig
@@ -641,14 +766,13 @@ class CiaoConfig:
     # it into ``.runtime/workspaces.json`` once and then ignores it.
     legacy_workspaces_env: str = field(default="", repr=False)
     legacy_gws_profile: str = field(default="", repr=False)
-    legacy_insights_disabled: bool | None = field(default=None, repr=False)
     # Raw values of the retired `.env` server variables
     # (`app_settings.LEGACY_ENV_SETTINGS`) this install still sets. Never read
     # as settings; server startup imports them into Settings once.
     legacy_env_settings: dict[str, str] = field(default_factory=dict, repr=False)
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
-    # the PWA Settings → Models & providers tab (runtime settings store). A missing
+    # the PWA Settings → Providers tab (runtime settings store). A missing
     # entry uses ``claude_mode`` for every provider.
     provider_default_modes: dict[str, str] = field(default_factory=dict)
     # Per-provider default model for new chats, set from the PWA Settings →
@@ -656,19 +780,19 @@ class CiaoConfig:
     # own catalog default.
     provider_default_models: dict[str, str] = field(default_factory=dict)
     # Per-provider default thinking level for new chats, set from the PWA
-    # Settings → Models tab. A missing entry uses the provider's own default.
+    # Settings → Providers tab. A missing entry uses the provider's own default.
     provider_default_thinking: dict[str, str] = field(default_factory=dict)
     # Per-provider Session insights model (memory pass, chat titles, schedule
-    # attention check), set on each provider's card in Settings → Models. A
+    # attention check), set on each provider's card in Settings → Providers. A
     # missing entry uses the source chat's model.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
     pwa_port: int = 8443
     # The server binds all interfaces by default so the PWA is reachable over
     # LAN and Tailscale; the dashboard password + login rate limit are the
-    # access control. Settings → General → Network access sets "127.0.0.1"
+    # access control. Settings → Access & devices → Network access sets "127.0.0.1"
     # for loopback-only (`app_settings.DEFAULT_PWA_HOST` is this default).
     pwa_host: str = "0.0.0.0"
-    # Root log level name (Settings → General → Developer).
+    # Root log level name (Settings → Advanced → Developer).
     log_level: str = "info"
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
@@ -676,7 +800,6 @@ class CiaoConfig:
     # Claude model for the review-queue folds that run without a chat behind
     # them. Chat-driven calls use :func:`ciao.insights.resolve_insights_model`.
     insights_model: str = "sonnet"
-    insights_enabled: bool = True
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -1098,6 +1221,10 @@ class CiaoConfig:
             # so it keeps following the platform it loads on.
             if workspace.agent_fs_scope is not None:
                 row["agent_fs_scope"] = workspace.agent_fs_scope
+            if workspace.memory_handover != DEFAULT_MEMORY_HANDOVER:
+                row["memory_handover"] = workspace.memory_handover
+            if workspace.provider_overrides:
+                row["provider_overrides"] = workspace.provider_overrides
             payload.append(row)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
@@ -1160,6 +1287,10 @@ class CiaoConfig:
             )
             return []
         legacy = _parse_workspaces_json(raw)
+        # Overrides can carry a permission mode and are operator-set in
+        # Settings only; an environment import never brings them in.
+        for imported_workspace in legacy.values():
+            imported_workspace.provider_overrides = {}
         # A workspace archived in Settings left the registry on purpose; the
         # variable must not bring it back while its folder sits in the archive.
         archived = self._archived_workspace_names()
@@ -1286,10 +1417,12 @@ class CiaoConfig:
     ) -> str:
         """Pick the new-chat / new-schedule default for a workspace.
 
-        The workspace no longer pins a model: the answer is the effective
+        Order: this workspace's override for the effective provider, then the
         provider's operator default (``provider_default_models``, surfaced in
-        the PWA Settings → Models tab), falling back to the provider's own
-        catalog default.
+        the PWA Settings → Providers tab), then the provider's own catalog
+        default. The override is keyed by the effective provider, never by the
+        workspace's default provider, so a chat opened on another provider
+        never inherits a model that belongs to this workspace's own provider.
 
         ``provider``, when given, is the provider the chat/schedule will
         actually run on. It can differ from the workspace's own
@@ -1307,11 +1440,16 @@ class CiaoConfig:
         if effective_provider:
             descriptor = provider_registry.get(effective_provider)
             if descriptor is not None:
+                override = self.workspace_override(
+                    workspace, effective_provider, "model"
+                )
+                if override:
+                    return override
                 # The operator's explicit pick comes first, whatever the
                 # provider. Checking `default_model_config_key` before this
                 # meant Claude — the one provider that has such a key — always
                 # returned its env-backed value, so a Claude default chosen in
-                # Settings → Models was stored, echoed back by the UI, and
+                # Settings → Providers was stored, echoed back by the UI, and
                 # never actually used.
                 operator_default = self._operator_default_model(descriptor)
                 if operator_default:
@@ -1327,7 +1465,7 @@ class CiaoConfig:
     def _operator_default_model(self, descriptor: "ProviderDescriptor") -> str:
         """The operator-settable default model for a provider, or ``""`` when unset.
 
-        ``provider_default_models`` is what Settings → Models writes for every
+        ``provider_default_models`` is what Settings → Providers writes for every
         provider, so it is the authority. The per-provider settings dataclass is
         consulted only as a fallback, for providers that mirror the same value
         there (``app_settings`` copies it across for those).
@@ -1340,13 +1478,47 @@ class CiaoConfig:
         settings = getattr(self, descriptor.default_model_settings_attr, None)
         return getattr(settings, "default_model", "") if settings else ""
 
-    def default_model_for_provider(self, provider: str) -> str:
-        """The operator's default model for a provider, or ``""`` when unset.
+    def workspace_override(
+        self, workspace: str | None, provider: str, field_name: str
+    ) -> str:
+        """This workspace's override of one provider default, or "" when it has none."""
+        workspace_config = self.workspace(workspace)
+        if workspace_config is None:
+            return ""
+        return (workspace_config.provider_overrides.get(provider) or {}).get(
+            field_name, ""
+        )
+
+    def default_thinking_for_provider(
+        self, provider: str, workspace: str | None = None
+    ) -> str:
+        """Default thinking level for new chats on ``provider``: workspace override, then engine."""
+        return self.workspace_override(workspace, provider, "thinking") or (
+            self.provider_default_thinking or {}
+        ).get(provider, "")
+
+    def insights_model_override(
+        self, provider: str, workspace: str | None = None
+    ) -> str:
+        """Session-insights model override for ``provider``: workspace, then engine, else ""."""
+        return self.workspace_override(workspace, provider, "insights_model") or (
+            self.provider_insights_models or {}
+        ).get(provider, "")
+
+    def default_model_for_provider(
+        self, provider: str, workspace: str | None = None
+    ) -> str:
+        """The default model for a provider, or ``""`` when unset.
 
         Used when a chat is created on a provider that is not the workspace's
-        default provider, so the per-provider default still applies.
+        default provider, so the per-provider default still applies. A
+        ``workspace`` override for that provider wins over the operator default.
         """
         from ciao import provider_registry
+
+        override = self.workspace_override(workspace, provider, "model")
+        if override:
+            return override
 
         descriptor = provider_registry.get(provider)
         if descriptor is None:
@@ -1365,15 +1537,20 @@ class CiaoConfig:
             return workspace_config.default_provider
         return "claude"
 
-    def default_mode_for_provider(self, provider: str) -> BridgeMode:
+    def default_mode_for_provider(
+        self, provider: str, workspace: str | None = None
+    ) -> BridgeMode:
         """The default execution (permission) mode for new chats on ``provider``.
 
-        An operator pin (Settings → Models & providers → permission mode) wins;
-        otherwise every provider falls back to ``claude_mode`` (auto).
+        A ``workspace`` override wins; then an operator pin (Settings →
+        Providers → permission mode); otherwise every provider falls back to ``claude_mode`` (auto).
         ``manual`` maps to the BridgeMode ``normal`` — ask for every
         action; ``bypass`` allows everything; ``auto`` runs the permissive
         classifier-gated default.
         """
+        override = self.workspace_override(workspace, provider, "permission_mode")
+        if override:
+            return cast(BridgeMode, "normal" if override == "manual" else override)
         mode = (self.provider_default_modes or {}).get(provider, "")
         if mode in {"normal", "plan", "auto", "bypass"}:
             return cast(BridgeMode, mode)
@@ -1486,7 +1663,9 @@ class CiaoConfig:
 
     @classmethod
     def from_env(
-        cls, env: dict[str, str] | None = None, *, export: bool = True
+        cls, env: dict[str, str] | None = None, *, export: bool = True,
+        installer_bootstrap: bool = False,
+        installer_suggest_workspace: str | None = None,
     ) -> "CiaoConfig":
         """Build a config from the environment.
 
@@ -1507,6 +1686,25 @@ class CiaoConfig:
         discovery branch below already uses. Use it for anything read-only —
         a diagnostic must not change its caller's environment.
         """
+        if installer_bootstrap:
+            root = Path.home() / ".ciao" / "installer-bootstrap"
+            launcher, runtime = root / "launcher", root / "runtime"
+            for path in (root, launcher, runtime):
+                if path.is_symlink():
+                    raise ValueError(f"installer bootstrap refuses symlink path: {path}")
+            launcher.mkdir(parents=True, exist_ok=True)
+            runtime.mkdir(parents=True, exist_ok=True)
+            return cls(
+                pwa_auth_token=secrets.token_urlsafe(32),
+                workspace_root=root,
+                state_path=runtime / "state.json",
+                media_root=runtime / "media",
+                vault_root=root / "memory-vault",
+                bootstrap_mode=True,
+                suggested_workspace=Path(installer_suggest_workspace) if installer_suggest_workspace is not None else None,
+                pwa_host="127.0.0.1",
+                pwa_port=8443,
+            )
         overlay: dict[str, str] = {}
         if env is None:
             workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or "."
@@ -1623,6 +1821,10 @@ class CiaoConfig:
         try:
             if workspaces_path.is_file():
                 workspaces_json = workspaces_path.read_text(encoding="utf-8")
+        except PermissionError as exc:
+            from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
+
+            raise RuntimeStateUnreadable(workspaces_path) from exc
         except OSError:
             workspaces_json = ""
 
@@ -1647,15 +1849,6 @@ class CiaoConfig:
             if str(source.get(name, "") or "").strip()
         }
 
-        legacy_insights_raw = str(
-            source.get("CIAO_INSIGHTS_DISABLED", "") or ""
-        ).strip().lower()
-        legacy_insights_disabled = (
-            None
-            if not legacy_insights_raw
-            else legacy_insights_raw not in {"0", "false", "no", "off"}
-        )
-
         return cls(
             pwa_auth_token=pwa_auth_token,
             workspace_root=workspace_root,
@@ -1673,7 +1866,6 @@ class CiaoConfig:
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
             legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),
-            legacy_insights_disabled=legacy_insights_disabled,
         )
 
 

@@ -231,6 +231,7 @@ def record_decision(
     outcome: str = "",
     proposal_id: str = "",
     receipt_id: str = "",
+    reason: str = "",
 ) -> None:
     """Record one resolved proposal in the decision history.
 
@@ -255,6 +256,9 @@ def record_decision(
     is not this function's to write: by the time a decision is recorded the row
     is already out of the queue, which is too late for it to matter.
 
+    ``reason`` is the optional operator (or agent) "why", already validated by
+    the caller with ``clean_reason``; it is stored as given and never raises here.
+
     Imports are deferred so a test that patches ``ciao.memory_proposals`` still
     sees its patch honoured here.
     """
@@ -272,4 +276,5 @@ def record_decision(
         outcome=outcome,
         proposal_id=proposal_id,
         receipt_id=receipt_id,
+        reason=reason,
     )

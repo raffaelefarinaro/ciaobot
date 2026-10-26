@@ -161,6 +161,13 @@ describe('HomeWelcomeCard', () => {
     expect(again.text()).not.toContain('Your Ciaobot')
   })
 
+  it('links Providers to the providers tab', async () => {
+    answer(pending())
+    const view = await mountCard()
+    const link = view.findAllComponents(RouterLinkStub).find((l) => l.text() === 'Providers')
+    expect(link?.props('to')).toBe('/settings/providers#chat-providers')
+  })
+
   it('hides the card without an error when the password route answers 404', async () => {
     answer(pending())
     const view = await mountCard()

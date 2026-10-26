@@ -857,6 +857,18 @@ def _note_edit_entry_after(
     return _NoteEditAfter(after, "")
 
 
+def _note_edit_entry_text(proposal: Any) -> str:
+    """The entry an entry operation names, sliced from its ``before`` image, else ``""``."""
+    from ciao.note_edit_proposals import ENTRY_OPERATIONS
+
+    if proposal.operation not in ENTRY_OPERATIONS:
+        return ""
+    start, end = proposal.entry_span
+    if not (0 <= start < end <= len(proposal.before)):
+        return ""
+    return str(proposal.before[start:end]).strip()
+
+
 def _note_edit_row_fields(config, workspace: str, sidecar_id: str) -> dict[str, Any]:
     """The fields a ``[note_edit]`` bullet adds to its row.
 
@@ -902,6 +914,10 @@ def _note_edit_row_fields(config, workspace: str, sidecar_id: str) -> dict[str, 
         )
         return fields
     fields["target"] = proposal.relative_path
+    # The bullet an entry operation is about, as the note held it when the
+    # proposal was filed. Two verdicts on two bullets of the same note otherwise
+    # render as the same path and the same sentence, differing only by a digest.
+    fields["note_edit"]["entry"] = _note_edit_entry_text(proposal)
     if proposal.settled:
         fields["note_edit"].update(
             operation=proposal.operation,
@@ -995,6 +1011,11 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # a preview rendered without the request shows a line with no
                     # citation that the accept then writes with one.
                     row["request"] = bullet.request
+                if bullet.decider:
+                    # Absent for rows with no decider, like `target` and `request`.
+                    row["decider"] = bullet.decider
+                    if bullet.decide_reason:
+                        row["decide_reason"] = bullet.decide_reason
                 accept = proposal_kinds.accept_for(bullet.kind)
                 if accept.action == "edit_region":
                     row["region"] = resolve_region(bullet.kind)

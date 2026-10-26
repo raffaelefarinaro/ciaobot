@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest'
-import { askConfirm, pendingConfirm } from './confirm'
+import { askConfirm, askConfirmReason, pendingConfirm } from './confirm'
 
 describe('askConfirm', () => {
   beforeEach(() => {
@@ -61,6 +61,34 @@ describe('askConfirm', () => {
     const request = pendingConfirm.value!
     request.resolve(true)
     request.resolve(false)
+    await expect(answer).resolves.toBe(true)
+  })
+})
+
+describe('askConfirmReason', () => {
+  beforeEach(() => {
+    pendingConfirm.value = null
+  })
+
+  test('resolves the confirmed flag with the typed reason', async () => {
+    const answer = askConfirmReason('Delete it?')
+    expect(pendingConfirm.value?.withReason).toBe(true)
+    pendingConfirm.value!.reason = '  not mine  '
+    pendingConfirm.value!.resolve(true)
+    await expect(answer).resolves.toEqual({ confirmed: true, reason: 'not mine' })
+  })
+
+  test('cancel resolves with no reason, even if one was typed', async () => {
+    const answer = askConfirmReason('Delete it?')
+    pendingConfirm.value!.reason = 'typed'
+    pendingConfirm.value!.resolve(false)
+    await expect(answer).resolves.toEqual({ confirmed: false, reason: '' })
+  })
+
+  test('a plain askConfirm has no reason field and still returns a boolean', async () => {
+    const answer = askConfirm('Plain?')
+    expect(pendingConfirm.value).toMatchObject({ withReason: false, reason: '' })
+    pendingConfirm.value!.resolve(true)
     await expect(answer).resolves.toBe(true)
   })
 })

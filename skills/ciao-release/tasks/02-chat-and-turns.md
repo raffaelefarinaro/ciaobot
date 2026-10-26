@@ -96,8 +96,8 @@ not collapse them.
 
 ## Step 4 — file access and network (Workspace only)
 
-Regression check for #1234. In Settings → Workspaces, confirm this chat's
-workspace shows the *Workspace only* File access tag. Start a Claude chat in
+Regression check for #1234. In Settings → Manage workspaces, confirm this chat's
+workspace row summary shows *Workspace only*. Start a Claude chat in
 that workspace and ask the agent, in one message, to run:
 
 - `ciao vault search test --limit 1`

@@ -23,7 +23,11 @@ from ciao.models import ImageAttachment, ResultEvent, ToolUseEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import (
+    MAX_SEND_IDS_PER_TURN,
+    SEND_ID_HISTORY_TURNS,
+    ProjectChatManager,
+)
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -207,6 +211,113 @@ async def test_queued_flush_records_the_send_id(tmp_path: Path) -> None:
     flushed = [e for e in echoes if e.get("text") == "queued one"]
     assert len(flushed) == 1, echoes
     assert flushed[0].get("send_id") == "s-queued", flushed[0]
+
+
+async def test_send_id_stays_pending_during_provider_reload_before_flush(
+    tmp_path: Path,
+) -> None:
+    provider = _SteerProvider()
+    pcm, chat, _stream, release_turn, turn_calls, _captured, consumer = (
+        await _start_blocked_turn(tmp_path, provider)
+    )
+    assert pcm.queue_message(chat.chat_id, "follow-up", send_id="s-follow-up")
+    assert pcm.arm_reload_continuation(chat.chat_id) is True
+
+    reload_started = asyncio.Event()
+    finish_reload = asyncio.Event()
+
+    async def pause_reload(_chat_id: str) -> bool:
+        reload_started.set()
+        await finish_reload.wait()
+        return False
+
+    pcm.reload_provider = pause_reload  # type: ignore[method-assign]
+    release_turn.set()
+    await asyncio.wait_for(reload_started.wait(), timeout=5.0)
+
+    owned_turn = pcm.find_turn_by_send_id(chat.chat_id, "s-follow-up")
+    duplicate = owned_turn is not None or pcm.has_pending_send(
+        chat.chat_id, "s-follow-up"
+    )
+    assert duplicate is True
+    if not duplicate:
+        pcm.queue_message(chat.chat_id, "follow-up", send_id="s-follow-up")
+
+    finish_reload.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    assert turn_calls == ["initial", "follow-up"]
+    owned = pcm.find_turn_by_send_id(chat.chat_id, "s-follow-up")
+    assert owned is not None
+    assert owned["turn_index"] == 1
+
+
+async def test_cancelled_provider_reload_parks_draining_and_pending_entries(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("cancel-reload-queue", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="cancel-reload-queue")
+    release_turn = asyncio.Event()
+
+    async def fake_stream_chat(_chat_id, _prompt, **_kwargs):
+        await release_turn.wait()
+        yield _result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    assert pcm.queue_message(chat.chat_id, "first", entry_id="q-first", send_id="s-first")
+    assert pcm.queue_message(chat.chat_id, "second", entry_id="q-second", send_id="s-second")
+    assert pcm.arm_reload_continuation(chat.chat_id) is True
+
+    reload_started = asyncio.Event()
+
+    async def pause_reload(_chat_id: str) -> bool:
+        reload_started.set()
+        await asyncio.Event().wait()
+        return False
+
+    pcm.reload_provider = pause_reload  # type: ignore[method-assign]
+    release_turn.set()
+    await asyncio.wait_for(reload_started.wait(), timeout=5.0)
+
+    drive_task = pcm._streaming.drive_task(chat.chat_id, stream)
+    assert drive_task is not None
+    drive_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await drive_task
+
+    parked = pcm.get_chat(chat.chat_id).pending_queue
+    assert [(entry["id"], entry["text"]) for entry in parked] == [
+        ("q-first", "first"),
+        ("q-second", "second"),
+    ]
+    assert pcm._broker.get(chat.chat_id) is None
+    for send_id in ("s-first", "s-second"):
+        assert pcm.has_pending_send(chat.chat_id, send_id) is True
+
+
+async def test_parked_queue_owns_send_id_without_a_live_stream(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("parked-send-id", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="parked-send-id")
+    chat.pending_queue = [{"id": "q-1", "text": "waiting", "images": [], "send_id": "s-parked"}]
+
+    assert pcm.has_pending_send(chat.chat_id, "s-parked") is True
+    assert pcm.has_pending_send(chat.chat_id, "s-other") is False
+
+
+async def test_adopting_waiting_entries_preserves_send_ids(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("adopt-send-id", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="adopt-send-id")
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    stream.adopt_waiting(
+        [{"id": "q-1", "text": "waiting", "images": [], "send_id": "s-adopt"}],
+        "queue",
+    )
+
+    assert pcm.has_pending_send(chat.chat_id, "s-adopt") is True
 
 
 async def test_a_blank_queued_follow_up_does_not_rerun_the_previous_prompt(
@@ -1544,6 +1655,58 @@ async def test_steer_queue_combines_in_list_order(tmp_path: Path) -> None:
     await asyncio.wait_for(consumer, timeout=5.0)
 
 
+async def test_steer_overflow_stays_queued_and_keeps_accepted_ids_deduped(
+    tmp_path: Path,
+) -> None:
+    provider = _SteerProvider()
+    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
+        tmp_path, provider
+    )
+    ids = [f"s-{index}" for index in range(MAX_SEND_IDS_PER_TURN + 3)]
+    entry_ids = []
+    for index, send_id in enumerate(ids):
+        entry_id = f"q-{index}"
+        entry_ids.append(entry_id)
+        assert pcm.queue_message(
+            chat.chat_id,
+            f"message {index}",
+            entry_id=entry_id,
+            delivery="steer",
+            send_id=send_id,
+        )
+
+    await pcm.steer_queue(chat.chat_id)
+
+    assert len(provider.requests) == 1
+    assert provider.requests[0].prompt == "\n\n".join(
+        f"message {index}" for index in range(MAX_SEND_IDS_PER_TURN)
+    )
+    fallback = [
+        event for event in stream.buffered_events()
+        if event.get("type") == "steer_fallback"
+    ]
+    assert fallback[-1] == {
+        "type": "steer_fallback",
+        "entry_ids": entry_ids[MAX_SEND_IDS_PER_TURN:],
+        "reason": "send_id_limit",
+    }
+    overflow = [entry for entry in stream.pending if entry["id"] in entry_ids[MAX_SEND_IDS_PER_TURN:]]
+    assert len(overflow) == 3
+    assert all(entry["delivery"] == "queue" for entry in overflow)
+
+    pcm.on_steer_delivered(chat.chat_id, stream, "d1")
+    owned = chat.user_turn_send_ids[str(chat.user_turn_count - 1)]
+    assert isinstance(owned, list)
+    assert len(owned) == MAX_SEND_IDS_PER_TURN
+    for send_id in ids[:MAX_SEND_IDS_PER_TURN]:
+        assert pcm.find_turn_by_send_id(chat.chat_id, send_id) is not None
+    for send_id in ids[MAX_SEND_IDS_PER_TURN:]:
+        assert pcm.has_pending_send(chat.chat_id, send_id) is True
+
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+
 async def test_steer_queue_combines_images_in_list_order(tmp_path: Path) -> None:
     provider = _SteerProvider()
     pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
@@ -1582,8 +1745,8 @@ async def test_steer_delivered_publishes_steered_and_bumps_turn(tmp_path: Path) 
         await _start_blocked_turn(tmp_path, provider, events=[delivered])
     )
     before = pcm.get_chat(chat.chat_id).user_turn_count
-    pcm.queue_message(chat.chat_id, "a", entry_id="q-a", delivery="steer")
-    pcm.queue_message(chat.chat_id, "b", entry_id="q-b", delivery="steer")
+    pcm.queue_message(chat.chat_id, "a", entry_id="q-a", delivery="steer", send_id="s-a")
+    pcm.queue_message(chat.chat_id, "b", entry_id="q-b", delivery="steer", send_id="s-b")
     await pcm.steer_queue(chat.chat_id)
     release.set()
     await asyncio.wait_for(consumer, timeout=5.0)
@@ -1599,6 +1762,8 @@ async def test_steer_delivered_publishes_steered_and_bumps_turn(tmp_path: Path) 
     meta = pcm.get_chat(chat.chat_id)
     assert meta.user_turn_count == before + 1
     assert meta.user_turn_steered[str(before)] is True
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-a")["turn_index"] == before
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-b")["turn_index"] == before
     assert meta.user_turn_timings[str(before)]["sent_at"] == event["sent_at"]
     # The steered turn gets the turn's completion stamp, and nothing flushed as
     # a second turn.
@@ -1909,8 +2074,8 @@ async def test_send_now_starts_a_turn_from_waiting_entries(tmp_path: Path) -> No
 
     pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
     chat.pending_queue = [
-        {"id": "p1", "text": "first", "images": ["one.png"]},
-        {"id": "p2", "text": "second", "images": []},
+        {"id": "p1", "text": "first", "images": ["one.png"], "send_id": "s-one"},
+        {"id": "p2", "text": "second", "images": [], "send_id": "s-two"},
         {"id": "p3", "text": "stays", "images": []},
     ]
     del one
@@ -1922,6 +2087,8 @@ async def test_send_now_starts_a_turn_from_waiting_entries(tmp_path: Path) -> No
     await _wait_for(lambda: bool(turn_calls))
     assert turn_calls[0][0] == "first\n\nsecond"
     assert turn_calls[0][1] == ["one.png"]
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-one")["turn_index"] == 0
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-two")["turn_index"] == 0
     # The sent entries are gone from the waiting queue; the other one stays
     # waiting: it is neither re-seeded into the new turn nor flushed after it.
     assert [e["id"] for e in pcm.get_chat(chat.chat_id).pending_queue] == ["p3"]
@@ -1932,6 +2099,117 @@ async def test_send_now_starts_a_turn_from_waiting_entries(tmp_path: Path) -> No
     states = [e["queue"] for e in stream.buffered_events() if e.get("type") == "queue_state"]
     assert states
     assert [e["id"] for e in states[-1]] == ["p3"]
+
+
+async def test_failed_send_now_keeps_entries_and_does_not_record_delivery(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("failed-send-now", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="failed-send-now")
+    chat.record_send_ids(0, ["s-preexisting", "s-extra"])
+    chat.pending_queue = [{
+        "id": "p1", "text": "first", "images": [], "send_id": "s-first",
+    }]
+
+    def fail_to_start(*_args, **_kwargs):
+        raise RuntimeError("could not start")
+
+    pcm.start_stream = fail_to_start  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="could not start"):
+        await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer")
+
+    assert chat.pending_queue[0]["send_id"] == "s-first"
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-first") is None
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-preexisting") is not None
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-extra") is not None
+
+
+async def test_send_now_owns_ids_during_stream_start_for_replayed_send(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("send-now-overlap", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="send-now-overlap")
+    chat.pending_queue = [{
+        "id": "p1", "text": "first", "images": [], "send_id": "s-first",
+    }]
+    original_start_stream = pcm.start_stream
+    duplicate_suppressed_during_start: list[bool] = []
+
+    def replay_while_starting(*args, **kwargs):
+        # This is the synchronous overlap window in which another handler can
+        # process a recovery replay before start_stream returns.
+        owned_turn = pcm.find_turn_by_send_id(chat.chat_id, "s-first")
+        duplicate_suppressed_during_start.append(
+            owned_turn is not None or pcm.has_pending_send(chat.chat_id, "s-first")
+        )
+        return original_start_stream(*args, **kwargs)
+
+    pcm.start_stream = replay_while_starting  # type: ignore[method-assign]
+    assert await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer") is True
+
+    assert duplicate_suppressed_during_start == [True]
+
+
+async def test_failed_send_now_prunes_history_after_concurrent_owner(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("failed-send-now-full-history", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="failed-send-now-full-history")
+    chat.user_turn_count = SEND_ID_HISTORY_TURNS
+    chat.user_turn_send_ids = {
+        str(index): f"s-{index}" for index in range(SEND_ID_HISTORY_TURNS)
+    }
+    chat.pending_queue = [{
+        "id": "p1", "text": "new", "images": [], "send_id": "s-new",
+    }]
+
+    def fail_to_start(*_args, **_kwargs):
+        # Simulate another owner being recorded for this same turn while the
+        # reserved send is entering the start path.
+        chat.record_send_ids(SEND_ID_HISTORY_TURNS, ["s-preexisting"])
+        raise RuntimeError("could not start")
+
+    pcm.start_stream = fail_to_start  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="could not start"):
+        await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer")
+
+    assert len(chat.user_turn_send_ids) == SEND_ID_HISTORY_TURNS
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-0") is None
+    assert pcm.find_turn_by_send_id(
+        chat.chat_id, f"s-{SEND_ID_HISTORY_TURNS - 1}"
+    ) is not None
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-preexisting") is not None
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-new") is None
+
+
+async def test_failed_send_now_without_concurrent_owner_restores_exact_history(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("failed-send-now-exact-history", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="failed-send-now-exact-history")
+    chat.user_turn_count = SEND_ID_HISTORY_TURNS
+    original_history = {
+        str(index): f"s-{index}" for index in range(SEND_ID_HISTORY_TURNS)
+    }
+    chat.user_turn_send_ids = dict(original_history)
+    chat.pending_queue = [{
+        "id": "p1", "text": "new", "images": [], "send_id": "s-new",
+    }]
+
+    def fail_to_start(*_args, **_kwargs):
+        raise RuntimeError("could not start")
+
+    pcm.start_stream = fail_to_start  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="could not start"):
+        await pcm.set_queue_delivery(chat.chat_id, ["p1"], "steer")
+
+    assert chat.user_turn_send_ids == original_history
+    assert chat.pending_queue[0]["send_id"] == "s-new"
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-new") is None
 
 
 async def test_queue_delivery_on_a_waiting_entry_is_a_noop(tmp_path: Path) -> None:
@@ -2341,6 +2619,83 @@ async def test_resend_after_a_cancelled_prompt_reuses_the_turn_index(
     assert pcm.get_chat(chat.chat_id).user_turn_count == 1
 
 
+async def test_cancelled_combined_send_now_keeps_all_ids_parked(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("cancelled-combined", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="cancelled-combined")
+    pcm._streaming.start_drive = lambda **_kwargs: None
+    stream = pcm.start_stream(chat.chat_id, "combined", send_id="s-one")
+    chat.record_send_ids(0, ["s-two"])
+
+    pcm.on_prompt_cancelled(chat.chat_id, stream, "combined", None, 0)
+
+    assert chat.pending_queue[0]["send_ids"] == ["s-one", "s-two"]
+    assert pcm.has_pending_send(chat.chat_id, "s-one") is True
+    assert pcm.has_pending_send(chat.chat_id, "s-two") is True
+
+
+async def test_cancelled_combined_ids_survive_reload_adoption_and_steer_delivery(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("cancel-reload-steer", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="cancel-reload-steer")
+    pcm._streaming.start_drive = lambda **_kwargs: None
+    cancelled_stream = pcm.start_stream(
+        chat.chat_id, "combined prompt", send_id="s-cancelled"
+    )
+    chat.record_send_ids(0, ["s-companion"])
+    pcm.on_prompt_cancelled(
+        chat.chat_id, cancelled_stream, "combined prompt", None, 0
+    )
+
+    config = pcm._config
+    reloaded = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(
+            Path(config.state_path).parent,
+            Path(config.state_path).parent / "transcripts",
+        ),
+        path=pcm._path,
+    )
+    reloaded_chat = reloaded.get_chat(chat.chat_id)
+    assert reloaded_chat is not None
+    parked = reloaded_chat.pending_queue[0]
+    assert parked["send_ids"] == ["s-cancelled", "s-companion"]
+
+    provider = _SteerProvider()
+    reloaded._providers[chat.chat_id] = provider  # type: ignore[assignment]
+    release = asyncio.Event()
+
+    async def fake_stream_chat(_chat_id, _prompt, **_kwargs):
+        await release.wait()
+        yield _result(reloaded_chat)
+
+    reloaded.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = reloaded.start_stream(chat.chat_id, "running turn")
+    captured: list[dict] = []
+
+    async def consume() -> None:
+        async for event in stream.subscribe():
+            captured.append(event)
+
+    consumer = asyncio.create_task(consume())
+    await _wait_for(lambda: any(e.get("type") == "user_echo" for e in captured))
+    assert await reloaded.set_queue_delivery(chat.chat_id, [parked["id"]], "steer")
+    assert stream.pending[0]["send_ids"] == ["s-cancelled", "s-companion"]
+
+    reloaded.on_steer_delivered(chat.chat_id, stream, "d1")
+    cancelled = reloaded.find_turn_by_send_id(chat.chat_id, "s-cancelled")
+    companion = reloaded.find_turn_by_send_id(chat.chat_id, "s-companion")
+    assert cancelled is not None
+    assert companion is not None
+    assert cancelled["turn_index"] == companion["turn_index"]
+
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+
 async def test_cancelled_prompt_skips_the_rollback_when_a_later_turn_exists(
     tmp_path: Path,
 ) -> None:
@@ -2358,4 +2713,3 @@ async def test_cancelled_prompt_skips_the_rollback_when_a_later_turn_exists(
     ] == [{"type": "prompt_cancelled", "turn_index": 0}]
     release.set()
     await asyncio.wait_for(consumer, timeout=5.0)
-

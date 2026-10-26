@@ -15,7 +15,7 @@ With `file_access=workspace only` in the Ciaobot context, `.runtime/`, app
 folders, `journalctl` and other checkouts are unreadable, `gh` is not signed in
 (so `gh issue list` and `gh issue create` fail), and git outside the roots is
 refused. Do not probe or retry. Tell the user at once that they can switch the
-workspace to Whole machine (Settings → Workspaces → Edit → File access) or run
+workspace to Whole machine (Settings → Overview → File access) or run
 the command themselves. Without `file_access=`, the chat has whole-machine
 access.
 
@@ -33,7 +33,7 @@ fixed from a log tail alone.
 
 ## Check whether an update already fixes it
 
-Before recommending a new issue, compare the installed version (`version` from `ciao context logs`, or Settings → Home)
+Before recommending a new issue, compare the installed version (`version` from `ciao context logs`, or Settings → General)
 with the [releases](https://github.com/raffaelefarinaro/ciaobot/releases) and
 [changelog](https://github.com/raffaelefarinaro/ciaobot/blob/main/CHANGELOG.md).
 Search [existing issues](https://github.com/raffaelefarinaro/ciaobot/issues)

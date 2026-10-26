@@ -75,6 +75,10 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    # A normal run takes about 16 minutes. A step that waits on input it will
+    # never get (a fresh install.ps1 serving the setup wizard) must not hold
+    # the runner for GitHub's six-hour default.
+    timeout-minutes: 45
     env:
       # 'true' on pushes and release PRs into main, 'false' on develop PRs.
       WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
@@ -266,9 +270,50 @@ jobs:
             # nothing, and the token is only known after the installer prints it,
             # so the install output is redacted on its way into this file (which
             # is uploaded as an artifact) instead of masked afterwards.
-            powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Version "$version" -ReleaseDir ps1-e2e/release -Workspace "$workspace" 2>&1 \
-              | sed -E 's#(Open Ciaobot: ).*#\1[redacted]#'
-            echo "install exit ${PIPESTATUS[0]}"
+            # A fresh install serves the browser setup wizard and waits for it,
+            # so the step finishes the wizard over HTTP the way the page does:
+            # wait for the bootstrap to answer, then POST /api/setup/finish.
+            # Bounded, so a wizard that never comes up fails the step instead
+            # of hanging the job.
+            install_log="$RUNNER_TEMP/ps1-e2e-install.log"
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./ps1-e2e/install.ps1 -Version "$version" -ReleaseDir ps1-e2e/release -Workspace "$workspace" > "$install_log" 2>&1 &
+            installer=$!
+            python - "$workspace" <<'EOF'
+        import json, sys, time, urllib.error, urllib.request
+        base = "http://127.0.0.1:8443"
+        deadline = time.time() + 600
+        while True:
+            try:
+                urllib.request.urlopen(base + "/api/setup-status", timeout=5).read()
+                break
+            except (OSError, urllib.error.URLError):
+                if time.time() > deadline:
+                    print("wizard: never answered")
+                    raise SystemExit(0)
+                time.sleep(3)
+        body = json.dumps({
+            "workspace": sys.argv[1], "workspace_name": "personal", "port": 8443,
+            "password": "ci-e2e-password", "provider": "claude", "restart": True,
+        }).encode()
+        request = urllib.request.Request(
+            base + "/api/setup/finish", data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                print("wizard: finished", response.status)
+        except urllib.error.HTTPError as exc:
+            print("wizard: refused", exc.code, exc.read()[:500])
+        EOF
+            for _ in $(seq 1 180); do kill -0 "$installer" 2>/dev/null || break; sleep 5; done
+            if kill -0 "$installer" 2>/dev/null; then
+              echo "installer still running after the wizard; stopping it"
+              taskkill /F /T /PID "$(cat /proc/$installer/winpid)" >/dev/null 2>&1 || kill "$installer"
+            fi
+            wait "$installer"
+            install_exit=$?
+            sed -E 's#(Open Ciaobot: ).*#\1[redacted]#' "$install_log"
+            echo "install exit $install_exit"
             # Four markers, one word each, so the Summarize step and a human
             # reading the artifact can tell an installer that ran from one that
             # refused before it started. "installed" is the engine's own entry
@@ -309,6 +354,10 @@ jobs:
           echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
           echo "- ConPTY terminal: $(tail -1 windows-terminal.txt 2>/dev/null)"
+          # The interrupt measurements are reported as warnings, and the
+          # summary has to carry them: the log of a step nobody reads is
+          # not where a measurement belongs.
+          grep -hE 'UserWarning: #1721 ' windows-terminal.txt 2>/dev/null | sed -E 's/^.*UserWarning: //' | sed 's/^/- /' || true
           echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
           echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
           echo "- install.ps1: $(grep -E 'exit ' windows-install-ps1.txt 2>/dev/null | paste -sd ';' -)"
@@ -435,7 +484,7 @@ jobs:
         if-no-files-found: ignore
 
     - name: Set up uv
-      uses: astral-sh/setup-uv@v10.3.0
+      uses: astral-sh/setup-uv@v10.3.2
 
     # The release ships the engine wheel and nothing else (#653), so the
     # macOS-only coverage is the engine too: build the wheel this branch would

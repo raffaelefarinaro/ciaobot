@@ -5,7 +5,7 @@
 - Status: implementing
 - Current checkpoint: C1–C4 in code; C5 docs and verification in progress
 - Next action: run the CI gates and inspect the completion sheets in the browser
-- Decisions accepted: Q-01 always prompt, note optional only via Complete without note; Q-02 notes are editable and revision-checked, no delete; Q-03 first reusable occurrence is a learning, a second distinct completion id is a skill candidate, one occurrence is enough only to correct an owned skill
+- Decisions accepted: Q-01 always prompt, the note optional in the field itself with no separate no-note action; Q-02 notes are editable and revision-checked, no delete; Q-03 first reusable occurrence is a learning, a second distinct completion id is a skill candidate, one occurrence is enough only to correct an owned skill
 - Blocker: none
 - Implementation repository: `/Users/raffaelefarinaro/repos/ciaobot`
 - Generated plan output: `docs/TASK_LIFECYCLE_MEMORY_PLAN.md`
@@ -154,7 +154,7 @@ Use one Markdown field with the prompt:
 
 > How was this completed, or why was it closed? What worked, and how did you verify it?
 
-Recommended behavior: the prompt is always shown, but the note remains optional through an explicit **Complete without note** action. This captures knowledge without making quick or trivial work impossible to close.
+Recommended behavior: the prompt is always shown, and the note remains optional in the field itself — one action completes, and a blank note completes without a resolution. This captures knowledge without making quick or trivial work impossible to close.
 
 The write remains atomic: completion status and note land together. A failed or conflicting write keeps the draft, as the current resolution sheet already does.
 
@@ -243,7 +243,7 @@ Rejected because existing vaults already carry delegation and completion section
 
 | ID | Question | Recommended default | Status |
 | --- | --- | --- | --- |
-| Q-01 | Must a completion note be non-empty? | No. Always show the prompt, with an explicit **Complete without note** action. | Open |
+| Q-01 | Must a completion note be non-empty? | No. Always show the prompt; the note is optional in the field itself, with no separate no-note action. | Open |
 | Q-02 | Can an update be edited? | Yes, revision-checked, retaining `edited_at`; no delete control in the first release. | Open |
 | Q-03 | When should recurrence propose a new skill? | Two independent completions; one is enough only for an explicit correction to an existing skill. | Open |
 

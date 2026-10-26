@@ -444,17 +444,21 @@ it('does not pull focus for a run this tab did not start', async () => {
     { install_mode: 'installer', can_update: true, operation: operation('downloading') },
     undefined, { attach: true },
   )
+  // The control the user is on: any focusable element outside the update card
+  // (Restart, which used to be on this page, now lives on Advanced).
+  const elsewhere = document.createElement('button')
+  elsewhere.textContent = 'Elsewhere'
+  document.body.appendChild(elsewhere)
   try {
-    const restart = button(wrapper, 'Restart')!
-    expect(restart).toBeDefined()
-    restart.element.focus()
-    expect(document.activeElement).toBe(restart.element)
+    elsewhere.focus()
+    expect(document.activeElement).toBe(elsewhere)
 
     await flushPromises()
     expect(wrapper.find('.update-progress-phase').text()).toBe('Downloading the release')
     expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-    expect(document.activeElement).toBe(restart.element)
+    expect(document.activeElement).toBe(elsewhere)
   } finally {
+    elsewhere.remove()
     wrapper.unmount()
   }
 })
@@ -661,8 +665,7 @@ it('collapses Updates to its title and an up-to-date badge when nothing is in pr
   )
   try {
     // The first card on General is Updates. Its title stays; the status sits in
-    // the corner as the same badge the Google Workspace section uses, and the
-    // copy and the engine panel are not rendered at all.
+    // the corner as a badge, and the copy and the engine panel are not rendered at all.
     const card = wrapper.get('.card')
     expect(card.get('.section-title').text()).toBe('Updates')
     expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 0.20.0')

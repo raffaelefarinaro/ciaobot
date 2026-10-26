@@ -21,6 +21,19 @@ vi.mock('../../lib/api', () => {
   const get = vi.fn((path: string) => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
+    if (path.startsWith('/api/proposals/handover')) {
+      return Promise.resolve({
+        workspace: 'personal',
+        handover: 'off',
+        acting_available: true,
+        agreement: {
+          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
+          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
+          suggest_handover: false,
+        },
+      })
+    }
+    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     if (path === '/api/integrations/gws') {
       return Promise.resolve({
         installed: false,
@@ -29,6 +42,8 @@ vi.mock('../../lib/api', () => {
         profiles: [],
       })
     }
+    // The Overview's Chats and models card reads the engine defaults.
+    if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})
   })
   return {
@@ -72,12 +87,12 @@ function workspaces(
   }
 }
 
-async function mountWorkspacesTab() {
+async function mountWorkspacesTab(path = '/settings/workspaces') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
   })
-  await router.push('/settings/workspaces')
+  await router.push(path)
   await router.isReady()
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
@@ -106,11 +121,8 @@ describe('Settings > Workspaces file access', () => {
 
   it('saves workspace or machine from the edit panel', async () => {
     const { api } = await import('../../lib/api')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountWorkspacesTab('/settings/workspace')
     try {
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await flushPromises()
-
       const select = fileAccessSelect(wrapper)
       expect(select.element.value).toBe('workspace')
       expect(select.findAll('option').map(o => o.text())).toEqual([
@@ -154,7 +166,7 @@ describe('Settings > Workspaces file access', () => {
       expect(newPanel.text()).not.toContain('this computer')
 
       await newPanel.get('input[placeholder="letters, numbers, dashes, underscores"]').setValue('client-a')
-      const create = wrapper.findAll('button').find(b => b.text() === 'Create workspace')
+      const create = wrapper.findAll('button').find(b => b.text() === 'Create and open')
       await create!.trigger('click')
       await flushPromises()
 
@@ -177,7 +189,7 @@ describe('Settings > Workspaces file access', () => {
       const newPanel = wrapper.get('#new-workspace')
       await fileAccessSelect(newPanel).setValue('workspace')
       await newPanel.get('input[placeholder="letters, numbers, dashes, underscores"]').setValue('client-b')
-      const create = wrapper.findAll('button').find(b => b.text() === 'Create workspace')
+      const create = wrapper.findAll('button').find(b => b.text() === 'Create and open')
       await create!.trigger('click')
       await flushPromises()
 
@@ -201,11 +213,8 @@ describe('Settings > Workspaces file access default', () => {
 
   it('labels the default option from the engine payload', async () => {
     state.workspaces = workspaces(null, 'machine')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountWorkspacesTab('/settings/workspace')
     try {
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await flushPromises()
-
       expect(fileAccessSelect(wrapper).findAll('option')[0].text()).toBe('Default (Whole machine)')
     } finally {
       wrapper.unmount()
@@ -215,11 +224,8 @@ describe('Settings > Workspaces file access default', () => {
   it('shows a workspace that never chose as the default and saves it unchanged without the key', async () => {
     const { api } = await import('../../lib/api')
     state.workspaces = workspaces(null, 'workspace')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountWorkspacesTab('/settings/workspace')
     try {
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await flushPromises()
-
       const select = fileAccessSelect(wrapper)
       expect(select.element.value).toBe('')
 
@@ -241,11 +247,8 @@ describe('Settings > Workspaces file access default', () => {
   it('clears an explicit choice when the default is picked again', async () => {
     const { api } = await import('../../lib/api')
     state.workspaces = workspaces('machine', 'workspace')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountWorkspacesTab('/settings/workspace')
     try {
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await flushPromises()
-
       await fileAccessSelect(wrapper).setValue('')
       await flushPromises()
       await wrapper.get('.workspace-save').trigger('click')

@@ -19,7 +19,6 @@ for (const mobile of [false, true]) {
       thinking_levels: { claude: ['low', 'medium', 'high', 'xhigh', 'max'] },
     } }))
     let settings = {
-      insights_enabled: true,
       provider_default_models: { claude: 'sonnet' },
       provider_default_thinking: {},
       provider_insights_models: {},
@@ -33,10 +32,12 @@ for (const mobile of [false, true]) {
       }
       await route.fulfill({ json: settings })
     })
-    await boot(page, '/settings/models', '.provider-inline-defaults')
+    await boot(page, '/settings/providers', '.provider-inline-defaults')
     await expect(page.locator('.startup-overlay')).toHaveCount(0)
     const defaults = page.locator('.provider-inline-defaults').first()
-    await expect(defaults.locator('.model-selector__trigger').nth(0)).toContainText('sonnet')
+    // The picker names the model the way every picker does; the raw id is
+    // what gets saved.
+    await expect(defaults.locator('.model-selector__trigger').nth(0)).toContainText('Sonnet')
     await expect(defaults.locator('.model-selector__trigger').nth(1)).toContainText('Automatic — same as chat model')
     const effort = page.locator('select[aria-labelledby="thinking-label-claude"]')
     await effort.focus()

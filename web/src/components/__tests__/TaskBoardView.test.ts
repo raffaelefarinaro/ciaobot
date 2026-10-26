@@ -27,6 +27,9 @@ const apiDel = vi.hoisted(() => vi.fn())
 const askConfirm = vi.hoisted(() => vi.fn(
   async (_message?: string, _options?: { title?: string }) => true,
 ))
+const askConfirmReason = vi.hoisted(() => vi.fn(
+  async (_message?: string, _options?: { title?: string }) => ({ confirmed: true, reason: '' }),
+))
 const pendingConfirm = vi.hoisted(() => ({ value: null as unknown }))
 
 vi.mock('../../lib/api', () => ({
@@ -39,6 +42,7 @@ vi.mock('../../lib/api', () => ({
 // whether its own Escape handling applies while a confirm is up.
 vi.mock('../../lib/confirm', () => ({
   askConfirm,
+  askConfirmReason,
   pendingConfirm,
 }))
 
@@ -152,6 +156,8 @@ describe('TaskBoardView', () => {
     apiPatch.mockReset()
     apiDel.mockReset()
     askConfirm.mockReset()
+    askConfirmReason.mockReset()
+    askConfirmReason.mockResolvedValue({ confirmed: true, reason: '' })
     askConfirm.mockResolvedValue(true)
     pendingConfirm.value = null
     // jsdom has no ResizeObserver and no layout, so the pane's width is driven
@@ -1150,7 +1156,7 @@ describe('TaskBoardView', () => {
     await nextTick()
 
     let release: (ok: boolean) => void = () => {}
-    askConfirm.mockImplementation((message = '', options = {}) => {
+    askConfirmReason.mockImplementation((message = '', options = {}) => {
       // The real module parks the outstanding request here for the duration.
       pendingConfirm.value = {
         message,
@@ -1158,10 +1164,10 @@ describe('TaskBoardView', () => {
         destructive: true,
         resolve: () => {},
       }
-      return new Promise<boolean>((resolve) => {
+      return new Promise<{ confirmed: boolean, reason: string }>((resolve) => {
         release = (ok: boolean) => {
           pendingConfirm.value = null
-          resolve(ok)
+          resolve({ confirmed: ok, reason: '' })
         }
       })
     })
@@ -1677,7 +1683,7 @@ describe('TaskBoardView', () => {
 
   it('deletes at the revision it read, and only after the confirmation', async () => {
     const wrapper = await mountBoard()
-    askConfirm.mockResolvedValue(false)
+    askConfirmReason.mockResolvedValue({ confirmed: false, reason: '' })
     apiDel.mockResolvedValue({ workspace: 'personal', deleted: 'ship' })
 
     await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
@@ -1691,7 +1697,7 @@ describe('TaskBoardView', () => {
     expect(apiDel).not.toHaveBeenCalled()
     expect(wrapper.find('.task-sheet').exists()).toBe(true)
 
-    askConfirm.mockResolvedValue(true)
+    askConfirmReason.mockResolvedValue({ confirmed: true, reason: '' })
     await wrapper.get('.task-delete').trigger('click')
     await flushPromises()
     await nextTick()
@@ -1951,6 +1957,144 @@ describe('TaskBoardView', () => {
       expect(card(wrapper, 'Never delegated').find('.task-more').exists()).toBe(false)
       wrapper.unmount()
     })
+
+  describe('decision reasons (#1730)', () => {
+    const reviewed = () => liveTask({ attempt_state: 'ready_for_review', revision: THIRD_REVISION })
+
+    async function openDetail(wrapper: ReturnType<typeof mount>, title: string) {
+      await card(wrapper, title).get('.task-open').trigger('click')
+      await flushPromises()
+      await nextTick()
+    }
+
+    function detailButton(wrapper: ReturnType<typeof mount>, label: string) {
+      return wrapper.get('.task-sheet').findAll('button').find((b) => b.text() === label)
+    }
+
+    it('delete sends the reason the confirm collected, and none when it is skipped', async () => {
+      apiDel.mockResolvedValue({ workspace: 'personal', deleted: 'ship' })
+      const wrapper = await mountBoard()
+      askConfirmReason.mockResolvedValue({ confirmed: true, reason: 'not mine' })
+      await openDetail(wrapper, 'Ship the board')
+      await wrapper.get('.task-delete').trigger('click')
+      await flushPromises()
+      expect(askConfirmReason).toHaveBeenCalledTimes(1)
+      expect(apiDel).toHaveBeenCalledWith('/api/tasks/ship', {
+        workspace: 'personal', expected_revision: REVISION, reason: 'not mine',
+      })
+      wrapper.unmount()
+
+      apiDel.mockClear()
+      askConfirmReason.mockResolvedValue({ confirmed: true, reason: '' })
+      const again = await mountBoard()
+      await openDetail(again, 'Ship the board')
+      await again.get('.task-delete').trigger('click')
+      await flushPromises()
+      // One click, as before: no reason key at all.
+      expect(apiDel).toHaveBeenCalledWith('/api/tasks/ship', {
+        workspace: 'personal', expected_revision: REVISION,
+      })
+      again.unmount()
+    })
+
+    it('shows the reason block only on the sheet of a review-ready task', async () => {
+      const wrapper = await mountWithBody([reviewed()])
+      await card(wrapper, 'Wire the store').get('.task-check').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.task-resolution-sheet').find('.decision-reason').exists()).toBe(true)
+      wrapper.unmount()
+
+      const plain = await mountWithBody([liveTask({ attempt_state: 'running' }), plainTask()])
+      await card(plain, 'Draft the runbook').get('.task-check').trigger('click')
+      await flushPromises()
+      expect(plain.get('.task-resolution-sheet').find('.decision-reason').exists()).toBe(false)
+      plain.unmount()
+    })
+
+    it('approving sends the typed reason with the completion', async () => {
+      apiPost.mockResolvedValue({
+        workspace: 'personal',
+        task: { ...reviewed(), status: 'done', attempt_id: '', chat_id: '', live_attempt_id: '', revision: NEXT_REVISION },
+      })
+      const wrapper = await mountWithBody([reviewed()])
+      await card(wrapper, 'Wire the store').get('.task-check').trigger('click')
+      await flushPromises()
+      const sheet = wrapper.get('.task-resolution-sheet')
+      await sheet.findAll('.decision-reason .task-chip').find((b) => b.text() === 'good as is')!.trigger('click')
+      await sheet.get('form').trigger('submit')
+      await flushPromises()
+      expect(apiPost).toHaveBeenCalledWith('/api/tasks/doing/complete', {
+        workspace: 'personal',
+        expected_revision: THIRD_REVISION,
+        resolution: '',
+        reason: 'good as is',
+      })
+      wrapper.unmount()
+    })
+
+    it('a failed approval keeps the typed reason in the sheet', async () => {
+      apiPost.mockRejectedValue(new Error('conflict'))
+      const wrapper = await mountWithBody([reviewed()])
+      await card(wrapper, 'Wire the store').get('.task-check').trigger('click')
+      await flushPromises()
+      const field = () => wrapper.get<HTMLTextAreaElement>('#task-approve-reason')
+      await field().setValue('looked right')
+      await wrapper.get('.task-resolution-sheet form').trigger('submit')
+      await flushPromises()
+      await nextTick()
+      expect(wrapper.find('.task-resolution-sheet').exists()).toBe(true)
+      expect(field().element.value).toBe('looked right')
+      wrapper.unmount()
+    })
+
+    it('offers Reject only for a review-ready task, and detaches with the reason', async () => {
+      apiPost.mockResolvedValue({
+        workspace: 'personal',
+        attempt: { ...delegateAnswer().attempt, attempt_id: LIVE_ID, state: 'stopped', live: false },
+      })
+      const running = await mountWithBody([liveTask()])
+      await openDetail(running, 'Wire the store')
+      expect(detailButton(running, 'Reject…')).toBeUndefined()
+      running.unmount()
+
+      const wrapper = await mountWithBody([reviewed()])
+      await openDetail(wrapper, 'Wire the store')
+      askConfirmReason.mockResolvedValue({ confirmed: true, reason: 'not a task' })
+      await detailButton(wrapper, 'Reject…')!.trigger('click')
+      await flushPromises()
+      expect(askConfirmReason.mock.calls[0]![1]).toMatchObject({ title: 'Reject result', confirmLabel: 'Reject' })
+      expect(apiPost).toHaveBeenCalledWith(
+        `/api/tasks/doing/attempt/${LIVE_ID}/detach`,
+        { workspace: 'personal', reason: 'not a task' },
+      )
+      wrapper.unmount()
+    })
+
+    it('cancelling the Reject confirm sends nothing, and plain Detach stays one click with no reason', async () => {
+      const wrapper = await mountWithBody([reviewed()])
+      await openDetail(wrapper, 'Wire the store')
+      askConfirmReason.mockResolvedValue({ confirmed: false, reason: '' })
+      await detailButton(wrapper, 'Reject…')!.trigger('click')
+      await flushPromises()
+      expect(apiPost).not.toHaveBeenCalled()
+      wrapper.unmount()
+
+      apiPost.mockResolvedValue({
+        workspace: 'personal',
+        attempt: { ...delegateAnswer().attempt, attempt_id: LIVE_ID, state: 'stopped', live: false },
+      })
+      const running = await mountWithBody([liveTask()])
+      await openDetail(running, 'Wire the store')
+      await detailButton(running, 'Detach')!.trigger('click')
+      await flushPromises()
+      expect(askConfirmReason).toHaveBeenCalledTimes(1)
+      expect(apiPost).toHaveBeenCalledWith(
+        `/api/tasks/doing/attempt/${LIVE_ID}/detach`,
+        { workspace: 'personal' },
+      )
+      running.unmount()
+    })
+  })
 
   it('previews the resolved project, the defaults, and that the turn is attended',
     async () => {

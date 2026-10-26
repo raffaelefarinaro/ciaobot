@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ciao.memory_proposals import read_decisions
 
 
@@ -772,3 +774,983 @@ def test_cli_request_must_be_a_plain_identifier(tmp_path: Path) -> None:
 
     rows = [row for row in list_proposals(queue) if row["kind"] == "learnings"]
     assert len(rows) == 1 and rows[0]["request"] == ""
+
+
+# ── decider: add flag and escalate ────────────────────────────────────────
+
+_PEOPLE_BULLET = "- [people Mo] Mo leads platform.  _(from: chat-1)_  _(decide: nightly; r1)_"
+_OTHER_BULLET = "- [memory] Prefer uv.  _(from: chat-2)_"
+
+
+def _decider_queue(tmp_path: Path, *bullets: str) -> tuple[Path, Path]:
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n## 2026-01-01T00:00:00Z\n\n" + "\n".join(bullets) + "\n",
+        encoding="utf-8",
+    )
+    return vault, queue
+
+
+def _escalate(tmp_path: Path, vault: Path, needle: str, reason: str | None) -> int:
+    from ciao import cli
+
+    text_file = tmp_path / "needle.txt"
+    text_file.write_text(needle, encoding="utf-8")
+    argv = [
+        "memory-proposal-escalate",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "--text-file", str(text_file),
+    ]
+    if reason is not None:
+        reason_file = tmp_path / "reason.txt"
+        reason_file.write_text(reason, encoding="utf-8")
+        argv += ["--reason-file", str(reason_file)]
+    return cli.main(argv)
+
+
+def test_cli_add_rejects_an_unknown_decider(tmp_path: Path) -> None:
+    """argparse refuses a decider outside the closed set."""
+    import pytest
+
+    from ciao import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["memory-proposal-add", "--workspace", str(tmp_path), "--decide", "maybe", "x"])
+    assert exc.value.code == 2
+
+
+def test_cli_escalate_retags_in_place_under_the_lock(tmp_path: Path, monkeypatch) -> None:
+    """Escalation rewrites one line under queue_lock and records no decision."""
+    import contextlib
+
+    from ciao import memory_receipts
+
+    vault, queue = _decider_queue(tmp_path, _PEOPLE_BULLET, _OTHER_BULLET)
+    entered: list[Path] = []
+    real_lock = memory_receipts.queue_lock
+
+    @contextlib.contextmanager
+    def recording_lock(path: Path):
+        entered.append(path)
+        with real_lock(path):
+            yield
+
+    monkeypatch.setattr(memory_receipts, "queue_lock", recording_lock)
+    rc = _escalate(tmp_path, vault, "Mo leads", "Checked People/Mo.md; only you know.")
+
+    assert rc == 0
+    assert entered
+    lines = queue.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "# Memory Proposals"
+    assert lines[2] == "## 2026-01-01T00:00:00Z"
+    assert lines[4] == (
+        "- [people Mo] Mo leads platform.  _(from: chat-1)_"
+        "  _(decide: you; Checked People/Mo.md; only you know.)_"
+    )
+    assert lines[5] == _OTHER_BULLET
+    assert read_decisions(queue) == []
+
+
+def test_cli_escalate_adds_a_tail_to_a_bullet_with_none(tmp_path: Path) -> None:
+    """A bullet with no decide tail gains one at the end."""
+    vault, queue = _decider_queue(tmp_path, _OTHER_BULLET)
+    assert _escalate(tmp_path, vault, "Prefer uv", "r") == 0
+    assert queue.read_text(encoding="utf-8").splitlines()[-1] == _OTHER_BULLET + "  _(decide: you; r)_"
+
+
+def test_cli_escalate_replaces_an_existing_you_reason(tmp_path: Path) -> None:
+    """Re-escalating is idempotent: one tail, the latest reason."""
+    vault, queue = _decider_queue(tmp_path, _OTHER_BULLET)
+    assert _escalate(tmp_path, vault, "Prefer uv", "first") == 0
+    assert _escalate(tmp_path, vault, "Prefer uv", "second") == 0
+    last = queue.read_text(encoding="utf-8").splitlines()[-1]
+    assert last == _OTHER_BULLET + "  _(decide: you; second)_"
+    assert last.count("_(decide:") == 1
+
+
+def test_cli_escalate_preserves_the_proposal_id(tmp_path: Path) -> None:
+    """The decider is outside the hashed fields, so escalation keeps the id."""
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    vault, queue = _decider_queue(tmp_path, _PEOPLE_BULLET, _OTHER_BULLET)
+    rel = "ws/Workspace/Memory-Proposals.md"
+    before = [e.proposal_id for e in walk_proposal_queue("ws", rel, queue.read_text(encoding="utf-8"))]
+    assert _escalate(tmp_path, vault, "Mo leads", "r") == 0
+    after = [e.proposal_id for e in walk_proposal_queue("ws", rel, queue.read_text(encoding="utf-8"))]
+    assert before == after and len(before) == 2
+
+
+def test_cli_escalate_refuses_ambiguous_missing_and_empty(tmp_path: Path) -> None:
+    """Two matches or none exit 1 and change nothing; bad reason input exits 2."""
+    vault, queue = _decider_queue(tmp_path, "- [memory] lesson one  _(from: a)_", "- [memory] lesson two  _(from: a)_")
+    original = queue.read_text(encoding="utf-8")
+    assert _escalate(tmp_path, vault, "lesson", "r") == 1
+    assert queue.read_text(encoding="utf-8") == original
+    assert _escalate(tmp_path, vault, "absent", "r") == 1
+    assert _escalate(tmp_path, vault, "lesson one", "  \n") == 2
+    assert _escalate(tmp_path, vault, "lesson one", None) == 2
+    assert queue.read_text(encoding="utf-8") == original
+
+
+def test_cli_escalate_matches_the_flattened_form(tmp_path: Path) -> None:
+    """A needle with repeated whitespace still resolves, like dismiss."""
+    vault, queue = _decider_queue(tmp_path, "- [memory] spaced lesson  _(from: a)_")
+    assert _escalate(tmp_path, vault, "spaced   lesson", "r") == 0
+    assert "_(decide: you; r)_" in queue.read_text(encoding="utf-8")
+
+
+def test_dismiss_still_works_on_a_bullet_with_a_decide_tail(tmp_path: Path) -> None:
+    """Dismissal records the bare text, never the decide tail."""
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _PEOPLE_BULLET)
+    rc = cli.main([
+        "memory-proposal-dismiss", "--workspace", str(tmp_path),
+        "--vault-root", str(vault), "Mo leads",
+    ])
+    assert rc == 0
+    decisions = read_decisions(queue)
+    assert len(decisions) == 1
+    assert decisions[0]["text"] == "Mo leads platform."
+
+
+# ── decision reasons (#1734) ──────────────────────────────────────────────
+
+
+def _reason_queue(tmp_path: Path) -> tuple[Path, Path]:
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] durable lesson  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    return vault, queue
+
+
+def _dismiss_args(tmp_path: Path, vault: Path, *extra: str) -> list[str]:
+    return [
+        "memory-proposal-dismiss",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        *extra,
+        "durable lesson",
+    ]
+
+
+def test_cli_dismiss_records_a_reason_from_a_file(tmp_path: Path) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    reason_file = tmp_path / "reason.txt"
+    reason_file.write_text("one-off\n", encoding="utf-8")
+
+    rc = cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(reason_file)))
+
+    assert rc == 0
+    decisions = read_decisions(queue)
+    assert decisions[0]["reason"] == "one-off"
+    assert decisions[0]["via"] == "agent"
+    assert decisions[0]["action"] == "dismissed"
+
+
+def test_cli_promoted_dismiss_records_the_reason_on_the_accepted_row(tmp_path: Path) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    reason_file = tmp_path / "reason.txt"
+    reason_file.write_text("yes, everywhere", encoding="utf-8")
+
+    rc = cli.main(
+        _dismiss_args(tmp_path, vault, "--promoted", "--reason-file", str(reason_file))
+    )
+
+    assert rc == 0
+    decisions = read_decisions(queue)
+    assert decisions[0]["action"] == "accepted"
+    assert decisions[0]["reason"] == "yes, everywhere"
+
+
+def test_cli_over_cap_or_unreadable_reason_file_exits_2_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    from ciao import cli
+    from ciao.memory_receipts import journal_path
+
+    vault, queue = _reason_queue(tmp_path)
+    before = queue.read_bytes()
+    too_long = tmp_path / "long.txt"
+    too_long.write_text("x" * 1001, encoding="utf-8")
+
+    for reason_file in (too_long, tmp_path / "missing.txt"):
+        rc = cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(reason_file)))
+        assert rc == 2
+        assert queue.read_bytes() == before
+        assert read_decisions(queue) == []
+        assert not journal_path(vault, None).exists()
+
+
+def test_cli_without_reason_file_is_unchanged(tmp_path: Path) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+
+    assert cli.main(_dismiss_args(tmp_path, vault)) == 0
+    assert read_decisions(queue)[0]["reason"] == ""
+
+
+# ── credential-adjacent reason files are refused (#1734) ───────────────────
+
+
+def _refused_reason_paths(tmp_path: Path) -> list[Path]:
+    """A `.env`-shaped file and one under `.runtime/`, both holding a secret."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("TOKEN=s3cret", encoding="utf-8")
+    runtime_file = tmp_path / ".runtime" / "reason.txt"
+    runtime_file.parent.mkdir(parents=True)
+    runtime_file.write_text("s3cret-token", encoding="utf-8")
+    return [env_file, runtime_file]
+
+
+def _no_sidecar(queue: Path) -> bool:
+    from ciao.memory_proposals import dismissed_log_path
+
+    return not dismissed_log_path(queue).exists()
+
+
+def test_cli_dismiss_refuses_a_credential_adjacent_reason_file(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    before = queue.read_bytes()
+
+    for path in _refused_reason_paths(tmp_path):
+        rc = cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(path)))
+        assert rc == 2
+        assert "credential" in capsys.readouterr().err
+        assert queue.read_bytes() == before
+        assert _no_sidecar(queue)
+
+
+def test_cli_add_refuses_a_credential_adjacent_decide_reason_file(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _OTHER_BULLET)
+    before = queue.read_bytes()
+    text_file = tmp_path / "text.txt"
+    text_file.write_text("A new durable fact.", encoding="utf-8")
+
+    for path in _refused_reason_paths(tmp_path):
+        rc = cli.main([
+            "memory-proposal-add",
+            "--workspace", str(tmp_path),
+            "--vault-root", str(vault),
+            "--kind", "memory",
+            "--text-file", str(text_file),
+            "--decide", "you",
+            "--decide-reason-file", str(path),
+        ])
+        assert rc == 2
+        assert "credential" in capsys.readouterr().err
+        assert queue.read_bytes() == before
+
+
+def test_cli_escalate_refuses_a_credential_adjacent_reason_file(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _OTHER_BULLET)
+    before = queue.read_bytes()
+    text_file = tmp_path / "needle.txt"
+    text_file.write_text("Prefer uv", encoding="utf-8")
+
+    for path in _refused_reason_paths(tmp_path):
+        rc = cli.main([
+            "memory-proposal-escalate",
+            "--workspace", str(tmp_path),
+            "--vault-root", str(vault),
+            "--text-file", str(text_file),
+            "--reason-file", str(path),
+        ])
+        assert rc == 2
+        assert "credential" in capsys.readouterr().err
+        assert queue.read_bytes() == before
+
+
+# ── shadow verdicts and handover (#1737) ──────────────────────────────────
+
+_REGION_BULLET = "- [memory] Prefers uv over pip for installs.  _(from: chat-1)_"
+_REGION_NEEDLE = "Prefers uv over pip"
+
+
+def _write(tmp_path: Path, name: str, text: str) -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _predict(
+    tmp_path: Path,
+    vault: Path,
+    needle: str,
+    verdict: str,
+    reason: str = "because",
+    *extra: str,
+) -> int:
+    from ciao import cli
+
+    argv = [
+        "memory-proposal-predict",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "--text-file", str(_write(tmp_path, "needle.txt", needle)),
+        "--verdict", verdict,
+        "--reason-file", str(_write(tmp_path, "reason.txt", reason)),
+        *extra,
+    ]
+    return cli.main(argv)
+
+
+_INSTALLED: dict[str, str] = {}
+
+
+@pytest.fixture(autouse=True)
+def _installed_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The service definition the handover gate trusts names ``_INSTALLED['root']``."""
+    from types import SimpleNamespace
+
+    _INSTALLED.clear()
+    monkeypatch.setattr(
+        "ciao.macos_service.discover_runtime",
+        lambda **_: SimpleNamespace(workspace=_INSTALLED.get("root", "")),
+    )
+
+
+def _handover_install(tmp_path: Path, handover: str | None, *bullets: str) -> tuple[Path, Path, Path]:
+    """An install root whose registry names workspace `work`; returns ``(root, vault, queue)``."""
+    import json
+
+    from ciao.memory_tool import ensure_regions
+    from ciao.workspace_guide import guide_path
+
+    root = tmp_path / "workspace"
+    vault = root / "memory-vault" / "work"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n## 2026-01-01T00:00:00Z\n\n" + "\n".join(bullets) + "\n",
+        encoding="utf-8",
+    )
+    (root / ".runtime").mkdir()
+    entry: dict[str, str] = {"name": "work", "vault_root": str(vault)}
+    if handover is not None:
+        entry["memory_handover"] = handover
+    (root / ".runtime" / "workspaces.json").write_text(json.dumps([entry]), encoding="utf-8")
+    guide = guide_path(root)
+    guide.write_text("# Guide\n", encoding="utf-8")
+    ensure_regions(guide)
+    _INSTALLED["root"] = str(root)
+    return root, vault, queue
+
+
+def _run_handover(
+    command: str, root: Path, vault: Path, needle: str, *extra: str
+) -> int:
+    from ciao import cli
+
+    needle_file = _write(root.parent, "handover-needle.txt", needle)
+    return cli.main([
+        command,
+        "--workspace", str(root),
+        "--vault-root", str(vault),
+        "--text-file", str(needle_file),
+        *extra,
+    ])
+
+
+def _store_prediction(queue: Path, verdict: str, text: str = "Prefers uv over pip for installs.") -> None:
+    from ciao.proposal_predictions import record_prediction
+
+    record_prediction(queue, kind="memory", text=text, verdict=verdict, reason="because")
+
+
+def _store_fresh_prediction(queue: Path, verdict: str, text: str = "Prefers uv over pip for installs.") -> None:
+    """Append a prediction one second after the newest decision on *text*."""
+    import json
+    from datetime import datetime, timedelta
+
+    from ciao.proposal_predictions import predictions_path
+
+    decided = [row["ts"] for row in read_decisions(queue) if row.get("text") == text]
+    after = max(datetime.fromisoformat(ts) for ts in decided) + timedelta(seconds=1)
+    row = {
+        "predicted_at": after.isoformat(timespec="seconds"),
+        "kind": "memory",
+        "text": text,
+        "verdict": verdict,
+        "reason": "fresh after the decision",
+    }
+    with predictions_path(queue).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def test_predict_records_a_verdict_without_touching_the_queue(tmp_path: Path, capsys) -> None:
+    import json
+
+    from ciao.proposal_predictions import predictions_path, read_predictions
+
+    vault, queue = _decider_queue(tmp_path, _REGION_BULLET)
+    before = queue.read_bytes()
+
+    rc = _predict(tmp_path, vault, _REGION_NEEDLE, "accept", "stable preference", "--json")
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["recorded"] is True
+    assert queue.read_bytes() == before
+    rows = read_predictions(queue)
+    assert len(rows) == 1
+    assert rows[0]["verdict"] == "accept"
+    assert predictions_path(queue).exists()
+    assert read_decisions(queue) == []
+
+
+def test_predict_refuses_non_region_rows(tmp_path: Path, capsys) -> None:
+    from ciao.proposal_predictions import predictions_path
+
+    vault, queue = _decider_queue(tmp_path, "- [people Mo] Mo likes tea.")
+
+    rc = _predict(tmp_path, vault, "Mo likes tea", "accept")
+
+    assert rc == 1
+    assert "only recorded for [memory] and [profile]" in capsys.readouterr().err
+    assert not predictions_path(queue).exists()
+
+
+def test_predict_matches_the_flattened_form_and_refuses_ambiguity(tmp_path: Path) -> None:
+    from ciao.proposal_predictions import read_predictions
+
+    vault, queue = _decider_queue(
+        tmp_path,
+        "- [memory] Prefers uv over pip.",
+        "- [memory] Prefers poetry sometimes.",
+        "- [memory] Prefers poetry rarely.",
+    )
+
+    assert _predict(tmp_path, vault, "Prefers   uv over pip", "dismiss") == 0
+    assert _predict(tmp_path, vault, "Prefers poetry", "dismiss") == 1
+    assert len(read_predictions(queue)) == 1
+
+
+def test_predict_requires_verdict_and_reason(tmp_path: Path) -> None:
+    import pytest
+
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _REGION_BULLET)
+    needle = _write(tmp_path, "needle.txt", _REGION_NEEDLE)
+    base = [
+        "memory-proposal-predict",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "--text-file", str(needle),
+    ]
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*base, "--reason-file", str(_write(tmp_path, "r.txt", "why"))])
+    assert exc.value.code == 2
+    assert cli.main([*base, "--verdict", "accept"]) == 2
+    empty = _write(tmp_path, "empty.txt", "  \n")
+    assert cli.main([*base, "--verdict", "accept", "--reason-file", str(empty)]) == 2
+
+
+def test_predict_refuses_a_credential_adjacent_reason_file(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _REGION_BULLET)
+    denied_path = tmp_path / ".runtime" / "reason.txt"
+    denied_path.parent.mkdir()
+    denied_path.write_text("why", encoding="utf-8")
+
+    rc = cli.main([
+        "memory-proposal-predict",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "--text-file", str(_write(tmp_path, "needle.txt", _REGION_NEEDLE)),
+        "--verdict", "accept",
+        "--reason-file", str(denied_path),
+    ])
+
+    assert rc == 2
+    assert "credential" in capsys.readouterr().err
+
+
+def test_predict_twice_identical_reports_not_recorded(tmp_path: Path, capsys) -> None:
+    import json
+
+    vault, queue = _decider_queue(tmp_path, _REGION_BULLET)
+
+    assert _predict(tmp_path, vault, _REGION_NEEDLE, "accept", "why", "--json") == 0
+    capsys.readouterr()
+    assert _predict(tmp_path, vault, _REGION_NEEDLE, "accept", "why", "--json") == 0
+    assert json.loads(capsys.readouterr().out)["recorded"] is False
+
+
+def test_memory_proposals_shows_the_prediction(tmp_path: Path, capsys) -> None:
+    import json
+
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _REGION_BULLET, "- [people Mo] Mo likes tea.")
+    _store_prediction(queue, "dismiss")
+    base = ["memory-proposals", "--workspace", str(tmp_path), "--vault-root", str(vault)]
+
+    assert cli.main(base) == 0
+    out = capsys.readouterr().out
+    assert "(predicted: dismiss; because)" in out
+    assert cli.main([*base, "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)["proposals"]
+    by_kind = {row["kind"]: row for row in rows}
+    assert by_kind["memory"]["predicted"] == "dismiss"
+    assert by_kind["memory"]["predicted_reason"] == "because"
+    assert by_kind["people"]["predicted"] == ""
+    assert by_kind["people"]["predicted_reason"] == ""
+
+
+@pytest.mark.parametrize("stored", [None, "off"], ids=["missing-key", "explicit-off"])
+def test_dismiss_handover_refuses_when_setting_is_off(
+    tmp_path: Path, capsys, stored: str | None
+) -> None:
+    root, vault, queue = _handover_install(tmp_path, stored, _REGION_BULLET)
+    _store_prediction(queue, "dismiss")
+    before = queue.read_bytes()
+
+    rc = _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE, "--handover")
+
+    assert rc == 1
+    assert "handover refused" in capsys.readouterr().err
+    assert queue.read_bytes() == before
+    assert read_decisions(queue) == []
+
+
+def test_dismiss_handover_refuses_without_a_dismiss_prediction_and_for_accept_prediction(
+    tmp_path: Path,
+) -> None:
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    before = queue.read_bytes()
+    assert _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE, "--handover") == 1
+    _store_prediction(queue, "accept")
+    assert _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE, "--handover") == 1
+    assert queue.read_bytes() == before
+    assert read_decisions(queue) == []
+
+
+def test_dismiss_handover_refuses_decide_you_and_non_region_rows(tmp_path: Path) -> None:
+    root, vault, queue = _handover_install(
+        tmp_path,
+        "all",
+        "- [memory] Prefers uv over pip for installs.  _(decide: you; needs the owner)_",
+        "- [people Mo] Mo likes tea.",
+    )
+    _store_prediction(queue, "dismiss")
+    before = queue.read_bytes()
+
+    assert _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE, "--handover") == 1
+    assert _run_handover("memory-proposal-dismiss", root, vault, "Mo likes tea", "--handover") == 1
+    assert queue.read_bytes() == before
+
+
+def test_dismiss_handover_with_promoted_is_a_usage_error(tmp_path: Path) -> None:
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    _store_prediction(queue, "dismiss")
+
+    rc = _run_handover(
+        "memory-proposal-dismiss", root, vault, _REGION_NEEDLE, "--handover", "--promoted"
+    )
+
+    assert rc == 2
+    assert _REGION_NEEDLE in queue.read_text(encoding="utf-8")
+
+
+def test_dismiss_handover_settles_a_predicted_dismiss_as_agent(tmp_path: Path) -> None:
+    for handover in ("dismiss", "all"):
+        case = tmp_path / handover
+        case.mkdir()
+        root, vault, queue = _handover_install(case, handover, _REGION_BULLET)
+        _store_prediction(queue, "dismiss")
+
+        rc = _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE, "--handover")
+
+        assert rc == 0
+        assert _REGION_NEEDLE not in queue.read_text(encoding="utf-8")
+        decisions = read_decisions(queue)
+        assert len(decisions) == 1
+        assert decisions[0]["via"] == "agent"
+        assert decisions[0]["action"] == "dismissed"
+
+
+def test_dismiss_without_the_flag_is_unchanged_for_region_rows(tmp_path: Path) -> None:
+    root, vault, queue = _handover_install(tmp_path, None, _REGION_BULLET)
+
+    rc = _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE)
+
+    assert rc == 0
+    decisions = read_decisions(queue)
+    assert len(decisions) == 1
+    assert decisions[0]["via"] == "agent"
+
+
+def test_accept_refuses_unless_handover_is_all(tmp_path: Path, capsys) -> None:
+    for handover in ("off", "dismiss"):
+        case = tmp_path / handover
+        case.mkdir()
+        root, vault, queue = _handover_install(case, handover, _REGION_BULLET)
+        _store_prediction(queue, "accept")
+        before = queue.read_bytes()
+
+        rc = _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE)
+
+        assert rc == 1
+        assert "handover refused" in capsys.readouterr().err
+        assert queue.read_bytes() == before
+        assert read_decisions(queue) == []
+
+
+def test_accept_refuses_without_an_accept_prediction_and_for_decide_you(tmp_path: Path) -> None:
+    for name, bullet, prediction in (
+        ("none", _REGION_BULLET, None),
+        ("dismiss", _REGION_BULLET, "dismiss"),
+        (
+            "you",
+            "- [memory] Prefers uv over pip for installs.  _(decide: you; owner call)_",
+            "accept",
+        ),
+    ):
+        case = tmp_path / name
+        case.mkdir()
+        root, vault, queue = _handover_install(case, "all", bullet)
+        if prediction:
+            _store_prediction(queue, prediction)
+        before = queue.read_bytes()
+
+        assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+        assert queue.read_bytes() == before
+        assert read_decisions(queue) == []
+
+
+def _accepted_install(tmp_path: Path, bullet: str = _REGION_BULLET) -> tuple[Path, Path, Path]:
+    from ciao import curation_run
+
+    root, vault, queue = _handover_install(tmp_path, "all", bullet)
+    _store_prediction(queue, "accept")
+    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    return root, vault, queue
+
+
+def test_accept_writes_the_region_with_a_receipt_and_records_the_decision(
+    tmp_path: Path, capsys
+) -> None:
+    import json
+
+    from ciao import memory_receipts
+    from ciao.workspace_guide import guide_path
+
+    root, vault, queue = _accepted_install(tmp_path)
+
+    rc = _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE, "--json")
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["accepted"] is True
+    guide = guide_path(root).read_text(encoding="utf-8")
+    assert "Prefers uv over pip for installs." in guide
+    assert "Prefers uv over pip" not in queue.read_text(encoding="utf-8")
+    decisions = read_decisions(queue)
+    assert len(decisions) == 1
+    assert decisions[0]["via"] == "agent"
+    assert decisions[0]["action"] == "accepted"
+    assert decisions[0]["outcome"] == "written"
+    assert decisions[0]["destination"] == "ciao:memory"
+    receipt_id = decisions[0]["receipt_id"]
+    assert receipt_id
+    journal = memory_receipts.journal_path(vault, guide_path(root))
+    receipt = memory_receipts.find_receipt(journal, receipt_id)
+    assert receipt is not None
+    assert memory_receipts.is_undoable(receipt)
+
+
+def test_accept_receipt_undo_restores_the_region(tmp_path: Path) -> None:
+    from ciao import memory_receipts
+    from ciao.workspace_guide import guide_path
+
+    root, vault, queue = _accepted_install(tmp_path)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    receipt_id = read_decisions(queue)[0]["receipt_id"]
+
+    memory_receipts.undo_receipt(
+        receipt_id, vault_root=vault, journal=memory_receipts.journal_path(vault, guide_path(root))
+    )
+
+    assert "Prefers uv over pip for installs." not in guide_path(root).read_text(encoding="utf-8")
+
+
+def test_accept_leaves_an_event_shaped_row_queued(tmp_path: Path, capsys) -> None:
+    fact = "The user asked me to check the logs and I found the bug."
+    root, vault, queue = _handover_install(tmp_path, "all", f"- [memory] {fact}")
+    _store_prediction(queue, "accept", fact)
+    from ciao import curation_run
+
+    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    before = queue.read_bytes()
+
+    rc = _run_handover("memory-proposal-accept", root, vault, "asked me to check the logs")
+
+    assert rc == 1
+    assert "event" in capsys.readouterr().err
+    assert queue.read_bytes() == before
+    assert read_decisions(queue) == []
+
+
+def test_accept_duplicate_removes_the_row_and_records_duplicate(tmp_path: Path) -> None:
+    root, vault, queue = _accepted_install(tmp_path)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+    # The same fact queued again, with a fresh prediction stamped after the first
+    # decision: the earlier one is stale once a later decision exists (#1759), and
+    # whether the accept lands in the same second as it must not matter.
+    queue.write_text(
+        queue.read_text(encoding="utf-8") + "\n" + _REGION_BULLET + "\n", encoding="utf-8"
+    )
+    _store_fresh_prediction(queue, "accept")
+
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+
+    decisions = read_decisions(queue)
+    assert [row["outcome"] for row in decisions] == ["written", "duplicate"]
+    assert _REGION_NEEDLE not in queue.read_text(encoding="utf-8")
+
+
+def _smuggle_handover_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("memory_handover", "MEMORY_HANDOVER", "CIAO_MEMORY_HANDOVER"):
+        monkeypatch.setenv(name, "all")
+
+
+def test_accept_reads_handover_from_the_registry_not_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    root, vault, queue = _accepted_install(allowed)
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
+
+    refused = tmp_path / "refused"
+    refused.mkdir()
+    root, vault, queue = _handover_install(refused, "off", _REGION_BULLET)
+    _store_prediction(queue, "accept")
+    _smuggle_handover_env(monkeypatch)
+    before = queue.read_bytes()
+
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert queue.read_bytes() == before
+
+
+def test_dismiss_handover_reads_the_registry_not_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, vault, queue = _handover_install(tmp_path, "off", _REGION_BULLET)
+    _store_prediction(queue, "dismiss")
+    _smuggle_handover_env(monkeypatch)
+    before = queue.read_bytes()
+
+    assert _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE, "--handover") == 1
+    assert queue.read_bytes() == before
+    assert read_decisions(queue) == []
+
+
+# ── review round 1 (#1737) ────────────────────────────────────────────────
+
+
+def _write_decision(queue: Path, text: str, ts: str, key: str = "dismissed_at") -> None:
+    import json
+
+    from ciao.memory_proposals import dismissed_log_path
+
+    log = dismissed_log_path(queue)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({key: ts, "kind": "memory", "text": text, "via": "pwa"}) + "\n")
+
+
+def test_handover_gate_refuses_a_prediction_the_operator_has_since_overruled(
+    tmp_path: Path, capsys
+) -> None:
+    """A fact dismissed after it was predicted and then re-queued is a new question."""
+    from ciao import curation_run
+
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    _store_prediction(queue, "accept")
+    _write_decision(queue, "Prefers uv over pip for installs.", "2999-01-01T00:00:00+00:00")
+    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    before = queue.read_bytes()
+
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert "no stored accept prediction" in capsys.readouterr().err
+    assert queue.read_bytes() == before
+
+
+def test_handover_gate_ignores_a_registry_under_the_workspace_argument(
+    tmp_path: Path, capsys
+) -> None:
+    """A fake `.runtime/workspaces.json` named by --workspace cannot grant handover."""
+    import json
+    import shutil
+
+    root, vault, queue = _handover_install(tmp_path, "off", _REGION_BULLET)
+    _store_prediction(queue, "dismiss")
+    fake = tmp_path / "fake"
+    (fake / ".runtime").mkdir(parents=True)
+    (fake / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "work", "vault_root": str(vault), "memory_handover": "all"}]),
+        encoding="utf-8",
+    )
+    before = queue.read_bytes()
+
+    rc = _run_handover("memory-proposal-dismiss", fake, vault, _REGION_NEEDLE, "--handover")
+
+    assert rc == 1
+    assert "handover refused" in capsys.readouterr().err
+    assert queue.read_bytes() == before
+    shutil.rmtree(fake)
+
+
+def test_handover_gate_refuses_a_vault_that_is_not_the_registered_one(
+    tmp_path: Path, capsys
+) -> None:
+    import json
+
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    other = root / "memory-vault" / "elsewhere"
+    other_queue = other / "Workspace" / "Memory-Proposals.md"
+    other_queue.parent.mkdir(parents=True)
+    other_queue.write_text(queue.read_text(encoding="utf-8"), encoding="utf-8")
+    registry = root / ".runtime" / "workspaces.json"
+    registry.write_text(
+        json.dumps([
+            {"name": "work", "vault_root": str(vault), "memory_handover": "all"},
+            {"name": "elsewhere", "vault_root": str(other)},
+        ]),
+        encoding="utf-8",
+    )
+    _store_prediction(other_queue, "dismiss")
+    # A caller-side registry that names the unregistered vault as `work`.
+    fake = tmp_path / "fake"
+    (fake / ".runtime").mkdir(parents=True)
+    (fake / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "work", "vault_root": str(other), "memory_handover": "all"}]),
+        encoding="utf-8",
+    )
+    before = other_queue.read_bytes()
+
+    rc = _run_handover("memory-proposal-dismiss", fake, other, _REGION_NEEDLE, "--handover")
+
+    assert rc == 1
+    assert other_queue.read_bytes() == before
+
+
+def test_handover_gate_refuses_when_no_service_definition_names_an_install(
+    tmp_path: Path,
+) -> None:
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    _store_prediction(queue, "dismiss")
+    _INSTALLED.clear()
+    before = queue.read_bytes()
+
+    assert _run_handover("memory-proposal-dismiss", root, vault, _REGION_NEEDLE, "--handover") == 1
+    assert queue.read_bytes() == before
+
+
+def test_accept_is_capped_per_curation_run(tmp_path: Path, capsys) -> None:
+    from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP
+
+    facts = [f"Fact number {i} stays true for installs." for i in range(HANDOVER_ACCEPT_CAP + 1)]
+    root, vault, queue = _handover_install(tmp_path, "all", *[f"- [memory] {f}" for f in facts])
+    from ciao import curation_run
+
+    curation_run.begin_run(vault, holder="test-run", ttl_s=3600)
+    for fact in facts:
+        _store_prediction(queue, "accept", fact)
+
+    codes = [_run_handover("memory-proposal-accept", root, vault, fact) for fact in facts]
+
+    assert codes == [0] * HANDOVER_ACCEPT_CAP + [1]
+    assert "cap" in capsys.readouterr().err
+    assert facts[-1] in queue.read_text(encoding="utf-8")
+    assert len(read_decisions(queue)) == HANDOVER_ACCEPT_CAP
+
+
+def test_accept_needs_a_live_curation_lease(tmp_path: Path, capsys) -> None:
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    _store_prediction(queue, "accept")
+    before = queue.read_bytes()
+
+    assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 1
+    assert "curation run" in capsys.readouterr().err
+    assert queue.read_bytes() == before
+
+
+@pytest.mark.parametrize("command", ["memory-proposal-predict", "memory-proposal-accept"])
+def test_new_commands_refuse_a_credential_adjacent_text_file(
+    tmp_path: Path, capsys, command: str
+) -> None:
+    from ciao import cli
+
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    denied_path = root / ".runtime" / "needle.txt"
+    denied_path.write_text(_REGION_NEEDLE, encoding="utf-8")
+    argv = [
+        command, "--workspace", str(root), "--vault-root", str(vault),
+        "--text-file", str(denied_path),
+    ]
+    if command == "memory-proposal-predict":
+        argv += ["--verdict", "accept", "--reason-file", str(_write(tmp_path, "r.txt", "why"))]
+
+    assert cli.main(argv) == 2
+    assert "credential" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["memory-proposal-predict", "memory-proposal-accept"])
+def test_new_commands_do_not_echo_a_long_needle(tmp_path: Path, capsys, command: str) -> None:
+    root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
+    needle = "NOSUCHROW" + "x" * 400
+    extra = ["--verdict", "accept", "--reason-file", str(_write(tmp_path, "r.txt", "why"))]
+
+    from ciao import cli
+
+    argv = [
+        command, "--workspace", str(root), "--vault-root", str(vault),
+        "--text-file", str(_write(tmp_path, "long.txt", needle)),
+    ]
+    if command == "memory-proposal-predict":
+        argv += extra
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "NOSUCHROW" in err
+    assert "x" * 100 not in err
+
+
+def test_cli_dismiss_refuses_a_nested_runtime_or_env_variant_reason_file(
+    tmp_path: Path, capsys
+) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    before = queue.read_bytes()
+    nested = tmp_path / ".runtime" / "a" / "b" / "file.txt"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("s3cret-token", encoding="utf-8")
+    env_local = tmp_path / ".env.local"
+    env_local.write_text("TOKEN=s3cret", encoding="utf-8")
+
+    for path in (nested, env_local):
+        rc = cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(path)))
+        assert rc == 2
+        assert "credential" in capsys.readouterr().err
+        assert queue.read_bytes() == before
+        assert _no_sidecar(queue)

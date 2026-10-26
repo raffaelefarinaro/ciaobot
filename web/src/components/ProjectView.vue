@@ -130,7 +130,6 @@
                 :disabled="repoBusy"
                 @click="openRepoInstructions"
               >Open AGENTS.md</button>
-              <HostTerminalButton :project-id="project.project_id" />
             </p>
           </template>
           <p v-else class="empty-row">No repository linked. Link one to give this project's chats the repository's agent instructions and skills.</p>
@@ -141,6 +140,22 @@
             :current-path="project.repo?.path ?? null"
             @close="repoPickerOpen = false"
           />
+        </section>
+
+        <!-- The terminal is not a repository feature. A project without a
+             repository still needs a shell — a provider sign-in, an install,
+             an MCP server that stopped answering — so the terminal has a
+             section of its own, outside the repository's, and every project
+             has one. -->
+        <section class="project-section project-terminal" aria-labelledby="project-terminal-title">
+          <div class="section-head">
+            <h3 id="project-terminal-title">Terminal</h3>
+          </div>
+          <p class="section-hint">
+            A shell on the engine's own machine, in the linked repository or the
+            workspace folder. Nothing runs until you start a session.
+          </p>
+          <BrowserTerminalButton :project-id="project.project_id" />
         </section>
 
         <section class="project-section" aria-labelledby="project-chats-title">
@@ -386,7 +401,7 @@
           <h3 id="project-closure-title">Close {{ project.name }}</h3>
           <button type="button" class="btn-icon" aria-label="Close" :disabled="closureBusy" @click="closeClosure">×</button>
         </header>
-        <form class="task-form" novalidate @submit.prevent="submitClosure(false)">
+        <form class="task-form" novalidate @submit.prevent="submitClosure()">
           <fieldset class="form-group">
             <legend>How did it end?</legend>
             <label><input v-model="closureOutcome" type="radio" value="completed" :disabled="closureBusy" /> Completed</label>
@@ -410,8 +425,7 @@
           </p>
           <p v-if="closureError" class="task-action-error" role="alert">{{ closureError }}</p>
           <div class="form-actions">
-            <button type="submit" class="btn-primary" :disabled="closureBusy || !closureNote.trim()">{{ closureBusy ? 'Closing…' : (closureOutcome === 'stopped' ? 'Stop project' : 'Complete project') }}</button>
-            <button type="button" class="btn-small" :disabled="closureBusy" @click="submitClosure(true)">Close without note</button>
+            <button type="submit" class="btn-primary" :disabled="closureBusy">{{ closureBusy ? 'Closing…' : (closureOutcome === 'stopped' ? 'Stop project' : 'Complete project') }}</button>
             <button type="button" class="btn-small" :disabled="closureBusy" @click="closeClosure">Cancel</button>
           </div>
         </form>
@@ -437,7 +451,7 @@ import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
-import HostTerminalButton from './HostTerminalButton.vue'
+import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import RepoPickerDialog from './RepoPickerDialog.vue'
 import { branchLabel, findRepoInstructions } from '../lib/repo'
 import ChatSignals from './ChatSignals.vue'
@@ -604,7 +618,14 @@ async function loadArchives(): Promise<void> {
       `/api/projects/${encodeURIComponent(projectId)}/chats?archived=1&limit=${ARCHIVED_PER_PAGE}&offset=${archivedPage.value * ARCHIVED_PER_PAGE}`,
     )
     if (request !== archiveRequest || projectId !== props.projectId) return
-    archiveData.value = data
+    // The engine answers a page envelope. A payload without `items` — a stub,
+    // or an engine that does not know the `archived=1` branch and answers the
+    // bare array instead — would leave the template reading
+    // `archiveData.items.length`, and the throw that follows takes the whole
+    // project pane down with it. The section's own error row is the readable
+    // outcome (#1710).
+    if (!data || !Array.isArray(data.items)) throw new Error('malformed archive page')
+    archiveData.value = { ...data, total: Number(data.total) || 0 }
     const lastPage = Math.max(0, Math.ceil(data.total / ARCHIVED_PER_PAGE) - 1)
     if (archivedPage.value > lastPage) archivedPage.value = lastPage
   } catch {
@@ -867,10 +888,11 @@ async function doComplete() {
   }
 }
 
-async function submitClosure(withoutNote: boolean) {
+async function submitClosure() {
   if (!project.value || closureBusy.value) return
-  const note = withoutNote ? '' : closureNote.value.trim()
-  if (!withoutNote && !note) return
+  // The note is optional in the field itself: a blank (or whitespace-only)
+  // note closes the project without a note, like the task board's completion sheet.
+  const note = closureNote.value.trim()
   closureBusy.value = true
   closureError.value = ''
   try {
@@ -1275,6 +1297,16 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 
 .repo-meta :deep(.host-terminal-link) { color: var(--accent); font-size: var(--text-sm); min-height: 32px; text-decoration: none; }
 .repo-meta :deep(.host-terminal-link:hover:not(:disabled)) { text-decoration: underline; text-underline-offset: 3px; }
+
+/* The terminal's button is a block of its own under the section's sentence,
+   so it is a 44px target on touch — the same box the chat rail gives it.
+   The colour is the page's action colour: this page's actions are links, and
+   a quiet grey one alone under a heading would read as prose. */
+.project-terminal :deep(.terminal-button) {
+  display: block;
+  margin-top: var(--space-2);
+  color: var(--accent);
+}
 
 .text-action:disabled {
   cursor: default;

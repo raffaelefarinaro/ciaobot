@@ -59,6 +59,34 @@ describe('ProposalHistoryList', () => {
     wrapper.unmount()
   })
 
+  it('shows the reason on a decided row', async () => {
+    apiGet.mockResolvedValue({ rows: [historyRow({ reason: 'tool quirk — belongs in a skill' })], total: 1, truncated: false })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-reason').text()).toContain('tool quirk — belongs in a skill')
+    wrapper.unmount()
+  })
+
+  it('renders a reason as text, never markup', async () => {
+    apiGet.mockResolvedValue({ rows: [historyRow({ reason: '<img src=x onerror=1>' })], total: 1, truncated: false })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-reason img').exists()).toBe(false)
+    expect(wrapper.find('.ph-reason').text()).toContain('<img src=x onerror=1>')
+    wrapper.unmount()
+  })
+
+  it('shows no reason line when absent', async () => {
+    apiGet.mockResolvedValue({ rows: [historyRow({ reason: '' })], total: 1, truncated: false })
+    const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.find('.ph-reason').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('shows an empty state with nothing loaded', async () => {
     apiGet.mockResolvedValue({ rows: [], total: 0, truncated: false })
     const wrapper = mount(ProposalHistoryList, { global: { plugins: [pinia] } })

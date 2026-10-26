@@ -18,13 +18,14 @@ const SECTIONS: ModelSection[] = [
   { key: 'ollama_local', label: 'Ollama local', models: ['llama3.1:latest'], badge: 'local' },
 ]
 
-function mountSelector(props: Record<string, unknown> = {}) {
+function mountSelector(props: Record<string, unknown> = {}, slots: Record<string, string> = {}) {
   return mount(ModelSelector, {
     attachTo: document.body,
     props: {
       sections: SECTIONS,
       ...props,
     },
+    slots,
   })
 }
 
@@ -78,6 +79,30 @@ describe('ModelSelector', () => {
       mountSelector({ multiple: true, modelValue: ['haiku', 'glm-5.2:cloud'] })
         .find('.model-selector__trigger').attributes('title'),
     ).toBe('haiku, glm-5.2:cloud')
+  })
+
+  it('names the trigger after its row label and the current model', () => {
+    const label = document.createElement('span')
+    label.id = 'row-label'
+    label.textContent = 'Default model'
+    document.body.appendChild(label)
+    const wrapper = mountSelector({ modelValue: 'sonnet', labelledBy: 'row-label' })
+
+    const trigger = wrapper.get('.model-selector__trigger')
+    const ids = (trigger.attributes('aria-labelledby') || '').split(' ')
+    expect(ids).toHaveLength(2)
+    expect(ids[0]).toBe('row-label')
+    // The second id is the trigger's own value, so the name reads
+    // "Default model, sonnet" rather than the label alone.
+    expect(document.getElementById(ids[1])?.textContent).toBe('sonnet')
+    label.remove()
+    wrapper.unmount()
+  })
+
+  it('keeps the trigger named by its text when no row label is given', () => {
+    const wrapper = mountSelector({ modelValue: 'sonnet' })
+    expect(wrapper.get('.model-selector__trigger').attributes('aria-labelledby')).toBeUndefined()
+    wrapper.unmount()
   })
 
   it('opens on trigger click and renders sections', async () => {
@@ -256,5 +281,112 @@ describe('ModelSelector', () => {
     await flushPromises()
 
     expect(wrapper.emitted('close')).toEqual([[]])
+  })
+
+  // The chat's recovery picker carries its heading and its warning in the
+  // header slot, above the searchable list.
+  it('renders the header slot above the list', async () => {
+    const wrapper = mountSelector(
+      {},
+      { header: '<p class="picker-heading">Choose a model to retry immediately</p>' },
+    )
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    const header = wrapper.get('.model-selector__header')
+    expect(header.find('.picker-heading').text()).toBe('Choose a model to retry immediately')
+    // The heading comes before the search field and the options.
+    const listbox = wrapper.get('.model-selector__listbox')
+    const children = Array.from(listbox.element.children)
+    expect(children[0]?.classList.contains('model-selector__header')).toBe(true)
+    expect(children[1]?.classList.contains('model-selector__search-wrap')).toBe(true)
+  })
+})
+
+describe('ModelSelector model names', () => {
+  const NAMED_SECTIONS: ModelSection[] = [
+    {
+      key: 'opencode',
+      label: 'opencode',
+      models: ['openai/gpt-5.6-luna'],
+      modelLabels: { 'openai/gpt-5.6-luna': 'GPT-5.6 Luna' },
+      modelBadges: { 'openai/gpt-5.6-luna': ['Default', 'openai'] },
+    },
+  ]
+
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('shows the readable name and keeps the raw id in the title', async () => {
+    const wrapper = mountSelector({ sections: NAMED_SECTIONS })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    const item = wrapper.get('.model-selector__item')
+    expect(item.find('.model-selector__item-label').text()).toBe('GPT-5.6 Luna')
+    expect(item.attributes('title')).toBe('openai/gpt-5.6-luna')
+    // The raw id still carries the selection, not the readable name.
+    expect(item.attributes('data-model')).toBe('openai/gpt-5.6-luna')
+    expect(item.attributes('role')).toBe('option')
+    // The namespace the id states rides beside the readable name.
+    expect(item.findAll('.model-selector__item-badge').map((el) => el.text())).toEqual([
+      'Default',
+      'openai',
+    ])
+  })
+
+  it('names the selected model on the trigger', async () => {
+    const wrapper = mountSelector({
+      sections: NAMED_SECTIONS,
+      modelValue: 'openai/gpt-5.6-luna',
+    })
+
+    expect(wrapper.get('.model-selector__trigger').text()).toContain('GPT-5.6 Luna')
+  })
+
+  it('finds a model by its technical id', async () => {
+    const wrapper = mountSelector({ sections: NAMED_SECTIONS })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    // The readable name reads "GPT-5.6 Luna", so only the raw id carries
+    // "gpt-5.6-luna".
+    await wrapper.find('.model-selector__search').setValue('gpt-5.6-luna')
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.findAll('.model-selector__item').length).toBe(1)
+  })
+
+  it('finds a model by the provider its id states', async () => {
+    const wrapper = mountSelector({ sections: NAMED_SECTIONS })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('.model-selector__search').setValue('openai')
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.findAll('.model-selector__item').length).toBe(1)
+  })
+
+  it('selects the raw id and sends nothing', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const wrapper = mountSelector({ sections: NAMED_SECTIONS })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('.model-selector__item').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([['openai/gpt-5.6-luna']])
+    expect(wrapper.emitted('select')).toEqual([['openai/gpt-5.6-luna', 'opencode']])
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
   })
 })

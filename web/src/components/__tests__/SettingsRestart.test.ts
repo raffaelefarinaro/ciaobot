@@ -14,8 +14,8 @@ afterEach(() => vi.restoreAllMocks())
 it.each([true, false])('chooses the advertised restart action (restart_only=%s)', async (restartOnly) => {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
-  await router.push('/settings')
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab', component: stub }] })
+  await router.push('/settings/advanced')
   await router.isReady()
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
     if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: restartOnly } as never
@@ -40,8 +40,8 @@ it.each([true, false])('chooses the advertised restart action (restart_only=%s)'
 it('mentions open cards a restart would close', async () => {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
-  await router.push('/settings')
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab', component: stub }] })
+  await router.push('/settings/advanced')
   await router.isReady()
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
     if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: true } as never
@@ -64,7 +64,7 @@ it('mentions open cards a restart would close', async () => {
 it('installer mode shows re-run guidance and no update button', async () => {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab', component: stub }] })
   await router.push('/settings')
   await router.isReady()
   // An engine installed by the terminal installer has no in-app update: the
@@ -89,8 +89,8 @@ it('installer mode shows re-run guidance and no update button', async () => {
 it('fails closed when the server type cannot be determined', async () => {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
-  await router.push('/settings')
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings/:tab', component: stub }] })
+  await router.push('/settings/advanced')
   await router.isReady()
   // Both the initial load and the pre-action re-check fail: localStatus stays null.
   vi.spyOn(api, 'get').mockRejectedValue(new Error('status unavailable'))

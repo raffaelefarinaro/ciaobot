@@ -18,8 +18,6 @@ import { api } from '../../lib/api'
 
 vi.mock('../../lib/api', () => {
   let routineSettings = {
-    insights_enabled: true,
-
     model_options: {
       anthropic: ['haiku', 'sonnet', 'opus', 'fable'],
     },
@@ -168,6 +166,16 @@ vi.mock('../../lib/api', () => {
       pending_changes: 0,
       pending_commits: 0,
       reason: 'up to date',
+    },
+    '/api/proposals/handover': {
+      workspace: 'personal',
+      handover: 'off',
+      acting_available: true,
+      agreement: {
+        decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
+        predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
+        suggest_handover: false,
+      },
     },
     '/api/local/backup/setup-prompt': {
       context: { folder: '/Users/person/Ciao', scope: 'memory-vault' },
@@ -448,9 +456,14 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
-  it('SettingsView shows the memory backup section on /settings', async () => {
+  it('SettingsMemoryHandover mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../settings/SettingsMemoryHandover.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('SettingsView shows the memory backup section on /settings/advanced', async () => {
     const router = makeRouter()
-    await router.push('/settings')
+    await router.push('/settings/advanced')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -553,7 +566,7 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView shows the session insights switch on the General tab', async () => {
+  it('SettingsView has no session insights switch on the General tab', async () => {
     const router = makeRouter()
     await router.push('/settings')
     await router.isReady()
@@ -564,8 +577,8 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const toggle = wrapper.get('[aria-label="Automatic session insights"]')
-    expect(toggle.attributes('aria-checked')).toBe('true')
+    expect(wrapper.find('[aria-label="Automatic session insights"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('Automatic session insights')
     expect(wrapper.text()).not.toContain('Trajectory capture')
     wrapper.unmount()
   })
@@ -589,9 +602,9 @@ describe('component mount smoke', () => {
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
     expect(providerOptions).toContain('opencode')
-    // Provider, File access and GWS profile are native selects; Default model
-    // uses the custom ModelSelector component, not a fourth native <select>.
-    expect(wrapper.findAll('select.workspace-select')).toHaveLength(3)
+    // Provider and File access are native selects (Google is set on Overview);
+    // Default model uses the custom ModelSelector component, not a third <select>.
+    expect(wrapper.findAll('select.workspace-select')).toHaveLength(2)
 
     const providerField = wrapper.findAll('label.settings-field')
       .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
@@ -622,7 +635,9 @@ describe('component mount smoke', () => {
     })
 
     const router = makeRouter()
-    await router.push('/settings/workspaces')
+    await router.push('/settings/workspace')
+    const overviewStore = (await import('../../stores/projects')).useProjectStore()
+    overviewStore.activeWorkspace = 'legacy'
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -632,17 +647,12 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      // Rows are collapsed; Edit opens the workspace's fields in place.
-      await wrapper.get('[aria-label="Edit workspace legacy"]').trigger('click')
-      await nextTick()
-      const providerField = wrapper.findAll('label.settings-field')
-        .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
-      expect(providerField).toBeTruthy()
-      const providerSelect = providerField!.find('select')
-      expect((providerSelect.element as HTMLSelectElement).value).toBe('claude')
-      expect(providerSelect.findAll('option').map((option) => option.attributes('value')))
-        .toContain('claude')
-      expect(providerSelect.text()).toContain('Anthropic (via Claude Code)')
+      // The provider control lives in the Overview's Chats and models card.
+      const card = wrapper.findAll('.card').find((c) => c.find('.section-title').text() === 'Chats and models')
+      expect(card).toBeTruthy()
+      const radios = card!.findAll('[role="radiogroup"] button[role="radio"]')
+      expect(radios.map((r) => r.text())).toEqual(['Anthropic (via Claude Code)', 'opencode'])
+      expect(radios.map((r) => r.attributes('aria-checked'))).toEqual(['true', 'false'])
     } finally {
       wrapper.unmount()
       testApi.setResponse('/api/workspaces', originalWorkspaces)
@@ -674,7 +684,9 @@ describe('component mount smoke', () => {
       { payload: { error: 'default_provider must be one of: claude, opencode' } },
     ))
     const router = makeRouter()
-    await router.push('/settings/workspaces')
+    await router.push('/settings/workspace')
+    const overviewStore = (await import('../../stores/projects')).useProjectStore()
+    overviewStore.activeWorkspace = 'personal'
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -684,9 +696,7 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      // Save appears only after a change in the opened row.
-      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
-      await nextTick()
+      // Save appears only after a change on the page.
       expect(wrapper.find('.workspace-save').exists()).toBe(false)
       await wrapper.get('.workspace-color-swatch[aria-label="Terminal Cyan"]').trigger('click')
       await nextTick()
@@ -710,9 +720,9 @@ describe('component mount smoke', () => {
     }
   })
 
-  it('SettingsView models tab stacks chat providers and background models', async () => {
+  it('SettingsView providers tab shows the chat providers card, and its Status rail with one card', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -722,8 +732,10 @@ describe('component mount smoke', () => {
     await nextTick()
 
     const titles = wrapper.findAll('.section-title').map((el) => el.text())
-    expect(titles).toEqual(['Chat providers', 'Background models'])
+    expect(titles).toEqual(['Chat providers'])
     expect(wrapper.find('#chat-providers').exists()).toBe(true)
+    expect(wrapper.findAll('.settings-toc-item')).toHaveLength(0)
+    expect(wrapper.find('.settings-rail-status').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -733,7 +745,7 @@ describe('component mount smoke', () => {
     const scrolled = vi.fn()
     proto.scrollIntoView = scrolled
     const router = makeRouter()
-    await router.push('/settings/models#chat-providers')
+    await router.push('/settings/providers#chat-providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     // Attached, so document.getElementById can find the card.
@@ -756,7 +768,7 @@ describe('component mount smoke', () => {
 
       // An in-app link to the anchor (this view stays mounted) scrolls again.
       await router.push('/settings/skills')
-      await router.push('/settings/models#chat-providers')
+      await router.push('/settings/providers#chat-providers')
       await flushPromises()
       await nextTick()
       expect(scrolled).toHaveBeenCalledTimes(2)
@@ -787,7 +799,7 @@ describe('component mount smoke', () => {
       },
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -833,7 +845,7 @@ describe('component mount smoke', () => {
     }
     testApi.setResponse('/api/settings/providers', { ...original, connections })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -933,7 +945,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView labels every provider connection from the backend registry', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -958,7 +970,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView Connect reports the terminal it opened', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -981,7 +993,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView Connect on a remote browser shows the command to run on the host', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1047,7 +1059,7 @@ describe('component mount smoke', () => {
       },
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1074,7 +1086,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView renders no API-key entry UI even when the payload advertises keys', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1096,7 +1108,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView shows per-provider defaults and saves a default model', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1125,7 +1137,9 @@ describe('component mount smoke', () => {
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       provider_default_models: { claude: 'sonnet' },
     })
-    expect(claudeSelector.find('.model-selector__trigger').text()).toContain('sonnet')
+    // The trigger names the model the way every picker does; the raw id is
+    // what gets saved, and what the option's data still carries.
+    expect(claudeSelector.find('.model-selector__trigger').text()).toContain('Sonnet')
     expect(wrapper.findAll('.provider-inline-defaults')[0]!.text()).toContain('Automatic — same as chat model')
     expect(wrapper.text()).not.toContain('Same as default')
 
@@ -1154,7 +1168,7 @@ describe('component mount smoke', () => {
       return originalGet(path)
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1184,7 +1198,7 @@ describe('component mount smoke', () => {
       return originalGet(path)
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1203,7 +1217,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView offers a per-provider default permission mode', async () => {
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1237,7 +1251,7 @@ describe('component mount smoke', () => {
       opencode_models: [],
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {
@@ -1282,7 +1296,7 @@ describe('component mount smoke', () => {
       opencode_models: opencodeModels,
     })
     const router = makeRouter()
-    await router.push('/settings/models')
+    await router.push('/settings/providers')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {

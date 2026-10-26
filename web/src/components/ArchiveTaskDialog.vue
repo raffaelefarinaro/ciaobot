@@ -47,7 +47,7 @@
             </div>
           </template>
           <template v-else>
-            <label class="archive-task-label" for="archive-task-resolution">How was this completed?</label>
+            <label class="archive-task-label" for="archive-task-resolution">How was this completed? (optional)</label>
             <textarea
               id="archive-task-resolution"
               ref="noteField"
@@ -67,18 +67,10 @@
                 Back
               </button>
               <button
-                class="confirm-action confirm-action--cancel"
-                type="button"
-                :disabled="busy"
-                @click="submit(true)"
-              >
-                Complete without note
-              </button>
-              <button
                 class="confirm-action confirm-action--primary"
                 type="button"
-                :disabled="busy || !draft.trim()"
-                @click="submit(false)"
+                :disabled="busy"
+                @click="submit()"
               >
                 {{ busy ? 'Saving…' : (request?.awaitingReview ? 'Approve Done' : 'Mark done') }}
               </button>
@@ -96,6 +88,9 @@
  * complete the task (closure note, then archive), keep it open, or cancel.
  * Rendered once in App.vue and driven by `askArchiveTask`, like ConfirmDialog.
  * The completion calls are the rail note's own (`lib/taskClosure`).
+ *
+ * The closure note is optional and one action completes: a blank note
+ * completes the task without a resolution.
  */
 import {
   DialogContent,
@@ -158,11 +153,10 @@ function back() {
   nextTick(() => cancelButton.value?.focus())
 }
 
-async function submit(withoutNote: boolean) {
+async function submit() {
   const req = request.value
   if (!req || busy.value) return
-  const resolution = withoutNote ? '' : draft.value.trim()
-  if (!withoutNote && !resolution) return
+  const resolution = draft.value.trim()
   const kind = req.awaitingReview ? 'approve' : 'mark-done'
   busy.value = true
   error.value = ''

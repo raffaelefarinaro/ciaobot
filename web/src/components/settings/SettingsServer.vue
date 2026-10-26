@@ -2,7 +2,7 @@
   <!-- Server settings that used to be lines in the workspace .env. The bind
        address and the log level are read when the engine starts, so a saved
        change says so until the next restart. -->
-  <div class="card">
+  <div v-if="section === 'network'" class="card">
     <div class="settings-card-header">
       <h2 class="section-title">Network access</h2>
       <p class="hint">
@@ -28,7 +28,7 @@
     </p>
   </div>
 
-  <div class="card">
+  <div v-if="section === 'developer'" class="card">
     <div class="settings-card-header">
       <h2 class="section-title">Developer</h2>
       <p class="hint">
@@ -95,8 +95,10 @@
 import { computed, ref, watch } from 'vue'
 import type { RoutineSettings } from '../../lib/types'
 
-// The settings store is owned by SettingsView (it also feeds the Models tab).
+// The settings store is owned by SettingsView (it also feeds the Providers tab).
 const props = defineProps<{
+  // Which of the two cards this page shows: Network access or Developer.
+  section: 'network' | 'developer'
   routines: RoutineSettings | null
   routinesSaving: boolean
   saveRoutines: (patch: Record<string, unknown>) => Promise<void>

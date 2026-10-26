@@ -552,6 +552,56 @@ def test_agent_cannot_complete_and_user_can_complete_manual_task(tmp_path: Path)
     assert done.record.chat_id is None and done.record.attempt_id is None
 
 
+def test_agent_completes_only_with_a_non_empty_resolution(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    created = store.create(title="manual work")
+    path = task_path(vault, created.record.id)
+    for resolution in (None, "", "   "):
+        with pytest.raises(TaskBoardError) as excinfo:
+            store.update(
+                created.record.id,
+                expected_revision=created.revision,
+                changes={"status": "done"},
+                actor="agent",
+                resolution=resolution,
+            )
+        assert excinfo.value.code == "completion_requires_user"
+        assert path.read_bytes() == created.raw
+
+    done = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"status": "done"},
+        actor="agent",
+        resolution="The user said it shipped.",
+    )
+    assert done.record.status == "done"
+    assert "The user said it shipped." in done.body
+
+
+def test_agent_cannot_complete_a_linked_task_even_with_a_resolution(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    linked = store.create(title="live work")
+    link_path = task_path(vault, linked.record.id)
+    link_path.write_text(
+        link_path.read_text(encoding="utf-8").replace("attempt_id: null", "attempt_id: att-1"),
+        encoding="utf-8",
+    )
+    current = store.get(linked.record.id)
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.update(
+            linked.record.id,
+            expected_revision=current.revision,
+            changes={"status": "done"},
+            actor="agent",
+            resolution="The user said it is done.",
+        )
+    assert excinfo.value.code == "invalid_task"
+    assert link_path.read_bytes() == current.raw
+
+
 def test_in_review_is_an_ordinary_column_and_linked_live_completion_is_refused(
     tmp_path: Path,
 ) -> None:
@@ -1433,3 +1483,60 @@ def test_absent_and_null_linked_chats_read_empty(tmp_path: Path) -> None:
     hand_file(vault, other, valid_frontmatter(other, extra=["linked_chats: null"]))
     nulled = make_store(vault, tmp_path / "runtime", Clock()).get(other)
     assert nulled.record.linked_chats == ()
+
+
+# ── Creator marker (#1726) ───────────────────────────────────────────
+
+
+def test_create_as_agent_marks_created_by_agent(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    created = store.create(title="from the agent", created_by="agent")
+    raw = task_path(vault, created.record.id).read_bytes()
+    assert b"created_by: agent\n" in raw
+    assert store.get(created.record.id).record.created_by == "agent"
+
+
+def test_create_as_user_writes_no_created_by_line(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    created = store.create(title="from the user")
+    raw = task_path(vault, created.record.id).read_bytes()
+    assert b"created_by" not in raw
+    assert store.get(created.record.id).record.created_by is None
+
+
+def test_hand_written_created_by_other_than_agent_is_invalid_task(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    bad = "c" * 32
+    hand_file(vault, bad, valid_frontmatter(bad, extra=["created_by: robot"]))
+    with pytest.raises(TaskBoardError) as excinfo:
+        make_store(vault, tmp_path / "runtime", Clock()).get(bad)
+    assert excinfo.value.code == "invalid_task"
+
+    nulled = "d" * 32
+    hand_file(vault, nulled, valid_frontmatter(nulled, extra=["created_by: null"]))
+    assert make_store(vault, tmp_path / "runtime", Clock()).get(nulled).record.created_by is None
+    absent = "e" * 32
+    hand_file(vault, absent, valid_frontmatter(absent))
+    assert make_store(vault, tmp_path / "runtime", Clock()).get(absent).record.created_by is None
+
+
+def test_created_by_is_not_patchable(tmp_path: Path) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    created = store.create(title="mine", created_by="agent")
+    with pytest.raises(TaskBoardError):
+        store.update(
+            created.record.id,
+            expected_revision=created.revision,
+            changes={"created_by": "agent"},
+            actor="user",
+        )
+    renamed = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"title": "renamed"},
+        actor="user",
+    )
+    assert b"created_by: agent\n" in renamed.raw
+    assert renamed.record.created_by == "agent"

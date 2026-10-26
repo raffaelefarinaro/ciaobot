@@ -85,7 +85,7 @@ def test_system_prompt_states_workspace_scope_limits() -> None:
     append = payload["append"]
     assert "file_access=workspace only" in append
     assert "Do not probe them" in append
-    assert "Settings → Workspaces → Edit → File access" in append
+    assert "Settings → Overview → File access" in append
     assert "`gh` is not signed in" in append
 
 
@@ -221,3 +221,11 @@ def test_rules_carry_a_reason_in_the_same_bullet() -> None:
     assert "output lands in transcripts and replies" in bullet("never quote or repeat credentials")
     assert "public and permanent" in bullet("Public GitHub issues")
     assert "land in notes and transcripts" in bullet("webhook create|rotate")
+
+
+def test_system_prompt_task_bullet_runs_task_rules_before_filing() -> None:
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert append.count("ciao task-rules") == 1
+    assert "Workspace/Task-Rules.md" not in append

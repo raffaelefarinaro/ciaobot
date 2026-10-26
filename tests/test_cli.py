@@ -707,7 +707,7 @@ def test_remove_legacy_app_shortcuts_keeps_the_legacy_app_bundle(tmp_path: Path)
     assert (app_root / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
 
 
-def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool = False) -> list[str]:
+def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool = False, initialize_git: bool = False) -> list[str]:
     argv = [
         "setup",
         "--workspace", str(workspace),
@@ -718,6 +718,8 @@ def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool =
     ]
     if yes:
         argv.append("--yes")
+    if initialize_git:
+        argv.append("--initialize-git")
     return argv
 
 
@@ -769,6 +771,36 @@ def test_setup_yes_overrides_repoint_guard(tmp_path: Path) -> None:
     assert cli.main(_setup_argv(first, launch_agents, apps)) == 0
     assert cli.main(_setup_argv(second, launch_agents, apps, yes=True)) == 0
     assert (second / ".env").exists()
+
+
+def test_setup_defers_git_unless_initialize_git_is_explicit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert cli.main(_setup_argv(workspace, tmp_path / "LaunchAgents", tmp_path / "Applications")) == 0
+    assert not (workspace / ".git").exists()
+
+
+def test_setup_yes_does_not_consent_to_git_initialization(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    assert cli.main(_setup_argv(workspace, tmp_path / "LaunchAgents", tmp_path / "Applications", yes=True)) == 0
+    assert not (workspace / ".git").exists()
+
+
+def test_setup_initialize_git_creates_workspace_history(tmp_path: Path) -> None:
+    """The explicit CLI flag is the consent; it must actually reach the helper.
+
+    Without this the flag could silently stop being forwarded and every other
+    setup test would still pass, because they only assert that nothing was made.
+    """
+    workspace = tmp_path / "workspace"
+    argv = _setup_argv(workspace, tmp_path / "LaunchAgents", tmp_path / "Applications", initialize_git=True)
+
+    assert cli.main(argv) == 0
+    assert (workspace / ".git").is_dir()
+    log = subprocess.run(
+        ["git", "-C", str(workspace), "log", "--oneline"],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert "Initialize Ciaobot workspace" in log.stdout, log.stderr
 
 
 def _stub_setup_for_launchd(workspace: Path, **kwargs) -> list[Path]:
@@ -4714,3 +4746,57 @@ def test_setup_command_prints_the_macos_access_note(
     err = capsys.readouterr().err
     assert "Ciaobot Server" in err and "Error:" in err
     assert not (home / "Documents" / "ws2").exists()
+
+
+def _handover_registry(root: Path, vault: Path, handover: str | None) -> None:
+    entry: dict[str, str] = {"name": "work", "vault_root": str(vault)}
+    if handover is not None:
+        entry["memory_handover"] = handover
+    (root / ".runtime" / "workspaces.json").write_text(
+        json.dumps({"work": entry}), encoding="utf-8"
+    )
+
+
+def test_curation_begin_reports_the_workspace_handover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def begin(case: str, handover: str | None, *, elsewhere: bool = False) -> dict[str, Any]:
+        (tmp_path / case).mkdir()
+        root, vault = _registered_install(tmp_path / case)
+        _handover_registry(root, vault, handover)
+        if elsewhere:
+            vault = root / "memory-vault" / "elsewhere"
+            (vault / "Workspace").mkdir(parents=True)
+        monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+        monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+        rc = cli.main([
+            "curation-begin",
+            "--workspace", str(root),
+            "--vault-root", str(vault),
+            "--holder", "test",
+            "--json",
+        ])
+        assert rc == 0
+        payload: dict[str, Any] = json.loads(capsys.readouterr().out)
+        return payload
+
+    assert begin("dismiss", "dismiss")["handover"] == "dismiss"
+    assert begin("unset", None)["handover"] == "off"
+    assert begin("elsewhere", "all", elsewhere=True)["handover"] == "off"
+
+
+def test_curation_plan_text_prints_the_handover_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    _handover_registry(root, vault, "all")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+
+    rc = cli.main([
+        "curation-plan", "--workspace", str(root), "--vault-root", str(vault),
+    ])
+
+    assert rc == 0
+    assert "Handover: all" in capsys.readouterr().out

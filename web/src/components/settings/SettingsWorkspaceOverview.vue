@@ -1,0 +1,163 @@
+<template>
+  <div v-if="!workspacesLoaded" class="card"><SkeletonLoader label="Loading workspace" :count="3" /></div>
+  <div v-else-if="workspacesError" class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
+  <template v-else-if="form">
+    <div class="card">
+      <div class="settings-card-header">
+        <div class="overview-title">
+          <WorkspaceTile :name="form.name" />
+          <p class="section-title">Workspace</p>
+        </div>
+        <p class="hint">
+          Name, colour and file access for this workspace.
+        </p>
+      </div>
+      <div class="overview-body">
+        <label class="settings-field set-subrow">
+          <span class="ws-label set-subrow-label">Name</span>
+          <input
+            id="workspace-name-input"
+            class="routine-input set-subrow-control"
+            v-model="workspaceNameDraft"
+            :disabled="workspacesSaving === form.name"
+            :aria-describedby="`workspace-name-hint-${form.name}`"
+          />
+        </label>
+        <p :id="`workspace-name-hint-${form.name}`" class="hint hint--compact set-subrow-hint">Letters, numbers, dashes, underscores.</p>
+        <div class="set-subrow">
+          <span class="ws-label set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
+          <WorkspaceColorPicker
+            v-model="form.color"
+            class="set-subrow-control"
+            :labelledby="`workspace-color-${form.name}`"
+            :disabled="workspacesSaving === form.name"
+          />
+        </div>
+        <label
+          class="settings-field set-subrow"
+          :class="{ 'workspace-card--target': workspaceLinkTarget === form.name }"
+          :id="`workspace-file-access-row-${form.name}`"
+          @animationend.self="clearWorkspaceLinkHighlight(form.name)"
+        >
+          <span class="ws-label set-subrow-label">File access</span>
+          <select
+            :id="`workspace-file-access-${form.name}`"
+            class="routine-input routine-select workspace-select set-subrow-control"
+            v-model="form.agent_fs_scope"
+            :disabled="workspacesSaving === form.name"
+          >
+            <option value="">{{ fsScopeDefaultOptionLabel }}</option>
+            <option value="workspace">Workspace only</option>
+            <option value="machine">Whole machine</option>
+          </select>
+        </label>
+        <p class="hint hint--compact set-subrow-hint">{{ WORKSPACE_FS_SCOPE_COPY[form.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</p>
+        <div class="settings-switch-row set-subrow">
+          <span class="ws-label set-subrow-label">claude.ai connectors</span>
+          <button
+            class="settings-switch"
+            type="button"
+            role="switch"
+            :aria-checked="form.claude_ai_connectors"
+            aria-label="claude.ai connectors"
+            :disabled="workspacesSaving === form.name"
+            @click="form.claude_ai_connectors = !form.claude_ai_connectors"
+          >
+            <span class="switch-word">{{ form.claude_ai_connectors ? 'On' : 'Off' }}</span>
+            <span class="switch-track" aria-hidden="true"></span>
+          </button>
+        </div>
+        <p class="hint hint--compact set-subrow-hint">Load your Claude account's connectors (Slack, Jira, …) in this workspace's Claude chats.</p>
+      </div>
+    </div>
+
+    <SettingsWorkspaceModels />
+
+    <div class="card">
+      <div class="settings-card-header">
+        <p class="section-title">Google account</p>
+        <p class="hint">
+          Used by this workspace's chats and schedules for Gmail, Calendar, Drive, Docs, Sheets, Slides and Tasks. One account per workspace.
+        </p>
+      </div>
+      <div class="overview-body">
+        <WorkspaceGoogleAccount />
+      </div>
+    </div>
+
+    <div v-if="workspacesResult" class="action-result action-result--error" role="alert">{{ workspacesResult }}</div>
+
+    <SettingsMemoryHandover />
+    <SettingsUpdateTasks />
+
+    <div v-if="workspaceArchivable(form.name)" class="card">
+      <div class="settings-card-header">
+        <p class="section-title">Archive this workspace</p>
+        <p class="hint">
+          Archiving removes it from the sidebar; nothing is deleted and you can restore it from Manage workspaces.
+        </p>
+      </div>
+      <div class="action-row settings-actions">
+        <button
+          type="button"
+          class="btn-small settings-menu-item--caution"
+          :aria-label="`Archive workspace ${form.name}`"
+          :disabled="archivingWorkspace === form.name"
+          @click="archiveWorkspace(form.name)"
+        >{{ archivingWorkspace === form.name ? 'Archiving...' : 'Archive workspace' }}</button>
+      </div>
+    </div>
+  </template>
+  <div v-else class="card"><p class="hint">This workspace is not in the registry.</p></div>
+</template>
+
+<script setup lang="ts">
+import { inject } from 'vue'
+import SkeletonLoader from '../SkeletonLoader.vue'
+import WorkspaceTile from '../WorkspaceTile.vue'
+import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
+import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
+import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
+import WorkspaceGoogleAccount from './WorkspaceGoogleAccount.vue'
+import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
+import {
+  WORKSPACE_ADMIN_KEY,
+  WORKSPACE_FS_SANDBOX_NOTE,
+  WORKSPACE_FS_SCOPE_COPY,
+} from '../../composables/useWorkspaceAdmin'
+
+// Workspace > Overview: the page for the workspace the sidebar has active. The
+// editor state belongs to SettingsView's useWorkspaceAdmin (one load, one set
+// of drafts for every workspace page); this page only draws the active form.
+const admin = inject(WORKSPACE_ADMIN_KEY)
+if (!admin) throw new Error('SettingsWorkspaceOverview needs the workspace admin SettingsView provides')
+
+const {
+  workspacesLoaded,
+  workspacesError,
+  workspacesSaving,
+  workspacesResult,
+  archivingWorkspace,
+  workspaceNameDraft,
+  workspaceLinkTarget,
+  fsScopeDefaultOptionLabel,
+  activeWorkspaceForm: form,
+  clearWorkspaceLinkHighlight,
+  workspaceArchivable,
+  archiveWorkspace,
+} = admin
+</script>
+
+<style scoped src="./settingsPanels.css"></style>
+
+<style scoped>
+.overview-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.overview-title .section-title { margin: 0; }
+.overview-body .set-subrow,
+.overview-body .set-subrow-hint { padding-left: 0; }
+.action-result--error { color: var(--error); }
+</style>

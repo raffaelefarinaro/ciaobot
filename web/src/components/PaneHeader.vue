@@ -141,8 +141,8 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
    the header cannot hold a centred mark on top of a title and the action icons.
    The middle column is the first thing to go: the mark is decoration plus a
    reload shortcut that is one drag of the splitter away, whereas a clipped icon
-   is a lost action. `chat-split` is declared on `.chat-split-main` in
-   ChatLayout, so this only applies inside the split view. */
+   is a lost action. `chat-split` is declared on the chat column in ChatLayout,
+   so this only applies inside the split view. */
 @container chat-split (max-width: 420px) {
   .header-center { display: none; }
 }
@@ -210,7 +210,7 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
       overflow: hidden;
       clip: auto;
       color: var(--fg);
-      font-family: var(--font-sans);
+      font-family: var(--font);
       font-size: var(--text-lg);
       font-weight: 650;
       letter-spacing: -0.01em;

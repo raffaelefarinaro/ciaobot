@@ -136,6 +136,16 @@ _CONTEXT_USAGE_TIMEOUT_S = 3.0
 # silent still fails, just one turn later than before.
 _STREAM_CLOSE_TIMEOUT_ENV = "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"
 _INITIALIZE_TIMEOUT_MS = 180_000
+# The SDK owns the initialize deadline (it reads it from
+# CLAUDE_CODE_STREAM_CLOSE_TIMEOUT when the client is built) and names a miss
+# with "Control request timeout: initialize". Our outer connect deadline must
+# outlive it, or it fires first with a bare TimeoutError, the SDK never names
+# the cause, and the one retry in run_streaming can never classify the miss.
+# The 30 s margin is smaller than a loaded machine's cold spawn (see above) and
+# the SDK's 180 s clock starts after it, so the outer deadline can still fire
+# first; that is harmless because _connect_with_deadline classifies its own
+# timeout as an initialize miss, preserving the retry.
+_CONNECT_TIMEOUT_S = _INITIALIZE_TIMEOUT_MS / 1000 + 30
 # Ask the CLI to name a refused startup in the message stream. Without it a
 # startup failure ends with stderr alone, which the SDK turns into a bare
 # control-request timeout instead of an error that says what went wrong.
@@ -243,6 +253,27 @@ def _is_initialize_timeout(exc: BaseException) -> bool:
     mistaken for a CLI that never started.
     """
     return isinstance(exc, Exception) and str(exc).startswith(_INITIALIZE_TIMEOUT_MESSAGE)
+
+
+def _catalog_account_generation() -> int:
+    """Account generation to tag a capture with, read before connecting."""
+    from ciao.providers.catalog_evidence import account_generation
+
+    return account_generation()
+
+
+async def _connect_with_deadline(client: ClaudeSDKClient) -> None:
+    """Connect to the CLI, naming a missed initialize as a retryable miss."""
+    try:
+        await asyncio.wait_for(client.connect(), timeout=_CONNECT_TIMEOUT_S)
+    except asyncio.TimeoutError as exc:
+        raise ClaudeInitializeTimeout(
+            f"connect deadline {_CONNECT_TIMEOUT_S:.0f}s exceeded"
+        ) from exc
+    except Exception as exc:
+        if _is_initialize_timeout(exc):
+            raise ClaudeInitializeTimeout(str(exc)) from exc
+        raise
 
 
 def _cli_process_exited(client: object) -> bool:
@@ -636,7 +667,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._permission_gate = PermissionGate()
         self._mcp_token = ""
         # Filesystem scope and roots the live CLI process was started with.
-        self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        self._fs_scope_key: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]] = ("machine", (), (), ())
         # Spawn-only options the live CLI process was started with.
         self._spawn_key: tuple[object, ...] = ()
         # Fire-and-forget closes of dead clients, held so they are not collected.
@@ -722,7 +753,7 @@ class ClaudeProvider(BaseSDKProvider):
             and self._connected
             and (
                 provider_reuse_key(request) != self._mcp_token
-                or (request.agent_fs_scope, request.agent_roots) != self._fs_scope_key
+                or (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except) != self._fs_scope_key
             )
         ):
             # MCP configuration, the shell environment and the filesystem
@@ -800,7 +831,12 @@ class ClaudeProvider(BaseSDKProvider):
                 )
             roots = [Path(root) for root in request.agent_roots]
             sandbox_dict: dict[str, Any] | None = claude_sandbox_settings(
-                scope=request.agent_fs_scope, mode=request.mode, roots=roots
+                scope=request.agent_fs_scope,
+                mode=request.mode,
+                roots=roots,
+                read_only=[Path(p) for p in request.agent_read_only],
+                denied=[Path(p) for p in request.agent_denied],
+                regrant=[Path(p) for p in request.agent_denied_except],
             )
             sandbox = cast(SandboxSettings, sandbox_dict)
             agent_root, *other_roots = request.agent_roots
@@ -820,7 +856,7 @@ class ClaudeProvider(BaseSDKProvider):
         linked_repo = linked_repo_of(request)
         if linked_repo and linked_repo not in {str(d) for d in add_dirs}:
             add_dirs.append(linked_repo)
-        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
 
         # The SDK reads the initialize deadline from os.environ when it builds
         # the client, so it has to be set before ClaudeSDKClient() below.
@@ -1166,6 +1202,21 @@ class ClaudeProvider(BaseSDKProvider):
             except Exception:
                 logger.debug("Between-turns drain task ended with error", exc_info=True)
 
+    async def _capture_catalog_evidence(
+        self, client: ClaudeSDKClient, *, generation: int | None = None
+    ) -> None:
+        from ciao.providers.catalog_evidence import invalidate_claude_catalog, record_claude_models
+
+        root = Path(self.workspace_root)
+        try:
+            record_claude_models(
+                root, await client.get_server_info(), expected_generation=generation
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            invalidate_claude_catalog(root)
+
     async def run_streaming(
         self,
         request: AgentRequest,
@@ -1303,16 +1354,13 @@ class ClaudeProvider(BaseSDKProvider):
                     # No prompt: the SDK then never starts stream_input, which
                     # closes stdin once the run goes idle and makes the CLI
                     # exit (#1402).
-                    try:
-                        await asyncio.wait_for(client.connect(), timeout=120)
-                    except Exception as exc:
-                        # Only an initialize handshake that missed its deadline
-                        # is worth a fresh spawn; every other control-request
-                        # failure is a real error for this turn.
-                        if _is_initialize_timeout(exc):
-                            raise ClaudeInitializeTimeout(str(exc)) from exc
-                        raise
+                    # Only an initialize handshake that missed its deadline is
+                    # worth a fresh spawn; every other control-request failure
+                    # is a real error for this turn.
+                    catalog_generation = _catalog_account_generation()
+                    await _connect_with_deadline(client)
                     self._connected = True
+                    await self._capture_catalog_evidence(client, generation=catalog_generation)
                 await asyncio.wait_for(client.query(payload), timeout=120)
 
                 pending_result: ResultEvent | None = None
@@ -1578,7 +1626,10 @@ class ClaudeProvider(BaseSDKProvider):
                 pass
             raise
         except asyncio.TimeoutError:
-            logger.error("Claude connect/query timed out after 120s")
+            logger.error(
+                "Claude query timed out after 120s; the connect step is "
+                "bounded separately by ClaudeInitializeTimeout"
+            )
             try:
                 await self.disconnect()
             except Exception:

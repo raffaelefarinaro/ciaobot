@@ -33,20 +33,19 @@ deadline it was minted with, so a browser cannot keep a terminal alive by
 talking to it. Grants are bounded in number, expired grants are reclaimed,
 and revocation is explicit — one grant, or all of them.
 
-The password policy is the second half of the module. Unlocking a terminal
-asks for the PWA password again, so guessing it must be expensive: a rolling
-window of failures per client address, a closed window that even a correct
-password cannot pass, and a bounded number of tracked clients so the
-limiter's own memory cannot be used as the attack surface.
+There is no password here, and there is no guessing budget either: the
+signed-in session is the terminal's trust boundary, so a browser that
+already holds one is the thing the grant is issued to. What the grant
+answers is *which* browser may hold the socket and *for how long* — it
+binds the browser, expires on its own fixed deadline, and dies with the
+session it was minted on.
 
 **What this module does not do: it authenticates nobody.** A route must
 verify the session cookie (that it is signed, unexpired and the caller's)
-and the unlock password before it calls in here. The store binds a grant to
-a session it is handed and compares bytes; it trusts the identity its caller
-gives it. In the same way, ``client_ip`` must be the address the *server*
-selected — the TCP peer, or whatever the deployment's proxy trust policy
-decides. A value taken from a request body or an untrusted header is not a
-client address, and normalizing one does not make it trustworthy.
+before it calls in here. The store binds a grant to a session it is handed
+and compares bytes; it trusts the identity its caller gives it. A session
+cookie that is not valid UTF-8 names no session, and a bearer that is not
+valid UTF-8 is not a grant.
 
 Everything here is in memory and dies with the process. A grant is not a
 durable session: it is a bounded, short-lived capability, and a restart
@@ -57,7 +56,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import ipaddress
 import secrets
 import threading
 import time
@@ -78,26 +76,12 @@ TERMINAL_UNLOCK_TTL_S = 900
 #: this bounds how many browsers can hold terminal access.
 TERMINAL_MAX_GRANTS = 32
 
-#: Failed unlock attempts allowed per client address inside the window.
-TERMINAL_UNLOCK_FAIL_LIMIT = 5
-
-#: The rolling window those failures are counted in.
-TERMINAL_UNLOCK_FAIL_WINDOW_S = 900
-
-#: How many client addresses can be tracked as failing at once.
-TERMINAL_MAX_FAILURE_CLIENTS = 256
-
 #: Bearer strength: 32 random bytes, URL-safe.
 _TOKEN_BYTES = 32
 
 #: The grant id is an identifier, not a credential: 16 random bytes is
 #: plenty to be unique without being guessable enough to matter.
 _GRANT_ID_BYTES = 16
-
-#: The one bucket every address the server cannot parse is counted against.
-#: A fixed key, so a caller cannot make the table grow by varying the
-#: spelling of an unusable address.
-_UNKNOWN_CLIENT_KEY = "unknown"
 
 
 class TerminalAuthError(Exception):
@@ -108,11 +92,9 @@ class TerminalAuthError(Exception):
 
     - ``invalid_session``: the unlock arrived without a usable login cookie.
     - ``capacity``: too many live grants; the oldest has to expire first.
-    - ``rate_limited``: the client is inside a closed guessing window, or
-      the failure table is full and no new client may start guessing.
 
     The message is the reason and nothing else: a refused attempt must not
-    put a password, a bearer or a cookie into an error string.
+    put a bearer or a cookie into an error string.
     """
 
     def __init__(self, reason: str) -> None:
@@ -171,35 +153,11 @@ def _digest(value: str) -> str | None:
     return _digest_bytes(encoded)
 
 
-def _client_key(client_ip: str) -> str:
-    """The canonical failure bucket for a client address.
-
-    Two spellings of one address are one bucket (``2001:0db8::1`` and
-    ``2001:db8::1``), and an IPv4-mapped IPv6 address is the IPv4 address it
-    carries (``::ffff:10.0.0.1`` is ``10.0.0.1``). Two genuinely different
-    addresses stay different buckets, so the IPv4 and the IPv6 loopback are
-    two budgets.
-
-    An address the server cannot parse is one fixed unknown-client bucket,
-    not a new key per spelling — otherwise a caller could grow the table
-    without bound by varying a string the server already refuses to read.
-    """
-    try:
-        address = ipaddress.ip_address(client_ip.strip())
-    except ValueError:
-        return _UNKNOWN_CLIENT_KEY
-    if isinstance(address, ipaddress.IPv6Address):
-        mapped = address.ipv4_mapped
-        if mapped is not None:
-            return str(mapped)
-    return str(address)
-
-
 class TerminalGrantStore:
-    """Live terminal grants and the unlock guessing budget.
+    """Live terminal grants.
 
     One store per engine, held in memory. The clock is injected so the
-    expiry and the rolling failure window are testable without sleeping.
+    expiry is testable without sleeping.
     """
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
@@ -207,7 +165,6 @@ class TerminalGrantStore:
         # Keyed by the bearer's SHA-256 digest: the store never holds the
         # bearer itself.
         self._grants: dict[str, TerminalGrant] = {}
-        self._failures: dict[str, list[float]] = {}
         # The engine reads grants from request handlers and from a watchdog
         # that closes sockets; the lock keeps a check-then-write (the
         # capacity check) from interleaving across threads.
@@ -336,76 +293,3 @@ class TerminalGrantStore:
         if not hmac.compare_digest(record.session_fingerprint, fingerprint):
             return
         del self._grants[digest]
-
-    # ── Password policy ────────────────────────────────────────────────────
-
-    def check_password(self, client_ip: str, supplied: str, expected: str) -> bool:
-        """Whether ``supplied`` is the terminal unlock password.
-
-        ``True`` only for a correct password. A blank ``expected`` never
-        authenticates: an engine with no password configured has no terminal
-        unlock, and an empty guess is not one either. A password that is not
-        valid UTF-8 is a failed attempt, not an exception.
-
-        The failure budget is per client *address* — normalized, so two
-        spellings of one address share one bucket. Five failures inside
-        :data:`TERMINAL_UNLOCK_FAIL_WINDOW_S` close the window for that
-        address, and a closed window refuses *every* attempt, the correct
-        password included, until it clears. A success before the limit
-        clears that address's count, which is also how a success behind a
-        shared address clears the count for everyone else behind it.
-
-        The costs of that policy are deliberate and are the caller's to
-        weigh: a client that trips the window cannot unlock until the
-        window ages out or the engine restarts, and a full failure table
-        locks every untracked client out. There is no bypass and no
-        exception path; the only way back is time or a restart, both of
-        which clear the in-memory counts.
-
-        :raises TerminalAuthError: with reason ``rate_limited`` when the
-            window is closed, or when the failure table is full and this
-            client is not already tracked. A full table refuses new
-            guessing rather than evicting a live bucket, because evicting
-            one would hand the next guess a fresh budget. That refusal is
-            fail-closed for the whole table, the correct password
-            included: a full table is a locked door, not a queue.
-        """
-        key = _client_key(client_ip)
-        now = self._clock()
-        with self._lock:
-            self._prune_failures_locked(now)
-            failures = self._failures.get(key)
-            if failures is not None:
-                if len(failures) >= TERMINAL_UNLOCK_FAIL_LIMIT:
-                    raise TerminalAuthError("rate_limited")
-            elif len(self._failures) >= TERMINAL_MAX_FAILURE_CLIENTS:
-                # Every tracked client is inside its own window; a new one
-                # may not start guessing, and no live bucket is dropped to
-                # make room for it.
-                raise TerminalAuthError("rate_limited")
-
-            supplied_bytes = _encode(supplied)
-            expected_bytes = _encode(expected)
-            if (
-                supplied_bytes is not None
-                and expected_bytes is not None
-                and expected.strip()
-                and hmac.compare_digest(supplied_bytes, expected_bytes)
-            ):
-                self._failures.pop(key, None)
-                return True
-
-            # A wrong guess, a blank expected password and a malformed one
-            # are all the same thing to this budget: a failed attempt.
-            self._failures.setdefault(key, []).append(now)
-            return False
-
-    def _prune_failures_locked(self, now: float) -> None:
-        """Forget the failures that fell out of the rolling window."""
-        window_start = now - TERMINAL_UNLOCK_FAIL_WINDOW_S
-        for key in list(self._failures):
-            recent = [stamp for stamp in self._failures[key] if stamp > window_start]
-            if recent:
-                self._failures[key] = recent
-            else:
-                del self._failures[key]

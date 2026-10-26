@@ -1,7 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { boot, horizontalOverflow, isolate } from '../support/app'
 
-const SHOTS = '/private/tmp/claude-501/-Users-raffaelefarinaro-repos-ciaobot/d6b99252-f939-4dd7-b1fb-0de2ae7b0ad8/scratchpad/i1258shots'
 const HINT = 'Runs first. If it prints nothing and exits 0, no chat is opened.'
 const PHONE = { width: 390, height: 844 }
 // 200% page zoom is indistinguishable from halving the CSS viewport; see browser-zoom.spec.ts.
@@ -77,8 +76,6 @@ test.describe('schedule command field', () => {
 
     await tabTo(page, field, '#nsf-prompt')
     await expectFocusRing(field)
-    await page.screenshot({ path: `${SHOTS}/new-desktop-focused.png` })
-
     await page.locator('#nsf-prompt').fill('Check the docs')
     await field.fill('git -C docs pull')
     await page.locator('#nsf-frequency').selectOption('manual')
@@ -97,8 +94,6 @@ test.describe('schedule command field', () => {
 
     await tabTo(page, field, '.content-form textarea >> nth=1')
     await expectFocusRing(field)
-    await page.screenshot({ path: `${SHOTS}/edit-desktop-focused.png` })
-
     await field.fill('./scripts/check.sh')
     await page.locator('.content-form .btn-primary').click()
     await expect.poll(() => patches.length).toBeGreaterThan(0)
@@ -115,7 +110,6 @@ test.describe('schedule command field', () => {
       const box = await field.boundingBox()
       const { overflow, culprits } = await horizontalOverflow(page)
       console.log(`MOBILE ${surface}: field ${box!.width}x${box!.height}, overflow ${overflow}`)
-      await page.screenshot({ path: `${SHOTS}/${surface}-mobile.png` })
       expect(box!.height).toBeGreaterThanOrEqual(44)
       expect(overflow, `scrolls ${overflow}px; ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
       await context.close()
@@ -132,7 +126,6 @@ test.describe('schedule command field', () => {
       const box = await field.boundingBox()
       const { overflow, culprits } = await horizontalOverflow(page)
       console.log(`ZOOM ${surface}: field ${box!.width}x${box!.height}, overflow ${overflow}`)
-      await page.screenshot({ path: `${SHOTS}/${surface}-zoom200.png` })
       expect(overflow, `scrolls ${overflow}px; ${JSON.stringify(culprits)}`).toBeLessThanOrEqual(0)
     })
   }

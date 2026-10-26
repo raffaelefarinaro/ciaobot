@@ -24,9 +24,11 @@ from __future__ import annotations
 import ctypes
 import queue
 import re
+import subprocess
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +41,18 @@ _windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="the native ConPTY adapter is the Windows branch"
 )
 
+from ciao.os_support import terminal_child_windows as tcw  # noqa: E402
 from ciao.os_support import terminal_windows as tw  # noqa: E402
+
+#: The helper that clears the terminal's interrupt attribute and starts the
+#: shell. The path is spelled out rather than read from the adapter, so the
+#: file is found on a machine that is not Windows too.
+CHILD_HELPER = (
+    Path(__file__).resolve().parents[1]
+    / "ciao"
+    / "os_support"
+    / "terminal_child_windows.py"
+)
 
 
 # ── a fake Kernel32 ─────────────────────────────────────────────────────────
@@ -420,23 +433,75 @@ def _names(fake: _FakeWin32) -> list[str]:
 def test_spawn_assigns_the_job_before_resuming_and_never_uses_a_process_group(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The shell must be owned by the job before it runs a single instruction."""
+    """The shell must be owned by the job before it runs a single instruction.
+
+    The child the adapter creates is the helper, not the shell: a fresh
+    process has to clear the ignore-Ctrl+C attribute before the shell is
+    created, or the shell inherits the engine's. The helper is what the
+    adapter spawns, and the shell's executable and its whole argv travel to
+    the helper, which creates the shell with them.
+    """
     fake = _FakeWin32()
     _install_fake(monkeypatch, fake)
     argv = _shell(monkeypatch)
 
+    def make_tree(pid: int, *, dies_with_engine: bool = False) -> _FakeProcessTree:
+        # The job's creation is recorded among the native calls, so the
+        # order of the whole transaction can be asserted.
+        fake._record("ProcessTree")
+        tree = _FakeProcessTree(pid, dies_with_engine=dies_with_engine)
+        tree.on_kill = fake.wait_release.set
+        return tree
+
+    monkeypatch.setattr(tw, "ProcessTree", make_tree)
+
     terminal = tw.spawn_terminal(cwd=tmp_path, cols=100, rows=40)
     try:
         names = _names(fake)
-        assert names.index("CreateProcessW") < names.index(
-            "ResumeThread"
-        ), "the child must be created suspended, then resumed"
+        created = names.index("CreateProcessW")
+        assigned = names.index("ProcessTree")
+        resumed = names.index("ResumeThread")
+        assert created < assigned < resumed, (
+            "the child must be created suspended, assigned to the job, and "
+            "only then resumed"
+        )
         flags = fake.spawned[0]["flags"]
         assert flags & tw._CREATE_SUSPENDED, "the child must start suspended"
         assert flags & tw._EXTENDED_STARTUPINFO_PRESENT
         assert flags & tw._CREATE_UNICODE_ENVIRONMENT
         assert not flags & 0x00000200, "no CREATE_NEW_PROCESS_GROUP for a terminal"
-        assert fake.spawned[0]["application"] == argv[0]
+        spawned = fake.spawned[0]
+        command = spawned["command"]
+        # The helper is what is spawned, and the shell's own executable and
+        # its whole argv travel to it.
+        assert spawned["application"] == sys.executable, (
+            "the interpreter that runs the helper is what is spawned"
+        )
+        assert str(tw.CHILD_HELPER) in command, "the helper must be named"
+        assert "-NoLogo" in command, "the shell's argv must travel to the helper"
+        assert "-NoProfile" in command, "the shell's argv must travel to the helper"
+        # The shell is never created with a path guessed from a PATH: the
+        # executable the adapter resolved is what travels to the helper,
+        # and it travels whole.
+        assert argv[0] in command, "the resolved shell path must travel to the helper"
+        # The shell is never created with a path guessed from a PATH: the
+        # executable the adapter resolved is what travels to the helper,
+        # and it travels whole. It travels twice — once as the executable
+        # the helper is told to run, once as the program token the command
+        # line itself carries — and both are the full path, so a bare name
+        # that a PATH could resolve to something else appears nowhere.
+        shell_name = Path(argv[0]).name
+        stray = re.findall(
+            rf"(?<![\\/A-Za-z0-9_.-]){re.escape(shell_name)}(?![\\A-Za-z0-9_.-])",
+            command,
+        )
+        assert not stray, (
+            "the shell must be named by its path, and by nothing else"
+        )
+        assert command.count(argv[0]) == 2, (
+            "the shell's path travels twice: as the executable the helper "
+            "runs and as the command line's own program token"
+        )
     finally:
         terminal.close()
 
@@ -458,6 +523,10 @@ def test_the_child_standard_handles_point_at_the_pseudoconsole(
     (``siEx.StartupInfo.dwFlags = STARTF_USESTDHANDLES;``) with the three
     standard-handle slots left null, because the pseudoconsole replaces the
     child's console rather than its file descriptors.
+
+    The child is the helper, and the helper leaves the three slots null for
+    the shell as well: the shell's input and output are the console's own,
+    and not the engine's.
     """
     fake = _FakeWin32()
     _install_fake(monkeypatch, fake)
@@ -510,10 +579,17 @@ def test_the_job_is_created_between_the_child_and_its_resume(
 
 
 @_windows_only
-def test_spawn_uses_an_explicit_executable_and_the_full_quoted_argv(
+def test_spawn_names_the_shell_explicitly_and_quotes_the_whole_argv(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """CreateProcessW gets the executable and the whole command line."""
+    """The shell's executable and its whole argv travel to the helper.
+
+    The adapter no longer creates the shell itself: a fresh process has to
+    clear the ignore-Ctrl+C attribute before the shell is created, or the
+    shell inherits the engine's. The shell's name therefore goes to the
+    helper, which creates the shell with it — still explicit, still fully
+    quoted, and never guessed from a PATH.
+    """
     fake = _FakeWin32()
     _install_fake(monkeypatch, fake)
     argv = _shell(monkeypatch)
@@ -521,11 +597,15 @@ def test_spawn_uses_an_explicit_executable_and_the_full_quoted_argv(
     terminal = tw.spawn_terminal(cwd=tmp_path)
     try:
         spawned = fake.spawned[0]
-        assert spawned["application"] == argv[0]
-        assert "-NoLogo" in spawned["command"]
-        assert "-NoProfile" in spawned["command"]
+        command = spawned["command"]
+        assert argv[0] in command, "the shell's executable must be named"
+        assert "-NoLogo" in command
+        assert "-NoProfile" in command
+        assert str(tw.CHILD_HELPER) in command, "the helper must be named"
         assert spawned["cwd"] == str(tmp_path)
-        assert spawned["inherit"] == 0
+        assert (
+            spawned["inherit"] == 0
+        ), "nothing is inherited: the shell inherits the helper's console"
     finally:
         terminal.close()
 
@@ -2149,6 +2229,692 @@ def test_a_real_ctrl_c_cancels_the_pending_line_and_the_shell_lives(
         terminal.close()
 
 
+# ── the interrupt gap (#1721) ───────────────────────────────────────────────
+
+
+def _console_state_command(label: str) -> bytes:
+    """The command that reports the console's input state.
+
+    Two values come back, in this order:
+
+    * the marker, followed by ``[Console]::IsInputRedirected`` — whether the
+      shell's *standard* input is the console's own ``CONIN$`` (False) or
+      something else (True). It cannot fail, so the marker always arrives
+      and the test always knows the command ran;
+    * ``[Console]::TreatControlCAsInput`` — the console's
+      ``ENABLE_PROCESSED_INPUT`` flag read backwards (True means the flag is
+      off, and the console host then hands 0x03 to the shell as an ordinary
+      character instead of raising a Ctrl+C control event for it). Reading
+      it needs a console handle, so it may fail; the shell then prints an
+      error and the test records the flag as unreadable.
+
+    The marker is written as code points and turned back into text by the
+    shell, so the text the test waits for cannot be the echo of the command.
+    The command stays short on purpose: a shell that reads the line in the
+    console's cooked mode stops at 254 characters.
+    """
+    codes = ",".join(f"[char]{ord(char)}" for char in label)
+    command = (
+        f"Write-Output ('CIAO' + (-join @({codes})) + '-END ' + "
+        "[Console]::IsInputRedirected); "
+        "Write-Output ([Console]::TreatControlCAsInput)"
+    )
+    return (command + "\r").encode("utf-8")
+
+
+def _nested_console_state_command(label: str) -> bytes:
+    """A child shell that reports the state and then waits.
+
+    The child samples the console while the parent shell is busy with it,
+    which is the state a foreground program runs under. The command is
+    quoted for the outer shell, which passes it to the child as one
+    argument, and the child's own path is absolute so the terminal's PATH
+    cannot decide whether it starts at all.
+    """
+    codes = ",".join(f"[char]{ord(char)}" for char in label)
+    inner = (
+        f"Write-Output ('CIAO' + (-join @({codes})) + '-END ' + "
+        "[Console]::IsInputRedirected); "
+        "Write-Output ([Console]::TreatControlCAsInput); Start-Sleep 300"
+    )
+    shell = tw._resolve_powershell()
+    assert shell, "powershell.exe is not on the machine's terminal PATH"
+    # The call operator: the path has spaces in it, and the outer shell is
+    # PowerShell, which needs to be told that the quoted path is a program.
+    return f'& "{shell}" -NoProfile -Command "{inner}"\r'.encode("utf-8")
+
+
+def _console_state(produced: bytes, marker: bytes) -> tuple[str, str]:
+    """The two values the shell reported: redirected, and the input flag.
+
+    ``redirected`` is ``True``/``False`` (the shell's standard input is not
+    the console's) and ``processed`` is ``on``/``off``/``unreadable`` (the
+    console's ``ENABLE_PROCESSED_INPUT``).
+    """
+    text = produced.split(marker, 1)[1].decode("utf-8", "replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    redirected = lines[0] if lines else ""
+    processed = "unreadable"
+    for line in lines[1:]:
+        if line in ("True", "False"):
+            # .NET reads the flag backwards: TreatControlCAsInput is True
+            # when ENABLE_PROCESSED_INPUT is off.
+            processed = "off" if line == "True" else "on"
+            break
+    return redirected, processed
+
+
+def _drain(terminal: tw.WindowsTerminalProcess, seconds: float) -> bytes:
+    """Take what the terminal has produced, until it goes quiet.
+
+    The quiet is what makes this safe to use before looking for the
+    prompt: a prompt left over from an earlier command would otherwise be
+    mistaken for the one the interrupt brings back.
+    """
+    collected = b""
+    deadline = time.monotonic() + seconds
+    quiet = 0.0
+    while time.monotonic() < deadline:
+        item = terminal.read(65536)
+        if item is None:
+            time.sleep(0.05)
+            quiet += 0.05
+            if quiet >= 0.3:
+                break
+            continue
+        if item == b"":
+            break
+        collected += item
+        quiet = 0.0
+    return collected
+
+
+def _wait_for(
+    terminal: tw.WindowsTerminalProcess, needle: bytes, timeout: float
+) -> bytes:
+    """Collect output until ``needle`` shows up; empty when it does not."""
+    collected = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        item = terminal.read(65536)
+        if item is None:
+            time.sleep(0.05)
+            continue
+        if item == b"":
+            break
+        collected += item
+        if needle in collected:
+            return collected
+    return b""
+
+
+def _collect_until(
+    terminal: tw.WindowsTerminalProcess, needles: tuple[bytes, ...], timeout: float
+) -> bytes:
+    """Collect output until one of ``needles`` shows up, or the window ends.
+
+    Unlike :func:`_drain` this does not stop when the terminal goes quiet: a
+    marker that is on its way must not be missed because the terminal had not
+    produced anything *yet*.
+    """
+    collected = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        item = terminal.read(65536)
+        if item is None:
+            time.sleep(0.05)
+            continue
+        if item == b"":
+            break
+        collected += item
+        if any(needle in collected for needle in needles):
+            break
+    return collected
+
+
+@_windows_only
+def test_the_console_state_behind_the_interrupt_is_measured(tmp_path: Path) -> None:
+    """Measure what decides whether 0x03 interrupts a running program.
+
+    Windows' console host turns the 0x03 byte into a Ctrl+C control event
+    only when the console's input mode has ``ENABLE_PROCESSED_INPUT`` set
+    (the console host's ``HandleGenericKeyEvent`` asks
+    ``IsInProcessedInputMode()`` first), and the event is then delivered to
+    every process attached to the console. The mode belongs to the
+    *client*: the console host never writes it, the only writer is the
+    client's ``SetConsoleMode``, and the client's own line editor is what
+    clears the flag while it owns the prompt.
+
+    So the two things that decide the outcome are the console's input mode
+    and the shell's own standard handles. This test reports both, from
+    inside the pseudoconsole, and reports what the 0x03 byte did to a
+    running program. It asserts that the measurement is possible and that
+    the shell survives; the numbers are the evidence #1721 needs, and they
+    are reported as a warning so they land in the CI log.
+    """
+    label = "S"
+    marker = f"CIAO{label}-END ".encode("utf-8")
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The state the shell's own line editor works under.
+        terminal.write(_console_state_command(label))
+        produced = _read_until(terminal, marker) + _drain(terminal, 2.0)
+        at_prompt = _console_state(produced, marker)
+        assert at_prompt[0] in (
+            "True",
+            "False",
+        ), f"the shell did not report its console state: {produced[-400:]!r}"
+
+        # The state a foreground program runs under: a child shell samples
+        # it and then waits, so the parent is busy with a program.
+        terminal.write(_nested_console_state_command(label))
+        produced = _read_until(terminal, marker, timeout=30) + _drain(terminal, 2.0)
+        in_foreground = _console_state(produced, marker)
+        assert in_foreground[0] in (
+            "True",
+            "False",
+        ), f"the child shell did not report the console state: {produced[-400:]!r}"
+
+        # The byte, and what it did to the running program. The queue is
+        # emptied first: a prompt left over from an earlier command would
+        # look like the one the interrupt brings back.
+        _drain(terminal, 2.0)
+        terminal.write(b"\x03")
+        interrupted = bool(_wait_for(terminal, b"> ", timeout=20))
+
+        report = (
+            f"#1721 console state: at the prompt, standard input redirected "
+            f"{at_prompt[0]}, ENABLE_PROCESSED_INPUT {at_prompt[1]}; during "
+            f"a foreground program, standard input redirected "
+            f"{in_foreground[0]}, ENABLE_PROCESSED_INPUT {in_foreground[1]}; "
+            f"0x03 ended the running program: {interrupted}"
+        )
+        print(report)
+        warnings.warn(report, stacklevel=1)
+        assert terminal.poll() is None, "the shell must survive the interrupt"
+    finally:
+        terminal.close()
+
+
+# ── the interrupt path itself, measured (#1721) ─────────────────────────────
+#
+# The console host turns the bytes on the pseudoconsole's input pipe into
+# console input records. An ETX (0x03) is matched while that stream is
+# decoded: the host synthesises a Ctrl+C key event and, when the console's
+# input mode has ENABLE_PROCESSED_INPUT set, raises a CTRL_C_EVENT. The
+# event is then delivered by the operating system to the processes of the
+# console host's *process group* (Microsoft's own summary of the mechanism:
+# "In order for Ctrl-C to work, thus, the pseudoconsole process must be in
+# the same process group as the processes you are trying to control").
+#
+# Two links of that chain are invisible from the adapter, and they are what
+# the probe below measures:
+#
+#   * does the byte reach the console as an ordinary character, or does the
+#     host turn it into the control event? A reader that reads the console
+#     tells the two apart: it reads the byte as a character when the host
+#     left it alone, and its read is aborted when the host raised the
+#     event;
+#   * is the event delivered to the process? The same reader registers a
+#     Console.CancelKeyPress handler, which tells that apart too: it runs
+#     only when the event was raised *and* reached the process.
+
+# The interrupt the console host asks for: the win32-input-mode key record
+# for Ctrl+C, exactly what Windows Terminal sends. The host advertises
+# win32-input-mode at start-up (`CSI ? 9001 h`) and decodes these records
+# into real key events, so the record is the other way into the same gate a
+# raw ETX takes. The record is `CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`: the
+# virtual key 'C' (67), its scan code (30), the character 0x03, the key
+# down, the left control key, and one repeat.
+_WIN32_CTRL_C = b"\x1b[67;30;3;1;2;1_"
+
+
+# The script the probe runs. It does three things, in this order:
+#
+# * it registers a ``Console.CancelKeyPress`` handler that cancels the
+#   interrupt and prints a marker. The handler runs only when the host
+#   raised a control event **and** delivered it to this process;
+# * it prints a "ready" marker, so the test knows the handler is
+#   registered and the read below is pending before the interrupt is
+#   written;
+# * it reads one key from the console. When the byte reached the console
+#   as an ordinary character the read returns it and the reader prints its
+#   code; when the host raised the interrupt the read is aborted, the read
+#   throws, and the reader says so.
+#
+# The markers are literals, and the script is the terminal's **shell**: the
+# terminal never echoes a command it was not given, so only the script's
+# own output can carry them.
+_PROBE_SCRIPT = (
+    "[Console]::add_CancelKeyPress({ param($sender, $event) "
+    "$event.Cancel = $true; [Console]::Out.WriteLine('CIAO-HANDLER'); "
+    "[Console]::Out.Flush() }); "
+    "[Console]::Out.WriteLine('CIAO-READY'); [Console]::Out.Flush(); "
+    "try { $key = [Console]::ReadKey($true); "
+    "[Console]::Out.WriteLine('CIAO-CHAR-' + [int][char]$key.KeyChar) } "
+    "catch { [Console]::Out.WriteLine('CIAO-READ-ABORTED'); "
+    "[Console]::Out.Flush() }"
+)
+
+
+def _probe_shell() -> list[str]:
+    """The shell that runs the probe.
+
+    The probe **is** the terminal's shell, not a child of it: a child would
+    race the shell that started it, because the interrupt reaches the whole
+    console and the shell aborts its own pipeline - and kills the child -
+    while the child is still writing its marker.
+
+    The script is handed to the shell with ``-Command`` and not with
+    ``-File``: the execution policy of the machine decides whether a
+    script file may run at all, and it has nothing to say about a command.
+    """
+    shell = tw._resolve_powershell()
+    assert shell, "powershell.exe is not on the machine's terminal PATH"
+    return [shell, "-NoProfile", "-Command", _PROBE_SCRIPT]
+
+
+def _interrupt_seen_by_a_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupt: bytes
+) -> tuple[int, int, int]:
+    """What the console host did with the interrupt, seen from a reader.
+
+    Returns ``(char_read, read_aborted, handler_ran)``, the three answers
+    a reader can give:
+
+    * ``char_read``: the reader got the byte as an ordinary character, so
+      the host raised no control event at all;
+    * ``read_aborted``: the host raised the event and the read it aborted
+      never returned, but the event did not reach the process;
+    * ``handler_ran``: the host raised the event *and* the operating
+      system delivered it, which is what the ``CancelKeyPress`` handler
+      says.
+    """
+    # The patch is scoped to this spawn: the scenarios that follow need the
+    # terminal's ordinary shell back.
+    with monkeypatch.context() as patch:
+        patch.setattr(tw, "default_shell", _probe_shell)
+        terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The reader is up, its handler is registered and its read is
+        # pending: the interrupt has to arrive after that, or the shell
+        # would read it instead.
+        _read_until(terminal, b"CIAO-READY", timeout=30)
+
+        terminal.write(interrupt)
+        produced = _collect_until(
+            terminal,
+            (b"CIAO-HANDLER", b"CIAO-CHAR-", b"CIAO-READ-ABORTED"),
+            timeout=20,
+        )
+        char = int(b"CIAO-CHAR-" in produced)
+        aborted = int(b"CIAO-READ-ABORTED" in produced)
+        handler = int(b"CIAO-HANDLER" in produced)
+        return char, aborted, handler
+    finally:
+        terminal.close()
+
+
+def _interrupt_ends_a_running_program(tmp_path: Path, interrupt: bytes) -> int:
+    """Whether the interrupt ended a running program.
+
+    ``ping`` is the program: it neither reads the console nor installs a
+    handler, so the only thing that can end it is the interrupt itself. The
+    shell's prompt coming back is the sign that it ended.
+    """
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        terminal.write(b"ping -n 31 127.0.0.1\r")
+        _read_until(terminal, b"Reply from", timeout=30)
+        # The queue is emptied first: a prompt left over from an earlier
+        # command would look like the one the interrupt brings back.
+        _drain(terminal, 1.0)
+
+        terminal.write(interrupt)
+        ended = bool(_wait_for(terminal, b"> ", timeout=20))
+        assert terminal.poll() is None, "the shell must survive the interrupt"
+        return int(ended)
+    finally:
+        terminal.close()
+
+
+@_windows_only
+def test_the_interrupt_is_measured_against_the_console_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measure the two links of the interrupt chain the adapter cannot see.
+
+    The bytes on the pseudoconsole's input pipe are decoded by the console
+    host, and the host raises the control event and the operating system
+    delivers it. The adapter sees neither step, so this measures them from
+    inside the pseudoconsole:
+
+    * a reader tells whether the byte arrived as an ordinary character (the
+      host left it alone) or whether the read was aborted (the host raised
+      the event);
+    * the same reader registers a ``Console.CancelKeyPress`` handler, which
+      runs only when the event was raised *and* delivered to the process.
+
+    A third scenario asks the question the user asks: does the interrupt
+    end a running program? ``ping`` is the program, because it neither
+    reads the console nor installs a handler, and a nested shell cannot
+    answer it, because a shell cancels Ctrl+C itself.
+
+    The raw ETX and the win32-input-mode key record are measured side by
+    side, because the host decodes both and dispatches both through the
+    same gate: if the two disagree, the encoding is the difference and the
+    adapter can act on it, and if they agree, the difference is further
+    down the chain and the adapter cannot.
+
+    The numbers are reported as a warning so they land in the CI log; the
+    test asserts that the measurement was possible, not what the numbers
+    say.
+    """
+    raw_char, raw_aborted, raw_handler = _interrupt_seen_by_a_reader(
+        tmp_path, monkeypatch, b"\x03"
+    )
+    raw_ended = _interrupt_ends_a_running_program(tmp_path, b"\x03")
+    record_char, record_aborted, record_handler = _interrupt_seen_by_a_reader(
+        tmp_path, monkeypatch, _WIN32_CTRL_C
+    )
+    record_ended = _interrupt_ends_a_running_program(tmp_path, _WIN32_CTRL_C)
+
+    report = (
+        f"#1721 interrupt probe: the raw 0x03 reached the reader as a "
+        f"character: {raw_char}; the raw 0x03 aborted the reader's read: "
+        f"{raw_aborted}; the raw 0x03 ran the reader's CancelKeyPress "
+        f"handler: {raw_handler}; the raw 0x03 ended a running program: "
+        f"{raw_ended}; the win32 key record reached the reader as a "
+        f"character: {record_char}; the win32 key record aborted the "
+        f"reader's read: {record_aborted}; the win32 key record ran the "
+        f"reader's CancelKeyPress handler: {record_handler}; the win32 key "
+        f"record ended a running program: {record_ended}"
+    )
+    print(report)
+    warnings.warn(report, stacklevel=1)
+
+
+# ── the attribute that decides the delivery (#1721) ──────────────────────────
+#
+# The chain that carries an interrupt into a pseudoconsole has four links,
+# and the measurements above pinned three of them: the console host turns
+# the 0x03 byte into a Ctrl+C key event, the host raises a CTRL_C_EVENT
+# because the console's input mode has ENABLE_PROCESSED_INPUT set, and the
+# operating system then decides whether that event reaches the process.
+#
+# That last decision is made from a per-process attribute: the "ignore
+# Ctrl+C" flag. SetConsoleCtrlHandler(NULL, TRUE) sets it,
+# SetConsoleCtrlHandler(NULL, FALSE) clears it, and **every child inherits
+# it from its parent**. A process that has it set is skipped when the
+# event is delivered: no handler runs, no read is aborted, and the process
+# is not even terminated by the default handler — it simply never hears
+# about the event.
+#
+# The engine inherits the attribute from whatever started it (a
+# POSIX-flavoured shell sets it, so that its own Ctrl+C arrives as a
+# signal), and a shell the engine created would inherit it from the engine.
+# The probe below puts the attribute in a known state and measures what the
+# operating system then does with the event, so the attribute is either the
+# blocker or it is not.
+
+# The probe that measures the attribute. It is a Python program rather than
+# a PowerShell script: it needs a control handler of its own, and ctypes
+# gives it one without a compiler in the way.
+#
+# Two states, and only the attribute differs between them:
+#
+# * "ignored": the handler is registered first and the attribute is set
+#   afterwards, so the attribute is the last word and the event must not
+#   reach the handler;
+# * "cleared": the attribute is set and then cleared, and the handler is
+#   registered afterwards, so the attribute is clear and the event must
+#   reach it.
+#
+# The order is deliberate. A probe that only ever cleared the attribute
+# would say nothing about what the attribute does, and a probe that
+# registered its handler after setting the attribute would have the
+# attribute set twice over in the "ignored" case.
+_IGNORE_ATTRIBUTE_PROBE = '''"""The probe that measures the ignore-Ctrl+C attribute."""
+
+import ctypes
+import sys
+import time
+
+KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+KERNEL32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, ctypes.c_int]
+KERNEL32.SetConsoleCtrlHandler.restype = ctypes.c_int
+
+HANDLER = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong)
+
+#: How long the probe waits for the interrupt. The test waits for the
+#: marker that ends the wait, so the answer is never a timeout.
+WAIT_SECONDS = 6
+
+
+def _on_control(control_type):
+    """The control handler: the event reached this process."""
+    sys.stdout.write("CIAO-HANDLER\\n")
+    sys.stdout.flush()
+    return 1
+
+
+def main():
+    mode = sys.argv[1]
+    callback = HANDLER(_on_control)
+    if mode == "cleared":
+        KERNEL32.SetConsoleCtrlHandler(None, True)
+        KERNEL32.SetConsoleCtrlHandler(None, False)
+    KERNEL32.SetConsoleCtrlHandler(callback, True)
+    if mode == "ignored":
+        KERNEL32.SetConsoleCtrlHandler(None, True)
+    sys.stdout.write("CIAO-READY\\n")
+    sys.stdout.flush()
+    time.sleep(WAIT_SECONDS)
+    sys.stdout.write("CIAO-DONE\\n")
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _interrupt_with_the_ignore_attribute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> tuple[int, bool]:
+    """Whether the probe's handler ran, with the attribute in that state.
+
+    Returns ``(ran, measured)``: whether the control handler ran, and
+    whether the probe answered at all — either the handler ran, or the
+    probe reached the end of its wait without it. A run that never got the
+    interrupt is still an answer; a run that never answered is not.
+    """
+    probe = tmp_path / f"ignore-attribute-{mode}.py"
+    probe.write_text(_IGNORE_ATTRIBUTE_PROBE, encoding="utf-8")
+    argv = [sys.executable, "-I", "-S", str(probe), mode]
+    with monkeypatch.context() as patch:
+        patch.setattr(tw, "default_shell", lambda: list(argv))
+        terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        _read_until(terminal, b"CIAO-READY", timeout=60)
+        terminal.write(b"\x03")
+        produced = _collect_until(
+            terminal, (b"CIAO-HANDLER", b"CIAO-DONE"), timeout=30
+        )
+        ran = b"CIAO-HANDLER" in produced
+        return int(ran), ran or b"CIAO-DONE" in produced
+    finally:
+        terminal.close()
+
+
+@_windows_only
+def test_the_ignore_ctrl_c_attribute_decides_whether_the_event_is_delivered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measure the attribute that decides whether the interrupt arrives.
+
+    The console host raises the control event, and the operating system
+    then decides whether it reaches the process: a process that has the
+    "ignore Ctrl+C" attribute is skipped, and one that does not is not.
+    The attribute is inherited by every child, so the engine's own decides
+    what a shell it starts inherits.
+
+    The probe measures the attribute directly: it puts it in a known
+    state, writes the 0x03 byte, and reports whether its control handler
+    ran. The two states differ in the attribute and in nothing else, so the
+    difference between the two numbers is the attribute's doing.
+
+    The numbers are reported as a warning so they land in the CI log; the
+    test asserts that the measurement was possible, not what the numbers
+    say.
+    """
+    ignored, ignored_measured = _interrupt_with_the_ignore_attribute(
+        tmp_path, monkeypatch, "ignored"
+    )
+    cleared, cleared_measured = _interrupt_with_the_ignore_attribute(
+        tmp_path, monkeypatch, "cleared"
+    )
+    assert ignored_measured and cleared_measured, (
+        "the probe never answered: the attribute cannot be measured"
+    )
+    report = (
+        f"#1721 ignore-attribute experiment: with the ignore-Ctrl+C attribute "
+        f"set, the 0x03 ran the probe's control handler: {ignored}; "
+        f"with the attribute cleared, it ran: {cleared}"
+    )
+    print(report)
+    warnings.warn(report, stacklevel=1)
+
+
+@_windows_only
+def test_ctrl_c_ends_a_running_program_and_the_shell_survives(
+    tmp_path: Path,
+) -> None:
+    """The interrupt reaches the shell and ends the program the shell runs.
+
+    Two things hold at once:
+
+    * the program the shell runs ends, so the event reached the program:
+      ``ping`` neither reads the console nor installs a handler, so nothing
+      but the event itself can end it, and the shell's prompt coming back
+      is the sign that it ended;
+    * the shell survives, so the event did not take the shell down with it.
+
+    The byte is still the byte the user typed: ``0x03``, written to the
+    terminal's input, unchanged.
+
+    What is deliberately **not** asserted here is the reader's own
+    ``CancelKeyPress`` handler. PowerShell installs its own console control
+    handler, and it is registered after the runtime's, so the shell answers
+    the event first and the runtime's handler never sees it — a shell that
+    handles Ctrl+C is not evidence of anything either way. The delivery is
+    measured where it can be measured: the experiment's own Python probe
+    registers a handler in a process that has no handler of its own, and it
+    reports whether the event was raised and delivered.
+    """
+    ended = _interrupt_ends_a_running_program(tmp_path, b"\x03")
+    assert ended == 1, "the interrupt must end the running program"
+
+
+# ── the helper that starts the shell (#1721) ─────────────────────────────────
+
+
+def test_the_helper_imports_nothing_from_the_engine() -> None:
+    """The helper is a plain module: it imports nothing from ciao.
+
+    It runs under ``-I -S`` as a process of its own, and the engine's
+    packages are not on its way in: a helper that imported the engine
+    would read the engine's configuration on the way to a terminal.
+    """
+    source = CHILD_HELPER.read_text(encoding="utf-8")
+    assert "import ciao" not in source
+    assert "from ciao" not in source
+
+
+def test_the_helper_does_not_ask_for_null_standard_handles() -> None:
+    """The shell inherits the console's handles; it does not ask for none.
+
+    ``STARTF_USESTDHANDLES`` says "use these three handles", and a null
+    slot means *no* handle. A child that merely inherits a console and
+    asks for null standard handles gets invalid ones, and a shell with
+    invalid standard handles prints nothing at all — which is exactly what
+    the first native run of this design did. Without the flag the shell
+    inherits the helper's standard handles, and the helper's are the
+    console's own.
+    """
+    source = CHILD_HELPER.read_text(encoding="utf-8")
+    assert "dwFlags = _STARTF_USESTDHANDLES" not in source, (
+        "the helper must not ask the shell for null standard handles"
+    )
+    assert "startup.dwFlags" not in source, (
+        "the shell's standard handles come from the console, not from a flag"
+    )
+
+
+def test_the_helper_is_inert_on_import_and_prints_nothing() -> None:
+    """Importing the helper does nothing, and it writes no byte.
+
+    The engine's import-all gate loads this module on every platform, so
+    importing it must not touch a console. And the helper's own standard
+    handles are the console's once it runs as the terminal's child, so
+    anything it wrote would land in the user's terminal: importing it
+    writes nothing either.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            f"import runpy; runpy.run_path({str(CHILD_HELPER)!r})",
+        ],
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b""
+    assert result.stderr == b""
+
+
+@_windows_only
+def test_the_helper_reports_a_status_and_never_a_traceback(tmp_path: Path) -> None:
+    """A helper that cannot start the shell says so with a status.
+
+    The helper's standard handles are the user's terminal, so a traceback
+    would land in it. A failure is a status, and only a status — and the
+    status says which step failed.
+    """
+    missing = str(tmp_path / "no-such-shell.exe")
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(CHILD_HELPER), missing, missing],
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode in (tcw.CONTROL_FAILED, tcw.CREATE_FAILED), (
+        f"the helper must fail with a status, not a crash: {result.returncode}"
+    )
+    assert result.stdout == b""
+    assert result.stderr == b""
+    assert b"Traceback" not in result.stderr
+
+
+@_windows_only
+def test_the_helper_refuses_an_argument_it_cannot_use() -> None:
+    """A helper that cannot read its arguments says so with a status."""
+    for arguments in ([], ["only-one"], ["one", "two", "three"]):
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", str(CHILD_HELPER), *arguments],
+            capture_output=True,
+            timeout=30,
+        )
+        assert result.returncode == 2, (
+            f"the helper must refuse {arguments!r} with a status"
+        )
+        assert result.stdout == b""
+        assert result.stderr == b""
+
+
 def _process_alive(pid: int) -> bool:
     """True when a process with that id is still running."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -2179,6 +2945,44 @@ def _process_alive(pid: int) -> bool:
 
 
 @_windows_only
+def test_the_helper_is_attached_to_the_pseudoconsole_and_inherits_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The helper is on the pseudoconsole, and no handle travels to it.
+
+    The shell inherits the helper's console, so the pseudoconsole's handle
+    never has to reach the helper: a handle reaches a child only when it is
+    inheritable, and the pseudoconsole's handle is not an ordinary kernel
+    handle — ``SetHandleInformation`` refuses it with "the handle is
+    invalid". The handle goes into the process attribute list instead, which
+    is how a child is attached to a pseudoconsole, and the console is then
+    passed on to the shell the ordinary way.
+    """
+    fake = _FakeWin32()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        names = _names(fake)
+        attributes = [
+            args for name, args in fake.calls if name == "UpdateProcThreadAttribute"
+        ]
+        assert len(attributes) == 1, (
+            "the helper is attached to the pseudoconsole, and only to it"
+        )
+        attribute, value, size = attributes[0]
+        assert attribute == tw._PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+        assert value, "the pseudoconsole's handle goes into the attribute list"
+        assert size == ctypes.sizeof(ctypes.c_void_p)
+        # Nothing is inherited: the console is attached, not handed over.
+        assert fake.spawned[0]["inherit"] == 0
+        assert not any(name == "SetHandleInformation" for name in names)
+    finally:
+        terminal.close()
+
+
+@_windows_only
 def test_a_real_close_kills_the_background_child(tmp_path: Path) -> None:
     """Closing the terminal ends the shell and what it started."""
     marker = tmp_path / "child.pid"
@@ -2198,10 +3002,21 @@ def test_a_real_close_kills_the_background_child(tmp_path: Path) -> None:
             ).encode("utf-8")
         )
         deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and not marker.exists():
-            time.sleep(0.1)
-        assert marker.exists(), "the background child never started"
-        child_pid = int(marker.read_text(encoding="utf-8").strip())
+        child_pid = 0
+        while time.monotonic() < deadline and child_pid == 0:
+            # `Set-Content` can leave the file present but unreadable for a
+            # moment — a file another process has open exists before its
+            # content can be read — so existence is not readiness: read in
+            # the loop and treat a refusal as "not written yet".
+            try:
+                text = marker.read_text(encoding="utf-8").strip()
+            except (PermissionError, FileNotFoundError):
+                time.sleep(0.1)
+                continue
+            child_pid = int(text) if text else 0
+            if child_pid == 0:
+                time.sleep(0.1)
+        assert child_pid, "the background child never started"
         assert _process_alive(child_pid), "the background child is not running"
     finally:
         terminal.close()
@@ -2406,6 +3221,12 @@ def test_the_windows_job_runs_this_file_on_every_pull_request() -> None:
     assert (
         "windows-terminal.txt" in summary
     ), "the summary must report the focused native step's result"
+    # The measurements of the interrupt are reported as warnings, and the
+    # job summary has to carry them: a number in the log of a step nobody
+    # reads is not a measurement anybody can use.
+    assert "UserWarning: #1721" in summary, (
+        "the summary must carry the #1721 measurements of the interrupt"
+    )
     failing = summary.split("windows-failures.txt", 1)[0]
     assert (
         "windows-terminal.txt" in failing

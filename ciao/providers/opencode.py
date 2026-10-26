@@ -14,8 +14,9 @@ reads it from ``.mcp.json``. What ties a server to one chat is process-scoped,
 not session-scoped: the chat's bearer capability (``CIAO_AGENT_TOKEN``, minted
 per chat) travels in the server's environment, ``OPENCODE_SERVER_PASSWORD`` is
 per server, the filesystem sandbox wraps the server process, and
-``OPENCODE_CONFIG_CONTENT`` (linked-repo skills) is read at startup. A token
-rotation or scope change therefore restarts this chat's server. Per-session
+``OPENCODE_CONFIG_CONTENT`` (tool output limits, linked-repo skills) is read at
+startup. A token rotation or scope change therefore restarts this chat's
+server. Per-session
 agent, model, and permission rules are OpenCode's own and keep chat behavior
 isolated.
 
@@ -49,7 +50,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -304,6 +305,27 @@ def _stop_server_sync(process: subprocess.Popen[bytes], tree: ProcessTree) -> No
                 process.wait()
     finally:
         tree.close()
+
+
+def _read_only_snapshot(request: AgentRequest) -> tuple[tuple[str, tuple[int, int] | None], ...]:
+    """Identity of each granted read-only file, for the server reuse decision (#1960).
+
+    Linux only: ``bwrap`` binds a file by inode when the server starts, so a
+    registry replaced by rename keeps showing its old content and a receipt
+    created later is never bound. A changed snapshot restarts the server with
+    fresh binds. Seatbelt grants by path, so macOS never needs the restart.
+    """
+    if request.agent_fs_scope != "workspace" or not sys.platform.startswith("linux"):
+        return ()
+    snapshot: list[tuple[str, tuple[int, int] | None]] = []
+    for raw in request.agent_read_only:
+        try:
+            st = os.stat(raw)
+        except OSError:  # missing or unreadable: nothing is bound
+            snapshot.append((raw, None))
+            continue
+        snapshot.append((raw, (st.st_ino, st.st_mtime_ns)))
+    return tuple(snapshot)
 
 
 async def _spawn_server(
@@ -681,6 +703,10 @@ def _file_touches(tool: str, raw: object) -> list[dict[str, str]] | None:
     """Paths a tool call writes, for the PWA's file-change cards."""
     if not isinstance(raw, Mapping):
         return None
+    if tool.lower() in {"shell", "bash"}:
+        from ciao.web.chat_broker import extract_file_touches
+
+        return extract_file_touches("bash", raw) or None
     action = {"write": "write", "edit": "edit", "patch": "edit"}.get(tool.lower())
     if action is None:
         return None
@@ -753,6 +779,18 @@ def usage_payload(tokens: Mapping[str, Any] | None) -> dict[str, str]:
         if total:
             usage["totalTokens"] = str(total)
     return usage
+
+
+def _summed_usage(steps: Iterable[Mapping[str, str]]) -> dict[str, str]:
+    """Per-key sum of several ``usage_payload`` dicts."""
+    totals: dict[str, int] = {}
+    for step in steps:
+        for key, value in step.items():
+            try:
+                totals[key] = totals.get(key, 0) + int(value)
+            except (TypeError, ValueError):
+                continue
+    return {key: str(value) for key, value in totals.items()}
 
 
 def _token_usage_events(tokens: object) -> list[StreamEvent]:
@@ -1513,38 +1551,53 @@ def _sandboxed_server_dirs(binary: str, *, path: str | None = None) -> tuple[lis
 LINKED_REPO_SKILL_DIRS: tuple[str, ...] = (".claude/skills", ".agents/skills", ".opencode/skills")
 
 
-def linked_repo_config_content(repo: str, existing: str = "") -> str:
-    """OPENCODE_CONFIG_CONTENT that adds the linked repo's skill folders.
+#: OpenCode's ``tool_output`` truncation thresholds for shell, webfetch, grep and
+#: the other output-producing tools. OpenCode's own default (2000 lines /
+#: 51,200 bytes) let one tool result take ~13K tokens of context; the full
+#: output is still saved to a file the agent can read on demand.
+TOOL_OUTPUT_MAX_LINES = 1000
+TOOL_OUTPUT_MAX_BYTES = 20_000
 
-    Returns "" when there is nothing to add (no repo, or no skill folder in
-    it): the caller then leaves the environment alone. ``existing`` is the
-    value already in the environment; its JSON object is kept and the repo
-    folders are appended to its ``skills.paths``. A value that is not a JSON
-    object is left untouched (logged) rather than replaced.
+
+def server_config_content(repo: str, existing: str = "") -> str:
+    """OPENCODE_CONFIG_CONTENT for a chat's server.
+
+    Sets the ``tool_output`` truncation thresholds and adds the linked repo's
+    skill folders to ``skills.paths``. ``existing`` is the value already in the
+    environment; its JSON object is kept, a ``tool_output`` it already sets
+    wins, and the repo folders are appended to its ``skills.paths``. A value
+    that is not a JSON object is left untouched (logged) and "" is returned:
+    the caller then leaves the environment alone.
     """
-    if not repo:
-        return ""
-    paths = [str(Path(repo) / d) for d in LINKED_REPO_SKILL_DIRS if (Path(repo) / d).is_dir()]
-    if not paths:
-        return ""
     try:
         config = json.loads(existing) if existing.strip() else {}
     except ValueError:
         config = None
     if not isinstance(config, dict):
         logger.warning(
-            "opencode: OPENCODE_CONFIG_CONTENT is not a JSON object; linked repo skills not added"
+            "opencode: OPENCODE_CONFIG_CONTENT is not a JSON object; "
+            "tool output limits and linked repo skills not added"
         )
         return ""
-    skills = config.setdefault("skills", {})
-    existing_paths = skills.get("paths", []) if isinstance(skills, dict) else None
-    if not isinstance(existing_paths, list):
-        logger.warning(
-            "opencode: OPENCODE_CONFIG_CONTENT has a non-standard skills block; "
-            "linked repo skills not added"
-        )
-        return ""
-    skills["paths"] = list(dict.fromkeys([*existing_paths, *paths]))
+    config.setdefault(
+        "tool_output",
+        {"max_lines": TOOL_OUTPUT_MAX_LINES, "max_bytes": TOOL_OUTPUT_MAX_BYTES},
+    )
+    paths = (
+        [str(Path(repo) / d) for d in LINKED_REPO_SKILL_DIRS if (Path(repo) / d).is_dir()]
+        if repo
+        else []
+    )
+    if paths:
+        skills = config.setdefault("skills", {})
+        existing_paths = skills.get("paths", []) if isinstance(skills, dict) else None
+        if isinstance(existing_paths, list):
+            skills["paths"] = list(dict.fromkeys([*existing_paths, *paths]))
+        else:
+            logger.warning(
+                "opencode: OPENCODE_CONFIG_CONTENT has a non-standard skills block; "
+                "linked repo skills not added"
+            )
     return json.dumps(config)
 
 
@@ -1624,12 +1677,17 @@ class OpencodeProvider(BaseSDKProvider):
         self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
         # Filesystem scope and roots the live server was started with.
-        self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        self._fs_scope_key: tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]] = ("machine", (), (), ())
+        # The read-only files' identities when it started (`_read_only_snapshot`).
+        self._read_only_snapshot: tuple[tuple[str, tuple[int, int] | None], ...] = ()
         self._linked_repo: str = ""  # linked repo the live server was started with
         # Background work of this chat's session. It outlives a turn, so it is
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
         # reconciles replace it wholesale (#1391).
         self._background_shells: set[str] = set()
+        # Command of each shell seen in `shell.created`, for the composer's
+        # process list. A shell found only by `GET /api/shell` has no entry.
+        self._shell_commands: dict[str, str] = {}
         self._background_children: set[str] = set()
         # Task/subagent sessions spawned under a parent session (any depth),
         # child id -> parent session. Only their permission/form requests are
@@ -1658,10 +1716,16 @@ class OpencodeProvider(BaseSDKProvider):
         # Set whenever `_steer_ids_pending` empties, so a pump that skipped its
         # terminal for a steer that was then refused stops waiting.
         self._steer_pending_emptied = asyncio.Event()
+        # The turn's own usage and cost: the sum of this turn's
+        # ``session.step.ended`` events, one per model call, keyed by assistant
+        # message so a repeated event cannot count twice. ``session.usage.updated``
+        # is a running total for the whole session (every earlier turn, title
+        # generation, a pre-rotation history), so recording it per turn counted
+        # the same tokens again on every turn. The latest step alone is the
+        # context-window occupancy.
         self._usage: dict[str, str] = {}
-        # ``session.usage.updated`` is a cumulative session snapshot, while
-        # ``session.step.ended`` describes the latest model call. Keep the
-        # latter separately for context-window occupancy.
+        self._step_usage: dict[str, dict[str, str]] = {}
+        self._step_cost: dict[str, float] = {}
         self._context_usage: dict[str, str] = {}
         self._cost: float | None = None
         # Visible assistant text, accumulated per part so the terminal
@@ -1702,6 +1766,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._steer_ids_owned.clear()
         self._steer_ids_delivered.clear()
         self._usage = {}
+        self._step_usage.clear()
+        self._step_cost.clear()
         self._context_usage = {}
         self._cost = None
         self._answer_parts.clear()
@@ -1775,6 +1841,13 @@ class OpencodeProvider(BaseSDKProvider):
         """Background shells plus subagents tracked for this chat's session."""
         return len(self._background_shells) + len(self._background_children)
 
+    def background_shell_rows(self) -> list[dict[str, str]]:
+        """``{id, command}`` for each live background shell, in id order."""
+        return [
+            {"id": shell_id, "command": self._shell_commands.get(shell_id, "")}
+            for shell_id in sorted(self._background_shells)
+        ]
+
     @property
     def seconds_since_activity(self) -> float:
         """Seconds since the server last sent this provider an event."""
@@ -1803,9 +1876,11 @@ class OpencodeProvider(BaseSDKProvider):
                 and str(info["id"]) not in self._background_shells
             ):
                 self._background_shells.add(str(info["id"]))
+                self._shell_commands[str(info["id"])] = str(info.get("command") or "")
                 changed = True
         elif kind == "shell.exited":
             shell_id = str(props.get("id") or "")
+            self._shell_commands.pop(shell_id, None)
             if shell_id in self._background_shells:
                 self._background_shells.discard(shell_id)
                 changed = True
@@ -1865,9 +1940,14 @@ class OpencodeProvider(BaseSDKProvider):
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             return len(self._background_shells)
         if shells != self._background_shells:
-            self._background_shells = shells
+            self._replace_background_shells(shells)
             self._background_changed.set()
         return len(self._background_shells)
+
+    def _replace_background_shells(self, shells: set[str]) -> None:
+        """Take the server's running shells, dropping commands of shells that are gone."""
+        self._background_shells = shells
+        self._shell_commands = {k: v for k, v in self._shell_commands.items() if k in shells}
 
     def _set_background_children(self, active: set[str], session_id: str) -> None:
         """Replace ``_background_children`` with what the server reports running.
@@ -2025,7 +2105,7 @@ class OpencodeProvider(BaseSDKProvider):
             active = await _read_active_sessions(client)
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
             return True
-        self._background_shells = shells
+        self._replace_background_shells(shells)
         self._set_background_children(active, session_id)
         return not shells and not self._background_children and session_id not in active
 
@@ -2219,22 +2299,24 @@ class OpencodeProvider(BaseSDKProvider):
 
         A changed MCP token forces a full restart: opencode reads MCP
         configuration at server scope, so the running process cannot be
-        re-pointed at a new token. A changed filesystem scope does too: the
-        sandbox wraps the server process itself. A changed filesystem scope or
-        linked repo does too.
+        re-pointed at a new token. A changed filesystem scope or linked repo
+        does too, since the sandbox wraps the server process itself, and on
+        Linux so does a replaced, created or deleted read-only runtime file
+        (`_read_only_snapshot`).
         """
         if self._client is not None and self._process is not None:
             if (
                 self._process.returncode is None
                 and provider_reuse_key(request) == self._mcp_token
-                and (request.agent_fs_scope, request.agent_roots) == self._fs_scope_key
+                and (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except) == self._fs_scope_key
+                and _read_only_snapshot(request) == self._read_only_snapshot
                 and linked_repo_of(request) == self._linked_repo
             ):
                 return self._client
             if self._process.returncode is None and self.background_work_outstanding:
                 logger.warning(
-                    "Restarting the OpenCode server for %s (agent token, filesystem scope or linked repo "
-                    "changed) stops %d background shell(s) and %d background subagent(s)",
+                    "Restarting the OpenCode server for %s (agent token, filesystem scope, runtime file "
+                    "or linked repo changed) stops %d background shell(s) and %d background subagent(s)",
                     self.workspace_root,
                     len(self._background_shells),
                     len(self._background_children),
@@ -2290,7 +2372,12 @@ class OpencodeProvider(BaseSDKProvider):
         effective_env = {**os.environ, **(request.extra_env or {})}
         writable, read_only, cache_home = _sandboxed_server_dirs(binary, path=effective_env.get("PATH", ""))
         roots = [Path(root) for root in request.agent_roots] + writable
-        prefix = opencode_sandbox_prefix(roots=roots, read_only=read_only)
+        prefix = opencode_sandbox_prefix(
+            roots=roots,
+            read_only=[*read_only, *(Path(p) for p in request.agent_read_only)],
+            denied=[Path(p) for p in request.agent_denied],
+            regrant=[Path(p) for p in request.agent_denied_except],
+        )
         for folder in writable:
             folder.mkdir(parents=True, exist_ok=True)
         # Exec the resolved binary: an npm install puts a symlink in
@@ -2307,6 +2394,10 @@ class OpencodeProvider(BaseSDKProvider):
     ) -> httpx.AsyncClient:
         """Start, validate, and register one opencode server process."""
         port = _free_port()
+        # Before the argv: the prefix decides each bind as it is built, so a
+        # file changed in between shows up as a difference next turn and
+        # restarts, instead of being recorded as already bound.
+        read_only_snapshot = _read_only_snapshot(request)
         argv, sandbox_env = self._server_launch(request, binary, port)
         self._password = secrets.token_urlsafe(24)
         env = {
@@ -2316,13 +2407,14 @@ class OpencodeProvider(BaseSDKProvider):
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
         self._linked_repo = linked_repo_of(request)
-        config_content = linked_repo_config_content(
+        config_content = server_config_content(
             self._linked_repo, env.get("OPENCODE_CONFIG_CONTENT", "")
         )
         if config_content:
             env["OPENCODE_CONFIG_CONTENT"] = config_content
         self._mcp_token = provider_reuse_key(request)
-        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except)
+        self._read_only_snapshot = read_only_snapshot
 
         # Say it now, while the environment we are about to hand over is in
         # hand: an unresolved placeholder becomes an empty credential and only
@@ -2476,6 +2568,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._tool_calls.clear()
         self._settled_tool_ids.clear()
         self._background_shells.clear()
+        self._shell_commands.clear()
         self._background_children.clear()
         self._child_sessions.clear()
         self._background_changed.set()
@@ -2499,7 +2592,8 @@ class OpencodeProvider(BaseSDKProvider):
             reader.cancel()
         self._base_url = ""
         self._mcp_token = ""
-        self._fs_scope_key = ("machine", ())
+        self._fs_scope_key = ("machine", (), (), ())
+        self._read_only_snapshot = ()
         self._linked_repo = ""
         self._session_handover_context = ""
         self._reset_settings()
@@ -3237,8 +3331,7 @@ class OpencodeProvider(BaseSDKProvider):
 
     def _restore_turn_metadata(self, messages: list[Any]) -> None:
         """Restore model, usage, cost, and assistant error after SSE loss."""
-        total_tokens: dict[str, int] = {}
-        last_context_usage: dict[str, str] = {}
+        message_usages: list[dict[str, str]] = []
         total_cost = 0.0
         for message in self._turn_scope(messages):
             info = message.get("info")
@@ -3262,26 +3355,18 @@ class OpencodeProvider(BaseSDKProvider):
                 self._effective_model = (
                     f"{provider_id}/{model_id}" if provider_id else model_id
                 )
-            tokens = info.get("tokens")
-            if isinstance(tokens, Mapping):
-                message_usage = usage_payload(tokens)
-                if message_usage:
-                    last_context_usage = message_usage
-                for key, value in message_usage.items():
-                    try:
-                        total_tokens[key] = total_tokens.get(key, 0) + int(value)
-                    except (TypeError, ValueError):
-                        continue
+            message_usage = usage_payload(info.get("tokens"))
+            if message_usage:
+                message_usages.append(message_usage)
             cost = info.get("cost")
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
                 total_cost += float(cost)
             message_error = info.get("error")
             if isinstance(message_error, Mapping):
                 self._poll_error = self._poll_error or error_text(message_error)
-        if total_tokens:
-            self._usage = {key: str(value) for key, value in total_tokens.items()}
-        if last_context_usage:
-            self._context_usage = last_context_usage
+        if message_usages:
+            self._usage = _summed_usage(message_usages)
+            self._context_usage = message_usages[-1]
         if total_cost:
             self._cost = total_cost
 
@@ -3558,18 +3643,28 @@ class OpencodeProvider(BaseSDKProvider):
                         f"{provider_id}/{model_id}" if provider_id else model_id
                     )
             return []
-        if kind in {"session.step.ended", "session.usage.updated"}:
+        if kind == "session.step.ended":
+            # An id-less step gets a fresh key: counting only `_step_usage`
+            # would reuse a cost-only step's key and overwrite its cost.
+            step = str(
+                props.get("assistantMessageID")
+                or f"step-{len(self._step_usage.keys() | self._step_cost.keys())}"
+            )
             cost = props.get("cost")
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-                self._cost = float(cost)
-            tokens = props.get("tokens")
-            if isinstance(tokens, Mapping):
-                event_usage = usage_payload(tokens)
-                if event_usage:
-                    if kind == "session.step.ended":
-                        self._context_usage = event_usage
-                    self._usage = event_usage or self._usage
-            return _token_usage_events(tokens)
+                self._step_cost[step] = float(cost)
+                self._cost = sum(self._step_cost.values())
+            event_usage = usage_payload(props.get("tokens"))
+            if not event_usage:
+                return []
+            self._context_usage = event_usage
+            self._step_usage[step] = event_usage
+            self._usage = _summed_usage(self._step_usage.values())
+            # The live counter shows the turn so far, not this one call.
+            return _token_usage_events({
+                "input": int(self._usage.get("inputTokens", 0)),
+                "output": int(self._usage.get("outputTokens", 0)),
+            })
 
         if kind == "permission.asked":
             return self._permission_event(props)
@@ -4236,8 +4331,8 @@ class OpencodeProvider(BaseSDKProvider):
             session_id=session_id,
             is_error=bool(error),
             effective_model=self._effective_model or request.model,
-            # Accumulated from the assistant message's own totals rather than
-            # summed per step, so a retried step cannot double-count.
+            # This turn's own model calls, summed per assistant message (a
+            # repeated step event replaces its entry rather than adding).
             usage=self._usage,
             cost_usd=self._cost,
             fallback_final=(bool(error) and saw_output) or degraded_final,
@@ -4454,44 +4549,84 @@ class OpencodeProvider(BaseSDKProvider):
                 return False
 
 
-def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int, bool]:
-    """Return running and observed counts, treating unknown activity safely."""
-    running = 0
-    for item in tree:
-        if not isinstance(item, Mapping):
+def opencode_child_status(
+    messages: list,
+    info: dict | None = None,
+    active: bool | None = None,
+) -> str:
+    """A V2 child session's lifecycle state.
+
+    ``/api/session/active`` is authoritative for the current execution;
+    ``Session.Info.outcome`` describes only the previous completed execution.
+    Normalized projected messages remain a defensive fallback for sparse data.
+    """
+    if active is True:
+        return "running"
+    last: dict | None = None
+    for message in messages:
+        if not isinstance(message, dict):
             continue
-        if "active" not in item:
-            continue
-        active = item.get("active")
-        if active is True:
-            running += 1
-            continue
-        if active is False:
-            continue
-        messages = item.get("messages")
-        if not isinstance(messages, list):
-            # A different process cannot prove that a child with no projected
-            # assistant row is idle. Keep it conservatively running.
-            running += 1
-            continue
-        last: Mapping[str, Any] | None = None
-        for message in messages:
-            if not isinstance(message, Mapping):
-                continue
-            info = message.get("info")
-            if isinstance(info, Mapping) and info.get("role") == "assistant":
-                last = info
-        if last is None:
-            running += 1
-            continue
-        time_info = last.get("time") if isinstance(last, Mapping) else None
+        message_info = message.get("info")
+        if isinstance(message_info, dict) and message_info.get("role") == "assistant":
+            last = message_info
+    if last is not None:
+        if last.get("error"):
+            return "failed"
+        time_info = last.get("time")
         if (
-            isinstance(time_info, Mapping)
+            isinstance(time_info, dict)
             and time_info.get("created")
             and not time_info.get("completed")
         ):
-            running += 1
-    return running, bool(tree)
+            return "running"
+    if isinstance(info, dict):
+        outcome = str(info.get("outcome") or "")
+        if outcome == "failed":
+            return "failed"
+        if outcome in {"succeeded", "interrupted"}:
+            return "completed"
+        if active is None:
+            # A read from a different OpenCode process cannot establish
+            # inactivity. Keep an unobserved child visible/running rather than
+            # allowing an archive or schedule waiter to settle it early.
+            return "running"
+    if active is False:
+        return "completed"
+    if active is None and isinstance(info, dict):
+        return "running"
+    return "completed"
+
+
+def running_opencode_child_ids(tree: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Ids of the children in a collab tree that are still running.
+
+    The one running-child rule, shared by the watcher count and the
+    running-subagents route: a child runs by ``opencode_child_status``
+    (``active`` is authoritative; otherwise message timing and ``outcome``).
+    """
+    ids: list[str] = []
+    for item in tree:
+        if not isinstance(item, Mapping):
+            continue
+        info = item.get("info")
+        info = info if isinstance(info, dict) else {}
+        child_id = str(info.get("id") or "")
+        if not child_id:
+            continue
+        messages = item.get("messages")
+        messages = messages if isinstance(messages, list) else []
+        active = item.get("active")
+        status = opencode_child_status(
+            messages, info, active if isinstance(active, bool) else None
+        )
+        if status == "running":
+            ids.append(child_id)
+    return ids
+
+
+def opencode_collab_tree_counts(tree: Sequence[Mapping[str, Any]]) -> tuple[int, bool]:
+    """Return the running child count and whether the tree has any children."""
+    return len(running_opencode_child_ids(tree)), bool(tree)
 
 
 def catalog_providers(catalog: Sequence[Mapping[str, Any]]) -> set[str]:

@@ -905,7 +905,7 @@ def read_health_cache(runtime_root: Path) -> dict[str, dict[str, Any]]:
 
 
 class GwsHealthMonitor:
-    """Debounced token-validity check for configured GWS profiles.
+    """Debounced token-validity check: checks configured GWS profiles; notifies only for linked ones.
 
     On the transition to an invalid token it emits a PWA notification (via the
     push manager) and an in-app ``gws_health`` status event (via the events
@@ -960,6 +960,7 @@ class GwsHealthMonitor:
         )
 
     def _configured_profiles(self) -> list[str]:
+        """Profiles with credentials."""
         out: list[str] = []
         for profile in known_profiles(self._config):
             config_dir = profile_config_dir(self._config, profile)
@@ -971,6 +972,10 @@ class GwsHealthMonitor:
             ):
                 out.append(profile)
         return out
+
+    def _linked_profiles(self) -> set[str]:
+        """Profile ids some active workspace links; archived workspaces are outside config.workspaces."""
+        return {str(w.gws_profile or "").strip() for w in self._config.workspaces.values()}
 
     def check_once(self) -> dict[str, Any]:
         """Check every configured profile once. Returns a summary for logging.
@@ -988,6 +993,7 @@ class GwsHealthMonitor:
         with self._lock:
             state = self._load()
             summary: dict[str, Any] = {"checked": [], "invalid": [], "notified": []}
+            linked = self._linked_profiles()
             for profile in self._configured_profiles():
                 status = self._status_fn(self._config, profile)
                 summary["checked"].append(profile)
@@ -1035,6 +1041,7 @@ class GwsHealthMonitor:
                     if (
                         consecutive_invalid >= self._notify_threshold
                         and not prior.get("notified_invalid")
+                        and profile in linked
                     ):
                         self._notify(profile, token_error)
                         entry["notified_invalid"] = True
@@ -1053,8 +1060,9 @@ class GwsHealthMonitor:
         title = "Google Workspace login needs attention"
         body = (
             f"The '{profile}' Google login may have expired or been revoked. "
-            "Re-authenticate in Settings → Workspaces to restore Gmail, "
-            "Calendar, Drive, and scheduled Google tasks."
+            "Re-authenticate in Settings → Overview → Google account (open the "
+            "workspace that uses it) to restore Gmail, Calendar, Drive, and "
+            "scheduled Google tasks."
         )
         if self._push is not None:
             try:

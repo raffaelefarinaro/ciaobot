@@ -107,6 +107,23 @@
               <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(workspace.name) || workspaceInitial(workspace.name) }}</span>
               <span class="workspace-scope-name">{{ workspaceLabel(workspace.name) }}</span>
             </button>
+            <div class="workspace-scope-divider" role="separator"></div>
+            <router-link
+              to="/settings/workspace"
+              role="menuitem"
+              class="workspace-scope-option workspace-scope-link"
+              @click="workspaceScopeOpen = false"
+            >
+              <span class="workspace-scope-name">Workspace settings</span>
+            </router-link>
+            <router-link
+              to="/settings/workspaces"
+              role="menuitem"
+              class="workspace-scope-option workspace-scope-link"
+              @click="workspaceScopeOpen = false"
+            >
+              <span class="workspace-scope-name">Manage workspaces</span>
+            </router-link>
             <router-link
               to="/settings/workspaces#new-workspace"
               role="menuitem"
@@ -141,10 +158,7 @@
           <router-link
             to="/"
             class="nav-item"
-            :class="{
-              'nav-item--active': mode === 'chat' || mode === 'project',
-              'nav-item--working': isAnyChatWorking
-            }"
+            :class="{ 'nav-item--active': mode === 'chat' || mode === 'project' }"
             title="Home"
             :data-count="todayCount || undefined"
             :aria-label="todayCount > 0 ? `Home — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Home (assistant is working)' : 'Home')"
@@ -161,6 +175,7 @@
 
             </span>
             <span class="nav-item-label" aria-hidden="true">Home</span>
+            <span v-if="isAnyChatWorking" class="spinner-dot" aria-hidden="true"></span>
           </router-link>
           <router-link
             to="/schedules"
@@ -186,6 +201,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Automations</span>
+            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"></span>
           </router-link>
           <router-link
             to="/memory"
@@ -237,7 +253,7 @@
             <span class="nav-item-label" aria-hidden="true">Tasks</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
-               (/settings/models, /settings/workspaces, ...) and none of them match
+               (/settings/providers, /settings/workspaces, ...) and none of them match
                the /settings record, so active-class left this item inactive on
                nearly every settings page - and with it the label collapsed. The
                sibling links already key off mode for the same reason. -->
@@ -262,6 +278,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Settings</span>
+            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"></span>
           </router-link>
         </nav>
 
@@ -319,7 +336,7 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item schedule-item--once"
-                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
+                :class="{ 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
@@ -341,7 +358,7 @@
                 aria-label="New automation"
                 title="New automation"
                 @click="emit('new-schedule')"
-              >New</button>
+              ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
             </div>
             <p v-if="!userRoutines.length" class="sidebar-empty-note">No routines in this workspace yet.</p>
             <div v-else class="schedule-group-items">
@@ -350,7 +367,7 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
+                :class="{ 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
@@ -374,7 +391,7 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
+                :class="{ 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
@@ -397,15 +414,33 @@
 
     <template v-if="!collapsed && mode === 'settings'">
       <nav class="settings-nav-list" aria-label="Settings sections">
-        <h2 class="sidebar-list-label">Settings</h2>
-        <router-link
-          v-for="item in SETTINGS_NAV"
-          :key="item.to"
-          :to="item.to"
-          class="settings-nav-item"
-          :class="{ active: route.path === item.to }"
-          :aria-current="route.path === item.to ? 'page' : undefined"
-        >{{ item.label }}</router-link>
+        <div
+          v-for="group in SETTINGS_NAV_GROUPS"
+          :key="group.id"
+          class="settings-nav-group"
+          role="group"
+          :aria-labelledby="`settings-nav-heading-${group.id}`"
+        >
+          <h2
+            :id="`settings-nav-heading-${group.id}`"
+            class="sidebar-list-label settings-nav-heading"
+            :data-workspace-color="group.label === null ? activeWorkspaceAccent(store.workspaces, store.activeWorkspace) : undefined"
+          >
+            <template v-if="group.label !== null">{{ group.label }}</template>
+            <template v-else>
+              <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) || workspaceInitial(store.activeWorkspace) }}</span>
+              <span class="settings-nav-heading-name">{{ workspaceLabel(store.activeWorkspace) || 'Workspace' }}</span>
+            </template>
+          </h2>
+          <router-link
+            v-for="item in group.items"
+            :key="item.to"
+            :to="item.to"
+            class="settings-nav-item"
+            :class="{ active: route.path === item.to }"
+            :aria-current="route.path === item.to ? 'page' : undefined"
+          >{{ item.label }}</router-link>
+        </div>
       </nav>
     </template>
 
@@ -523,14 +558,18 @@
               <span
                 v-if="chat.title_status === 'pending'"
                 class="title-shimmer"
-                aria-label="Generating title"
-                title="Generating title..."
+                aria-hidden="true"
+                title="Naming conversation"
               />
               <span
                 v-else
                 class="recent-title"
                 :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
               >{{ chat.title }}</span>
+              <!-- A bare span is role=generic, which cannot be named: the bar
+                   is hidden from assistive tech and the name travels as text
+                   beside it. -->
+              <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
               <ChatSignals
                 :chat-id="chat.chat_id"
                 density="row"
@@ -555,7 +594,7 @@
             aria-label="New project"
             title="New project"
             @click="addProject"
-          >New</button>
+          ><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>New</button>
           <button
             type="button"
             class="sidebar-label-icon archive-btn"
@@ -728,28 +767,44 @@
                     role="link"
                     :tabindex="chat.local === false ? -1 : 0"
                     :aria-disabled="chat.local === false"
-                    :title="chat.local === false ? `${chat.title}\nThis chat lives on another instance` : `${chat.title}\nDrag to move to another project`"
+                    :title="chatRowTitle(chat, project.repo)"
                   >
                     <span
                       v-if="chat.title_status === 'pending'"
                       class="title-shimmer"
-                      aria-label="Generating title"
-                      title="Generating title..."
+                      aria-hidden="true"
+                      title="Naming conversation"
                     />
                     <span
                       v-else
                       class="chat-title"
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
-                    <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
-                    <span v-if="isChatCodeModeOn(chat, project.repo) && !branchChip(chat, project.repo)" class="chat-code-tag" title="Code mode is on">code</span>
+                    <!-- A bare span is role=generic, which cannot be named: the
+                         bar is hidden from assistive tech and the name travels
+                         as text beside it. The row is not a live region; only
+                         the chat header announces the naming. -->
+                    <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
+                    <span
+                      v-if="taskSignals.isTaskChat(chat)"
+                      class="chat-task-tag"
+                      :title="taskBadgeTitle(chat)"
+                    ><TaskGlyph /></span>
+                    <!-- The tag hides with the row's other marks on hover, so the
+                         qualifier also travels as text: the row title for a
+                         pointer, a hidden line for a screen reader. -->
+                    <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
+                    <span
+                      v-if="isChatCodeModeOn(chat, project.repo)"
+                      class="chat-code-tag"
+                      role="img"
+                      :title="codeBadgeTitle(chat, project.repo)"
+                      :aria-label="codeBadgeTitle(chat, project.repo)"
+                    >›_</span>
                     <span
                       v-if="branchChip(chat, project.repo)"
-                      class="chat-repo-tag"
-                      :class="{
-                        'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed,
-                        'chat-repo-tag--code-off': branchChip(chat, project.repo)!.codeOff,
-                      }"
+                      class="chat-repo-tag chat-repo-tag--code-off"
+                      :class="{ 'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed }"
                       :title="branchChip(chat, project.repo)!.title"
                     >{{ branchChip(chat, project.repo)!.label }}</span>
                     <ChatSignals
@@ -919,7 +974,8 @@ import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
-import { sidebarBranchChip } from '../lib/repoLocation'
+import TaskGlyph from './TaskGlyph.vue'
+import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
 import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
@@ -927,7 +983,7 @@ import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
 import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
-import { SETTINGS_NAV } from '../lib/settingsNav'
+import { SETTINGS_NAV_GROUPS } from '../lib/settingsNav'
 import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 import { projectDeleteMessage, projectDeleteToastBody } from '../lib/projectDelete'
@@ -1089,12 +1145,9 @@ const memoryCount = computed(() => {
   const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
   return proposals.scopedRows(workspace).length + retirement
 })
-// Settings has no count; a word says what kind of attention it wants.
-const settingsNote = computed(() => {
-  if (hasBlockingHousekeeping.value) return 'check'
-  if (store.packageStatus?.update_available) return 'update'
-  return ''
-})
+// Settings has no count. A blocking action is the warning dot like any other
+// failure; an available update is news, not trouble, so it is a muted word.
+const settingsNote = computed(() => (store.packageStatus?.update_available ? 'update' : ''))
 
 function projectAttention(projectId: string): number {
   return store.projectNeedsInput(projectId) + store.projectUnread(projectId)
@@ -1109,9 +1162,40 @@ function projectAttentionLabel(projectId: string): string {
   return parts.join(', ')
 }
 
-// The branch chip for a chat row, with code mode folded in.
+// The branch tag for a chat row. In code mode the row carries the compact
+// `code` badge instead, so the branch tag marks a code-off row only.
 function branchChip(chat: ChatInfo, repo: ProjectInfo['repo']) {
-  return sidebarBranchChip(repo, chat.repo_location, isChatCodeModeOn(chat, repo))
+  if (isChatCodeModeOn(chat, repo)) return null
+  return sidebarBranchChip(repo, chat.repo_location)
+}
+
+// The `code` badge's facts: the repository, the branch the chat works on and
+// the folder it works in. Undefined without a linked repository, which is also
+// when the badge does not render.
+function codeBadgeTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string | undefined {
+  if (!repo || !isChatCodeModeOn(chat, repo)) return undefined
+  return sidebarCodeBadgeTitle(repo, chat.repo_location)
+}
+
+// Which relation the task badge stands for: the board task is delegated to
+// this chat, or the chat is only linked to it. The word on the badge stays
+// `task`; the qualifier is in the tooltip and the accessible name, so a
+// linked chat never claims to be the task's attempt.
+function taskBadgeTitle(chat: ChatInfo): string {
+  return taskSignals.isDelegatedChat(chat) ? 'Delegated board task' : 'Linked to a board task'
+}
+
+// The chat row's own title: the chat's name, the row's guidance, and, in code
+// mode, the repository facts. A mouse hides the row's marks while its actions
+// show, so the facts live here too, where they stay reachable.
+function chatRowTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string {
+  if (chat.local === false) return `${chat.title}\nThis chat lives on another instance`
+  const lines = [chat.title, 'Drag to move to another project']
+  const task = taskSignals.isTaskChat(chat) ? taskBadgeTitle(chat) : ''
+  if (task) lines.push(task)
+  const facts = codeBadgeTitle(chat, repo)
+  if (facts) lines.push(facts)
+  return lines.join('\n')
 }
 
 // Background command runs across this project's visible chats. A run can sit
@@ -1135,7 +1219,7 @@ function openWorkspaceMenu(): void {
   workspaceScopeOpen.value = true
   void nextTick(() => {
     workspaceScopeMenu.value
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+      ?.querySelector<HTMLElement>('[role="menuitem"]')
       ?.focus()
   })
 }
@@ -1166,7 +1250,7 @@ function selectWorkspaceScope(workspace: string): void {
 }
 
 function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
-  const items = Array.from(workspaceScopeMenu.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])
+  const items = Array.from(workspaceScopeMenu.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
   if (!items.length) return
   if (event.key === 'Escape') {
     event.preventDefault()
@@ -1178,7 +1262,7 @@ function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
     closeWorkspaceMenu(false)
     return
   }
-  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  const current = items.indexOf(document.activeElement as HTMLElement)
   let next = current
   if (event.key === 'Home') next = 0
   else if (event.key === 'End') next = items.length - 1
@@ -1291,7 +1375,7 @@ defineExpose({ onArrow })
 
 async function selectAutomationWorkspace(workspace: string) {
   if (store.activeWorkspace !== workspace) {
-    await store.switchWorkspace(workspace, { transition: false })
+    if ((await store.switchWorkspace(workspace, { transition: false })) === false) return
   }
   if (props.mode === 'schedules') await router.push('/schedules')
 }
@@ -2199,19 +2283,29 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Subtle section counts: plain numerals on the right of the row, drawn from
    a data attribute so they stay out of the link's text (its aria-label
-   carries the full sentence). Needs-you on Home uses the accent colour;
-   everything else stays muted. */
+   carries the full sentence). One colour role per signal: every count is
+   the same muted numeral, a failure is the warning dot (.nav-item-alert),
+   live work is the spinner dot, and the accent marks only the current row.
+   Icons never change colour. */
 .nav-item[data-count]::after,
 .nav-item[data-note]::after {
-  margin-left: auto;
   color: var(--fg3);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
 .nav-item[data-count]::after { content: attr(data-count); }
-.nav-item[data-note]::after { content: attr(data-note); color: var(--warning); font-family: var(--font-sans); }
-.nav-item[href="/"][data-count]::after { color: var(--accent); font-weight: 600; }
+.nav-item[data-note]::after { content: attr(data-note); font-family: var(--font); }
+
+.nav-item-alert {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.nav-item .spinner-dot { margin-left: 0; }
 
 /* Coarse pointers get the full 44px target on every rail row. */
 @media (pointer: coarse) {
@@ -2219,8 +2313,10 @@ async function confirmDeleteChat(chatId: string) {
   .sidebar-new-chat { min-height: var(--touch); }
 }
 
-/* aria-hidden because .nav-item already carries the full aria-label. */
+/* aria-hidden because .nav-item already carries the full aria-label. It
+   grows, so the dots and the count after it sit at the row's right edge. */
 .nav-item-label {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: inherit;
@@ -2239,56 +2335,11 @@ async function confirmDeleteChat(chatId: string) {
   outline-offset: 1px;
 }
 
-.nav-item--working svg {
-  animation: pulse-working 2.2s infinite ease-in-out;
-  color: var(--accent);
-}
-
-.nav-item--warning svg {
-  animation: pulse-warning 2.2s infinite ease-in-out;
-  color: var(--warning);
-}
-
-@keyframes pulse-working {
-  0%, 100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.55;
-    transform: scale(0.92);
-  }
-}
-
-@keyframes pulse-warning {
-  0%, 100% {
-    opacity: 1;
-    transform: scale(1);
-    filter: drop-shadow(0 0 0px var(--warning));
-  }
-  50% {
-    opacity: 0.7;
-    transform: scale(1.06);
-    filter: drop-shadow(0 0 1px var(--warning));
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .nav-item--working svg,
-  .nav-item--warning svg {
-    animation: none;
-  }
-}
-
 .nav-item--active,
 .nav-item--active:hover {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
   background: color-mix(in srgb, var(--accent) 13%, transparent);
   color: var(--fg);
-}
-
-.nav-item--active .nav-item-icon {
-  color: var(--accent);
 }
 
 .workspace-toggle {
@@ -2360,7 +2411,7 @@ async function confirmDeleteChat(chatId: string) {
   margin: 4px 0 0;
   padding: 6px 10px 5px;
   color: var(--fg3);
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
 }
 
 /* Flat rows rather than a bordered box per project: the tree keeps its
@@ -2401,6 +2452,26 @@ async function confirmDeleteChat(chatId: string) {
   .project-header {
     min-height: 36px;
     padding-block: 2px;
+  }
+
+  /* Idle project names may use the slots reserved for hover actions. Keep the
+     buttons in the tab order at zero width; focusing or hovering restores the
+     full target before it is activated. */
+  .project-header .project-actions-btn,
+  .project-header .add-chat-btn {
+    width: 0;
+    min-width: 0;
+  }
+
+  .project-header:hover .project-actions-btn,
+  .project-header:focus-within .project-actions-btn,
+  .project-actions-btn:focus,
+  .project-actions-btn[data-state='open'],
+  .project-header:hover .add-chat-btn,
+  .project-header:focus-within .add-chat-btn,
+  .add-chat-btn:focus {
+    width: var(--touch);
+    min-width: var(--touch);
   }
 
   .project-list .chat-item {
@@ -2658,24 +2729,23 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
 }
 
-/* A delegated task's chat says so in words, as a small squared tag
-   (DESIGN.md: --radius-xs, the keycap's tokens) so it cannot read as a count.
-   It never shrinks; the title truncates first, and the tag stays short. */
+/* The task and code marks are glyphs (code `›_`, task checkbox); the names
+   live in title/aria. They never shrink; the title truncates first. */
 .chat-task-tag,
 .chat-code-tag {
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  align-items: center;
   flex: 0 0 auto;
   height: 16px;
-  padding: 0 4px;
-  box-sizing: border-box;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
   color: var(--fg3);
-  font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
 }
 
-/* Same squared tag as .chat-task-tag, but it can truncate (branch names run long). */
+.chat-code-tag {
+  font: 700 calc(11px * var(--font-scale))/1 var(--font-mono);
+  letter-spacing: -0.04em;
+}
+
+/* A squared tag that can truncate (branch names run long). */
 .chat-repo-tag {
   flex: 0 1 auto;
   min-width: 0;
@@ -2818,13 +2888,19 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-scope-option.active {
   color: var(--accent);
 }
+.workspace-scope-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+.workspace-scope-link,
 .workspace-scope-new {
-  margin-top: 4px;
-  border-top: 1px solid var(--border);
-  border-radius: 0 0 5px 5px;
   color: var(--fg2);
   text-decoration: none;
 }
+/* Line the text up with the workspace names above (past the 22px tile). */
+.workspace-scope-link { padding-left: calc(var(--space-2) + 22px + var(--space-2)); }
+.workspace-scope-link:hover,
 .workspace-scope-new:hover { color: var(--fg); }
 .workspace-scope-mark--new {
   background: transparent;
@@ -2838,39 +2914,6 @@ async function confirmDeleteChat(chatId: string) {
   .workspace-status-ring { animation: none; }
   .rollup-ring::before,
   .workspace-status-ring::before { animation: none; opacity: 0.3; }
-}
-
-/* Shimmer placeholder shown in the sidebar while the server auto-titles
-   a brand new chat. The linear-gradient "sweep" is what the eye reads as
-   "something is happening", similar to skeleton loaders elsewhere. */
-.title-shimmer {
-  flex: 1;
-  min-width: 0;
-  height: 12px;
-  border-radius: 4px;
-  background: linear-gradient(
-    90deg,
-    var(--bg2) 0%,
-    var(--bg3) 50%,
-    var(--bg2) 100%
-  );
-  background-size: 200% 100%;
-  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
-}
-
-@keyframes title-shimmer-sweep {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .title-shimmer {
-    animation: title-shimmer-pulse 1.8s ease-in-out infinite;
-  }
-  @keyframes title-shimmer-pulse {
-    0%, 100% { opacity: 0.6; }
-    50% { opacity: 1; }
-  }
 }
 
 /* Three-dot chat actions. Hidden by default on desktop, fade in on row
@@ -2960,17 +3003,22 @@ async function confirmDeleteChat(chatId: string) {
 }
 .sidebar-label-row .sidebar-list-label,
 .sidebar-label-row .schedule-group-header { flex: 1; min-width: 0; margin: 0; }
+/* A ghost action: muted at rest, a fill on hover. Never the accent, which in
+   the sidebar marks only the current row and the workspace. */
 .sidebar-label-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   min-height: 28px;
   padding: 0 8px;
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
-  color: var(--accent);
-  font: 600 var(--text-xs)/1 var(--font-sans);
+  color: var(--fg2);
+  font: 600 var(--text-xs)/1 var(--font);
   cursor: pointer;
 }
-.sidebar-label-link:hover { background: var(--bg3); }
+.sidebar-label-link:hover { background: var(--bg3); color: var(--fg); }
 .sidebar-label-icon {
   width: 28px;
   height: 28px;
@@ -3189,7 +3237,7 @@ async function confirmDeleteChat(chatId: string) {
   margin: 4px 0 0;
   padding: 6px 10px 5px;
   color: var(--fg3);
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
 }
 .schedule-group-items {
   display: flex;
@@ -3243,7 +3291,6 @@ async function confirmDeleteChat(chatId: string) {
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
-.schedule-item--missed .schedule-time { color: var(--warning); }
 .schedule-item--disabled .schedule-label { color: var(--fg3); }
 .schedule-item .missed-dot {
   width: 6px;
@@ -3262,6 +3309,25 @@ async function confirmDeleteChat(chatId: string) {
 }
 .settings-nav-list .sidebar-list-label {
   margin: 0;
+}
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-nav-group + .settings-nav-group {
+  margin-top: 12px;
+}
+.settings-nav-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-nav-heading-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .settings-nav-item {
   display: flex;
@@ -3310,7 +3376,7 @@ async function confirmDeleteChat(chatId: string) {
 /* Same register as the chat rail's "Projects" label: 11px sans, sentence
    case. The old uppercase tracked labels read as a second kind of heading. */
 .mm-sidebar-scroll h3 {
-  font: 600 var(--text-xs)/1.2 var(--font-sans);
+  font: 600 var(--text-xs)/1.2 var(--font);
   color: var(--fg3);
   margin: var(--space-4) 0 var(--space-1);
   padding: 0 8px;
@@ -3355,13 +3421,21 @@ async function confirmDeleteChat(chatId: string) {
   border-radius: 999px;
   background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
   background-size: 200% 100%;
-  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+  /* The skeleton line keeps a sweep of its own. The naming placeholder's
+     keyframes live in components/titleShimmer.css, and a scoped style block
+     cannot name the @keyframes another block declares: Vue renames them per
+     block, so the name here would never resolve. */
+  animation: mm-shimmer-sweep 1.4s ease-in-out infinite;
+}
+@keyframes mm-shimmer-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 .mm-shimmer-line--n { width: 56%; height: 16px; margin-bottom: 8px; }
 .mm-shimmer-line--l { width: 78%; height: 8px; }
 .mm-skeleton-block { margin-top: var(--space-3); }
 @media (prefers-reduced-motion: reduce) {
-  .mm-shimmer-line { animation: title-shimmer-pulse 1.8s ease-in-out infinite; }
+  .mm-shimmer-line { animation: none; }
 }
 .history-loading-spinner {
   width: 9px;
@@ -3479,3 +3553,7 @@ button.mm-link-item:focus-visible { outline: 2px solid var(--accent); outline-of
   font-size: var(--text-sm) !important;
 }
 </style>
+
+<!-- The shared naming placeholder: the same bar the chat header shows while
+     the engine names a chat. -->
+<style scoped src="./titleShimmer.css"></style>

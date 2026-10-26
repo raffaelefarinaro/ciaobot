@@ -1,33 +1,59 @@
 <template>
   <!-- What the agent is given for this chat, each with when it is sent. Shared
        by the Chat details rail and the narrow-pane drawer. -->
-  <section class="rail-section agent-context" aria-labelledby="agent-context-label">
-    <p id="agent-context-label" class="rail-label">Agent context</p>
-    <template v-if="contextPct != null">
-      <div class="agent-context-meter-row">
-        <div
-          class="agent-context-meter"
-          role="meter"
-          :aria-valuenow="contextPct"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-label="Context window used"
-        >
-          <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
-          <strong>{{ contextPctLabel }}</strong>
-        </div>
+  <section v-if="contextPct != null" class="rail-section agent-context" :aria-labelledby="usageLabelId">
+    <p :id="usageLabelId" class="rail-label">Context usage</p>
+    <div class="agent-context-meter-row">
+      <div
+        class="agent-context-meter"
+        role="meter"
+        :aria-valuenow="contextPct"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-label="Context window used"
+      >
+        <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
+        <strong>{{ contextPctLabel }}</strong>
+      </div>
+      <button
+        type="button"
+        class="btn-small agent-context-compact"
+        :disabled="compactDisabled"
+        :aria-busy="compacting ? 'true' : undefined"
+        title="Compact this chat's context into a shorter summary"
+        @click="emit('compact')"
+      >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
+    </div>
+    <p class="agent-context-usage-note">{{ contextPctLabel }} of context window used</p>
+  </section>
+  <!-- Closed by default: these rows are the same every turn, so they are
+       reference, not news. The summary still says how much they cost. -->
+  <details class="rail-section agent-context agent-context-loaded" :open="loadedOpen" @toggle="onLoadedToggle">
+    <summary class="agent-context-summary">
+      <svg class="agent-context-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
+      <span class="agent-context-summary-label">Always loaded</span>
+      <span v-if="loadedTokens" class="agent-context-meta">{{ formatTokens(loadedTokens) }} tokens</span>
+    </summary>
+    <div class="rail-list">
+      <div v-if="systemPrompt" class="rail-item agent-context-row agent-context-system">
         <button
           type="button"
-          class="btn-small agent-context-compact"
-          :disabled="compactDisabled"
-          :aria-busy="compacting ? 'true' : undefined"
-          title="Compact this chat's context into a shorter summary"
-          @click="emit('compact')"
-        >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
+          class="agent-context-system-toggle"
+          :aria-expanded="systemPromptOpen"
+          :aria-controls="systemPromptOpen ? systemPromptId : undefined"
+          @click="systemPromptOpen = !systemPromptOpen"
+        >
+          <span class="agent-context-row-top">
+            <span class="agent-context-name">Ciaobot system prompt</span>
+            <span class="agent-context-meta">{{ formatTokens(systemPromptTokens) }} tokens</span>
+          </span>
+          <small>Added to the provider's own system prompt · every session</small>
+        </button>
+        <div v-if="systemPromptOpen" :id="systemPromptId" class="agent-context-system-body">
+          <button type="button" class="agent-context-link" aria-live="polite" @click="copySystemPrompt">{{ copied ? 'Copied' : 'Copy' }}</button>
+          <pre class="agent-context-system-text" tabindex="0">{{ systemPrompt }}</pre>
+        </div>
       </div>
-    </template>
-    <p class="agent-context-sub">Always loaded</p>
-    <div class="rail-list">
       <button
         v-if="guide.path"
         type="button"
@@ -76,14 +102,16 @@
         </span>
       </div>
     </div>
-  </section>
+  </details>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
 import { linkifyText } from '../lib/filePaths'
 import { joinRepoPath, repoName } from '../lib/repo'
+import { writeClipboard } from '../lib/codeCopy'
+import { fetchSystemPrompt } from '../lib/systemPrompt'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
 
 const props = defineProps<{
@@ -96,8 +124,14 @@ const props = defineProps<{
   compactDisabled: boolean
   /** Code mode is effectively on (chat.code_mode and a linked repo). */
   codeMode?: boolean
+  /** Bumped by a caller that points at this section ("See what Ciao knows"): opens Always loaded. */
+  revealKey?: number
 }>()
 const emit = defineEmits<{ 'open-file': [path: string]; compact: [] }>()
+
+// Unique per instance: the rail and the drawer are one component, and the
+// usage group's heading must not collide with anything else's.
+const usageLabelId = useId()
 
 const guide = ref<WorkspaceGuide>({ path: '', content: '', error: '' })
 let guideSeq = 0
@@ -151,6 +185,43 @@ function openContextFile(event: MouseEvent) {
   emit('open-file', path)
 }
 
+// Open or closed is remembered per browser, like Memory's "How memory works".
+const LOADED_OPEN_KEY = 'ciao.chatDetails.alwaysLoadedOpen'
+function readLoadedOpen(): boolean {
+  try { return localStorage.getItem(LOADED_OPEN_KEY) === '1' } catch { return false }
+}
+const loadedOpen = ref(readLoadedOpen())
+function onLoadedToggle(event: Event) {
+  loadedOpen.value = (event.target as HTMLDetailsElement).open
+  try { localStorage.setItem(LOADED_OPEN_KEY, loadedOpen.value ? '1' : '0') } catch { /* private mode */ }
+}
+watch(() => props.revealKey, (key) => { if (key) loadedOpen.value = true })
+
+// Ciaobot's own prompt is static per engine: fetched once, and a failed fetch
+// hides the row (it is reference, not a user file).
+const systemPrompt = ref('')
+const systemPromptOpen = ref(false)
+const systemPromptId = useId()
+const systemPromptTokens = computed(() => tokensFor(systemPrompt.value.length))
+onMounted(async () => { systemPrompt.value = await fetchSystemPrompt() })
+const copied = ref(false)
+let copyTimer: ReturnType<typeof setTimeout> | undefined
+async function copySystemPrompt() {
+  if (!(await writeClipboard(systemPrompt.value))) return
+  copied.value = true
+  clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => { copied.value = false }, 1500)
+}
+onBeforeUnmount(() => clearTimeout(copyTimer))
+
+const loadedTokens = computed(() => {
+  let total = guide.value.path ? guideTokens.value : 0
+  if (systemPrompt.value) total += systemPromptTokens.value
+  if (props.project && briefText.value) total += briefTokens.value
+  if (repoInstr.value) total += tokensFor(repoInstr.value.chars)
+  return total
+})
+
 const contextPctLabel = computed(() => {
   const pct = props.contextPct
   if (pct == null) return ''
@@ -160,12 +231,12 @@ const contextPctLabel = computed(() => {
 </script>
 
 <style scoped>
-.agent-context-sub { margin: var(--space-3) 0 var(--space-1); color: var(--fg3); font-size: var(--text-xs); }
+.agent-context-usage-note { margin: 0 0 var(--space-2); color: var(--fg3); font-size: var(--text-xs); }
 .agent-context-meter-row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin: 4px 0 10px;
+  margin: 4px 0 6px;
 }
 .agent-context-meter {
   flex: 1;
@@ -196,6 +267,32 @@ const contextPctLabel = computed(() => {
   background: var(--fg2);
 }
 .agent-context-meter strong { font-variant-numeric: tabular-nums; }
+.agent-context-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  list-style: none;
+  cursor: pointer;
+}
+.agent-context-summary::-webkit-details-marker { display: none; }
+.agent-context-summary:hover { color: var(--fg); }
+.agent-context-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.agent-context-summary-label { flex: 1; min-width: 0; }
+.agent-context-chevron { flex: none; transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1); }
+.agent-context-loaded[open] .agent-context-chevron { transform: rotate(90deg); }
+.agent-context-loaded[open] .agent-context-summary { margin-bottom: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .agent-context-chevron { transition: none; }
+}
+@media (pointer: coarse) {
+  .agent-context-summary { min-height: var(--touch); }
+}
 .agent-context-row { gap: 1px; }
 .agent-context-row-top {
   display: flex;
@@ -218,6 +315,34 @@ const contextPctLabel = computed(() => {
   font-variant-numeric: tabular-nums;
 }
 .agent-context-row small { line-height: 1.4; }
+.agent-context-system-toggle {
+  all: unset;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  cursor: pointer;
+}
+.agent-context-system-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (pointer: coarse) {
+  .agent-context-system-toggle { min-height: var(--touch); }
+}
+.agent-context-system { cursor: default; }
+.agent-context-system:hover { color: var(--fg); }
+.agent-context-system-body { display: flex; flex-direction: column; align-items: flex-end; margin-top: 4px; }
+.agent-context-system-text {
+  align-self: stretch;
+  max-height: 320px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: calc(11px * var(--font-scale)) / 1.5 var(--font-mono);
+  color: var(--fg2);
+}
 .agent-context-brief { cursor: default; }
 .agent-context-brief:hover { color: var(--fg); }
 .agent-context-repo[role='status'] { cursor: default; }

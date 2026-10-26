@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, public_release, release, service_backend
+from ciao import dev, gws_wrapper, package_smoke, proposal_kinds, public_release, release, service_backend
+from ciao.install_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
     EXIT_TIMEOUT_SECONDS,
@@ -50,6 +51,13 @@ if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
+def _absolute_installer_path(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise argparse.ArgumentTypeError("installer workspace suggestion must be an absolute path")
+    return str(path)
+
+
 def _workspace_name_arg(value: str) -> str:
     name = value.strip()
     if not _WORKSPACE_NAME_RE.fullmatch(name):
@@ -65,16 +73,113 @@ def _relaunch_argv() -> list[str]:
     return [sys.executable, "-m", "ciao.cli", *sys.argv[1:]]
 
 
-def _run_server(*, supervised: bool = False) -> int:
+def _run_command(args: argparse.Namespace) -> int:
+    if args.installer_suggest_workspace is not None and not args.installer_bootstrap:
+        print("--installer-suggest-workspace requires --installer-bootstrap", file=sys.stderr)
+        return 2
+    if args.installer_run_id and not args.installer_bootstrap:
+        print("--installer-run-id requires --installer-bootstrap", file=sys.stderr)
+        return 2
+    if args.installer_bootstrap and args.supervised:
+        print("--installer-bootstrap cannot be combined with --supervised", file=sys.stderr)
+        return 2
+    if not args.installer_bootstrap:
+        # Ordinary `ciao run` keeps its exact call shape.
+        return _run_server(supervised=args.supervised)
+    if not args.installer_run_id:
+        # A person resumed setup by hand (the installers print this command for
+        # a cancelled run), so there is no installer parent to activate the
+        # service: this process becomes one.
+        return _resume_installer_bootstrap(args.installer_suggest_workspace)
+    return _run_server(
+        supervised=args.supervised,
+        installer_bootstrap=True,
+        installer_run_id=args.installer_run_id,
+        installer_suggest_workspace=args.installer_suggest_workspace,
+    )
+
+
+def _resume_installer_bootstrap(suggestion: str | None) -> int:
+    """Run the bootstrap as a child and activate the service once it succeeds.
+
+    A child, not this process: the bootstrap ends its own process the moment
+    setup completes (the restart watchdog exits it directly), so nothing after
+    it here would ever run. The same parent/child split the installers use.
+    """
+    import uuid
+
+    run_id = str(uuid.uuid4())
+    argv = [sys.executable, "-m", "ciao.cli", "run", "--installer-bootstrap", "--installer-run-id", run_id]
+    if suggestion is not None:
+        # `--flag=value`, so a suggestion that begins with a dash stays a path.
+        argv.append(f"--installer-suggest-workspace={suggestion}")
+    try:
+        code = subprocess.call(argv)
+    except KeyboardInterrupt:
+        return 130
+    if code != 0:
+        return code
+    return _installer_command(argparse.Namespace(run_id=run_id, as_json=False))
+
+
+def _installer_command(args: argparse.Namespace) -> int:
+    """Verify an installer bootstrap result and start the service."""
+    from ciao.installer_handoff import HandoffError, activate
+
+    as_json = bool(args.as_json)
+    try:
+        result = activate(run_id=args.run_id)
+    except HandoffError as exc:
+        if as_json:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(
+                "Ciaobot was installed, but the service was not started: "
+                f"{exc}",
+                file=sys.stderr,
+            )
+        return 1
+    if as_json:
+        print(json.dumps({
+            "ok": True,
+            "workspace": str(result.workspace),
+            "service_backend": result.service_backend,
+            "definition": str(result.definition_path),
+            "port": result.port,
+        }))
+    else:
+        print(f"Ciaobot is starting from {result.workspace}.")
+    return 0
+
+
+def _run_server(
+    *,
+    supervised: bool = False,
+    installer_bootstrap: bool = False,
+    installer_run_id: str | None = None,
+    installer_suggest_workspace: str | None = None,
+) -> int:
     from ciao.config import RESTART_EXIT_CODE
     from ciao.main import main as server_main
 
     try:
-        server_main(supervised=supervised)
+        if installer_bootstrap:
+            server_main(
+                supervised=supervised,
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+                installer_suggest_workspace=installer_suggest_workspace,
+            )
+        else:
+            server_main(supervised=supervised)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 0
     else:
         code = 0
+    if installer_bootstrap:
+        # The installer parent owns this child's lifetime; a relaunch here would
+        # detach from it and make the outcome unobservable.
+        return code
     if code == RESTART_EXIT_CODE:
         # The setup wizard and package updates request a restart by exiting
         # with this code. Under launchd KeepAlive relaunches us anyway, but a
@@ -783,7 +888,7 @@ def _ensure_exact_bytes(root: Path) -> None:
     )
 
 
-def ensure_workspace_git(root: Path) -> None:
+def ensure_workspace_git(root: Path, *, initialize_if_missing: bool = True) -> None:
     """Make sure the workspace is a git repository with a protective .gitignore.
 
     Snapshots and sync rely on git; a fresh workspace gets `git init` plus an
@@ -794,14 +899,17 @@ def ensure_workspace_git(root: Path) -> None:
     if shutil.which("git") is None:
         print("git not found; skipping workspace git init", file=sys.stderr)
         return
-    _ensure_workspace_gitignore(root)
     probe = subprocess.run(
         ["git", *EXACT_BYTES, "-C", str(root), "rev-parse", "--is-inside-work-tree"],
         capture_output=True, text=True, encoding="utf-8",
     )
     if probe.returncode == 0 and probe.stdout.strip() == "true":
+        _ensure_workspace_gitignore(root)
         _ensure_exact_bytes(root)
         return
+    if not initialize_if_missing:
+        return
+    _ensure_workspace_gitignore(root)
     init = subprocess.run(
         ["git", *EXACT_BYTES, "init", "-b", "main", str(root)],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -847,7 +955,7 @@ def _ensure_vault_gitignore(root: Path) -> None:
     gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8", newline="")
 
 
-def ensure_vault_git(root: Path) -> None:
+def ensure_vault_git(root: Path, *, initialize_if_missing: bool = True) -> None:
     """Make sure the vault is (in) a git repository.
 
     Matters when the vault lives outside the workspace (an existing notes
@@ -879,6 +987,8 @@ def ensure_vault_git(root: Path) -> None:
         if toplevel == root:
             _ensure_vault_gitignore(root)
             _ensure_exact_bytes(root)
+        return
+    if not initialize_if_missing:
         return
     _ensure_vault_gitignore(root)
     init = subprocess.run(
@@ -1009,6 +1119,7 @@ def setup_workspace(
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
     confirm_repoint: bool = False,
+    initialize_git: bool = False,
     sync_failures: list[str] | None = None,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
@@ -1077,8 +1188,16 @@ def setup_workspace(
                     "choose a folder outside ~/Desktop, ~/Documents and ~/Downloads, such as "
                     "~/Ciaobot."
                 )
+    from ciao.onboarding import ensure_receipt, read_receipt
+    from ciao.setup_marker import is_set_up_workspace
+
+    runtime_root = root / ".runtime"
+    receipt_created = read_receipt(runtime_root) is None
+    receipt = ensure_receipt(runtime_root, established_install=is_set_up_workspace(root))
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    if receipt_created:
+        written.append(runtime_root / "onboarding.json")
     setup_selected_vault = vault_root is not None
     vault_value = str(vault_root) if vault_root is not None else "memory-vault"
     if vault_root is None and vault_mode == "existing":
@@ -1129,6 +1248,12 @@ def setup_workspace(
     # No registry yet means this folder has never been set up, even when it
     # already holds a `.env` of its own (a notes folder or a project checkout).
     first_setup = not workspaces_registry.exists()
+    if first_setup and receipt.installation.status == "in_progress":
+        from ciao.app_settings import AppSettingsStore, needs_new_install_backup_seed
+
+        settings_path = runtime_root / "app_settings.json"
+        if needs_new_install_backup_seed(settings_path):
+            AppSettingsStore(settings_path).seed_new_install_backup_default()
     registered_vaults = _setup_registry_vaults(
         workspaces_registry,
         workspace_root=root,
@@ -1222,11 +1347,28 @@ def setup_workspace(
         and not detect_nested_workspaces(vault_path)
         and not vault_path.exists()
     )
-    if fresh_per_root:
+    fresh_adopted_notes = (
+        first_setup
+        and receipt.installation.status == "in_progress"
+        and registered_vaults is None
+        and vault_mode == "existing"
+        and not detect_nested_workspaces(vault_path)
+    )
+    if fresh_per_root or fresh_adopted_notes:
         from ciao.workspace_reroot import mark_born_per_root
 
-        vault_path = root / name / vault_path.name
+        if fresh_per_root:
+            vault_path = root / name / vault_path.name
+        # Adopting notes is also a new install, not an upgrade target. Keep its
+        # vault path exactly where the user chose it; only agent assets get a
+        # per-workspace root. Otherwise first startup snapshots their notes in
+        # Git and tries to relocate them through the legacy re-root migration.
         written.extend(mark_born_per_root(root, runtime_root, [name]))
+        resolved_vault_path = vault_path.resolve()
+        try:
+            stored_vault_root = resolved_vault_path.relative_to(root).as_posix()
+        except ValueError:
+            stored_vault_root = str(resolved_vault_path)
         # The registry has to exist before the asset loop too: `agent_roots_for`
         # reads the receipt for the gate and the REGISTRY for the names, and with
         # no registry it falls back to the install root — which is how the first
@@ -1238,10 +1380,10 @@ def setup_workspace(
             json.dumps(
                 [{
                     "name": name,
-                    "vault_root": f"{name}/{vault_path.name}",
+                    "vault_root": stored_vault_root,
                     "default_provider": default_provider,
                     # No Google account is linked at scaffold time; the user
-                    # chooses in Settings → Workspaces after setup.
+                    # chooses in Settings → Overview after setup.
                     "gws_profile": "",
                 }],
                 indent=2,
@@ -1310,7 +1452,7 @@ def setup_workspace(
     # First-run wizard names the user's first logical workspace. Writing a
     # real registry (instead of relying on the legacy personal+work fallback)
     # means new installs start with exactly one workspace; more are added in
-    # Settings → Workspaces. The explicit vault_root also keeps the legacy
+    # Settings → Manage workspaces. The explicit vault_root also keeps the legacy
     # personal/work nested-vault special case from ever triggering.
     #
     # If the vault already holds nested workspace directories (e.g.
@@ -1501,11 +1643,11 @@ def setup_workspace(
             _remove_legacy_app_shortcuts(app_root_dir)
             _disable_legacy_menubar_agent(launch_dir)
 
-    ensure_workspace_git(root)
+    ensure_workspace_git(root, initialize_if_missing=initialize_git)
     # A vault outside the workspace (existing notes folder) gets its own
     # repo. Runs after the workspace init so the default nested vault is
     # never double-initialized.
-    ensure_vault_git(vault_path)
+    ensure_vault_git(vault_path, initialize_if_missing=initialize_git)
 
     return written
 
@@ -1656,6 +1798,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             launch_agents_dir=args.launch_agents_dir,
             app_dir=args.app_dir,
             confirm_repoint=args.yes,
+            initialize_git=args.initialize_git,
             sync_failures=sync_failures,
         )
     except RuntimeError as exc:
@@ -4148,6 +4291,67 @@ def _resolve_workspace_and_vaults(
 MEMORY_PROPOSALS_DEFAULT_LIMIT = 20
 
 
+def _decisions_digest_command(args: argparse.Namespace) -> int:
+    """Print the operator's recent decisions grouped for the weekly rules pass.
+
+    Read-only. Operator decisions only; agent-made ones are counted, never listed.
+    """
+    from datetime import UTC, datetime
+
+    from ciao import decision_rules
+
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    digest = decision_rules.build_digest(vault, today=datetime.now(UTC).date())
+    if args.json:
+        json.dump(digest, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    for kind in decision_rules.KINDS:
+        section = digest[kind]
+        print(
+            f"{kind}: {section['rows']} operator decisions, {len(section['groups'])} groups, "
+            f"rules file {'present' if section['file_present'] else 'absent'}"
+        )
+    return 0
+
+
+def _task_rules_command(args: argparse.Namespace) -> int:
+    """Print the operator's distilled task rules, fenced, or nothing when absent."""
+    from ciao import decision_rules
+
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    text = decision_rules.load_for_prompt(vault, decision_rules.TASK_RULES_NAME)
+    if text:
+        print(text)
+    return 0
+
+
+def _decision_rules_write_command(args: argparse.Namespace) -> int:
+    """Write one rules note's managed section from a body file."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from datetime import UTC, datetime
+
+    from ciao import decision_rules
+
+    body = _read_persisted_text_file(args.body_file, "--body-file")
+    if body is None:
+        return 2
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    try:
+        result = decision_rules.write_managed(vault, args.kind, body, today=datetime.now(UTC).date())
+    except (decision_rules.RulesError, OSError) as exc:
+        print(f"ciao decision-rules-write: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        json.dump(result, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        print(f"{result['file']}: wrote {result['chars']} characters")
+    return 0
+
+
 def _memory_proposals_command(args: argparse.Namespace) -> int:
     """List pending memory proposals in a workspace's review queue.
 
@@ -4167,6 +4371,17 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
     rows = list_proposals(path)
+    from ciao.proposal_predictions import REGION_KINDS, latest_predictions, prediction_key
+
+    predictions = latest_predictions(path)
+    for row in rows:
+        pred = (
+            predictions.get(prediction_key(row["kind"], row["text"]))
+            if row["kind"] in REGION_KINDS
+            else None
+        )
+        row["predicted"] = pred["verdict"] if pred else ""
+        row["predicted_reason"] = pred["reason"] if pred else ""
     window = rows[args.offset : args.offset + args.limit]
     page = page_of("proposals", window, total=len(rows), offset=args.offset, limit=args.limit)
     if args.json:
@@ -4177,7 +4392,17 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
             print("No memory proposals are pending.")
         for row in window:
             tag = f" [{row['source']}]" if row["source"] else ""
-            print(f"- [{row['kind']}] {row['text']}{tag}")
+            decide = (
+                f" (decide: {row['decider']}; {row['decide_reason']})"
+                if row["decider"]
+                else ""
+            )
+            predicted = (
+                f" (predicted: {row['predicted']}; {row['predicted_reason']})"
+                if row["predicted"]
+                else ""
+            )
+            print(f"- [{row['kind']}] {row['text']}{tag}{decide}{predicted}")
         if "next_offset" in page:
             print(
                 f"Showing {args.offset + 1}-{page['next_offset']} of {len(rows)}; "
@@ -4324,12 +4549,31 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    decide = (args.decide or "").strip()
+    reason_file = (args.decide_reason_file or "").strip()
+    decide_reason = ""
+    if decide and not reason_file:
+        print("--decide needs --decide-reason-file (one line saying why)", file=sys.stderr)
+        return 2
+    if reason_file and not decide:
+        print("--decide-reason-file needs --decide", file=sys.stderr)
+        return 2
+    if reason_file:
+        decide_text = _read_persisted_text_file(reason_file, "--decide-reason-file")
+        if decide_text is None:
+            return 2
+        decide_reason = " ".join(decide_text.split())
+        if not decide_reason:
+            print("the decide reason is empty", file=sys.stderr)
+            return 2
     proposal = MemoryProposal(
         target=kind,
         text=text,
         source_section=args.source.strip() or "curation",
         payload=payload,
         request=request,
+        decider=decide,
+        decide_reason=decide_reason,
     )
     path = append_proposals(
         [proposal], vault, allow_dismissed=bool(getattr(args, "allow_dismissed", False))
@@ -4351,6 +4595,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
                 "path": str(path) if path else None,
                 "text": text,
                 "request": request,
+                "decide": decide,
                 # argparse supplies a Path when --workspace is explicit, and
                 # json.dump cannot serialize one; report the resolved root.
                 "workspace": str(workspace),
@@ -4391,6 +4636,40 @@ def _observation_context(args: argparse.Namespace) -> tuple[Path, str] | int:
         print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
         return 1
     return vault_root, workspace
+
+
+def _read_persisted_text_file(path: str, flag: str) -> str | None:
+    """The text of a file whose contents are persisted into the vault.
+
+    ``None`` after printing why not. A reason file is written to the
+    vault-tracked proposal queue or decision sidecar, so a path that names a
+    credential store (``.env``, the runtime directory) is refused, the same
+    check ``agent_cli._task_body`` applies. At most ``MAX_REASON * 4 + 1``
+    characters are read so a huge file is never loaded whole; the caller's own
+    length check then refuses an over-long reason.
+    """
+    from ciao.execution_modes import is_credential_adjacent
+    from ciao.task_decisions import MAX_REASON
+
+    target = Path(path).expanduser()
+    try:
+        resolved = target.resolve()
+    except OSError as exc:
+        print(f"{flag} cannot be read: {exc}", file=sys.stderr)
+        return None
+    if is_credential_adjacent(resolved):
+        print(
+            f"{flag} refuses credential-adjacent paths ({path}): "
+            "pass the content in a workspace file instead.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        with resolved.open(encoding="utf-8") as handle:
+            return handle.read(MAX_REASON * 4 + 1)
+    except (OSError, UnicodeError) as exc:
+        print(f"could not read {path}: {exc}", file=sys.stderr)
+        return None
 
 
 def _read_argv_safe(value: str, path: str, what: str) -> str | None:
@@ -4600,8 +4879,14 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         remove_proposal_by_substring,
     )
 
-    workspace, vault = _resolve_workspace_and_vault(args)
+    workspace, vault, _registry_root, name = _resolve_workspace_and_vaults(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
+    if args.handover and args.promoted:
+        print(
+            "--handover dismisses a row; it cannot be combined with --promoted",
+            file=sys.stderr,
+        )
+        return 2
     # Same resolution as `memory-proposal-add`. A proposal's text is arbitrary
     # user prose, so putting it in argv is the hazard `--text-file` exists to
     # avoid there; a dismissal names the same text and needed the same door.
@@ -4628,6 +4913,20 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
+    # Validated before the queue lock so a bad reason mutates nothing.
+    from ciao.task_decisions import clean_reason
+
+    reason = ""
+    reason_file = (args.reason_file or "").strip()
+    if reason_file:
+        reason_text = _read_persisted_text_file(reason_file, "--reason-file")
+        if reason_text is None:
+            return 2
+        try:
+            reason = clean_reason(reason_text)
+        except ValueError as exc:
+            print(f"could not use the reason in {reason_file}: {exc}", file=sys.stderr)
+            return 2
     # Two needle forms, because rows reach the queue two ways:
     # `memory-proposal-add` flattens what it writes, while the Workspace care schedule prompt
     # appends `[review]` questions directly and may keep repeated whitespace.
@@ -4689,6 +4988,11 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        if args.handover:
+            refusal = _handover_gate(workspace, name, path, parsed, "dismiss")
+            if refusal:
+                print(f"handover refused: {refusal}", file=sys.stderr)
+                return 1
         resolved_text = parsed.text
         resolved_kind = parsed.kind
         # The removal keeps using the caller's needle (in whichever form
@@ -4749,6 +5053,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         text=removed_text,
         kind=kind,
         via="agent",
+        reason=reason,
     )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be
@@ -4763,6 +5068,280 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     else:
         verb = "Promoted" if args.promoted else "Dismissed"
         print(f"{verb} memory proposal matching {needle!r}.")
+    return 0
+
+
+def _memory_proposal_escalate_command(args: argparse.Namespace) -> int:
+    """Re-tag one queued proposal ``decide: you`` with the reason it could not be settled.
+
+    Not a decision: the bullet stays queued, nothing is recorded in History and
+    no receipt is written. Matched like ``memory-proposal-dismiss``; escalating
+    an item already marked ``you`` replaces its reason.
+    """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.memory_proposals import set_proposal_decider
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    text_file = (args.text_file or "").strip()
+    needle = (args.text or "").strip()
+    if needle and text_file:
+        print(
+            "pass the substring either as text or via --text-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if text_file:
+        try:
+            needle = Path(text_file).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read {text_file}: {exc}", file=sys.stderr)
+            return 2
+    if not needle:
+        print("a proposal text or unique substring is required", file=sys.stderr)
+        return 2
+    reason_file = (args.reason_file or "").strip()
+    if not reason_file:
+        print("--reason-file is required (one line saying why only you can decide)", file=sys.stderr)
+        return 2
+    reason_text = _read_persisted_text_file(reason_file, "--reason-file")
+    if reason_text is None:
+        return 2
+    reason = " ".join(reason_text.split())
+    if not reason:
+        print("the escalation reason is empty", file=sys.stderr)
+        return 2
+    forms = (needle, " ".join(needle.split()))
+    result = set_proposal_decider(path, forms, "you", reason)
+    if result is None:
+        print(
+            f"No unique memory proposal matched {needle!r} "
+            "(the text may be ambiguous or absent).",
+            file=sys.stderr,
+        )
+        return 1
+    kind, text = result
+    if args.json:
+        _emit_json({"escalated": True, "text": text, "workspace": str(workspace)})
+    else:
+        print(f"Escalated [{kind}] proposal to decide: you.")
+    return 0
+
+
+def _memory_proposal_predict_command(args: argparse.Namespace) -> int:
+    """Record the verdict the run would give one queued region row, without acting.
+
+    Not a decision: the queue is untouched, no receipt is written and History
+    gets no row until the operator decides. The prediction is what later lets
+    History show predicted against actual.
+    """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.proposal_predictions import REGION_KINDS, record_prediction
+
+    workspace, vault, _registry_root, _name = _resolve_workspace_and_vaults(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    needle = _proposal_needle(args)
+    if needle is None:
+        return 2
+    reason_file = (args.reason_file or "").strip()
+    if not reason_file:
+        print("--reason-file is required (one line saying why)", file=sys.stderr)
+        return 2
+    reason_text = _read_persisted_text_file(reason_file, "--reason-file")
+    if reason_text is None:
+        return 2
+    reason = " ".join(reason_text.split())
+    if not reason:
+        print("the prediction reason is empty", file=sys.stderr)
+        return 2
+    matched = _match_one_row(path, needle)
+    if matched is None:
+        print(
+            f"No unique memory proposal matched {_clip(needle)!r} "
+            "(the text may be ambiguous or absent).",
+            file=sys.stderr,
+        )
+        return 1
+    bullet, _removal_needle = matched
+    if bullet.kind not in REGION_KINDS:
+        print(
+            "predictions are only recorded for [memory] and [profile] rows",
+            file=sys.stderr,
+        )
+        return 1
+    recorded = record_prediction(
+        path,
+        kind=bullet.kind,
+        text=bullet.text,
+        verdict=args.verdict,
+        reason=reason,
+    )
+    if args.json:
+        _emit_json(
+            {
+                "recorded": recorded,
+                "kind": bullet.kind,
+                "verdict": args.verdict,
+                "text": bullet.text,
+                "workspace": str(workspace),
+            }
+        )
+    elif recorded:
+        print(f"Recorded predicted {args.verdict} for [{bullet.kind}] proposal.")
+    else:
+        print("Already recorded.")
+    return 0
+
+
+def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
+    """Accept one queued ``[memory]``/``[profile]`` row into its region as the agent.
+
+    Refused unless the operator's handover is ``all``, the run stored an accept
+    prediction for the row and the row is not ``decide: you``. The write goes
+    through the same guarded path the PWA accept uses, so the fact gets the
+    event-shape guard, the duplicate check, the learned-at stamp and an undo
+    receipt that History offers.
+    """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao import proposal_actions
+    from ciao.fact_candidates import external_anchor
+    from ciao.memory_proposals import accept_region_fact, remove_proposal_by_substring
+    from ciao.memory_receipts import QueueReceiptUnavailable, queue_lock, queue_resolution
+    from ciao.memory_tool import ensure_regions
+
+    workspace, vault, _registry_root, name = _resolve_workspace_and_vaults(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    needle = _proposal_needle(args)
+    if needle is None:
+        return 2
+    no_match = (
+        f"No unique memory proposal matched {_clip(needle)!r} "
+        "(the text may be ambiguous or absent)."
+    )
+    with queue_lock(path):
+        matched = _match_one_row(path, needle)
+        if matched is None:
+            print(no_match, file=sys.stderr)
+            return 1
+        bullet, removal_needle = matched
+        refusal = _handover_gate(workspace, name, path, bullet, "accept")
+        if refusal:
+            print(f"handover refused: {refusal}", file=sys.stderr)
+            return 1
+        # At most HANDOVER_ACCEPT_CAP accepts per curation run, counted from the
+        # sidecar's agent decisions since the live lease began. The lease is
+        # server-written state, so the count cannot be reset from the argument
+        # list; a run with no live lease may not accept at all.
+        refusal = _handover_accept_budget(vault, path)
+        if refusal:
+            print(f"handover refused: {refusal}", file=sys.stderr)
+            return 1
+    # Not written under the queue lock: the PWA writes the region and then takes
+    # the queue lock, and the region write takes the guide lock. The guide comes
+    # from the installed registry the gate just verified, not from --workspace.
+    trusted = trusted_registry(name, vault)
+    if trusted is None or name is None:
+        print("handover refused: the installed registry changed underneath", file=sys.stderr)
+        return 1
+    guide = guide_path(trusted.agent_root(name))
+    try:
+        ensure_regions(guide)
+    except (OSError, ValueError) as exc:
+        print(f"could not prepare {guide}: {exc}", file=sys.stderr)
+        return 1
+    receipt: dict[str, Any] = {}
+    try:
+        outcome, _written = accept_region_fact(
+            guide_path=guide,
+            target=bullet.kind,
+            text=bullet.text,
+            vault_root=vault,
+            actor="agent",
+            source="cli",
+            workspace=name or "",
+            source_section=external_anchor(bullet.source) or "review",
+            receipt_out=receipt,
+        )
+    except (ValueError, OSError) as exc:
+        print(f"could not write ciao:{bullet.kind}: {exc}", file=sys.stderr)
+        return 1
+    if outcome not in ("written", "duplicate"):
+        messages = {
+            "unshaped": "this reads as an event, not a standing rule; it stays queued",
+            "conflict": f"ciao:{bullet.kind} changed while this was being applied; retry",
+            "deferred": (
+                f"this fact may supersede an entry already in ciao:{bullet.kind}; "
+                "it stays queued"
+            ),
+        }
+        print(
+            f"handover refused: {messages.get(outcome, f'could not write ciao:{bullet.kind}')}",
+            file=sys.stderr,
+        )
+        return 1
+    with queue_lock(path):
+        again = _match_one_row(path, needle)
+        if (
+            again is None
+            or again[0].kind != bullet.kind
+            or again[0].text != bullet.text
+        ):
+            print(
+                "the fact was written but the queue row moved; it stays queued",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            with queue_resolution(
+                path,
+                removed_text=bullet.text,
+                kind=bullet.kind,
+                promoted=True,
+                actor="agent",
+                source="cli",
+                workspace=name or "",
+                vault_root=vault,
+            ):
+                removed = remove_proposal_by_substring(path, again[1])
+        except QueueReceiptUnavailable as exc:
+            print(
+                f"the memory receipt journal is unavailable; "
+                f"the proposal was not removed: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    if removed is None:
+        print(no_match, file=sys.stderr)
+        return 1
+    proposal_actions.record_decision(
+        path,
+        action="accept",
+        text=removed[1],
+        kind=removed[0],
+        via="agent",
+        source=bullet.source,
+        destination=f"ciao:{bullet.kind}",
+        outcome="duplicate" if outcome == "duplicate" else "written",
+        receipt_id=str(receipt.get("id", "")),
+    )
+    if args.json:
+        _emit_json(
+            {
+                "accepted": True,
+                "text": removed[1],
+                "region": bullet.kind,
+                "receipt_id": str(receipt.get("id", "")),
+                "workspace": str(workspace),
+            }
+        )
+    else:
+        print(f"Accepted [{bullet.kind}] proposal into ciao:{bullet.kind}.")
     return 0
 
 
@@ -4974,6 +5553,14 @@ def _curation_agent_root(workspace: Path, name: str | None) -> Path:
     """
     if name is None:
         return workspace
+    config = _installed_config(workspace)
+    if config.workspace(name) is None:
+        return workspace
+    return config.agent_root(name)
+
+
+def _installed_config(workspace: Path) -> CiaoConfig:
+    """The install's workspace registry, read without minting a session secret."""
     from ciao.config import CiaoConfig, installed_workspace_env
 
     env_source = installed_workspace_env(os.environ)
@@ -4982,10 +5569,131 @@ def _curation_agent_root(workspace: Path, name: str | None) -> Path:
         # A read-only resolution must not mint a session secret (see
         # `_resolve_workspace_and_vaults`).
         env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
-    config = CiaoConfig.from_env(env_source)
-    if config.workspace(name) is None:
-        return workspace
-    return config.agent_root(name)
+    return CiaoConfig.from_env(env_source)
+
+
+def _workspace_handover(workspace: Path, name: str | None) -> str:
+    """The operator's Memory handover for a registered workspace, else ``"off"``.
+
+    Always re-read from the registry at call time: it is the operator's
+    setting, so no argument, environment value or ``curation-begin`` output is
+    trusted for it.
+    """
+    if name is None:
+        return "off"
+    config = _installed_config(workspace)
+    registered = config.workspace(name)
+    if registered is None:
+        return "off"
+    handover: str = registered.memory_handover
+    return handover
+
+
+def _proposal_needle(args: argparse.Namespace) -> str | None:
+    """The proposal text or substring from the argument or ``--text-file``.
+
+    ``None`` after printing why not (the caller exits 2).
+    """
+    text_file = (args.text_file or "").strip()
+    needle = (args.text or "").strip()
+    if needle and text_file:
+        print(
+            "pass the substring either as text or via --text-file, not both",
+            file=sys.stderr,
+        )
+        return None
+    if text_file:
+        # Refuses credential-adjacent paths, like every other persisted-text flag.
+        read = _read_persisted_text_file(text_file, "--text-file")
+        if read is None:
+            return None
+        needle = read.strip()
+    if not needle:
+        print("a proposal text or unique substring is required", file=sys.stderr)
+        return None
+    return needle
+
+
+def _handover_accept_budget(vault: Path, queue: Path) -> str:
+    """``""`` while this curation run may still accept, else why not."""
+    from ciao.curation_run import active_lease
+    from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP, count_agent_accepts_since
+
+    lease = active_lease(vault)
+    if lease is None:
+        return "accepting needs a live curation run (take the lease with curation-begin)"
+    try:
+        started = datetime.datetime.fromisoformat(str(lease.get("started_at", "")))
+    except ValueError:
+        return "the curation lease has no readable start time"
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=datetime.UTC)
+    if count_agent_accepts_since(queue, started) >= HANDOVER_ACCEPT_CAP:
+        return f"this curation run already accepted its cap of {HANDOVER_ACCEPT_CAP} facts"
+    return ""
+
+
+def _clip(needle: str, limit: int = 80) -> str:
+    """At most *limit* characters of a needle, for an error message."""
+    flat = " ".join(needle.split())
+    return flat if len(flat) <= limit else flat[:limit] + "..."
+
+
+def _match_one_row(path: Path, needle: str) -> tuple[Any, str] | None:
+    """The one queued bullet ``needle`` names, with the needle form to remove it by.
+
+    Both needle forms are resolved to row identities and unioned, as
+    ``memory-proposal-dismiss`` does: exactly one row or nothing.
+    """
+    from ciao.memory_proposals import find_proposal_matches
+    from ciao.proposal_kinds import parse_bullet
+
+    flattened = " ".join(needle.split())
+    raw_matches = find_proposal_matches(path, needle)
+    flat_matches = (
+        find_proposal_matches(path, flattened) if flattened != needle else raw_matches
+    )
+    union = set(raw_matches) | set(flat_matches)
+    if len(union) != 1:
+        return None
+    try:
+        line = path.read_text(encoding="utf-8").splitlines()[next(iter(union))]
+    except (OSError, UnicodeError, IndexError):
+        return None
+    bullet = parse_bullet(line)
+    if bullet is None:
+        return None
+    removal_needle = flattened if (not raw_matches and flat_matches) else needle
+    return bullet, removal_needle
+
+
+def _handover_gate(
+    workspace: Path, name: str | None, queue: Path, bullet: Any, verdict: str
+) -> str:
+    """``""`` when the run may act on *bullet* with *verdict*, else why not."""
+    from ciao.proposal_predictions import (
+        REGION_KINDS,
+        handover_allows,
+        latest_predictions,
+        prediction_key,
+    )
+
+    if bullet.kind not in REGION_KINDS:
+        return "only [memory] and [profile] rows can be handed over"
+    if bullet.decider == "you":
+        return "the row is marked decide: you"
+    # The queue lives at <vault>/Workspace/Memory-Proposals.md.
+    trusted = trusted_registry(name, queue.parent.parent)
+    if trusted is None:
+        return "the installed engine does not register this workspace at this vault"
+    registered = trusted.workspace(name or "")
+    handover = registered.memory_handover if registered is not None else "off"
+    if not handover_allows(handover, verdict):
+        return f"the workspace handover is {handover}, which does not allow {verdict}"
+    predicted = latest_predictions(queue).get(prediction_key(bullet.kind, bullet.text))
+    if predicted is None or predicted.get("verdict") != verdict:
+        return f"no stored {verdict} prediction for this row"
+    return ""
 
 
 def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
@@ -5019,7 +5727,9 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
 
     workspace, vault, guide, budget, registry_root, name = _curation_context(args)
     state = load_state(vault)
+    handover = _workspace_handover(workspace, name)
     worklist = build_worklist(
+        handover=handover,
         vault_root=vault,
         guide_path=guide,
         workspace_dir=workspace,
@@ -5044,6 +5754,7 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     payload: dict[str, Any] = {
         "workspace": str(workspace),
         "vault_root": str(vault),
+        "handover": handover,
         **worklist.as_dict(),
         **plan.as_dict(),
         "last_run": state.last_run,
@@ -5060,6 +5771,7 @@ def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
         print("Nothing to curate: every mechanical check is clear.")
         return
     print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
+    print(f"Handover: {payload['handover']}")
     for item in payload.get("planned", []):
         print(f"- [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
         for key in item["keys"]:
@@ -6298,7 +7010,7 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     _load_env_file(workspace_root / ".env")
 
-    # The bind address (Settings → General → Network access) is where the
+    # The bind address (Settings → Access & devices → Network access) is where the
     # server listens. For a loopback/wildcard bind we emit "localhost" so the
     # printed chat link matches the host the browser is authenticated on (the
     # menu bar, setup, and login URLs all use localhost). The session cookie is
@@ -6463,20 +7175,51 @@ def _service_command(args: argparse.Namespace) -> int:
                     as_json=as_json,
                 )
             runtime = macos_service.discover_runtime()
+        # The run that is there before the kickstart (if any) must not pass
+        # for the one the kickstart starts, so its identity is read first.
+        previous = macos_service.read_lock_owner(runtime)
+        started_at = time.time()
         result = macos_service.start_service(runtime=runtime)
         if result.ok:
-            # The engine has to boot before it can fail, so a start that
-            # reports "started" before the engine has had the time to fail
-            # reports a hope. The wait ends as soon as the engine serves its
-            # port or records that it could not bind it (#1654).
-            macos_service.wait_for_engine(runtime)
-            reason = macos_service.port_in_use_reason(runtime)
-            if reason is not None:
+            # `start_service` submits the start; it does not confirm it. The
+            # engine has to boot before it can fail, so a start reported
+            # before the engine answered as itself reports a hope (#1654).
+            # The wait ends when the new engine answers with the identity its
+            # lock carries, when it records a bind failure or a denial, or at
+            # the deadline, which is a failure, not a start (#1938).
+            outcome = macos_service.wait_for_engine(
+                runtime, previous=previous, started_at=started_at,
+            )
+            if outcome.state == "timeout":
+                # The weaker bind-failure signal, launchd's last exit code,
+                # is read once the deadline passed: an unsupervised engine
+                # that exited on a taken port leaves no record of its own.
+                reason = macos_service.port_in_use_reason(runtime)
+                if reason is not None:
+                    outcome = macos_service.StartOutcome("port_in_use", reason)
+            if outcome.ok:
+                result = macos_service.ServiceResult(
+                    True,
+                    "start",
+                    outcome.message,
+                    {
+                        **result.details,
+                        "verified": True,
+                        "startup_id": outcome.startup_id,
+                        "pid": outcome.pid,
+                    },
+                )
+            else:
                 result = macos_service.ServiceResult(
                     False,
                     "start",
-                    reason,
-                    {**result.details, "port_in_use": True},
+                    outcome.message,
+                    {
+                        **result.details,
+                        "verified": False,
+                        "start_outcome": outcome.state,
+                        "port_in_use": outcome.state == "port_in_use",
+                    },
                 )
     elif action == "restart":
         result = macos_service.restart_service(force=bool(args.force))
@@ -6712,7 +7455,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit with the restart code instead of re-execing; for `ciao supervise`.",
     )
-    run_parser.set_defaults(func=lambda args: _run_server(supervised=args.supervised))
+    run_parser.add_argument(
+        "--installer-bootstrap",
+        action="store_true",
+        help=(
+            "Installer-only: start a scratch first-run bootstrap for a fresh machine. "
+            "Refused when a Ciaobot install already exists."
+        ),
+    )
+    run_parser.add_argument(
+        "--installer-run-id",
+        default=None,
+        help="Installer-only correlation id for the handoff result (requires --installer-bootstrap).",
+    )
+    run_parser.add_argument("--installer-suggest-workspace", type=_absolute_installer_path, default=None)
+    run_parser.set_defaults(func=_run_command)
 
     supervise_parser = subparsers.add_parser(
         "supervise",
@@ -6809,6 +7566,25 @@ def build_parser() -> argparse.ArgumentParser:
     desktop_uninstall_parser.add_argument("--json", action="store_true", dest="as_json")
     desktop_uninstall_parser.set_defaults(func=_desktop_command)
 
+    installer_parser = subparsers.add_parser(
+        "installer",
+        help="Installer-only: verify a bootstrap result and start the service.",
+    )
+    installer_sub = installer_parser.add_subparsers(
+        dest="installer_action", required=True
+    )
+    installer_activate_parser = installer_sub.add_parser(
+        "activate",
+        help="Activate the service for a completed installer bootstrap run.",
+    )
+    installer_activate_parser.add_argument(
+        "--run-id",
+        required=True,
+        help="The run id the installer passed to `ciao run --installer-bootstrap`.",
+    )
+    installer_activate_parser.add_argument("--json", action="store_true", dest="as_json")
+    installer_activate_parser.set_defaults(func=_installer_command)
+
     linux_service_parser = subparsers.add_parser(
         "linux-service",
         help="Print a systemd service unit for a Linux host (does not install it).",
@@ -6836,6 +7612,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("."),
         help="Workspace directory to initialize.",
+    )
+    setup_parser.add_argument(
+        "--initialize-git",
+        action="store_true",
+        default=False,
+        help=("Create local history and an initial commit of nonignored workspace "
+              "and external-vault contents; local only, no remote or upload."),
     )
     setup_parser.add_argument(
         "--workspace-name",
@@ -7507,7 +8290,7 @@ def build_parser() -> argparse.ArgumentParser:
             "every agent root) to TARGET on the same disk, repair what recorded "
             "the old path, repoint the engine's service and restart it. Prints "
             "the plan by default and changes nothing; --apply performs it. "
-            "Settings -> Main workspace runs the same move. To undo, move it back."
+            "Settings -> Advanced -> Ciaobot folder runs the same move. To undo, move it back."
         ),
     )
     move_parser.add_argument("target", help="The new folder. It must not exist, or be empty.")
@@ -7655,6 +8438,87 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_proposals_parser.set_defaults(func=_memory_proposals_command)
 
+    decisions_digest_parser = subparsers.add_parser(
+        "decisions-digest",
+        help="Group the operator's recent memory and task decisions for the weekly rules pass.",
+        description=(
+            "Read-only. Emits the operator's decisions of the last 180 days grouped by "
+            "reason chip, kind and task state, with counts, sanitised excerpts and "
+            "ready-made citations. Agent-made decisions are only counted."
+        ),
+    )
+    decisions_digest_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    decisions_digest_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    decisions_digest_parser.add_argument(
+        "--json", action="store_true", help="Emit the full digest as JSON."
+    )
+    decisions_digest_parser.set_defaults(func=_decisions_digest_command)
+
+    task_rules_parser = subparsers.add_parser(
+        "task-rules",
+        help="Print the operator's distilled task preferences (Workspace/Task-Rules.md).",
+        description=(
+            "Read-only. Prints Workspace/Task-Rules.md fenced as evidence of the "
+            "operator's preferences, never orders; prints nothing when the file is "
+            "absent or fails its checks. Run it before filing a task."
+        ),
+    )
+    task_rules_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    task_rules_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    task_rules_parser.set_defaults(func=_task_rules_command)
+
+    decision_rules_write_parser = subparsers.add_parser(
+        "decision-rules-write",
+        help="Write the managed section of Memory-Review-Rules.md or Task-Rules.md.",
+        description=(
+            "The only way the weekly pass writes a rules note. Replaces only the span "
+            "between the ciao:rules markers; refuses a body over 2500 characters, a "
+            "malformed fence, an uncited or unknown rule, or an unapproved verdict flip."
+        ),
+    )
+    decision_rules_write_parser.add_argument("kind", choices=["memory", "task"])
+    decision_rules_write_parser.add_argument(
+        "--body-file",
+        required=True,
+        help="File holding the managed rule lines.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--json", action="store_true", help="Emit the structured result as JSON."
+    )
+    decision_rules_write_parser.set_defaults(func=_decision_rules_write_command)
+
     memory_proposal_add_parser = subparsers.add_parser(
         "memory-proposal-add",
         help="File a fact into a workspace's memory-proposal review queue.",
@@ -7745,6 +8609,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-dismissed",
         action="store_true",
         help="Re-file a previously dismissed fact for review; promoted facts remain deduped.",
+    )
+    memory_proposal_add_parser.add_argument(
+        "--decide",
+        choices=proposal_kinds.DECIDERS,
+        default="",
+        help=(
+            "Who should settle it: `nightly` when more context (other chats, "
+            "existing notes, a duplicate check) would settle it, `you` only for "
+            "a judgement about the operator's identity or preferences. "
+            "Requires --decide-reason-file."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
+        "--decide-reason-file",
+        default="",
+        help="Read the one-line reason for --decide from this file.",
     )
     memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
 
@@ -7880,7 +8760,161 @@ def build_parser() -> argparse.ArgumentParser:
             "instead of dismissed."
         ),
     )
+    memory_proposal_dismiss_parser.add_argument(
+        "--reason-file",
+        default="",
+        help=(
+            "Read an optional one-line reason for this decision from this file "
+            "(at most 1000 characters; a multi-line file is flattened to one "
+            "line). Recorded in History beside the "
+            "decision, for the accept (--promoted) and the dismissal alike."
+        ),
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--handover",
+        action="store_true",
+        help=(
+            "Settle a [memory]/[profile] row the run predicted dismiss, as the "
+            "workspace's handover setting allows. Refused unless handover is "
+            "dismiss or all, a stored dismiss prediction exists and the row is "
+            "not decide: you."
+        ),
+    )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
+
+    memory_proposal_escalate_parser = subparsers.add_parser(
+        "memory-proposal-escalate",
+        help="Re-tag one queued memory proposal as needing the operator.",
+        description=(
+            "Marks one pending memory proposal `decide: you` with the reason "
+            "it could not be settled, matched by a unique text substring. The "
+            "bullet stays queued; this is not a decision and leaves no History row."
+        ),
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="Proposal text or unique substring. Omit when --text-file supplies it.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--text-file",
+        default="",
+        help="Read the substring from this file instead of the argument.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--reason-file",
+        default="",
+        help="Read the one-line reason from this file.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_escalate_parser.set_defaults(func=_memory_proposal_escalate_command)
+
+    memory_proposal_predict_parser = subparsers.add_parser(
+        "memory-proposal-predict",
+        help="Record the verdict the run would give a queued [memory]/[profile] row.",
+        description=(
+            "Records a predicted verdict and its reason for one pending "
+            "[memory]/[profile] proposal, matched by a unique text substring. "
+            "A prediction is not a decision: the bullet stays queued and "
+            "leaves no History row until the operator decides."
+        ),
+    )
+    memory_proposal_predict_parser.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="Proposal text or unique substring. Omit when --text-file supplies it.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--text-file",
+        default="",
+        help="Read the substring from this file instead of the argument.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--verdict",
+        required=True,
+        choices=("accept", "dismiss"),
+        help="What the run would do with the row.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--reason-file",
+        default="",
+        help="Read the one-line reason for the verdict from this file.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_predict_parser.set_defaults(func=_memory_proposal_predict_command)
+
+    memory_proposal_accept_parser = subparsers.add_parser(
+        "memory-proposal-accept",
+        help="Accept one queued [memory]/[profile] row into its region as the agent.",
+        description=(
+            "Accept one [memory]/[profile] row into its bounded region on the "
+            "agent's behalf. Refused unless handover is `all` and a stored "
+            "accept prediction exists."
+        ),
+    )
+    memory_proposal_accept_parser.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="Proposal text or unique substring. Omit when --text-file supplies it.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--text-file",
+        default="",
+        help="Read the substring from this file instead of the argument.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_accept_parser.set_defaults(func=_memory_proposal_accept_command)
 
     curation_plan_parser = subparsers.add_parser(
         "curation-plan",
@@ -8578,11 +9612,28 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
     return gws_auth_helper.main_entry(argv)
 
 
+# EX_NOPERM. Hardcoded: ``os.EX_NOPERM`` does not exist on Windows.
+RUNTIME_STATE_UNREADABLE_EXIT = 77
+
+
 def main(argv: list[str] | None = None) -> int:
     use_utf8_stdio()
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return _dispatch(argv_list)
+    except Exception as exc:
+        # The import lives in the handler so the agent fast path never pays for it.
+        from ciao.workspace_reroot import RuntimeStateUnreadable  # noqa: PLC0415
+
+        if not isinstance(exc, RuntimeStateUnreadable):
+            raise
+        print(f"ciao: {exc}", file=sys.stderr)
+        return RUNTIME_STATE_UNREADABLE_EXIT
+
+
+def _dispatch(argv_list: list[str]) -> int:
     # The agent surface (`ciao memory …`, `ciao vault search …`): dispatch
     # before building the operator parser so a call from a chat costs
     # interpreter start-up, not this module's import graph. ``ciao.agent_cli``

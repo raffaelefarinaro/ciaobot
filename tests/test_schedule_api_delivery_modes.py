@@ -227,3 +227,26 @@ def test_patch_schedule_preserves_configured_workspace(tmp_path: Path) -> None:
 
     assert updated.status_code == 200, updated.text
     assert updated.json()["workspace"] == "client"
+
+
+def test_pwa_patch_of_prompt_or_command_resets_the_saved_mode(tmp_path: Path) -> None:
+    """The operator owns the text again, so an agent-pinned mode no longer applies."""
+    client = _make_client(tmp_path)
+    manager = client.app.state.schedule_manager  # type: ignore[attr-defined]
+
+    def routine():
+        return manager.create(
+            daily_time_utc="09:00", prompt="Agent text.", model="", mode="normal",
+            chat_id=0, workspace="personal",
+        )
+
+    for body in ({"prompt": "Operator text."}, {"command": "echo hi"}):
+        entry = routine()
+        assert client.patch(f"/api/schedules/{entry.schedule_id}", json=body).status_code == 200
+        assert manager._store.get(entry.schedule_id).mode == ""
+
+    # Unchanged text, or a patch that touches neither, keeps the saved mode.
+    entry = routine()
+    for body in ({"prompt": "Agent text."}, {"title": "Renamed"}, {"enabled": False}):
+        assert client.patch(f"/api/schedules/{entry.schedule_id}", json=body).status_code == 200
+        assert manager._store.get(entry.schedule_id).mode == "normal"

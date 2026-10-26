@@ -34,6 +34,9 @@ ciao/web/static/assets/
 # is absent, packaging globs the filesystem (not git) after `npm run build`, and
 # the release gate checks the built shell is coherent before it can ship.
 ciao/web/static/index.html
+# The browser suite's terminal harness, built by `npm run build:harness` into
+# its own tree: the production build can never carry it.
+web/e2e/fixture/harness-dist/
 
 # Python build artifacts
 build/

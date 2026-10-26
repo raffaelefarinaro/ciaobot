@@ -29,9 +29,21 @@ from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import QUEUE_DELIVERIES, STREAM_KEEPALIVE_SECONDS, ChatStream
 from ciao.web.connection_tracker import ConnectionTracker
 from ciao.models import ImageAttachment
-from ciao.web.project_chats import RestartDrainingError
+from ciao.web.project_chats import ChatInfo, RestartDrainingError
 
 logger = logging.getLogger(__name__)
+
+
+def _recorded_turn_origin(chat: ChatInfo | None, turn_index: object) -> str:
+    """The origin the engine recorded for a user turn, if any.
+
+    A duplicate echo repeats what the engine stored, so a client that
+    reconnects keeps the turn's tag. Nothing here reads the incoming frame:
+    a repeat may not tag a turn the engine never tagged.
+    """
+    if chat is None or turn_index is None:
+        return ""
+    return str(chat.user_turn_origin.get(str(turn_index)) or "")
 
 
 async def _resettle_after_question_answer(websocket: WebSocket, chat_id: str) -> None:
@@ -451,6 +463,15 @@ async def ws_chat(websocket: WebSocket) -> None:
                         sent_at = str(owned_turn.get("sent_at") or "")
                         if sent_at:
                             duplicate_payload["sent_at"] = sent_at
+                        # The echo repeats the tag the engine recorded, so a
+                        # client that reconnects after a recovery resend does
+                        # not lose the turn's notice. The frame's own tag is
+                        # never trusted: a repeat cannot rewrite the turn.
+                        recorded_origin = _recorded_turn_origin(
+                            target_chat, owned_turn.get("turn_index")
+                        )
+                        if recorded_origin:
+                            duplicate_payload["origin"] = recorded_origin
                     try:
                         await websocket.send_json(duplicate_payload)
                     except (WebSocketDisconnect, RuntimeError):
@@ -462,6 +483,13 @@ async def ws_chat(websocket: WebSocket) -> None:
                 # client marks it `delivery: "steer"`, is handed to the running
                 # turn now (an older PWA sends no delivery and gets the queue).
                 delivery = "steer" if msg.get("delivery") == "steer" else "queue"
+                # A client may tag a deliberate retry of its own turn, so the
+                # PWA draws a notice instead of a user bubble. The tag is
+                # presentation metadata: only the exact "retry" value is
+                # honoured, so no engine origin (schedule, background_run, …)
+                # can be forged from the wire. An untagged send is unchanged.
+                origin = "retry" if msg.get("origin") == "retry" else ""
+                origin_kwargs = {"origin": origin} if origin else {}
                 active_stream = pcm.get_active_stream(chat_id)
                 if active_stream is not None:
                     handled = pcm.queue_message(
@@ -469,6 +497,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                         entry_id=str(msg.get("entry_id")) if msg.get("entry_id") else None,
                         delivery=delivery,
                         send_id=send_id,
+                        **origin_kwargs,
                     )
                     if handled:
                         if delivery == "steer":
@@ -487,7 +516,10 @@ async def ws_chat(websocket: WebSocket) -> None:
                 # the turn never started and the client's optimistic bubble
                 # was wiped by the reconnecting history reload.
                 try:
-                    pcm.start_stream(chat_id, text, images=images or None, send_id=send_id)
+                    pcm.start_stream(
+                        chat_id, text, images=images or None, send_id=send_id,
+                        **origin_kwargs,
+                    )
                 except RestartDrainingError as exc:
                     # Not a chat failure — the server is draining for
                     # restart. Tell the client so it can show the restart
@@ -543,6 +575,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_read`               {chat_id, last_read_at}
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
     - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
+    - `chat_terminal_offer_changed` {chat_id, terminal_offer}  (null = cleared)
     - `chat_title`              {chat_id, title}
     - `server_restarting`       {message}  (restart drain began; show overlay)
 
@@ -594,6 +627,13 @@ async def ws_events(websocket: WebSocket) -> None:
             # reconnecting after a gap has to be able to close a pin the engine
             # no longer holds, and it cannot do that for a chat that is absent.
             "chat_pins": pcm.chat_pin_states,
+            # The active terminal offer of every chat that has one, each
+            # value the same `{id, command}` payload the
+            # `chat_terminal_offer_changed` event carries. Sparse and
+            # COMPLETE: the map REPLACES the client's cache, so a chat that
+            # is missing from it has no offer and a stale offer is cleared
+            # by its absence.
+            "chat_terminal_offers": pcm.chat_terminal_offer_states,
             "keyboard_shortcuts": (
                 websocket.app.state.app_settings.settings.keyboard_shortcuts or {}
                 if getattr(websocket.app.state, "app_settings", None) is not None else {}
@@ -605,6 +645,10 @@ async def ws_events(websocket: WebSocket) -> None:
             "mid_turn_delivery": (
                 websocket.app.state.app_settings.settings.mid_turn_delivery or "queue"
                 if getattr(websocket.app.state, "app_settings", None) is not None else "queue"
+            ),
+            "appearance": (
+                websocket.app.state.app_settings.appearance_payload()
+                if getattr(websocket.app.state, "app_settings", None) is not None else None
             ),
             "keyboard_revision": (
                 hashlib.sha256(

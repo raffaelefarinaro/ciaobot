@@ -1,8 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { boot, isolate } from '../support/app'
 
-const SHOTS = '/private/tmp/claude-501/-Users-raffaelefarinaro-repos-ciaobot/d6b99252-f939-4dd7-b1fb-0de2ae7b0ad8/scratchpad/i8shots'
-
 async function openEditor(page: Page, patches: Array<Record<string, unknown>>) {
   await page.route('**/api/workspaces/alpha', async (route) => {
     if (route.request().method() === 'PATCH') {
@@ -12,8 +10,7 @@ async function openEditor(page: Page, patches: Array<Record<string, unknown>>) {
     }
     await route.fallback()
   })
-  await boot(page, '/settings/workspaces', '[aria-label="Edit workspace alpha"]')
-  await page.locator('[aria-label="Edit workspace alpha"]').click()
+  await boot(page, '/settings/workspace', '.settings-switch-row')
   const toggle = page.getByRole('switch', { name: 'claude.ai connectors' })
   await toggle.scrollIntoViewIfNeeded()
   await expect(toggle).toBeVisible()
@@ -46,7 +43,6 @@ test.describe('claude.ai connectors switch', () => {
 
     await page.keyboard.press('Space')
     await expect(toggle).toHaveAttribute('aria-checked', 'false')
-    await page.screenshot({ path: `${SHOTS}/desktop-off-focused.png` })
     await toggle.click()
     await expect(toggle).toHaveAttribute('aria-checked', 'true')
     await toggle.click()
@@ -64,7 +60,6 @@ test.describe('claude.ai connectors switch', () => {
     const toggle = await openEditor(page, [])
     const box = await toggle.boundingBox()
     console.log(`MOBILE hit target: ${box!.width}x${box!.height}`)
-    await page.screenshot({ path: `${SHOTS}/mobile.png` })
     expect(box!.width).toBeGreaterThanOrEqual(44)
     expect(box!.height).toBeGreaterThanOrEqual(44)
     await context.close()
@@ -85,6 +80,5 @@ test.describe('claude.ai connectors switch', () => {
     expect(m.rowScroll).toBeLessThanOrEqual(m.rowClient)
     expect(m.btnRight).toBeLessThanOrEqual(m.rowRight + 1)
     expect(m.docScroll).toBeLessThanOrEqual(m.docClient)
-    await page.screenshot({ path: `${SHOTS}/zoomed.png` })
   })
 })

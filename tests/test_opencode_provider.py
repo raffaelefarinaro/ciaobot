@@ -1061,6 +1061,32 @@ def test_write_tool_reports_a_file_touch(tmp_path):
     assert events[0].file_touches == [{"file_path": "/workspace/new.py", "action": "write"}]
 
 
+def test_shell_ciao_file_surface_emits_surfaced_touch(tmp_path):
+    events = _convert(
+        _provider(tmp_path),
+        "session.tool.called",
+        {"id": "c", "name": "shell", "input": {"command": "ciao file surface memory-vault/x.html"}},
+    )
+    assert events[0].file_touches == [
+        {"file_path": "memory-vault/x.html", "action": "surfaced"}
+    ]
+
+
+def test_shell_redirect_emits_touch(tmp_path):
+    events = _convert(
+        _provider(tmp_path),
+        "session.tool.called",
+        {"id": "c", "name": "shell", "input": {"command": "echo hi > out/a.md"}},
+    )
+    assert [t["file_path"] for t in events[0].file_touches] == ["out/a.md"]
+    plain = _convert(
+        _provider(tmp_path),
+        "session.tool.called",
+        {"id": "d", "name": "shell", "input": {"command": "pwd"}},
+    )
+    assert plain[0].file_touches is None
+
+
 def test_read_tool_reports_no_file_touch(tmp_path):
     events = _convert(
         _provider(tmp_path),
@@ -2110,9 +2136,9 @@ def test_v2_context_uses_the_last_step_not_the_cumulative_session_snapshot(
 ):
     """V2 reports both per-step and cumulative session token snapshots.
 
-    The result usage keeps OpenCode's cumulative session total, while the
-    context percentage uses the latest model-call size rather than adding the
-    cached prompt from every tool-loop step.
+    The result usage is the sum of the turn's steps, while the context
+    percentage uses the latest model-call size rather than adding the cached
+    prompt from every tool-loop step.
     """
     provider = _provider(tmp_path)
     _replay(provider)
@@ -2120,6 +2146,84 @@ def test_v2_context_uses_the_last_step_not_the_cumulative_session_snapshot(
     assert provider._usage["cacheReadTokens"] == "100"
     assert provider._context_usage["totalTokens"] == "102"
     assert provider._context_usage["cacheReadTokens"] == "80"
+
+
+def _replay_turns(provider: OpencodeProvider, name: str):
+    """Replay a multi-turn fixture; one (events, usage, cost) per execution.
+
+    Mirrors ``run_streaming``: turn state resets before each turn and the
+    terminal execution event ends it (the pump consumes it, not the converter).
+    """
+    turns = []
+    events: list = []
+    provider._reset_turn_state()
+    for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event["type"] == "session.execution.succeeded":
+            turns.append((events, dict(provider._usage), provider._cost))
+            events = []
+            provider._reset_turn_state()
+            continue
+        events.extend(provider._event_to_stream(event))
+    return turns
+
+
+def test_each_turn_records_its_own_usage_not_the_session_running_total(tmp_path):
+    """`session.usage.updated` is a session-wide running total.
+
+    `multi_turn_session.jsonl` is two real turns in one session (OpenCode
+    2.1.4, big-pickle). Recording the snapshot as the second turn's usage
+    counted turn one's 12,415 input tokens again; summing turns in the
+    transcript then grew quadratically with chat length.
+    """
+    turns = _replay_turns(_provider(tmp_path), "multi_turn_session.jsonl")
+
+    assert len(turns) == 2
+    (_, first, _), (second_events, second, second_cost) = turns
+    assert first["inputTokens"] == "12415"
+    assert second["inputTokens"] == "22"
+    assert second["outputTokens"] == "4"
+    assert second["cacheReadTokens"] == "15104"
+    assert second["totalTokens"] == "15130"
+    assert second_cost == 0.0
+    # The turns add up to OpenCode's own session total.
+    assert int(first["inputTokens"]) + int(second["inputTokens"]) == 12437
+    assert int(first["outputTokens"]) + int(second["outputTokens"]) == 7
+    # The live counter shows this turn, not the session.
+    live = [e for e in second_events if isinstance(e, TokenUsageEvent)]
+    assert [(e.input_tokens, e.output_tokens) for e in live] == [(22, 4)]
+
+
+def test_turn_usage_sums_steps_and_counts_a_repeated_step_once(tmp_path):
+    provider = _provider(tmp_path)
+    step = {
+        "sessionID": "ses_1",
+        "assistantMessageID": "msg_a",
+        "cost": 0.25,
+        "tokens": {"input": 100, "output": 10, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+    }
+    _convert(provider, "session.step.ended", step)
+    _convert(provider, "session.step.ended", step)
+    live = _convert(
+        provider,
+        "session.step.ended",
+        {**step, "assistantMessageID": "msg_b", "cost": 0.5,
+         "tokens": {"input": 5, "output": 2, "cache": {"read": 100}}},
+    )
+    _convert(
+        provider,
+        "session.usage.updated",
+        {"sessionID": "ses_1", "cost": 9.0, "tokens": {"input": 99999, "output": 999}},
+    )
+
+    assert provider._usage["inputTokens"] == "105"
+    assert provider._usage["outputTokens"] == "12"
+    assert provider._usage["totalTokens"] == "217"
+    assert provider._cost == 0.75
+    assert provider._context_usage["totalTokens"] == "107"
+    assert (live[0].input_tokens, live[0].output_tokens) == (105, 12)
 
 
 def test_recovered_turn_context_uses_the_final_assistant_call(tmp_path):
@@ -2798,6 +2902,8 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     with pytest.raises(RuntimeError, match="incompatible build"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -2832,10 +2938,13 @@ async def test_a_changed_root_set_restarts_the_opencode_server(
         mcp_token = ""
         agent_fs_scope = "workspace"
         agent_roots = ("/w/agent", "/w/data")
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
+        agent_read_only: tuple = ()
 
     request = Request()
     provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = ("workspace", live_roots)
+    provider._fs_scope_key = ("workspace", live_roots, (), ())
     stopped: list[bool] = []
 
     async def fake_disconnect() -> None:
@@ -2854,6 +2963,50 @@ async def test_a_changed_root_set_restarts_the_opencode_server(
     else:
         assert await provider._ensure_server(request) is live_client  # type: ignore[arg-type]
         assert stopped == []
+
+
+@pytest.mark.asyncio
+async def test_a_changed_denied_except_restarts_the_opencode_server(tmp_path, monkeypatch):
+    """Re-linking a Google account changes the re-allowed folder in the sandbox
+    profile, so the server must restart."""
+    from types import SimpleNamespace
+
+    from ciao.models import provider_reuse_key
+
+    provider = _provider(tmp_path)
+    provider._client = object()  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "workspace"
+        agent_roots = ("/w/agent",)
+        agent_denied = ("/w/agent/secrets",)
+        agent_denied_except = ("/w/agent/secrets/gws-b",)
+        agent_read_only: tuple = ()
+
+    request = Request()
+    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
+    provider._fs_scope_key = (
+        "workspace",
+        ("/w/agent",),
+        ("/w/agent/secrets",),
+        ("/w/agent/secrets/gws-a",),
+    )
+    stopped: list[bool] = []
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._process = None
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
+
+    with pytest.raises(FileNotFoundError):
+        await provider._ensure_server(request)  # type: ignore[arg-type]
+    assert stopped == [True]
 
 
 @pytest.mark.asyncio
@@ -2907,6 +3060,8 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -2972,6 +3127,8 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -3118,6 +3275,8 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     with pytest.raises(RuntimeError, match="port already in use"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -3166,6 +3325,8 @@ async def test_opencode_process_does_not_inherit_the_agent_token(tmp_path, monke
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -4973,8 +5134,8 @@ async def test_frames_until_cancel_leaves_no_pending_tasks():
     assert asyncio.all_tasks() - before == set()
 
 
-def test_linked_repo_config_content_lists_existing_skill_dirs(tmp_path):
-    from ciao.providers.opencode import linked_repo_config_content
+def test_server_config_content_lists_existing_skill_dirs(tmp_path):
+    from ciao.providers.opencode import server_config_content
 
     repo = tmp_path / "repo"
     (repo / ".claude" / "skills").mkdir(parents=True)
@@ -4982,30 +5143,50 @@ def test_linked_repo_config_content_lists_existing_skill_dirs(tmp_path):
     bare = tmp_path / "bare"
     bare.mkdir()
 
-    paths = json.loads(linked_repo_config_content(str(repo)))["skills"]["paths"]
+    paths = json.loads(server_config_content(str(repo)))["skills"]["paths"]
 
     assert paths == [str(repo / ".claude" / "skills"), str(repo / ".opencode" / "skills")]
-    assert linked_repo_config_content("") == ""
-    assert linked_repo_config_content(str(bare)) == ""
+    assert "skills" not in json.loads(server_config_content(""))
+    assert "skills" not in json.loads(server_config_content(str(bare)))
 
 
-def test_linked_repo_config_content_merges_an_existing_value(tmp_path):
-    from ciao.providers.opencode import linked_repo_config_content
+def test_server_config_content_caps_tool_output(tmp_path):
+    """Shell/webfetch/grep output is truncated well below OpenCode's 51,200-byte default."""
+    from ciao.providers.opencode import (
+        TOOL_OUTPUT_MAX_BYTES,
+        TOOL_OUTPUT_MAX_LINES,
+        server_config_content,
+    )
+
+    expected = {"max_lines": TOOL_OUTPUT_MAX_LINES, "max_bytes": TOOL_OUTPUT_MAX_BYTES}
+    assert json.loads(server_config_content(""))["tool_output"] == expected
+    assert json.loads(server_config_content(str(tmp_path)))["tool_output"] == expected
+    assert TOOL_OUTPUT_MAX_BYTES == 20_000
+    assert TOOL_OUTPUT_MAX_LINES == 1000
+    # A tool_output the operator already set in the environment wins.
+    own = json.loads(server_config_content("", '{"tool_output":{"max_lines":5}}'))
+    assert own["tool_output"] == {"max_lines": 5}
+
+
+def test_server_config_content_merges_an_existing_value(tmp_path):
+    from ciao.providers.opencode import server_config_content
 
     repo = tmp_path / "repo"
     (repo / ".agents" / "skills").mkdir(parents=True)
 
     merged = json.loads(
-        linked_repo_config_content(
+        server_config_content(
             str(repo), '{"skills":{"paths":["/x"]},"theme":"y"}'
         )
     )
 
     assert merged["theme"] == "y"
     assert merged["skills"]["paths"] == ["/x", str(repo / ".agents" / "skills")]
-    assert linked_repo_config_content(str(repo), "not json") == ""
-    assert linked_repo_config_content(str(repo), '{"skills": ["x"]}') == ""
-    assert linked_repo_config_content(str(repo), '{"skills": {"paths": "x"}}') == ""
+    assert server_config_content(str(repo), "not json") == ""
+    assert json.loads(server_config_content(str(repo), '{"skills": ["x"]}'))["skills"] == ["x"]
+    assert json.loads(
+        server_config_content(str(repo), '{"skills": {"paths": "x"}}')
+    )["skills"] == {"paths": "x"}
 
 
 @pytest.mark.asyncio
@@ -5027,11 +5208,13 @@ async def test_a_changed_linked_repo_restarts_the_opencode_server(
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
         linked_repo = "/r/new"
 
     request = Request()
     provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
-    provider._fs_scope_key = ("machine", ())
+    provider._fs_scope_key = ("machine", (), (), ())
     provider._linked_repo = live_repo
     stopped: list[bool] = []
 
@@ -5086,10 +5269,13 @@ async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypat
         mcp_token = ""
         agent_fs_scope = "machine"
         agent_roots: tuple = ()
+        agent_denied: tuple = ()
+        agent_denied_except: tuple = ()
         linked_repo = str(repo)
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
-    paths = json.loads(captured["env"]["OPENCODE_CONFIG_CONTENT"])["skills"]["paths"]
-    assert paths == [str(repo / ".claude" / "skills")]
+    config = json.loads(captured["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert config["skills"]["paths"] == [str(repo / ".claude" / "skills")]
+    assert config["tool_output"] == {"max_lines": 1000, "max_bytes": 20_000}
     provider._client = None

@@ -248,6 +248,20 @@ describe('parseInjectedPrompt', () => {
     expect(parseInjectedPrompt('anything', 'task_delegation')).toBeNull()
   })
 
+  // A retry is told apart by the origin the engine recorded for the turn, and
+  // by nothing else: the resend carries the request it repeats, so the text
+  // alone can never say "this is a retry".
+  it('recognises a recorded retry whatever its text says', () => {
+    expect(parseInjectedPrompt('Check the video', 'retry')).toEqual({ kind: 'retry' })
+    expect(parseInjectedPrompt('anything at all', 'retry')).toEqual({ kind: 'retry' })
+  })
+
+  it('never guesses a retry from the text', () => {
+    expect(parseInjectedPrompt('Check the video')).toBeNull()
+    expect(parseInjectedPrompt('Retry started')).toBeNull()
+    expect(parseInjectedPrompt('Retry')).toBeNull()
+  })
+
   it('ordinary text returns null', () => {
     expect(parseInjectedPrompt('hello there')).toBeNull()
     expect(parseInjectedPrompt('[Ciaobot] hello')).toBeNull()
@@ -299,6 +313,12 @@ describe('summarizeInjectedPrompt', () => {
     })
     expect(summarizeInjectedPrompt({ kind: 'update_task' }, 'Update')).toEqual({
       label: 'Update task', facts: 'Update', tone: null,
+    })
+  })
+
+  it('summarises a retry as a new attempt of the same request', () => {
+    expect(summarizeInjectedPrompt({ kind: 'retry' })).toEqual({
+      label: 'Retry started', facts: 'Same request · new attempt', tone: null,
     })
   })
 })

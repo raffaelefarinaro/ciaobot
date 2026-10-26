@@ -78,7 +78,7 @@ def _omits(text: str, pattern: str) -> bool:
 
 
 def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
-    """Settings is seven routes; the four asset lists are compared through the scoped API.
+    """Settings is ten routes; the four asset lists are compared through the scoped API.
 
     The old task called Settings one scrolling page with an "On this page" rail
     and treated a bare `curl` 401 as proof the endpoint worked. Both are wrong:
@@ -92,8 +92,11 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
     # All seven supported routes, including the default.
     for route in (
         "`/settings`",
+        "`/settings/appearance`",
+        "`/settings/access`",
+        "`/settings/advanced`",
         "`/settings/workspaces`",
-        "`/settings/models`",
+        "`/settings/providers`",
         "`/settings/skills`",
         "`/settings/subagents`",
         "`/settings/commands`",
@@ -105,6 +108,7 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
     for endpoint in (
         "/api/admin/skills?workspace=",
         "/api/agent-assets?workspace=",
+        "/api/commands?workspace=",
         "/api/mcp/status?workspace=",
     ):
         assert endpoint in text, endpoint
@@ -138,6 +142,12 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
     # The before/after half is honest on a single-workspace install.
     assert "single-workspace" in lowered and "BLOCKED" in text
 
+    # Loads are scoped per visible tab, not a batch of four on workspace switch.
+    assert "currently visible scoped tab refetches" in lowered
+    assert "off-screen tabs" in lowered
+    assert "when opened" in lowered
+    assert "all four refetch together" not in lowered
+
     # The route-specific rail cannot be claimed where a route has none.
     assert "more than one section" in lowered
 
@@ -169,13 +179,12 @@ def test_project_walk_separates_app_create_from_vault_completion() -> None:
     # The walkthrough has to *require* that action, not merely mention it:
     # "need not offer a Complete action" would leave the fixture unverified.
     assert _near(plain, "complete action", "must offer")
-    # The page's ••• menu is rendered only without a vault folder, so it is
-    # absent here, and the walkthrough has to look for its absence next to
-    # the menu it is talking about.
+    # The page's ••• menu with Delete project is offered for a vault-backed
+    # non-auto project, and the walkthrough checks that actual menu contract.
     assert "•••" in text
     assert "delete project" in lowered
-    assert _near(plain, "delete project", "absent")
-    assert "absent" in lowered
+    assert _near(plain, "delete project", "menu must offer")
+    assert "neither pressed" in lowered
 
     # The obsolete plain-project expectations are gone.
     assert "plain app project" not in lowered
@@ -198,6 +207,8 @@ def test_project_walk_separates_app_create_from_vault_completion() -> None:
     assert "isolated" in lowered
     assert "BLOCKED" in text
     assert "real workspace" in lowered or ("real" in lowered and "workspace" in lowered)
+    assert "already isolated" in lowered
+    assert "do not create a live engine" in lowered
 
     # Retention is checked, and cleanup is deliberately not done.
     assert "retained" in lowered

@@ -140,6 +140,35 @@ function actorLabel(via: string): string {
   return 'unknown'
 }
 
+const REGION_KINDS = new Set(['memory', 'profile'])
+
+/** A [memory]/[profile] row the nightly run settled itself. */
+function isCareSettled(row: ProposalHistoryRow): boolean {
+  return row.via === 'agent' && REGION_KINDS.has(row.kind)
+}
+
+/** "Filed" is only true of an accept; a dismissal says what it was. */
+function careLabel(row: ProposalHistoryRow): string {
+  return row.action === 'accepted' ? 'Filed by Workspace care' : 'Dismissed by Workspace care'
+}
+
+/** What the run predicted against what was decided. A miss is information, not
+ * an error, so it is muted rather than red. A row the run settled itself matched
+ * by construction: it acted on the prediction. */
+function predictionLine(row: ProposalHistoryRow): string {
+  const p = row.prediction
+  if (!p) return ''
+  const decided = row.action === 'accepted' ? 'accepted' : 'dismissed'
+  return `Predicted ${p.verdict}, ${decided}`
+}
+
+function predictionBadge(row: ProposalHistoryRow): { cls: string; text: string } {
+  if (row.via === 'agent') return { cls: 'badge--muted', text: 'Acted on prediction' }
+  return row.prediction?.match
+    ? { cls: 'badge--success', text: 'Matched' }
+    : { cls: 'badge--muted', text: 'Missed' }
+}
+
 /** Status badge class + text. `outcome` overrides a plain accept/dismiss
  * label when the row was not a fresh write: already-known facts the accept
  * recognized, and rows an expiry sweep dropped.
@@ -275,11 +304,26 @@ const filtersHideEverything = computed(
             <div class="ph-row-top">
               <span class="ph-kind">{{ kindLabel(row.kind) }}</span>
               <span class="badge" :class="statusBadge(row).cls">{{ statusBadge(row).text }}</span>
-              <span class="ph-actor">{{ actorLabel(row.via) }}</span>
+              <span v-if="isCareSettled(row)" class="ph-actor ph-actor--care">{{ careLabel(row) }}</span>
+              <span v-else class="ph-actor">{{ actorLabel(row.via) }}</span>
               <span v-if="row.ts" class="ph-time">{{ formatTime(row.ts) }}</span>
             </div>
             <p class="ph-text">{{ row.text }}</p>
+            <p v-if="row.prediction" class="ph-prediction">
+              <span class="badge" :class="predictionBadge(row).cls">{{ predictionBadge(row).text }}</span>
+              {{ predictionLine(row) }}
+              <span class="ph-prediction-reason">{{ row.prediction.reason }}</span>
+            </p>
+            <div v-if="isCareSettled(row) && row.change?.undoable" class="ph-care-actions">
+              <button
+                type="button"
+                class="btn-small btn-chip ph-care-undo"
+                :disabled="store.isBusy(row.change.receipt_id)"
+                @click="undoChange(row)"
+              >{{ store.isBusy(row.change.receipt_id) ? 'undoing…' : 'Undo' }}</button>
+            </div>
             <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
+            <p v-if="row.reason" class="ph-reason"><span class="ph-reason-label">Why</span> {{ row.reason }}</p>
             <!-- A retirement went to the review trash, not through a memory
                  receipt, so the Changes box below says there is no snapshot.
                  Saying so alone would read as "nothing happened" beside a note
@@ -576,6 +620,33 @@ const filtersHideEverything = computed(
   font-size: 0.8rem;
 }
 
+.ph-actor--care {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.ph-prediction {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg2);
+  font-size: 0.8rem;
+}
+
+.ph-prediction-reason {
+  overflow-wrap: anywhere;
+}
+
+.ph-care-actions {
+  margin-top: var(--space-1);
+}
+
+@media (max-width: 640px) {
+  .ph-care-undo { min-height: var(--touch, 44px); }
+}
+
 .ph-time {
   margin-left: auto;
   color: var(--fg2);
@@ -593,6 +664,17 @@ const filtersHideEverything = computed(
   color: var(--fg2);
   font-size: 0.8rem;
   font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.ph-reason {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.ph-reason-label {
+  font-weight: 600;
 }
 
 .ph-source-line {

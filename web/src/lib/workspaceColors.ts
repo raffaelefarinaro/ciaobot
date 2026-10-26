@@ -1,6 +1,6 @@
 /** Per-workspace accent presets (Option A: accents only). */
 
-export type WorkspaceColorId = 'amber' | 'pink' | 'cyan' | 'emerald' | 'violet'
+export type WorkspaceColorId = 'amber' | 'pink' | 'cyan' | 'emerald' | 'violet' | 'blue' | 'teal' | 'lime' | 'fuchsia'
 
 /**
  * What `#ciao-app` wears: a preset, or `neutral` while the active workspace's
@@ -16,6 +16,8 @@ export interface WorkspaceColorPreset {
   label: string
   /** Swatch shown in Settings (dark-theme accent). */
   swatch: string
+  /** Hidden behind the picker's "+" until chosen or opened. */
+  extra?: true
 }
 
 export const WORKSPACE_COLOR_PRESETS: WorkspaceColorPreset[] = [
@@ -24,6 +26,10 @@ export const WORKSPACE_COLOR_PRESETS: WorkspaceColorPreset[] = [
   { id: 'cyan', label: 'Terminal Cyan', swatch: '#38bdf8' },
   { id: 'emerald', label: 'Emerald Mint', swatch: '#34d399' },
   { id: 'violet', label: 'Violet Iris', swatch: '#a78bfa' },
+  { id: 'blue', label: 'Sky Blue', swatch: '#60a5fa', extra: true },
+  { id: 'teal', label: 'Deep Teal', swatch: '#2dd4bf', extra: true },
+  { id: 'lime', label: 'Lime Pop', swatch: '#a3e635', extra: true },
+  { id: 'fuchsia', label: 'Fuchsia Neon', swatch: '#e879f9', extra: true },
 ]
 
 const PRESET_IDS = new Set<string>(WORKSPACE_COLOR_PRESETS.map((p) => p.id))

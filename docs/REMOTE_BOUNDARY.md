@@ -29,9 +29,25 @@ carried by the session.
   mode and only to a loopback TCP peer (`is_loopback_client`) whose `Host`
   also names loopback: first run binds 0.0.0.0, so the `Host` header alone
   would let a LAN client claim `localhost`. Every `/ws/*` handshake is checked for same-origin and
-  then for the session. Every state-changing `/api/*` request must present an
-  `Origin` or `Referer` that matches the request host, allowing for a
-  proxy-declared `X-Forwarded-Host`.
+  then for the session. Every state-changing `/api/*` request that carries an
+  `Origin` or `Referer` must present one that matches the request host, the
+  request scheme (normalising `ws`/`wss`) and the effective port; a request
+  with neither header is accepted, and the session cookie is the only control
+  there. A request that carries a
+  proxy-declared `X-Forwarded-Host` naming that origin's host is accepted on
+  the host alone: a TLS-terminating proxy legitimately presents http to the
+  engine while the browser's origin is https, and the port may differ across
+  the hop too. A browser cannot set `X-Forwarded-Host`, so only a fronting
+  proxy declares it.
+- `ApiRequestBodyLimitMiddleware` (`ciao/web/request_limits.py`) is inside
+  `AuthMiddleware`, so session, origin and loopback-peer refusals never consume
+  the body. HTTP `/api/*` gets a 1 MiB default; only exact upload/write
+  method-and-route pairs receive finite exceptions. It rejects both oversized
+  declared lengths and actual streamed bytes, spools admitted bodies with a
+  1 MiB in-memory threshold and replays them unchanged. `/ws/*`, `/hooks/*` and
+  `/share-target` do not pass through it. Malformed or excessively nested JSON
+  is refused as 400 before handler dispatch; application errors are not
+  translated as parse failures.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
@@ -94,14 +110,38 @@ carried by the session.
   browser's terminal. A logout that presents no terminal cookie revokes
   nothing. A *successful* `POST /api/auth/settings` password change ends
   **every** grant, on every browser, and clears the `ciao_terminal` cookie
-  — the password is the terminal's own credential, so every browser has to
-  unlock again, including the one that made the change. A refused password
-  change ends nothing. The grant is revoked here; the terminal socket's own
-  re-check against this store is the terminal-stream child's work and does
-  not exist yet, so no socket is closed by this today. The signed session
-  cookie remains required for every route either way, and neither action
-  names a user or a device: there are no per-device identities to revoke
-  against.
+  — the grant is bound to the signed session, and the change re-keys the
+  session signer, so every browser has to sign in again and ask for a new
+  grant, including the one that made the change. A refused password
+  change ends nothing. The grant is revoked here, and the terminal socket
+  enforces it twice: a watchdog re-checks the store at most once a second
+  and closes the socket `4401`, and the receive loop re-checks on every
+  client frame, so a revoked grant ends the stream even between ticks. A
+  detached session's shell keeps running until its own 15-minute detached
+  TTL, which is what lets the browser get a new grant and recover it. The
+  signed session cookie remains required for every route either way, and
+  neither action names a user or a device: there are no per-device
+  identities to revoke against.
+- **The terminal's trust boundary is the signed-in session, and it is the
+  session alone.** `POST /api/terminal/unlock` asks for no secret: it
+  takes no body, and a signed-in browser on this engine's own origin gets
+  the 15-minute grant that the socket and the session routes then ask
+  for. The grant itself no longer proves anything about the password — it
+  answers *which* browser may hold the socket and *for how long* — and the
+  grant's own rules are unchanged: a host-only, HttpOnly, SameSite=Strict
+  cookie, bound to the session cookie that minted it, a fixed 15-minute
+  lifetime that does not slide, at most 32 live grants, one controller per
+  session, and revocation on logout and on a password change. The lifetime
+  bounds a *grant*, not an open pane: when the engine closes the socket
+  because the grant expired or was revoked, an open pane asks for a new
+  grant and resumes, so what the 15 minutes ends is the grant, not the
+  pane. The consequence is written down rather than left implicit: a
+  workspace that denies the agent `Bash` (or confines it to the workspace)
+  no longer has a host-shell boundary. The terminal used to ask for the
+  password a second time, and that second prompt was the last thing
+  between a signed-in tab and a shell on the engine; it is gone, so a
+  signed-in browser is now enough. Anything that relied on that prompt as
+  a second barrier has to rely on the session instead.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails
@@ -133,8 +173,36 @@ carried by the session.
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
   `command` to run on the host.
 
+- **Memory handover widens what unattended text can reach.** At `memory_handover: all`
+  (operator-only, `PATCH /api/workspaces/{name}`), the nightly run may accept a
+  queued `[memory]`/`[profile]` fact into the always-loaded `AGENTS.md` regions, and
+  that queued text can originate in untrusted sources (imported chats, fetched
+  pages). The exposure is bounded, not removed: the write goes through the
+  event-shape and duplicate guards, at most five facts per curation run (counted
+  from the sidecar's `via: agent` accepts since the live lease began, and only
+  while a lease is live), only for a row the run predicted accept and that is not
+  `decide: you`, and every accept leaves an undo receipt in History. The acting
+  commands read the setting only from the installed engine's registry (found
+  through the service definition, ignoring `--workspace`, `CIAO_WORKSPACE` and
+  `CIAO_RUNTIME_ROOT`) and refuse unless that registry maps the workspace to the
+  vault being written. A run that can already execute shell could end and retake
+  its lease to reset the cap, as it could edit the registry; the file-tool deny
+  patterns and the operator's Undo are the remaining controls.
+
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.
+
+### Residual: forged decision rows (#1745)
+
+An agent with vault write access can forge the `via=pwa` memory rows and `actor=user` task rows the weekly rules pass reads as operator decisions. This is bounded: the resulting `Memory-Review-Rules.md` and `Task-Rules.md` only shape what memory review proposes and how tasks are filed, are linted on write and again on read, and are fenced as evidence. They never accept, promote or change permissions.
+
+### Residual: writable Google credential directory (#1959)
+
+A workspace-only chat's sandbox makes the linked Google account's credential directory (`<workspace>/secrets/gws-<profile>`) writable, because `gws` must write its token cache there. `client_secret.json` and `credentials.json` are write-denied by name, but `gws` ranks `credentials.enc`, per-account `credentials.*.enc`, `accounts.json` and `.encryption_key` above them, and those stay writable. A prompt-injected agent can therefore plant credentials for an account it controls. A later unsandboxed `gws` (the operator's terminal, a schedule, a whole-machine chat) would then act as that account, for example writing the operator's files to it. The agent can also read the linked account's refresh token, as it can with whole-machine access. The maintainer accepted this risk. The alternative was a per-chat copy of the directory under `.runtime`, refreshed at each chat start.
+
+### Residual: readable gh token (#1961)
+
+A workspace-only chat's sandbox grants the `gh` config directory (`GH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/gh`, else `~/.config/gh`) read-only. `hosts.yml` there may hold the operator's GitHub OAuth token, so the agent can read it, as it can with whole-machine access. The maintainer accepted this. Because the keychain is outside the sandbox, the engine also reads gh's token and passes it as `GH_TOKEN` in the chat's environment, where the agent can read it. An OpenCode server keeps the `GH_TOKEN` it started with until it restarts, while a Claude chat respawns on a changed token. A token the agent prints, for example via `env`, is stored in the chat transcript.
 
 ## Verification
 
@@ -145,6 +213,8 @@ this one. There is nothing to unpair and no session to bridge.
   gone and the release is the engine (`#655`, `#656`).
 
 ## Remaining work (not claimed resolved)
+
+Onboarding lifecycle progress (`/api/onboarding`) is browser-session authority only: every request requires the signed session, and mutations use the normal same-origin policy. It records only installation/registered-workspace journey step and completion; it cannot verify readiness or perform host actions. An agent bearer token does not authorize this browser surface.
 
 1. Replace the dashboard password with named, revocable per-device credentials
    bound to a stable engine identity, and require verified TLS by default.

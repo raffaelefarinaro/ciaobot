@@ -1647,20 +1647,35 @@ def test_task_completion_enqueue_has_no_chat_and_quotes_the_resolution(
     assert streams.chat_ids == [chat_id]
 
 
-def test_task_completion_enqueue_does_nothing_when_insights_are_off(
+def test_agent_relayed_completion_is_labelled_unverified_and_user_one_is_unchanged(
     tmp_path: Path, passes_enabled: None, streams: _FakeStreams
 ) -> None:
     manager = _make_manager(tmp_path)
-    manager._config.insights_enabled = False
-    assert manager.enqueue_task_completion(
-        workspace="work",
-        task_path=_TASK_PATH,
-        completion_id=_COMPLETION_ID,
-        resolution=_RESOLUTION,
-        completed_at="2026-10-08T10:00:00+00:00",
-    ) is None
-    assert _memory_pass_helpers(manager) == []
-    assert streams.calls == []
+    user_id = manager.enqueue_task_completion(
+        workspace="work", task_path=_TASK_PATH, completion_id=_COMPLETION_ID,
+        resolution=_RESOLUTION, completed_at="2026-10-08T10:00:00+00:00",
+    )
+    agent_id = manager.enqueue_task_completion(
+        workspace="work", task_path=_TASK_PATH, completion_id=_COMPLETION_ID,
+        resolution=_RESOLUTION, completed_at="2026-10-08T10:00:00+00:00",
+        relayed_by_agent=True,
+    )
+    # The same text relayed by an agent is its own pass, not the user's.
+    assert agent_id is not None and agent_id != user_id
+    user_prompt = manager._memory_pass._prompt_for(manager.get_chat(user_id))
+    agent_prompt = manager._memory_pass._prompt_for(manager.get_chat(agent_id))
+    assert "resolution below is the user's verdict" in user_prompt
+    assert "recorded by the agent" not in user_prompt
+    assert "resolution below is the user's verdict" not in agent_prompt
+    assert "recorded by the agent" in agent_prompt
+    assert "unverified" in agent_prompt
+    assert "user preference" in agent_prompt
+    assert f"<quoted-resolution>\n{_RESOLUTION}\n</quoted-resolution>" in agent_prompt
+    helper = chat_service._normalize_chat_helper(manager.get_chat(agent_id).helper)
+    assert helper["relayed_by_agent"] is True
+    assert chat_service._normalize_chat_helper(helper) == helper
+    user_helper = chat_service._normalize_chat_helper(manager.get_chat(user_id).helper)
+    assert user_helper["relayed_by_agent"] is False
 
 
 def test_approved_focus_fences_the_user_resolution_and_round_trips() -> None:
@@ -1954,3 +1969,48 @@ def test_lesson_step_three_requires_origins_and_the_draft_ends_the_turn_in_step_
     step6, step7 = text.split("\n7. ")
     assert "the draft is where your turn ends" in step6
     assert step7 == "Report. Mention each filed proposal or draft in your closing list."
+
+
+def test_pass_prompt_requires_a_decider_on_every_queued_item() -> None:
+    """Every queued item carries a decider and reason, with the rubric to pick one."""
+    prompt = memory_pass.MEMORY_PASS_PROMPT
+    for phrase in (
+        "--decide nightly|you",
+        "--decide-reason-file",
+        "more context would settle it",
+        "identity or preferences",
+    ):
+        assert phrase in prompt, phrase
+
+
+# ── Review rules (#1745) ──────────────────────────────────────────────────
+
+
+def test_every_prompt_variant_carries_the_fenced_rules_when_present_and_is_unchanged_when_absent(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    variants = (
+        "",
+        chat_service.TASK_COMPLETION_SOURCE,
+        chat_service.PROJECT_CLOSURE_SOURCE,
+    )
+    baselines = {}
+    for source_kind in variants:
+        chat.helper = {**chat.helper, "source_kind": source_kind}
+        baselines[source_kind] = manager._memory_pass._prompt_for(chat)
+        assert "memory-review-rules" not in baselines[source_kind]
+
+    workspace = manager._memory_pass._workspace_of(chat)
+    vault = Path(manager._config.workspace_vault_root(workspace))
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    (vault / "Workspace" / "Memory-Review-Rules.md").write_text(
+        "<!-- ciao:rules:start source=0123456789abcdef -->\n- **Drop** one-offs <!-- rule:chip:one-off verdict=drop -->\n<!-- ciao:rules:end -->\n",
+        encoding="utf-8",
+    )
+    for source_kind in variants:
+        chat.helper = {**chat.helper, "source_kind": source_kind}
+        prompt = manager._memory_pass._prompt_for(chat)
+        assert prompt.startswith(baselines[source_kind])
+        assert "<memory-review-rules>\n- **Drop** one-offs" in prompt

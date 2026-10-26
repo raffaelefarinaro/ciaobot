@@ -24,9 +24,10 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from ciao import vault_index
+from ciao import decision_rules, vault_index
 from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
+from ciao.execution_modes import MODE_RANK
 from ciao.fts_search import (
     get_db_path,
     index_vault,
@@ -55,6 +56,7 @@ from ciao.schedules import (
     publish_automations_changed,
     stamp_fallback_project,
     wall_clock_time_error,
+    normalize_system_schedule_update,
 )
 from ciao.task_attempts import (
     HANDOFF_ATTEMPTS,
@@ -69,6 +71,7 @@ from ciao.task_attempts import (
     task_delegation_helper,
 )
 from ciao.task_board import Actor, TaskBoardError, TaskBoardStore, TaskDocument
+from ciao.task_decisions import append_decision, clean_reason
 from ciao.task_log import extract_log, log_text, render_item, strip_log, upsert_item
 from ciao.task_resolution import (
     Completion,
@@ -83,6 +86,7 @@ from ciao.task_updates import (
     strip_updates,
     unseen_updates,
 )
+from ciao.terminal_offer import TerminalOfferError, normalize_terminal_offer
 from ciao.web.chat_service import MEMORY_PASS_RESOLUTION_MAX
 from ciao.web.transcript_service import _assemble_chat_messages
 from ciao.web.routes_webhooks import webhook_store
@@ -192,7 +196,7 @@ McpPrincipal = AgentPrincipal
 # ``plan`` is read-only, ``normal`` asks before acting, ``auto`` acts with safer
 # defaults, ``bypass`` skips approvals. Mirrors ``BridgeMode`` in ciao.models
 # and the SDK mapping in ciao.providers.claude.
-_MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
+_MODE_RANK = MODE_RANK
 
 RELOAD_OWN_NOTE = (
     "The provider restarts when this turn ends and the conversation continues "
@@ -537,6 +541,14 @@ def _completed_summary(completions: list[Completion]) -> dict[str, Any]:
     }
 
 
+def _clean_reason(value: object) -> str:
+    """An optional decision reason, or the refusal a caller answers with."""
+    try:
+        return clean_reason(value)
+    except ValueError as exc:
+        raise ControlPlaneError("invalid_task", str(exc)) from None
+
+
 def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict[str, Any]:
     """One task as a transport payload.
 
@@ -562,6 +574,7 @@ def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict
         "chat_id": record.chat_id,
         "attempt_id": record.attempt_id,
         "linked_chats": list(record.linked_chats),
+        "created_by": record.created_by,
         "created_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
         "revision": document.revision,
@@ -1489,6 +1502,43 @@ class CiaoControlPlane:
             return False
         current_turn = str(max(0, int(chat.user_turn_count) - 1))
         return bool(chat.user_turn_unattended.get(current_turn))
+
+    #: Turn origins a person's own message produces. ``retry`` replays one the
+    #: person typed; every other origin in ``TURN_ORIGINS`` is the engine's.
+    _PERSON_TURN_ORIGINS = frozenset({"", "retry"})
+    #: Helper chats the engine starts from its own prompt, not a typed one.
+    _ENGINE_HELPER_KINDS = frozenset({"memory_pass", "update_task", "proposal"})
+
+    def _person_typed_turn(self, principal: AgentPrincipal) -> bool:
+        """Whether the turn asking right now is one a person typed into this chat.
+
+        Stricter than "not scheduled": a webhook, a delegated-task turn, a task
+        wake or an update task runs with nobody watching, and so do the engine's
+        own helper chats, so none of them may delete or close the user's
+        records. The current turn's origin must be empty (typed) or ``retry``.
+
+        A chat this process cannot see is allowed, as in
+        :meth:`_unattended_turn`.
+        """
+        chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
+        if chat is None:
+            return True
+        # The stored kind, not the normalized helper: normalization fails closed
+        # to an empty helper, which here would read as "not a helper chat".
+        helper = chat.helper if isinstance(chat.helper, dict) else {}
+        if helper.get("kind") in self._ENGINE_HELPER_KINDS:
+            return False
+        current_turn = str(max(0, int(chat.user_turn_count) - 1))
+        origin = str(chat.user_turn_origin.get(current_turn) or "")
+        return origin in self._PERSON_TURN_ORIGINS
+
+    def _require_person_typed_turn(self, principal: AgentPrincipal, what: str) -> None:
+        """Refuse *what* unless the person asked for it in this chat themselves."""
+        if self._unattended_turn(principal) or not self._person_typed_turn(principal):
+            raise ControlPlaneError(
+                "unattended_forbidden",
+                f"{what} requires a turn the user typed: ask them to request it in the chat themselves.",
+            )
 
     @staticmethod
     def _safe_relative(root: Path, relative_path: str, *, must_exist: bool = False) -> Path:
@@ -2650,6 +2700,77 @@ class CiaoControlPlane:
         self.pcm.start_stream(chat_id, text)
         return _ok({"chat_id": chat_id, "status": "started"})
 
+    def chat_terminal_offer(self, principal: AgentPrincipal, command: str) -> dict[str, Any]:
+        """Offer a suggested terminal command to the *calling* chat.
+
+        The command is guidance, not an action: the user reads it, copies it and
+        runs it themselves. Nothing here executes it, opens a terminal, unlocks
+        a session or reads output back — the state that holds it is transient
+        and in memory only (#1840).
+
+        There is no chat argument, and that is the whole point of the shape.
+        An offer is a command on somebody's screen, so the screen is the chat
+        that asked for it; a target argument would let a caller put one
+        anywhere it could name. The chat is therefore the principal's own, and
+        it is resolved by its *exact* id: ``_chat_scope`` falls back to an
+        unambiguous title, which is right for ``chat get`` and wrong here,
+        because a title is a name the caller chose.
+
+        The command is untrusted, model-authored text and can carry a
+        credential, so a refusal is static: it names a reason and never the
+        rejected text, which would end up in a log line and a telemetry
+        field. A value of the wrong *type* never reaches this method — the
+        transport's schema refuses it first — and a *constraint* on the text
+        is deliberately not part of that schema, because a constraint would
+        put a rejected command inside the validation error.
+
+        Plan mode may still offer: the command is text the user reviews, the
+        same classification ``file_surface`` has. An unattended turn may not:
+        a schedule has nobody in front of the screen to review the text.
+        """
+        chat_id = str(principal.chat_id or "").strip()
+        if not chat_id:
+            raise ControlPlaneError(
+                "chat_required", "No active chat to offer a terminal command to."
+            )
+        if self.pcm.get_chat(chat_id) is None:
+            # The exact id or nothing: a title must not resolve here.
+            raise ControlPlaneError("chat_not_found", "The calling chat was not found.")
+        # Authorization: the chat must live in the principal's own workspace.
+        chat, _project = self._chat_scope(principal, chat_id)
+        if chat.archived:
+            raise ControlPlaneError(
+                "chat_archived", "Cannot offer a terminal command in an archived chat."
+            )
+        # Not just "not scheduled": a webhook or task turn runs with nobody
+        # watching, and its payload must not put a command in front of the user.
+        self._require_person_typed_turn(principal, "A suggested terminal command")
+        try:
+            normalized = normalize_terminal_offer(command)
+        except TerminalOfferError as exc:
+            # `exc.reason` is a closed word ("empty", "too_long", ...); the
+            # command it came from never appears.
+            raise ControlPlaneError(
+                "invalid_terminal_command",
+                f"The suggested command was refused ({exc.reason}).",
+            ) from exc
+        try:
+            payload = self.pcm.set_terminal_offer(chat.chat_id, normalized)
+        except TerminalOfferError as exc:
+            raise ControlPlaneError(
+                "invalid_terminal_command",
+                f"The suggested command was refused ({exc.reason}).",
+            ) from exc
+        except ValueError:
+            # The manager's own refusals are static, and so is this one: the
+            # command never appears in an error string.
+            raise ControlPlaneError(
+                "invalid_terminal_command", "The suggested command was refused."
+            ) from None
+        if payload is None:
+            raise ControlPlaneError("chat_not_found", "The calling chat was not found.")
+        return _ok({"chat_id": chat.chat_id, "terminal_offer": payload})
+
     def chat_continue(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
         chat = self._chat(principal, chat_id)
         chat = self.pcm.continue_archived_chat(chat.chat_id)
@@ -2688,7 +2809,11 @@ class CiaoControlPlane:
             chat = self.pcm.get_chat(chat_id)
             return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
         if action == "set":
-            chat = self.pcm.set_chat_retry(chat_id, prompt, image_refs=[], reason="mcp")
+            # A retry a scheduled turn arms for itself replays unattended too.
+            unattended = chat_id == principal.chat_id and self._unattended_turn(principal)
+            chat = self.pcm.set_chat_retry(
+                chat_id, prompt, image_refs=[], reason="mcp", unattended=unattended
+            )
             if chat is None:
                 raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
             return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
@@ -3049,8 +3174,12 @@ class CiaoControlPlane:
         body: str = "",
         project_id: str | None = None,
         due: str | None = None,
+        actor: Actor = "user",
     ) -> dict[str, Any]:
-        """Create one task in one workspace and return it as stored."""
+        """Create one task in one workspace and return it as stored.
+
+        ``actor="agent"`` marks the task ``created_by: agent`` (#1726).
+        """
         project = self._task_project(workspace, project_id) if project_id else None
         document = self._task_call(
             workspace,
@@ -3059,6 +3188,7 @@ class CiaoControlPlane:
                 body=str(body or ""),
                 project_id=project,
                 due=due or None,
+                created_by=actor,
             ),
         )
         return _task_payload(document, include_body=True)
@@ -3077,27 +3207,24 @@ class CiaoControlPlane:
         """Apply managed edits to one task at the revision the caller read.
 
         The store owns the edit contract — which fields exist, which value
-        shapes are legal, and the rule that only a user may mark a task done.
+        shapes are legal, and the rule that an agent may mark a task done only
+        with a resolution.
         This layer adds the one thing a pure file store cannot know: that a
         ``project_id`` names a live project in this same workspace.
 
         ``resolution`` is the user's completion text. It rides on the write that
-        makes the task done, or rewords the latest completion of a task that is
-        already done. It is user-only: no agent call carries one. A resolution on
-        a write that leaves the task open, or on a done task with no completion
+        makes the task done, or a user rewords the latest completion of a task
+        that is already done. An agent may carry one only on the write that moves
+        the task into done, never to reword a past completion. A resolution on a
+        write that leaves the task open, or on a done task with no completion
         record to reword, is refused rather than dropped.
 
         The answer carries the attempt facts, so a board can redraw the card from it.
         """
         if resolution is not None:
-            if actor != "user":
-                raise ControlPlaneError(
-                    "task_completion_requires_user",
-                    "Only the user records how a task was resolved.",
-                )
             if not isinstance(resolution, str):
                 raise ControlPlaneError("invalid_task", "resolution must be a string")
-            self._check_resolution_target(workspace, task_id, changes)
+            self._check_resolution_target(workspace, task_id, changes, actor)
         planned: dict[str, object] = {}
         for key, value in dict(changes or {}).items():
             if key == "project_id":
@@ -3121,19 +3248,26 @@ class CiaoControlPlane:
         return self._task_with_attempt(workspace, document, include_body=True)
 
     def _check_resolution_target(
-        self, workspace: str, task_id: str, changes: Mapping[str, object]
+        self, workspace: str, task_id: str, changes: Mapping[str, object], actor: Actor
     ) -> None:
         """Refuse a resolution that no completion record could hold.
 
-        A resolution is written only with a transition into Done or as a rewording
-        of a completion that already exists. Anything else would be a silent no-op
-        in the store, so it is named here instead. The read is advisory: the store
-        still checks the revision before it writes.
+        A resolution is written only with a transition into Done or, for a user,
+        as a rewording of a completion that already exists. Anything else would
+        be a silent no-op in the store, so it is named here instead. An agent
+        gets the transition only. The read is advisory: the store still checks
+        the revision before it writes.
         """
         current = self._task_call(
             workspace, lambda store: store.get(str(task_id or "").strip())
         )
         target = changes.get("status", current.record.status)
+        if actor != "user" and not (target == "done" and current.record.status != "done"):
+            raise ControlPlaneError(
+                "task_completion_requires_user",
+                "An agent records a resolution only when it completes a task, "
+                "never on any other edit or to reword a past completion.",
+            )
         if target != "done":
             raise ControlPlaneError(
                 "invalid_task",
@@ -3363,13 +3497,18 @@ class CiaoControlPlane:
         due: str | None = None,
         actor: Actor = "agent",
         resolution: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """One board gesture: ``move``, ``complete`` or ``reassign``.
 
-        ``complete`` is an ordinary status edit to ``done``, so an agent caller
-        is refused by the store (``completion_requires_user``) exactly as it is
-        through ``task_update``; the gesture exists so the surface has a verb for
-        "mark this done" rather than a free-text status the caller must know.
+        ``complete`` is an ordinary status edit to ``done``, and the only route
+        by which an agent caller reaches it: an agent must pass a non-empty
+        ``reason`` (why the user says it is done), which is stored as the
+        completion's resolution, recorded as a ``complete`` decision and handed
+        to the learning pass. A ``move`` to ``done`` or a status edit by an agent
+        is refused by the store (``completion_requires_user``). An agent is also
+        refused a task linked to a live chat or attempt, including one ready for
+        review: the user approves those on the board.
 
         A ``complete`` on a task whose attempt has a **result waiting for review**
         is the one gesture that reaches past the linkage, and only for a user: see
@@ -3380,6 +3519,9 @@ class CiaoControlPlane:
         verb = str(action or "").strip()
         if resolution is not None and verb != "complete":
             raise ControlPlaneError("invalid_action", "resolution is only recorded by complete.")
+        if reason is not None and verb != "complete":
+            raise ControlPlaneError("invalid_action", "reason is only recorded by complete.")
+        note = _clean_reason(reason) if verb == "complete" else ""
         if verb == "move":
             target = str(status or "").strip()
             if not target:
@@ -3400,7 +3542,25 @@ class CiaoControlPlane:
             changes["project_id"] = project_id
         if due is not None:
             changes["due"] = due
-        if verb == "complete":
+        if verb == "complete" and actor == "agent":
+            if not note:
+                raise ControlPlaneError(
+                    "task_completion_requires_user",
+                    "a reason is required: say why the user says this task is done",
+                )
+            current: TaskDocument = self._task_call(
+                workspace, lambda store: store.get(str(task_id or "").strip())
+            )
+            if current.record.status == "done":
+                raise ControlPlaneError("invalid_task", "this task is already done")
+            if current.record.chat_id is not None or current.record.attempt_id is not None:
+                raise ControlPlaneError(
+                    "task_completion_requires_user",
+                    "this task is linked to a chat or a delegated run; the user "
+                    "approves those on the board, so ask them to.",
+                )
+            resolution = note
+        elif verb == "complete":
             reviewed = self.workspace_task_complete_reviewed(
                 workspace,
                 task_id,
@@ -3408,9 +3568,16 @@ class CiaoControlPlane:
                 changes=changes,
                 actor=actor,
                 resolution=resolution,
+                reason=note,
             )
             if reviewed is not None:
                 return reviewed
+            if note:
+                raise ControlPlaneError(
+                    "invalid_action",
+                    "a reason is recorded when approving a delegated result that is ready "
+                    "for review; this task has none.",
+                )
         task = self.workspace_task_update(
             workspace,
             task_id,
@@ -3419,8 +3586,14 @@ class CiaoControlPlane:
             actor=actor,
             resolution=resolution,
         )
+        if verb == "complete" and actor == "agent":
+            self._record_task_decision(
+                workspace, kind="complete", task=task, actor=actor, reason=note
+            )
         if verb == "complete" and (resolution or "").strip():
-            self._learn_from_task_completion(workspace, task_id)
+            self._learn_from_task_completion(
+                workspace, task_id, relayed_by_agent=actor == "agent"
+            )
         return task
 
     def workspace_task_complete_reviewed(
@@ -3432,6 +3605,7 @@ class CiaoControlPlane:
         changes: dict[str, object],
         actor: Actor,
         resolution: str | None = None,
+        reason: str = "",
     ) -> dict[str, Any] | None:
         """Close a task whose delegated turn has a result waiting, in one gesture.
 
@@ -3468,9 +3642,9 @@ class CiaoControlPlane:
            is the user's decision, and re-opening it behind their back would be a
            worse answer than a stale marker.
 
-        Only for ``actor="user"``: the store's own
-        ``completion_requires_user`` rule stands, and an agent approving a review
-        is refused there rather than reaching this at all. And only for a
+        Only for ``actor="user"``: an agent completing a task is refused a linked
+        one before it reaches this (the user approves a review on the board), and
+        gets ``None`` here. And only for a
         *review-ready* attempt: ``running`` and ``needs_you`` have no result yet, so
         those still need Stop or Detach first.
 
@@ -3520,6 +3694,15 @@ class CiaoControlPlane:
         # what a board paints, and a completed card still naming a live attempt
         # would keep drawing Stop and Detach over a task with no chat to open.
         done: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
+        self._record_task_decision(
+            workspace,
+            kind="approve",
+            task=_task_payload(done),
+            actor=actor,
+            reason=reason,
+            attempt_id=attempt.attempt_id,
+            attempt_state=attempt.state,
+        )
         self._learn_from_approved(
             workspace,
             attempt,
@@ -3643,8 +3826,13 @@ class CiaoControlPlane:
         except RuntimeError:
             logger.warning("tasks: the loop closed before %s could run", name)
 
-    def _learn_from_task_completion(self, workspace: str, task_id: str) -> None:
+    def _learn_from_task_completion(
+        self, workspace: str, task_id: str, *, relayed_by_agent: bool = False
+    ) -> None:
         """Queue a learning pass for the resolution a manual completion saved (#1154).
+
+        ``relayed_by_agent`` marks a resolution an agent recorded on the user's
+        behalf: the pass is told it is unverified.
 
         Runs after the completion is written, so nothing here can undo Done: a
         read failure, a refused resolution or a queue failure is logged and the
@@ -3663,7 +3851,9 @@ class CiaoControlPlane:
 
         async def _queue() -> None:
             try:
-                self._enqueue_task_resolution(workspace, task_path, latest)
+                self._enqueue_task_resolution(
+                    workspace, task_path, latest, relayed_by_agent=relayed_by_agent
+                )
             except Exception:  # noqa: BLE001 — the completion already stands
                 logger.exception(
                     "tasks: could not queue a learning pass for task %s", task_id
@@ -3672,7 +3862,12 @@ class CiaoControlPlane:
         self._run_on_engine_loop(f"task-resolution-{task_id[:8]}", _queue)
 
     def _enqueue_task_resolution(
-        self, workspace: str, task_path: str, completion: Completion
+        self,
+        workspace: str,
+        task_path: str,
+        completion: Completion,
+        *,
+        relayed_by_agent: bool = False,
     ) -> str | None:
         """Hand one saved resolution to the memory pass queue (#1154)."""
         queued: str | None = self.pcm.enqueue_task_completion(
@@ -3681,6 +3876,7 @@ class CiaoControlPlane:
             completion_id=completion.id,
             resolution=completion.resolution,
             completed_at=completion.completed_at.isoformat(),
+            relayed_by_agent=relayed_by_agent,
         )
         return queued
 
@@ -3699,8 +3895,6 @@ class CiaoControlPlane:
         task_path, latest = await asyncio.to_thread(
             self._resolution_to_review, workspace, clean, str(expected_revision or "")
         )
-        if not self.config.insights_enabled:
-            return {"queued": False, "reason": "session insights off"}
         try:
             chat_id = self._enqueue_task_resolution(workspace, task_path, latest)
         except ValueError as exc:
@@ -3780,8 +3974,50 @@ class CiaoControlPlane:
                 attempt.attempt_id,
             )
 
+    def _record_task_decision(
+        self,
+        workspace: str,
+        *,
+        kind: str,
+        task: Mapping[str, Any],
+        actor: Actor,
+        reason: str,
+        attempt_id: str = "",
+        attempt_state: str = "",
+    ) -> None:
+        """Append one operator decision to the workspace's decision log (#1726).
+
+        Best effort and never raising: it runs only after the real write landed,
+        and failing a delete or approval that already happened would tell the
+        caller the opposite of what is true. A failed append is logged.
+        """
+        try:
+            append_decision(
+                self.workspace_vault_root(workspace),
+                kind=kind,
+                task_id=str(task.get("id") or ""),
+                task_title=str(task.get("title") or ""),
+                task_created_by="agent" if task.get("created_by") == "agent" else "",
+                project_id=str(task.get("project_id") or ""),
+                attempt_id=attempt_id,
+                attempt_state=attempt_state,
+                actor=actor,
+                via="pwa" if actor == "user" else "cli",
+                reason=reason,
+            )
+        except (OSError, ValueError):
+            logger.exception(
+                "tasks: could not record the %s decision for task %s", kind, task.get("id")
+            )
+
     def workspace_task_delete(
-        self, workspace: str, task_id: str, *, expected_revision: str
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        reason: str | None = None,
+        actor: Actor = "agent",
     ) -> dict[str, Any]:
         """Remove one task record from one workspace, revision-checked.
 
@@ -3790,14 +4026,25 @@ class CiaoControlPlane:
         permanent and removes only that record, including the notes, history
         and log stored inside its file: it does not delete or archive linked
         chats, stop a running turn, discard attempt history, or mark anything
-        done. Completion remains user-only; removal is not completion.
+        done. Removal is not completion.
+
+        The decision is recorded in the workspace's decision log with the
+        optional ``reason``; that row outlives the deleted file. An over-long or
+        non-string reason is refused before anything is deleted. This method
+        keeps the reason optional because the PWA's own delete does; the agent
+        wrapper :meth:`task_delete` requires one.
         """
         clean = str(task_id or "").strip()
+        note = _clean_reason(reason)
+        document: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
         self._task_call(
             workspace,
             lambda store: store.delete(
                 clean, expected_revision=str(expected_revision or "")
             ),
+        )
+        self._record_task_decision(
+            workspace, kind="delete", task=_task_payload(document), actor=actor, reason=note
         )
         return {"id": clean, "deleted": True}
 
@@ -3825,8 +4072,9 @@ class CiaoControlPlane:
     #   the other order would leave an orphan chat with nothing pointing at it.
     # * **A finished turn is not a finished task.** The watcher settles
     #   ``ready_for_review``, and it is the *user's* gesture that moves the card
-    #   to Done. ``task_board`` still refuses an agent completion, so no path
-    #   through this block can close a task on the agent's own authority.
+    #   to Done. An agent completion needs the user's reason and is refused for
+    #   a task linked to a chat or attempt, so no path through this block can
+    #   close a delegated task on the agent's own authority.
 
     def _attempt_store(self, workspace: str) -> TaskAttemptStore:
         """One workspace's attempt store, beside the board's lock in the runtime dir."""
@@ -3936,6 +4184,7 @@ class CiaoControlPlane:
         project_id: str | None = None,
         actor: Actor = "user",
         instructions: str = "",
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """Hand one task to the agent as an ordinary chat, exactly once.
 
@@ -3966,6 +4215,11 @@ class CiaoControlPlane:
         what the turn did — a chat exists and nothing will report its outcome. That
         is the state a crash in this window leaves too, and it is never replayed
         without a person asking.
+
+        ``mode`` is the permission mode of the delegated chat. The user path
+        passes none and gets the workspace default; an agent caller passes its
+        own ceiling (:meth:`_child_mode`), so a workspace override can never
+        hand an agent a stronger chat than its own.
 
         ``actor`` is recorded for the caller, not used to weaken anything: the
         store refuses an agent completion either way, and this method never
@@ -4024,6 +4278,9 @@ class CiaoControlPlane:
             }
         record = document.record
         project, origin = self._delegation_project(workspace, project_id, record.project_id)
+        rules = decision_rules.load_for_prompt(
+            Path(self.config.workspace_vault_root(workspace)), decision_rules.TASK_RULES_NAME
+        )
         prompt = build_prompt(
             title=record.title,
             status=record.status,
@@ -4035,6 +4292,7 @@ class CiaoControlPlane:
             body=document.body,
             previous_attempts=self._previous_attempts(workspace, record.id),
             instructions=note,
+            task_rules=rules,
         )
         attempt_id = uuid.uuid4().hex
         # Two revisions are in play from here, and they are not the same one. The
@@ -4050,6 +4308,7 @@ class CiaoControlPlane:
             chat = self.pcm.create_chat(
                 project,
                 title=record.title,
+                mode=mode,
                 helper=task_delegation_helper(
                     task_id=record.id, task_revision=revision, attempt_id=attempt_id
                 ),
@@ -4866,6 +5125,8 @@ class CiaoControlPlane:
         *,
         task_id: str = "",
         actor: Actor = "user",
+        reason: str | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any]:
         """One lifecycle gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
 
@@ -4903,8 +5164,14 @@ class CiaoControlPlane:
         ``actor`` is the caller, and nothing here completes a task: the user's own
         completion (see :meth:`workspace_task_complete_reviewed`) is what that
         gesture makes possible, and only a user can take it.
+
+        ``reason`` is optional and only ``detach`` records it: releasing a result
+        that is ready for review is the operator's "reject" decision (#1726).
         """
         verb = str(action or "").strip()
+        if reason is not None and verb != "detach":
+            raise ControlPlaneError("invalid_action", "reason is only recorded by detach.")
+        note = _clean_reason(reason) if verb == "detach" else ""
         clean = str(attempt_id or "").strip()
         attempt = self._attempt_call(workspace, lambda store: store.get(clean))
         named_task = str(task_id or "").strip()
@@ -4921,9 +5188,9 @@ class CiaoControlPlane:
         if verb == "resume":
             return self._attempt_resume(workspace, attempt, actor=actor)
         if verb == "retry":
-            return self._attempt_retry(workspace, attempt, actor=actor)
+            return self._attempt_retry(workspace, attempt, actor=actor, mode=mode)
         if verb == "detach":
-            return await self._attempt_detach(workspace, attempt, actor=actor)
+            return await self._attempt_detach(workspace, attempt, actor=actor, reason=note)
         raise ControlPlaneError(
             "invalid_action", "action must be stop, resume, retry, or detach."
         )
@@ -5056,7 +5323,7 @@ class CiaoControlPlane:
         }
 
     def _attempt_retry(
-        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor, mode: str | None = None
     ) -> dict[str, Any]:
         """Start a new attempt for the same task, in a fresh chat.
 
@@ -5083,6 +5350,7 @@ class CiaoControlPlane:
             expected_revision=document.revision,
             project_id=None,
             actor=actor,
+            mode=mode,
         )
         return {**outcome, "retried": True}
 
@@ -5109,7 +5377,7 @@ class CiaoControlPlane:
             return None
 
     async def _attempt_detach(
-        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor, reason: str = ""
     ) -> dict[str, Any]:
         """Release the task from the attempt, stopping the turn first if needed.
 
@@ -5133,7 +5401,19 @@ class CiaoControlPlane:
         The card leaves In review with it: a task in that column with no attempt
         behind it asks the user to review a result they have already released, so
         it goes back to In progress here and nowhere else.
+
+        Releasing a result that is ready for review is the operator's reject
+        decision, recorded in the decision log (#1726) once the release has
+        landed. A non-empty ``reason`` on any other detach is refused before the
+        turn is stopped or anything is written.
         """
+        was_review = attempt.state == "ready_for_review" and attempt.is_live
+        if reason and not was_review:
+            raise ControlPlaneError(
+                "invalid_action",
+                "a reason is recorded when releasing a result that is ready for review; "
+                "this attempt is not.",
+            )
         document = self._attempt_task(workspace, attempt)
         if attempt.state == "running":
             await self._stop_turn(attempt.chat_id)
@@ -5175,7 +5455,18 @@ class CiaoControlPlane:
             freed = self._release_attempt(workspace, attempt.attempt_id)
             if freed is not None:
                 settled = freed
-        return _attempt_payload(settled, self._task_with_attempt(workspace, document))
+        released_task = self._task_with_attempt(workspace, document)
+        if was_review:
+            self._record_task_decision(
+                workspace,
+                kind="reject",
+                task=released_task,
+                actor=actor,
+                reason=reason,
+                attempt_id=attempt.attempt_id,
+                attempt_state=attempt.state,
+            )
+        return _attempt_payload(settled, released_task)
 
     # ---- agent wrappers for delegation --------------------------------
 
@@ -5200,11 +5491,16 @@ class CiaoControlPlane:
                 expected_revision=expected_revision,
                 project_id=project_id,
                 actor="agent",
+                mode=self._child_mode(principal, None),
             )
         )
 
     async def task_attempt_action(
-        self, principal: AgentPrincipal, attempt_id: str, action: str
+        self,
+        principal: AgentPrincipal,
+        attempt_id: str,
+        action: str,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Stop, resume, retry or detach one delegation attempt in this workspace.
 
@@ -5215,7 +5511,12 @@ class CiaoControlPlane:
         """
         return _ok(
             await self.workspace_task_attempt_action(
-                self._workspace(principal), attempt_id, action, actor="agent"
+                self._workspace(principal),
+                attempt_id,
+                action,
+                actor="agent",
+                reason=reason,
+                mode=self._child_mode(principal, None),
             )
         )
 
@@ -5273,6 +5574,7 @@ class CiaoControlPlane:
                 body=body,
                 project_id=project_id,
                 due=due,
+                actor="agent",
             )
         )
 
@@ -5333,7 +5635,7 @@ class CiaoControlPlane:
         changes: Mapping[str, object],
         body: str | None = None,
     ) -> dict[str, Any]:
-        """Edit one task at the revision it was read at. The agent cannot mark it done."""
+        """Edit one task at the revision it was read at; done goes through ``complete``."""
         return _ok(
             self.workspace_task_update(
                 self._workspace(principal),
@@ -5351,23 +5653,30 @@ class CiaoControlPlane:
         task_id: str,
         *,
         expected_revision: str,
+        reason: str,
     ) -> dict[str, Any]:
         """Permanently remove one task in the calling chat's workspace.
 
         Only the task record goes; its chats and running work stay where they
         are. The store still requires the revision the caller read. Deletion is
         attended-only: an unattended scheduled turn cannot permanently remove
-        the user's record.
+        the user's record. The agent does it only when the user clearly asked,
+        and must say why in the user's words: a missing reason is refused before
+        anything is read or removed.
         """
-        if self._unattended_turn(principal):
+        self._require_person_typed_turn(principal, "Task deletion")
+        if not isinstance(reason, str) or not reason.strip():
             raise ControlPlaneError(
-                "unattended_forbidden", "Task deletion requires an attended turn."
+                "invalid_task",
+                "a reason is required: say why the user asked to delete it",
             )
         return _ok(
             self.workspace_task_delete(
                 self._workspace(principal),
                 task_id,
                 expected_revision=expected_revision,
+                reason=reason,
+                actor="agent",
             )
         )
 
@@ -5382,8 +5691,19 @@ class CiaoControlPlane:
         assignee: str | None = None,
         project_id: str | None = None,
         due: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
-        """Move, complete or reassign one task; an agent completion is refused."""
+        """Move, complete or reassign one task.
+
+        An agent completes only on the user's clear say-so and must pass the
+        user's ``reason``; ``move`` to done stays refused. Completion is
+        attended-only, like deletion.
+        """
+        # The callee strips the verb, so the gate must see the same verb: a
+        # padded " complete" would otherwise skip it and still complete.
+        action = str(action or "").strip()
+        if action == "complete":
+            self._require_person_typed_turn(principal, "Task completion")
         return _ok(
             self.workspace_task_action(
                 self._workspace(principal),
@@ -5395,6 +5715,7 @@ class CiaoControlPlane:
                 project_id=project_id,
                 due=due,
                 actor="agent",
+                reason=reason,
             )
         )
 
@@ -5603,6 +5924,19 @@ class CiaoControlPlane:
             )
         )
 
+    def _require_webhook_mode(self, principal: AgentPrincipal) -> None:
+        """Refuse when the caller's mode ranks below the workspace's webhook chat mode."""
+        scope = self._workspace(principal)
+        provider = self.config.default_provider_for_workspace(scope)
+        default = self.config.default_mode_for_provider(provider, scope)
+        if MODE_RANK[self._child_mode(principal, None)] < MODE_RANK[default]:
+            raise ControlPlaneError(
+                "webhook_requires_operator",
+                "A webhook runs its chats in this workspace's default permission "
+                f"mode ({default}), which is stronger than this chat's. Ask the "
+                "user to make this change to the trigger in Settings.",
+            )
+
     def webhook_update(
         self,
         principal: AgentPrincipal,
@@ -5613,7 +5947,16 @@ class CiaoControlPlane:
         instructions: str | None = None,
         enabled: bool | None = None,
     ) -> dict[str, Any]:
-        """Edit one trigger at the revision it was read at."""
+        """Edit one trigger at the revision it was read at.
+
+        A webhook chat starts at the workspace's default permission mode, which
+        a sender cannot choose. Switching a trigger on, or changing what it
+        runs, is therefore the operator's call when the calling agent runs
+        below that default: it could otherwise hand an outside sender a
+        stronger chat than its own. Renaming and disabling stay open.
+        """
+        if enabled or instructions is not None:
+            self._require_webhook_mode(principal)
         return _ok(
             self.workspace_webhook_update(
                 self._workspace(principal),
@@ -5628,7 +5971,12 @@ class CiaoControlPlane:
     def webhook_rotate(
         self, principal: AgentPrincipal, trigger_id: str, *, expected_revision: str
     ) -> dict[str, Any]:
-        """Replace one trigger's secret; the old one stops working at once."""
+        """Replace one trigger's secret; the old one stops working at once.
+
+        Rotating a live trigger is held to the same mode check as editing it.
+        """
+        if self._webhook_of(self._workspace(principal), trigger_id).enabled:
+            self._require_webhook_mode(principal)
         return _ok(
             self.workspace_webhook_rotate(
                 self._workspace(principal),
@@ -5895,12 +6243,11 @@ class CiaoControlPlane:
             created_at=now,
             model=str(values.get("model") or ""),
             provider=str(values.get("provider") or ""),
-            # "" means inherit, exactly as an empty model/provider does: the
-            # permission mode is resolved from the operator's per-provider pin
-            # at dispatch. The MCP schedule tool exposes no `mode` at all, so
-            # the old "auto" default was an unconditional override that made the
-            # dispatcher's inheritance dead for every model-created routine.
-            mode=str(values.get("mode") or ""),
+            # An agent-created routine runs unattended later, so its mode is
+            # fixed now at the caller's own ceiling (a requested weaker mode is
+            # honoured, a stronger one is clamped), never left to inherit the
+            # workspace/engine default at dispatch time.
+            mode=self._child_mode(principal, str(values.get("mode") or "") or None),
             timezone_name=str(values.get("timezone") or values.get("timezone_name") or "UTC"),
             days_of_week=list(values.get("days_of_week") or []),
             frequency=frequency,
@@ -5966,8 +6313,12 @@ class CiaoControlPlane:
 
     def schedule_update(self, principal: AgentPrincipal, schedule_id: str, **changes: Any) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
-        if entry.scope == "system" and any(key not in {"enabled", "workspace", "model", "provider", "archive_policy", "provider_model", "archivePolicy"} for key in changes):
-            raise ControlPlaneError("system_schedule_read_only", "System schedules only allow enabled/workspace/model/provider/archive_policy changes.")
+        system_timing_fields: frozenset[str] = frozenset()
+        if entry.scope == "system":
+            try:
+                changes, system_timing_fields = normalize_system_schedule_update(changes, entry)
+            except ValueError as exc:
+                raise ControlPlaneError("system_schedule_read_only" if "read-only" in str(exc) else "invalid_time", str(exc)) from exc
         # Where this schedule's run bindings actually live: the bound project's
         # own workspace when there is one (an entry written before the workspace
         # field existed carries none of its own), else the stored field.
@@ -6019,6 +6370,22 @@ class CiaoControlPlane:
             # (unlike `changes`, filtered above).
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
+        if (
+            "mode" in changes
+            or normalized.get("prompt")
+            or "command" in normalized
+            or "provider" in normalized
+        ):
+            # Same ceiling `schedule_create` applies. Rewriting a routine's text
+            # or command, naming its mode, or switching its provider (whose
+            # default may be pinned higher) makes the routine the agent's own
+            # work, so it runs at most at the agent's mode: it can weaken the
+            # saved mode, never keep or set a stronger one, and an empty mode
+            # cannot clear a saved one. An update touching none of these
+            # (enable/disable, workspace) leaves the saved mode alone.
+            normalized["mode"] = self._child_mode(
+                principal, str(normalized.get("mode") or entry.mode or "") or None
+            )
         if project is not None:
             # The recorded name is what survives per-instance project-id
             # regeneration (dispatch re-homes by it), so leaving the previous
@@ -6119,7 +6486,10 @@ class CiaoControlPlane:
             raise ControlPlaneError("invalid_time", time_error)
         # A changed chat/project binding moves where this entry re-homes.
         stamp_fallback_project(updated, self.pcm)
-        self.schedules.replace(updated)
+        if entry.scope == "system":
+            self.schedules.replace(updated, timing_fields=system_timing_fields)
+        else:
+            self.schedules.replace(updated)
         publish_automations_changed(self.pcm)
         return _ok(self._schedule_payload(updated))
 

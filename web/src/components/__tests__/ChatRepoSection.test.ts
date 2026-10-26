@@ -5,8 +5,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import ChatRepoSection from '../ChatRepoSection.vue'
 import { useProjectStore } from '../../stores/projects'
-import { api } from '../../lib/api'
-import { resetHostTerminalForTests } from '../../composables/useHostTerminal'
 import type { ProjectRepo, RepoLocation } from '../../lib/types'
 
 const repo: ProjectRepo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
@@ -15,11 +13,18 @@ const worktree: RepoLocation = { path: '/r/app-wt', branch: 'feat-x', is_worktre
 function mountSection(
   r: ProjectRepo,
   location: Partial<RepoLocation> | null,
-  opts: { codeMode?: boolean; archived?: boolean } = {},
+  opts: { codeMode?: boolean; codeModeLocked?: boolean; archived?: boolean } = {},
 ) {
   return mount(ChatRepoSection, {
     attachTo: document.body,
-    props: { repo: r, location, chatId: 'c1', codeMode: opts.codeMode ?? false, archived: opts.archived ?? false },
+    props: {
+      repo: r,
+      location,
+      chatId: 'c1',
+      codeMode: opts.codeMode ?? false,
+      codeModeLocked: opts.codeModeLocked ?? false,
+      archived: opts.archived ?? false,
+    },
   })
 }
 
@@ -29,13 +34,82 @@ describe('ChatRepoSection', () => {
 
   it('shows name, branch and clean state for the main checkout', () => {
     const wrapper = mountSection(repo, {})
+    const heading = wrapper.get('.chat-repo-heading')
+    expect(heading.get('.rail-label').text()).toBe('Repository')
+    expect(heading.get('.chat-repo-name').text()).toBe('app')
     expect(wrapper.get('.chat-repo-name').text()).toBe('app')
     expect(wrapper.get('.chat-repo-name').attributes('title')).toBe('/r/app')
-    expect(wrapper.text()).not.toContain('/r/app')
+    // The summary carries the branch, not the folder; the folder is in the body.
+    expect(wrapper.get('.chat-repo-branch').text()).not.toContain('/r/app')
     expect(wrapper.get('.chat-repo-branch').text()).toContain('main')
     expect(wrapper.get('.chat-repo-clean').text()).toBe('clean')
     expect(wrapper.find('.chat-repo-branch').attributes('title')).toBeUndefined()
     wrapper.unmount()
+  })
+
+  it('keeps a full branch behind a closed disclosure', async () => {
+    const wrapper = mountSection(repo, {})
+    const toggle = wrapper.get('button.chat-repo-branch')
+    const body = wrapper.get('.chat-repo-branch-body')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.attributes('aria-controls')).toBe(body.attributes('id'))
+    expect(body.isVisible()).toBe(false)
+    expect(toggle.text()).toContain('main')
+    // The whole branch and the folder the chat works in are one click away.
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(body.isVisible()).toBe(true)
+    expect(body.get('.chat-repo-branch-value').text()).toBe('main')
+    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app')
+    wrapper.unmount()
+  })
+
+  it('keeps the whole branch text in the body when the summary has to cut it', () => {
+    const branch = 'feature/a-very-long-branch-name-for-the-rail'
+    const wrapper = mountSection({ ...repo, branch }, {})
+    const body = wrapper.get('.chat-repo-branch-body')
+    expect(body.get('.chat-repo-branch-value').text()).toBe(branch)
+    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app')
+    wrapper.unmount()
+  })
+
+  it('shows the actual location when the chat works away from the checkout', () => {
+    const wrapper = mountSection(repo, { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true })
+    const body = wrapper.get('.chat-repo-branch-body')
+    expect(body.get('.chat-repo-branch-value').text()).toBe('feat-x')
+    expect(body.get('.chat-repo-path-value').text()).toBe('/r/app-wt')
+    wrapper.unmount()
+  })
+
+  it('opens the branch details under the line, with the facts staying on it', () => {
+    const wrapper = mountSection(repo, { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true })
+    const line = wrapper.get('.chat-repo-branch-line')
+    const body = wrapper.get('.chat-repo-branch-body')
+    // The body is a sibling below the line, not inside it, so it takes the
+    // section's full width instead of a column beside the facts.
+    expect(line.element.nextElementSibling).toBe(body.element)
+    expect(body.text()).toContain('feat-x')
+    expect(body.find('.chat-repo-kind').exists()).toBe(false)
+    expect(line.get('.chat-repo-kind').text()).toBe('worktree')
+    // Exactly one focusable control in the branch row: the disclosure itself.
+    const focusables = line.findAll('summary, button, a, input, select, textarea, [tabindex]')
+    expect(focusables).toHaveLength(1)
+    expect(focusables[0].element).toBe(wrapper.get('button.chat-repo-branch').element)
+    wrapper.unmount()
+  })
+
+  it('keeps worktree and dirty facts visible', () => {
+    // A worktree reports no dirtiness of its own, so it carries the tag only.
+    const inWorktree = mountSection(repo, worktree)
+    expect(inWorktree.get('.chat-repo-kind').text()).toBe('worktree')
+    // The facts sit outside the closed branch disclosure.
+    expect(inWorktree.get('.chat-repo-kind').element.closest('details')).toBeNull()
+    inWorktree.unmount()
+
+    const dirty = mountSection({ ...repo, dirty: true }, {})
+    expect(dirty.get('.chat-repo-dirty').text()).toContain('uncommitted changes')
+    expect(dirty.get('.chat-repo-dirty').element.closest('details')).toBeNull()
+    dirty.unmount()
   })
 
   it("shows the chat's worktree and no dirty state", () => {
@@ -129,46 +203,43 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
   })
 
-  it('puts Open in Terminal before the code-mode row', async () => {
-    resetHostTerminalForTests()
-    vi.spyOn(api, 'get').mockResolvedValue({
-      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
-    })
+  it('carries no terminal button: the terminal has its own section', async () => {
+    // The terminal is not a repository fact — a chat with no repository still
+    // needs one — so it lives in the chat's own Terminal section, and this
+    // section carries the checkout facts alone.
     const wrapper = mountSection(repo, {})
     await flushPromises()
-    const terminal = wrapper.get('.chat-repo-terminal').element
-    const row = wrapper.get('.repo-code-row').element
-    expect(terminal.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const terminal = wrapper.findAll('button').filter(b => b.text() === 'Open in Terminal')
+    expect(terminal).toHaveLength(0)
+    expect(wrapper.find('.chat-repo-terminal').exists()).toBe(false)
     wrapper.unmount()
-    resetHostTerminalForTests()
   })
 
-  it('offers Open in Terminal at the chat folder when the engine can open one', async () => {
-    resetHostTerminalForTests()
-    vi.spyOn(api, 'get').mockResolvedValue({
-      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
-    })
-    const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true, platform: 'macos', launched: 'Terminal' })
-    const wrapper = mountSection(repo, {})
+  it('carries no terminal button when the folder is missing either', async () => {
+    const wrapper = mountSection({ ...repo, missing: true }, {})
     await flushPromises()
-    const button = wrapper.findAll('button').find((b) => b.text() === 'Open in Terminal')
-    expect(button).toBeDefined()
-    await button!.trigger('click')
-    await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/host/terminal', { open: 'folder', chat_id: 'c1' })
+    const terminal = wrapper.findAll('button').filter(b => b.text() === 'Open in Terminal')
+    expect(terminal).toHaveLength(0)
     wrapper.unmount()
-    resetHostTerminalForTests()
   })
 
-  it('marks the terminal link with chat-repo-terminal when the engine can open one', async () => {
-    resetHostTerminalForTests()
-    vi.spyOn(api, 'get').mockResolvedValue({
-      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
-    })
-    const wrapper = mountSection(repo, {})
-    await flushPromises()
-    expect(wrapper.find('.chat-repo-terminal').exists()).toBe(true)
+  it('names a locked code mode without changing switch semantics', () => {
+    const wrapper = mountSection(repo, {}, { codeMode: true, codeModeLocked: true })
+    const note = wrapper.get('.repo-code-lock-note')
+    expect(note.text()).toBe('Locked on for this chat')
+    // The note sits under the label, not inside the switch: the switch still reads On.
+    const sw = wrapper.get('[role=switch]')
+    expect(sw.text()).toBe('On')
+    expect(sw.find('.repo-code-lock-note').exists()).toBe(false)
+    expect(sw.attributes('aria-checked')).toBe('true')
+    expect(sw.attributes('aria-disabled')).toBe('true')
     wrapper.unmount()
-    resetHostTerminalForTests()
+  })
+
+  it('says nothing about a lock while code mode can still change', () => {
+    const wrapper = mountSection(repo, {}, { codeMode: true })
+    expect(wrapper.find('.repo-code-lock-note').exists()).toBe(false)
+    expect(wrapper.get('[role=switch]').attributes('aria-disabled')).toBe('false')
+    wrapper.unmount()
   })
 })

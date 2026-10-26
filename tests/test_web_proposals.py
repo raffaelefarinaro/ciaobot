@@ -18,6 +18,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -38,6 +39,7 @@ from ciao.web.routes_api import (
     proposal_implement,
     proposal_preview,
     proposals_batch,
+    proposals_handover,
     proposals_history,
 )
 
@@ -84,6 +86,7 @@ def _client(config: CiaoConfig, pcm: Any = None) -> TestClient:
         routes=[
             Route("/api/proposals", list_proposals, methods=["GET"]),
             Route("/api/proposals/history", proposals_history, methods=["GET"]),
+            Route("/api/proposals/handover", proposals_handover, methods=["GET"]),
             Route("/api/proposals/{id}/preview", proposal_preview, methods=["POST"]),
             # Before `{id}/{action}`, exactly as app.py orders them: Starlette
             # matches in order and would otherwise read "implement" as an action.
@@ -495,11 +498,12 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
 
     from ciao.web import app as app_module
 
-    registered = set(re.findall(r'Route\("(/api/proposals[^"]*)"', pathlib.Path(app_module.__file__).read_text()))
+    registered = set(re.findall(r'Route\("(/api/proposals[^"]*)"', pathlib.Path(app_module.__file__).read_text(encoding="utf-8")))
 
     expected = {
         "/api/proposals",
         "/api/proposals/history",
+        "/api/proposals/handover",
         "/api/proposals/batch",
         "/api/proposals/dismiss-older-than",
         "/api/proposals/{id}/preview",
@@ -510,7 +514,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
     # Every registered route must also appear in PWA_API.md, or the drift above
     # is only drift in one direction. Substring, not set equality: the prose
     # around each route names its path in curl examples too.
-    api_doc = pathlib.Path("PWA_API.md").read_text()
+    api_doc = pathlib.Path("PWA_API.md").read_text(encoding="utf-8")
     missing = {path for path in expected if path not in api_doc}
     assert not missing, f"PWA_API.md does not document: {missing}"
 
@@ -1799,6 +1803,154 @@ def _seed_history(config: CiaoConfig, workspace: str, entries: list[dict]) -> No
         "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
         encoding="utf-8",
     )
+
+
+def _predict(config: CiaoConfig, workspace: str, text: str, verdict: str, at: str) -> None:
+    """Write a prediction row with a chosen timestamp, as the nightly run would."""
+    from ciao.proposal_predictions import predictions_path
+
+    queue = config.workspace_vault_root(workspace) / "Workspace" / "Memory-Proposals.md"
+    sidecar = predictions_path(queue)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "predicted_at": at,
+        "kind": "memory",
+        "text": text,
+        "verdict": verdict,
+        "reason": "stable preference",
+    }
+    with sidecar.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def test_history_rows_carry_the_joined_prediction_and_match(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One.", "via": "pwa"}],
+    )
+    _predict(config, "personal", "One.", "dismiss", "2026-09-01T09:00:00+00:00")
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert rows[0]["prediction"] == {
+        "verdict": "dismiss",
+        "reason": "stable preference",
+        "ts": "2026-09-01T09:00:00+00:00",
+        "match": False,
+    }
+
+
+def test_history_rows_without_a_prediction_have_no_prediction_key(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One."}],
+    )
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert "prediction" not in rows[0]
+
+
+def test_history_does_not_join_a_prediction_made_after_the_decision(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One."}],
+    )
+    _predict(config, "personal", "One.", "accept", "2026-09-01T10:00:01+00:00")
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert "prediction" not in rows[0]
+
+
+def _seed_agreeing_decisions(config: CiaoConfig, workspace: str, count: int) -> None:
+    entries = []
+    for i in range(count):
+        text = f"Fact number {i}."
+        entries.append(
+            {
+                "promoted_at": f"2026-09-01T10:{i:02d}:00+00:00",
+                "kind": "memory",
+                "text": text,
+                "via": "pwa",
+            }
+        )
+        _predict(config, workspace, text, "accept", f"2026-09-01T09:{i:02d}:00+00:00")
+    _seed_history(config, workspace, entries)
+
+
+def test_proposals_handover_returns_setting_and_agreement(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_agreeing_decisions(config, "personal", 20)
+    client = _client(config)
+
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+
+    assert body["workspace"] == "personal"
+    assert body["handover"] == "off"
+    assert body["agreement"]["decided"] == 20
+    assert body["agreement"]["rate"] == 1.0
+    assert body["agreement"]["suggest_handover"] is True
+
+    config.workspace("personal").memory_handover = "dismiss"
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+    assert body["handover"] == "dismiss"
+    assert body["agreement"]["suggest_handover"] is False
+
+
+def test_proposals_handover_reports_whether_acting_is_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    client = _client(config)
+    monkeypatch.setattr("ciao.web.routes_api.trusted_registry", lambda name, vault: None)
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+    assert body["acting_available"] is False
+
+    seen: list[tuple[str | None, Path]] = []
+
+    def trusted(name: str | None, vault: Path) -> CiaoConfig:
+        seen.append((name, vault))
+        return config
+
+    monkeypatch.setattr("ciao.web.routes_api.trusted_registry", trusted)
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+    assert body["acting_available"] is True
+    assert seen == [("personal", config.workspace_vault_root("personal"))]
+
+
+def test_proposals_handover_validates_workspace(tmp_path: Path) -> None:
+    client = _client(_config(tmp_path))
+
+    assert client.get("/api/proposals/handover").status_code == 400
+    assert client.get("/api/proposals/handover", params={"workspace": "nope"}).status_code == 404
+
+
+def test_proposals_handover_requires_the_session(tmp_path: Path) -> None:
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+
+    from ciao.web.auth import SESSION_COOKIE, AuthMiddleware
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/proposals/handover", proposals_handover, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = _config(tmp_path)
+    client = TestClient(app, base_url="https://ciao.example")
+    url = "/api/proposals/handover?workspace=personal"
+
+    assert client.get(url).status_code == 401
+    client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
+    assert client.get(url).status_code == 200
 
 
 def test_history_row_ids_are_unique_across_workspaces(tmp_path: Path) -> None:
@@ -3888,6 +4040,15 @@ def test_an_entry_edit_preview_is_byte_exact_to_the_accept(
     assert "The landlord is Bianchi" in (vault / _ENTRY_NOTE).read_text(encoding="utf-8")
 
 
+def test_an_entry_row_carries_the_bullet_it_is_about(tmp_path: Path) -> None:
+    """Two verdicts on two bullets of one note must not render as the same row."""
+    config, _proposal, entry = _entry_edit_vault(tmp_path)
+    row = _accept_kind_row(_client(config), "note_edit")
+
+    assert row["note_edit"]["entry"] == _ENTRY_PLAIN[entry.start : entry.end].strip()
+    assert "Via Verdi 12, third floor" in row["note_edit"]["entry"]
+
+
 def test_accepting_an_entry_edit_uses_the_note_receipt_and_the_entry(
     tmp_path: Path,
 ) -> None:
@@ -4200,3 +4361,195 @@ def test_repo_accept_refuses_unlinked_repo_and_keeps_row(tmp_path: Path) -> None
     assert "linked" in resp.json()["error"]
     assert "make test" not in (repo / "AGENTS.md").read_text(encoding="utf-8")
     assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_decider_is_not_part_of_the_proposal_id() -> None:
+    """Adding, changing or dropping the decide tail never moves an id or a dup ordinal."""
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    rel = "ws/Workspace/Memory-Proposals.md"
+    tails = ("", "  _(decide: nightly; r)_", "  _(decide: you; other)_")
+    walks = [
+        list(
+            walk_proposal_queue(
+                "ws", rel, f"- [people Mo] x  _(from: s)_{t}\n- [people Mo] x  _(from: s)_{t}\n"
+            )
+        )
+        for t in tails
+    ]
+    ids = [[e.proposal_id for e in w] for w in walks]
+    assert ids[0] == ids[1] == ids[2]
+    assert len(set(ids[0])) == 2
+    assert [[e.dup for e in w] for w in walks] == [[0, 1]] * 3
+
+
+def test_listing_exposes_decider_and_reason(tmp_path: Path) -> None:
+    """Rows carry decider and decide_reason only when the bullet has a tail."""
+    config = _config(tmp_path)
+    (config.workspace_vault_root("personal") / "Workspace").mkdir(parents=True, exist_ok=True)
+    _write_queue(
+        config,
+        "personal",
+        "- [memory] tagged  _(from: s)_  _(decide: you; judgement)_\n"
+        "- [memory] plain  _(from: s)_\n",
+    )
+    rows = {r["text"]: r for r in _client(config).get("/api/proposals").json()["rows"]}
+    assert rows["tagged"]["decider"] == "you"
+    assert rows["tagged"]["decide_reason"] == "judgement"
+    assert "decider" not in rows["plain"]
+    assert "decide_reason" not in rows["plain"]
+
+
+# -- Decision reasons (#1734) -------------------------------------------------
+
+
+def _memory_row(client: TestClient) -> dict:
+    rows = client.get("/api/proposals").json()["rows"]
+    return next(r for r in rows if r["text"].startswith("Remember the lesson"))
+
+
+def _history_for(client: TestClient, text: str) -> list[dict]:
+    rows = client.get("/api/proposals/history").json()["rows"]
+    return [r for r in rows if r["text"] == text]
+
+
+def test_dismiss_with_a_reason_lands_in_history(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _memory_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss", json={"reason": "already known"})
+
+    assert resp.status_code == 200
+    (hist,) = _history_for(client, row["text"])
+    assert hist["reason"] == "already known"
+    assert hist["action"] == "dismissed"
+
+
+def test_accept_with_a_reason_and_edited_text_lands_in_history(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _memory_row(client)
+
+    resp = client.post(
+        f"/api/proposals/{row['id']}/accept",
+        json={"text": "Remember the edited lesson.", "reason": "yes, everywhere"},
+    )
+
+    assert resp.status_code == 200
+    (hist,) = _history_for(client, row["text"])
+    assert hist["reason"] == "yes, everywhere"
+    assert hist["action"] == "accepted"
+    # The history API folds the receipt id into ``change``; the recorded
+    # original text and the receipt reference both survive the edit.
+    assert hist["change"]["receipt_id"]
+
+
+@pytest.mark.parametrize("bad", ["x" * 1001, 123, ["a"]])
+def test_an_over_cap_or_non_string_reason_is_refused_before_any_write(
+    tmp_path: Path, bad: object
+) -> None:
+    from ciao.memory_proposals import dismissed_log_path
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    client = _client(config)
+    row = _memory_row(client)
+
+    def snapshot() -> dict[str, bytes]:
+        # Every file under the test root: the queue, the accept destination (the
+        # workspace guide), the sidecar and any receipt journal.
+        return {
+            p.relative_to(tmp_path).as_posix(): p.read_bytes()
+            for p in sorted(tmp_path.rglob("*"))
+            if p.is_file()
+        }
+
+    before = snapshot()
+    bodies = [
+        {"reason": bad},
+        {"text": "edited", "reason": bad},
+    ]
+    for action in ("dismiss", "accept"):
+        for body in bodies:
+            resp = client.post(f"/api/proposals/{row['id']}/{action}", json=body)
+            assert resp.status_code == 400
+            assert "1000" in resp.json()["error"] or "string" in resp.json()["error"]
+
+    assert snapshot() == before, "a refused reason must write nothing at all"
+    assert not dismissed_log_path(queue).exists()
+    assert any(r["id"] == row["id"] for r in client.get("/api/proposals").json()["rows"])
+
+
+def test_a_reason_of_exactly_the_cap_after_trim_passes(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _memory_row(client)
+
+    resp = client.post(
+        f"/api/proposals/{row['id']}/dismiss", json={"reason": "  " + "x" * 1000 + "  "}
+    )
+
+    assert resp.status_code == 200
+    (hist,) = _history_for(client, row["text"])
+    assert hist["reason"] == "x" * 1000
+
+
+@pytest.mark.parametrize("blank", ["   ", None])
+def test_a_blank_reason_is_no_reason(tmp_path: Path, blank: object) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _memory_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss", json={"reason": blank})
+
+    assert resp.status_code == 200
+    (hist,) = _history_for(client, row["text"])
+    assert hist["reason"] == ""
+
+
+def test_batch_and_sweep_never_store_a_reason(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", (
+        "## 2026-07-01 curation pass\n\n"
+        "- [memory] An old fact about a forgotten chat.  _(from: Decisions)_\n\n"
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [memory] A recent fact worth keeping.  _(from: Decisions)_\n"
+    ))
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    recent = next(r for r in rows if r["text"].startswith("A recent"))
+
+    swept = client.post(
+        "/api/proposals/dismiss-older-than?date=2026-08-01", json={"reason": "nope"}
+    )
+    assert swept.status_code == 200
+    batch = client.post(
+        "/api/proposals/batch",
+        json={"action": "dismiss", "ids": [recent["id"]], "reason": "nope"},
+    )
+    assert batch.status_code == 200
+
+    history = client.get("/api/proposals/history").json()["rows"]
+    assert len(history) == 2
+    assert all(r["reason"] == "" for r in history)
+
+
+def test_history_rows_carry_a_seeded_reason(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            {
+                "dismissed_at": "2026-09-01T10:00:00+00:00",
+                "kind": "memory",
+                "text": "Seeded.",
+                "reason": "one-off",
+            }
+        ],
+    )
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert rows[0]["reason"] == "one-off"

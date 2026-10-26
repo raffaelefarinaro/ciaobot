@@ -111,9 +111,16 @@ def _commit_guide_change(root: Path, message: str, *paths: str) -> None:
     leave the rename *staged* — a dirty tracked tree, which is the exact
     condition this function exists to avoid, plus a staged change the
     operator's next commit would silently carry.
+
+    ``core.symlinks=true`` because ``commit -- <paths>`` rebuilds the listed
+    entries from HEAD, and with Git for Windows' default ``false`` it keeps
+    HEAD's symlink mode for a path that is now a regular file. The relinked
+    ``AGENTS.md`` would be committed as a symlink and the tree left with a
+    staged ``T AGENTS.md``.
     """
     committed = _git(
         root,
+        "-c", "core.symlinks=true",
         "-c", "user.name=Ciaobot",
         "-c", "user.email=ciaobot@localhost",
         "commit", "-q", "--no-verify", "--no-gpg-sign",

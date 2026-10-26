@@ -15,6 +15,11 @@ import type {
   MemoryReceiptDetail,
 } from '../lib/types'
 
+/** A row the operator has to settle: marked `you`, carrying no decider, or a skill row. */
+export function needsYou(row: ProposalRow): boolean {
+  return row.decider !== 'nightly'
+}
+
 /**
  * Proposal-review queue. Mirrors the housekeeping store's best-effort
  * contract: a failed fetch leaves the list empty rather than throwing. The
@@ -294,6 +299,9 @@ export const useProposalsStore = defineStore('proposals', () => {
   // map, and the panel owns the list they filter. Two copies of "which kind is
   // showing" would let the chip row and the list disagree.
   const kindFilter = ref('all')
+  // Separate from `kindFilter`, which History filtering shares: a `needs-you`
+  // value there would hide every History row.
+  const decideFilter = ref<'all' | 'needs-you'>('all')
   const search = ref('')
   const selected = ref<Set<string>>(new Set())
 
@@ -363,14 +371,20 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   /** Rows the list should render: workspace scope, then kind, then search. */
-  function visibleRows(workspace: string): ProposalRow[] {
+  function visibleRows(workspace: string, withDecide = true): ProposalRow[] {
     const needle = search.value.trim().toLowerCase()
     return scopedRows(workspace).filter(r =>
       (kindFilter.value === 'all' || r.kind === kindFilter.value)
+      && (!withDecide || decideFilter.value === 'all' || needsYou(r))
       && (!needle
         || (r.text ?? '').toLowerCase().includes(needle)
         || (r.path ?? '').toLowerCase().includes(needle)),
     )
+  }
+
+  /** Rows in scope the operator has to settle: `you`, no decider, and skill rows. */
+  function needsYouCount(workspace: string): number {
+    return scopedRows(workspace).filter(needsYou).length
   }
 
   /** Kind tallies for the sidebar chips, over the workspace scope only — so a
@@ -387,6 +401,7 @@ export const useProposalsStore = defineStore('proposals', () => {
 
   function resetFilters() {
     kindFilter.value = 'all'
+    decideFilter.value = 'all'
     search.value = ''
     historyActionFilter.value = 'all'
     historyActorFilter.value = 'all'
@@ -402,6 +417,7 @@ export const useProposalsStore = defineStore('proposals', () => {
   function revealRow(id: string) {
     if (!id) return
     kindFilter.value = 'all'
+    decideFilter.value = 'all'
     search.value = ''
     revealedRowId.value = id
   }
@@ -481,7 +497,7 @@ export const useProposalsStore = defineStore('proposals', () => {
     id: string,
     action: 'accept' | 'dismiss',
     workspace = '',
-    opts?: { expectedRevision?: string; text?: string; reconcile?: boolean },
+    opts?: { expectedRevision?: string; text?: string; reconcile?: boolean; reason?: string },
   ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown }> {
     setBusy(id, true)
     error.value = ''
@@ -500,6 +516,8 @@ export const useProposalsStore = defineStore('proposals', () => {
       // older client rely on.
       if (opts?.expectedRevision) body.expected_revision = opts.expectedRevision
       if (opts?.text) body.text = opts.text
+      // Single-row decisions only: the batch bar never sends one.
+      if (opts?.reason) body.reason = opts.reason
       await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`, body)
       const stale = action === 'accept' ? dropSiblingPreviews([id]) : []
       await fetch({ force: true })
@@ -761,8 +779,8 @@ export const useProposalsStore = defineStore('proposals', () => {
     rows, loading, loaded, busy, busyIds, isBusy, setBusy, setBusyMany, error, loadError, fetch, ensureLoaded, act, acceptSkill, batch, dismissOlderThan,
     previews, previewErrors, isPreviewLoading, loadPreview, prefetchPreviews, dropPreview, conflictIds, lastBatchSummary,
     receipts, receiptErrors, receiptKey, isReceiptLoading, loadReceipt, undoReceipt,
-    kindFilter, search, selected, revealedRowId, revealRow,
-    scopedRows, visibleRows, kindCounts, resetFilters,
+    kindFilter, decideFilter, search, selected, revealedRowId, revealRow,
+    scopedRows, visibleRows, kindCounts, needsYouCount, resetFilters,
     view, historyRows, historyLoading, historyLoaded, historyTruncated, historyLimit,
     historyAtMax, historyTotal, historyCanLoadMore, historyFiltersActive, historyError, historyWorkspace,
     historyActionFilter, historyActorFilter,

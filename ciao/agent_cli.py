@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import urllib.error
 import urllib.request
@@ -23,7 +24,12 @@ from pathlib import Path
 from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
-from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
+from ciao.execution_modes import is_credential_adjacent
+from ciao.terminal_offer import (
+    TERMINAL_OFFER_MAX_BYTES,
+    TerminalOfferError,
+    normalize_terminal_offer,
+)
 
 #: Top-level words ``ciao.cli.main`` hands to this module unconditionally.
 #: ``run`` and ``gws`` are operator commands too (the server launcher and the
@@ -108,6 +114,15 @@ _CHAT_UPDATE_FLAGS: tuple[tuple[str, str], ...] = (
 
 class UsageError(Exception):
     """A caller mistake caught before any request is sent (exit 2)."""
+
+
+#: What a path operation can raise before it has produced a path: an I/O
+#: error, the ``RuntimeError`` an unknown ``~user`` raises while the home
+#: directory is looked up, and the ``ValueError`` an embedded NUL raises in
+#: every OS call that takes the name. All three mean the same thing to a
+#: caller — the file cannot be read — so all three are answered with one
+#: static reason.
+_PATH_FAILURES = (OSError, RuntimeError, ValueError)
 
 
 def is_agent_invocation(argv: list[str]) -> bool:
@@ -262,6 +277,23 @@ def build_parser() -> argparse.ArgumentParser:
         # so the calling chat is never a valid default. Make the target
         # explicit rather than advertising a default that can only error.
         sub.add_argument("--chat", required=True)
+    # The one chat verb with no `--chat`: an offer is a command on somebody's
+    # screen, and the screen is the chat that asked for it.
+    offer = chat.add_parser(
+        "terminal-offer",
+        help="Suggest a terminal command for the calling chat.",
+        # No abbreviation: `--command` would otherwise be an accepted spelling
+        # of `--command-file`, and a near-miss that reads as a path is a
+        # command offered by accident.
+        allow_abbrev=False,
+    )
+    offer.add_argument(
+        "--command-file",
+        required=True,
+        metavar="FILE",
+        help="File holding the command to suggest: @file.txt or a plain path. "
+        "The text is shown to the user to review and run; nothing is executed.",
+    )
 
     project = _verbs(nouns.add_parser("project", help="Projects in the active workspace."))
     plist = project.add_parser("list", help="List projects.")
@@ -311,13 +343,21 @@ def build_parser() -> argparse.ArgumentParser:
     tdelete = task.add_parser("delete", help="Permanently remove one task; its chats and runs stay.")
     tdelete.add_argument("task_id")
     tdelete.add_argument("--revision", required=True, help="The revision you read; a stale one removes nothing.")
+    tdelete.add_argument("--reason-file", required=True, metavar="FILE", help=(
+        "Text file holding why you are deleting it, in the user's words: "
+        "@file.txt or a plain path."
+    ))
     tmove = task.add_parser("move", help="Set a task's column.")
     tmove.add_argument("task_id")
     tmove.add_argument("--to", required=True, choices=["backlog", "in_progress", "in_review", "done"])
     tmove.add_argument("--revision", required=True)
-    tcomplete = task.add_parser("complete", help="Ask to mark a task done (refused to agents).")
+    tcomplete = task.add_parser("complete", help="Mark a task done because the user said it is.")
     tcomplete.add_argument("task_id")
     tcomplete.add_argument("--revision", required=True)
+    tcomplete.add_argument("--reason-file", required=True, metavar="FILE", help=(
+        "Text file holding why it is done, in the user's words: "
+        "@file.txt or a plain path."
+    ))
     tdelegate = task.add_parser("delegate", help="Hand a task to the agent as one chat.")
     tdelegate.add_argument("task_id")
     tdelegate.add_argument("--revision", required=True, help="The revision you read; a stale one starts nothing.")
@@ -340,6 +380,10 @@ def build_parser() -> argparse.ArgumentParser:
     tattempt.add_argument(
         "action", choices=["stop", "resume", "retry", "detach"]
     )
+    tattempt.add_argument("--reason-file", default=None, metavar="FILE", help=(
+        "Optional, for `detach` of a result that is ready for review: "
+        "why it is being released."
+    ))
 
     schedule = _verbs(nouns.add_parser("schedule", help="Schedules in the active workspace."))
     schedule.add_parser("list", help="List schedules with their next run.")
@@ -454,12 +498,12 @@ def _handover_messages(raw: str | None) -> list[dict[str, Any]] | None:
             # `cat` anyway; this path must not make it cheaper.
             candidate = Path(raw[1:]).expanduser()
             resolved = candidate.resolve()
-            if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+            if is_credential_adjacent(resolved):
                 raise UsageError(
                     f"--messages refuses credential-adjacent paths ({raw[1:]}): "
                     "pass the content inline instead."
                 )
-            text = candidate.read_text(encoding="utf-8")
+            text = resolved.read_text(encoding="utf-8")
         else:
             text = raw
         messages = json.loads(text)
@@ -490,13 +534,13 @@ def _task_body(raw: str | None, *, flag: str = "--body-file") -> str | None:
         resolved = path.resolve()
     except OSError as exc:
         raise UsageError(f"{flag} cannot be read: {exc}") from exc
-    if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+    if is_credential_adjacent(resolved):
         raise UsageError(
             f"{flag} refuses credential-adjacent paths ({path}): "
             "pass the content in a workspace file instead."
         )
     try:
-        return path.read_text(encoding="utf-8")
+        return resolved.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise UsageError(f"{flag} must be a readable UTF-8 file: {exc}") from exc
 
@@ -509,6 +553,67 @@ def _webhook_instructions(raw: str | None) -> str | None:
     mangled by ``$()``, backticks and quotes and would sit in the process table.
     """
     return _task_body(raw, flag="--instructions-file")
+
+
+def _terminal_offer_command(raw: str) -> str:
+    """The suggested command read from a file, validated and normalized.
+
+    The command is untrusted, model-authored text, so it travels in a file for
+    the same reason prose does: as a shell argument it would be mangled by
+    ``$()``, backticks and quotes, and it would sit in the process table. It is
+    read with a bound (a command is a copyable snippet, not a file) and
+    decoded strictly.
+
+    The file has to be an ordinary one. A FIFO, a device or a socket answers
+    an open with a read that never ends, and the byte bound does not help:
+    the read blocks before it counts anything. So the mode is checked first
+    and a non-regular file is refused without being opened.
+
+    Every refusal is static: neither the path nor the text appears in it. A
+    command can carry a credential, and an error string ends up in a log line
+    and in the agent's transcript.
+    """
+    try:
+        path = Path(raw[1:]).expanduser() if raw.startswith("@") else Path(raw).expanduser()
+        resolved = path.resolve()
+    except _PATH_FAILURES:
+        # A name that cannot become a path: an unknown ``~user`` (a
+        # ``RuntimeError``), an embedded NUL (a ``ValueError``), or an I/O
+        # error. The reason says the file is unreadable and names nothing.
+        raise UsageError("--command-file cannot be read.") from None
+    if is_credential_adjacent(resolved):
+        raise UsageError("--command-file refuses a credential-adjacent path.")
+    try:
+        mode = resolved.stat().st_mode
+    except _PATH_FAILURES:
+        raise UsageError("--command-file cannot be read.") from None
+    if not stat.S_ISREG(mode):
+        # Refused before the open: this is the check that keeps a FIFO from
+        # blocking the read that would follow it.
+        raise UsageError("--command-file must be an ordinary file.")
+    try:
+        with resolved.open("rb") as handle:
+            # The handle has to be an ordinary file too. This does not close
+            # the window between the two checks — the stat above is what
+            # keeps a FIFO from blocking the open — it only refuses a handle
+            # that is not an ordinary file.
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise UsageError("--command-file must be an ordinary file.")
+            payload = handle.read(TERMINAL_OFFER_MAX_BYTES + 1)
+    except _PATH_FAILURES:
+        raise UsageError("--command-file cannot be read.") from None
+    if len(payload) > TERMINAL_OFFER_MAX_BYTES:
+        raise UsageError("--command-file holds more text than a command may.")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        raise UsageError("--command-file must be UTF-8 text.") from None
+    try:
+        return normalize_terminal_offer(text)
+    except TerminalOfferError as exc:
+        if exc.reason == "empty":
+            raise UsageError("--command-file holds no command text.") from None
+        raise UsageError("--command-file holds text a command may not contain.") from None
 
 
 def _run_start_arguments(args: argparse.Namespace) -> dict[str, Any]:
@@ -627,6 +732,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if messages is not None:
                 arguments["messages"] = messages
             return "chat_handover", arguments
+        if verb == "terminal-offer":
+            # No chat id: the offer belongs to the calling chat, and the
+            # command travels as text read here rather than as an argument.
+            return "chat_terminal_offer", {
+                "command": _terminal_offer_command(args.command_file)
+            }
     if noun == "project":
         if verb == "list":
             return "projects_list", {"include_completed": bool(args.include_completed)}
@@ -684,10 +795,9 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 arguments["body"] = body
             return "task_update", arguments
         if verb == "delete":
-            return "task_delete", {
-                "task_id": args.task_id,
-                "expected_revision": args.revision,
-            }
+            arguments = {"task_id": args.task_id, "expected_revision": args.revision}
+            arguments["reason"] = _task_body(args.reason_file, flag="--reason-file") or ""
+            return "task_delete", arguments
         if verb == "move":
             return "task_action", {
                 "action": "move",
@@ -718,17 +828,16 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 "summary": _task_body(args.summary_file, flag="--summary-file") or "",
             }
         if verb == "attempt":
-            return "task_attempt_action", {
-                "attempt_id": args.attempt_id,
-                "action": args.action,
-            }
-        # `complete` stays its own verb even though the store refuses it: the
-        # refusal is the answer, and the agent needs a name for it to report
-        # rather than another route it has to guess at.
+            arguments = {"attempt_id": args.attempt_id, "action": args.action}
+            reason = _task_body(args.reason_file, flag="--reason-file")
+            if reason is not None:
+                arguments["reason"] = reason
+            return "task_attempt_action", arguments
         return "task_action", {
             "action": "complete",
             "task_id": args.task_id,
             "expected_revision": args.revision,
+            "reason": _task_body(args.reason_file, flag="--reason-file") or "",
         }
     if noun == "schedule":
         if verb == "list":

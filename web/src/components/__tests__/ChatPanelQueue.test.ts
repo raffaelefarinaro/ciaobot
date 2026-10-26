@@ -340,6 +340,25 @@ describe('ChatPanel queued messages', () => {
     wrapper.unmount()
   })
 
+  it('focuses the composer bar instead of opening the keyboard on a narrow pane', async () => {
+    const originalWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+    try {
+      const { wrapper, store } = await mountPanel((s) => {
+        s.streaming['chat-1'] = true
+        queue(s, [{ id: 'a', text: 'one' }])
+      })
+      ;(wrapper.get('.queued-chip').element as HTMLElement).focus()
+      store.queuedMessages['chat-1'] = []
+      await nextTick()
+      await nextTick()
+      expect(document.activeElement).toBe(wrapper.get('.composer-bar').element)
+      wrapper.unmount()
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    }
+  })
+
   it('steered user bubble shows the steered mark', async () => {
     const { wrapper } = await mountPanel((s) => {
       s.messages['chat-1'] = [

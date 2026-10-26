@@ -18,7 +18,7 @@ Ciaobot is your **second brain and personal assistant**: a persistent personal w
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-Installs the engine with uv, starts it as a LaunchAgent, and opens Ciaobot in your browser already signed in, through a one-time link it also prints. There is nothing to fill in: the installer puts your workspace in `~/Ciaobot`, generates a password and uses Claude Code as the AI tool. The first time you open Ciaobot, Home shows the folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Workspaces** and the password in **Settings → General**.
+Installs the engine with uv, starts it as a LaunchAgent, and opens Ciaobot in your browser already signed in, through a one-time link it also prints. There is nothing to fill in: the installer puts your workspace in `~/Ciaobot`, generates a password and uses Claude Code as the AI tool. The first time you open Ciaobot, Home shows the folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Overview** and the password in **Settings → General**.
 
 To use another folder, such as a notes folder you already have, pass `--workspace`:
 
@@ -48,7 +48,7 @@ See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors runnin
 ### Existing installs
 
 - **Upgrading from the retired macOS app:** follow the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app) to keep your workspace, password, chats, and schedules.
-- **Updates:** use **Settings → Home** in the PWA. See the [macOS update instructions](INTEGRATIONS.md#upgrading-from-the-macos-app) or [Windows update guide](docs/WINDOWS.md#update-and-rollback).
+- **Updates:** use **Settings → General** in the PWA. See the [macOS update instructions](INTEGRATIONS.md#upgrading-from-the-macos-app) or [Windows update guide](docs/WINDOWS.md#update-and-rollback).
 - **Stop or start the engine:** run `ciao service stop` or `ciao service start`. Your workspace is kept. [Windows service details](docs/WINDOWS.md#how-the-engine-runs).
 - **Uninstall on Windows:** follow the [uninstall guide](docs/WINDOWS.md#uninstall). For a leftover legacy macOS app, see the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app).
 
@@ -88,7 +88,7 @@ They are excellent agents. Ciaobot gives them a persistent personal workspace: s
 
 ### See what it remembered. Decide what stays.
 
-With Session insights enabled, archiving a chat can file confident facts automatically; uncertain ones become proposals. Review proposals and recorded decisions in Memory, with Undo where a reversible receipt is available. Nightly curation consolidates existing core memory rather than adding new core facts unattended. Old or unused notes are flagged for your decision, not automatically deleted; retired notes remain restorable until you permanently delete them.
+Archiving a chat can file confident facts automatically; uncertain ones become proposals. Review proposals and recorded decisions in Memory, with Undo where a reversible receipt is available. Nightly curation consolidates existing core memory rather than adding new core facts unattended. Old or unused notes are flagged for your decision, not automatically deleted; retired notes remain restorable until you permanently delete them.
 
 The user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` and `ciao`; the Python package and many environment variables still use `ciao`/`CIAO_*` for compatibility.
 

@@ -6,7 +6,7 @@ This document is for agents and operators working inside an installed Ciaobot wo
 
 - `CIAO_CUSTOMIZATION.md`: this guide.
 - `.env`: server config (auth, host/port) and runtime paths.
-- `.runtime/workspaces.json`: logical workspaces, managed from Settings → Workspaces.
+- `.runtime/workspaces.json`: logical workspaces, managed from Settings → Manage workspaces.
 - `.claude/agents/`: project agents available to Claude-backed chats.
 - `.claude/commands/`: slash commands available to Claude-backed chats.
 - `.claude/skills/`: skills available to Claude-backed chats.
@@ -23,7 +23,7 @@ Ciaobot has two workspace concepts:
 - `CIAO_WORKSPACE`: the filesystem root for this local Ciaobot instance. It contains `.env`, `.runtime/`, `.claude/`, and usually `memory-vault/`.
 - Logical workspaces: named chat spaces such as `default`, `personal`, `work`, or `client-a`. These appear in the PWA sidebar and route projects, chats, vault roots, model defaults, and integration profiles.
 
-Logical workspaces are managed from Settings → Workspaces and stored in `.runtime/workspaces.json`, the only source of the workspace list. `.env` does not configure them: the retired `CIAO_WORKSPACES` variable is ignored (a server start imports it into the registry once, then warns until it is removed from `.env`).
+Logical workspaces are managed from Settings → Manage workspaces and stored in `.runtime/workspaces.json`, the only source of the workspace list. `.env` does not configure them: the retired `CIAO_WORKSPACES` variable is ignored (a server start imports it into the registry once, then warns until it is removed from `.env`).
 
 Example `.runtime/workspaces.json`:
 
@@ -50,7 +50,7 @@ Example `.runtime/workspaces.json`:
 
 `vault_root` is relative to `CIAO_WORKSPACE` unless it is absolute.
 
-`color` is an optional PWA accent preset (`amber`, `pink`, `cyan`, `emerald`, `violet`). Missing values default to Ciao orange (`amber`). Only accent tokens change; canvas colors stay fixed.
+`color` is an optional PWA accent preset (`amber`, `pink`, `cyan`, `emerald`, `violet`, `blue`, `teal`, `lime`, `fuchsia`). Missing values default to Ciao orange (`amber`). Only accent tokens change; canvas colors stay fixed.
 
 ## Providers and Models
 
@@ -60,12 +60,13 @@ Ciaobot supports two chat providers, each authenticating through its own CLI:
 - `opencode`: the open-source agent CLI, bring-your-own model provider. This is how you reach anything else — Ollama, OpenRouter, or any OpenAI-compatible endpoint. Configure it in opencode and its models appear in Ciaobot's pickers automatically; Ciaobot lists whatever opencode reports as connected.
 
 Each provider has its own default model, thinking level, and permission mode
-for new chats, all set on the chat providers card in Settings → Models &
-providers. A Claude model alias
+for new chats, all set on the chat providers card in Settings → Providers. A Claude model alias
 (`haiku`, `sonnet`, `opus`, `fable`) is a real Claude model id; opencode resolves its
 own defaults from the signed-in account's catalog. The permission mode chooses
 how much a chat may do without asking: manual (ask for every action), auto
 (allow safe work, ask on risky actions), or bypass (allow everything).
+A workspace can override these per provider (its `provider_overrides`); an empty
+override uses the Providers value.
 
 ## API Keys and Secrets
 
@@ -73,8 +74,8 @@ Integration keys (MCP servers, third-party APIs) live in `.env`; provider sign-i
 
 Common keys:
 
-- Claude Code authentication is owned by the Claude CLI; use Settings → Models & providers to connect or verify it.
-- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Models & providers. Ciaobot has no API-key fields.
+- Claude Code authentication is owned by the Claude CLI; use Settings → Providers to connect or verify it.
+- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Providers. Ciaobot has no API-key fields.
 
 Agents may check whether a key is set, but must not print the value.
 
@@ -125,7 +126,7 @@ Use `ciao vault-index` after larger vault edits. Use `ciao vault search` to sear
 
 Runtime schedules live in `.runtime/schedules.json`.
 
-System schedules are seeded by the package and are normally read-only in the UI. User schedules can run normal chat prompts against a target workspace/project/chat and can inherit that target's provider and model. Settings → General owns the **Session insights** privacy switch; turning it off stops the memory pass for newly archived chats.
+System schedules are seeded by the package and are normally read-only in the UI. User schedules can run normal chat prompts against a target workspace/project/chat and can inherit that target's provider and model.
 
 Important fields:
 
@@ -138,7 +139,7 @@ Important fields:
 
 Safe workspace-level changes:
 
-- Manage workspaces in Settings → Workspaces.
+- Manage workspaces in Settings → Manage workspaces.
 - Add project docs, vault references, and memory pages.
 - Add or update canonical `skills/`, `subagents/`, and `commands/` assets, then run `ciao sync-skills`.
 

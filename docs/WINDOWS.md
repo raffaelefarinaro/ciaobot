@@ -7,7 +7,10 @@ Windows releases may still have rough edges. Report problems at
 
 ## Requirements
 
-- Windows 11 (build 22000 or newer), x64 or ARM64. Windows 10 is not supported.
+- Windows 11 (build 22000 or newer), x64 or ARM64. Windows 10 is not supported. On ARM64 the
+  engine runs as x64 under Windows' built-in emulation: `cryptography` ships no
+  ARM64 Windows build, so the installer always uses an x64 Python (native on x64)
+  and updates keep the engine's own architecture.
 - PowerShell 5.1 or newer (the one that ships with Windows is enough).
 - No administrator rights. Everything is installed for your own account.
 - Internet access to GitHub for the install.
@@ -25,6 +28,16 @@ irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install
 When it finishes it prints a one-time sign-in link and opens it in your browser.
 The link signs you in once. Do not share it. If you lose it, run
 `ciao setup-url --workspace <your workspace folder>` for a new one. If the installer created your password, it also tells you that Ciaobot shows it once on Home on this computer.
+
+On a fresh machine, the installer leaves workspace creation to the browser
+onboarding flow. `-Workspace` suggests a folder but does not create it; after
+you finish setup, the installer activates the logon task. If setup is cancelled,
+resume with `ciao run --installer-bootstrap`. With `-NoStart`, nothing is
+provisioned and that same command resumes setup later. If port 8443 is already
+taken, the installer warns before the wizard opens: choose another port in
+Advanced setup or free 8443. After activation it waits for the engine on the
+port you chose and reports it running only once it answers; otherwise setup is
+kept and the installer says Ciaobot is not answering yet.
 
 `iex` cannot take arguments, so to pass an option run the script as a script
 block:
@@ -176,7 +189,7 @@ new terminal, install [Git for Windows](https://gitforwindows.org/).
 
 ## Update and rollback
 
-Engine updates work the same way as on macOS: Settings -> Home, or from a
+Engine updates work the same way as on macOS: Settings -> General, or from a
 terminal:
 
 ```powershell

@@ -16,6 +16,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -24,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from ciao.server_host import SUPERSEDED_HOST_PROTOCOLS
 from ciao.release_manifest import (
     RELEASE_PUBLIC_KEY,
     SERVER_HOST_FILENAME,
@@ -471,6 +473,54 @@ PLIST
             exit 143
         fi
         ;;
+    run)
+        # The installer's foreground bootstrap. Simulate a wizard that
+        # provisions the suggested folder (or ~/Ciaobot) and writes the live
+        # definition, and record whether the installer created anything first.
+        proposed=$HOME/Ciaobot
+        previous=
+        for argument in "$@"; do
+            case "$argument" in --installer-suggest-workspace=*) proposed=${argument#*=} ;; esac
+            if [ "$previous" = "--installer-suggest-workspace" ]; then proposed=$argument; fi
+            previous=$argument
+        done
+        if [ -e "$proposed" ]; then existed=1; else existed=0; fi
+        printf 'bootstrap %s existed=%s\n' "$proposed" "$existed" >> "$HOME/bootstrap.log"
+        if [ -f "$HOME/cancel-installer-bootstrap" ]; then exit 130; fi
+        if [ -f "$HOME/fail-installer-bootstrap" ]; then exit 1; fi
+        if [ -f "$HOME/refuse-installer-bootstrap" ]; then
+            printf 'Ciaobot installer bootstrap refused: this machine is not fresh\n' >&2
+            exit 64
+        fi
+        mkdir -p "$proposed/.runtime"
+        printf '[]\n' > "$proposed/.runtime/workspaces.json"
+        printf 'PWA_PORT=8443\n' > "$proposed/.env"
+        printf '%s\n' "$proposed" > "$HOME/bootstrap-workspace"
+        "__PYTHON__" - "$HOME/Library/LaunchAgents/com.ciao.server.plist" <<'PLIST'
+import pathlib
+import plistlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+with path.open("wb") as handle:
+    plistlib.dump(
+        {"Label": "com.ciao.server", "ProgramArguments": [sys.executable, "run"]},
+        handle,
+    )
+PLIST
+        ;;
+    installer)
+        if [ "${2:-}" = activate ] && [ -f "$HOME/fail-installer-activate" ]; then
+            printf '{"ok":false,"error":"activation refused"}\n'
+            exit 1
+        fi
+        if [ -f "$HOME/installer-activation-output" ]; then
+            cat "$HOME/installer-activation-output"
+        else
+            "__PYTHON__" -c 'import json, sys; print(json.dumps({"ok": True, "workspace": sys.argv[1], "service_backend": "macos", "definition": sys.argv[2], "port": 8443}))' "$(cat "$HOME/bootstrap-workspace")" "$HOME/Library/LaunchAgents/com.ciao.server.plist"
+        fi
+        ;;
     service)
         if [ -f "$HOME/fail-ciao-service-start" ]; then exit 1; fi
         ;;
@@ -518,21 +568,39 @@ def _fake_uv() -> str:
 _CURL_STUB = """#!/bin/sh
 printf 'curl %s\\n' "$*" >> "$HOME/trace.log"
 engine_port=$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)
+response_output=
+previous=
+for arg in "$@"; do
+    if [ "$previous" = -o ]; then response_output=$arg; fi
+    previous=$arg
+done
 for arg in "$@"; do
     case "$arg" in
         */api/startup-status)
+            [ -z "$response_output" ] || exec > "$response_output"
             case "$arg" in
                 *":$engine_port/"*) ;;
                 *) exit 7 ;;
             esac
             version=$(cat "$HOME/startup-version" 2>/dev/null || echo "__VERSION__")
+            count=$(cat "$HOME/startup-response-count" 2>/dev/null || echo 0)
+            count=$((count + 1))
+            printf '%s\\n' "$count" > "$HOME/startup-response-count"
+            if [ -f "$HOME/startup-response" ]; then
+                cat "$HOME/startup-response"
+                exit "$(cat "$HOME/startup-response-exit" 2>/dev/null || echo 0)"
+            fi
+            if [ "$count" -eq 1 ] && [ -f "$HOME/startup-first-response" ]; then
+                cat "$HOME/startup-first-response"
+                exit 0
+            fi
             if [ -f "$HOME/startup-port-in-use" ]; then
                 port=$(cat "$HOME/startup-port-in-use")
-                printf '{"phases": [{"name": "server_starting", "status": "failed", "message": "port %s is already in use by another program. Free port %s, or set PWA_PORT in the workspace .env to serve on a different port."}], "overall_ready": true, "port_in_use": true, "version": "%s", "node_role": "host"}\\n' "$port" "$port" "$version"
+                printf '{"phases": [{"name": "server_starting", "status": "failed", "message": "port %s is already in use by another program. Free port %s, or set PWA_PORT in the workspace .env to serve on a different port.", "started_at": null, "finished_at": "2026-10-25T12:00:00+00:00"}], "overall_ready": true, "port_in_use": true, "version": "%s", "desktop_api_version": 1, "startup_id": "aaaaaaaabbbb4ccc8dddeeeeeeeeeeee", "pid": 123, "latest_version": null, "update_available": false}\\n' "$port" "$port" "$version"
                 exit 0
             fi
             # Shaped like the real response, which has keys before `version`.
-            printf '{"phases": [], "overall_ready": true, "port_in_use": false, "version": "%s", "node_role": "host"}\\n' "$version"
+            printf '{"phases": [{"name": "server_starting", "status": "done", "message": "", "started_at": "2026-10-25T12:00:00+00:00", "finished_at": "2026-10-25T12:00:01+00:00"}], "overall_ready": true, "port_in_use": false, "version": "%s", "desktop_api_version": 1, "startup_id": "aaaaaaaabbbb4ccc8dddeeeeeeeeeeee", "pid": 123, "latest_version": null, "update_available": false}\\n' "$version"
             exit 0
             ;;
     esac
@@ -636,6 +704,10 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         'exit 1\n',
     )
     _write_exec(fakebin / "sleep", "#!/bin/sh\nexit 0\n")
+    _write_exec(
+        fakebin / "uuidgen",
+        "#!/bin/sh\necho 11111111-2222-3333-4444-555555555555\n",
+    )
 
     # The tools a migration reaches for are script variables, so the test
     # rewrites the lines that set them instead of setting environment
@@ -655,11 +727,21 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         rewritten,
         flags=re.MULTILINE,
     )
+    # A fresh install probes its port with the engine's own bind; 8443 is
+    # whatever this machine runs there, so the copy probes a port just freed.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("0.0.0.0", 0))
+    fresh_port = probe.getsockname()[1]
+    probe.close()
+    rewritten = re.sub(
+        r"^FRESH_PORT=.*$", f"FRESH_PORT={fresh_port}", rewritten, count=1, flags=re.MULTILINE
+    )
     script = tmp_path / "install-engine.sh"
     script.write_text(rewritten, encoding="utf-8")
     script.chmod(0o755)
 
     return {
+        "fresh_port": fresh_port,
         "home": home,
         "script": script,
         "release": release,
@@ -668,6 +750,9 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         "env": {
             "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
             "HOME": str(home),
+            # Keep shell-specific startup-file writes inside the disposable
+            # home even when the host/CI environment sets a global XDG path.
+            "XDG_CONFIG_HOME": str(home / ".config"),
             "CIAO_RELEASE_BASE_URL": f"file://{tmp_path / 'rel'}",
             "TMPDIR": str(tmp_path),
         },
@@ -680,9 +765,18 @@ def _run_installer(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    # Simulate this harness's Mac, not the developer's workspace or a setup
+    # test that exported its destination. Explicit test inputs still win below.
+    inherited_env = {
+        key: value for key, value in os.environ.items()
+        if key not in {
+            "CIAO_WORKSPACE", "CIAO_WORKSPACES", "CIAO_RUNTIME_ROOT",
+            "CIAO_VAULT_ROOT", "CIAO_MEMORY_DIR", "CIAO_BOOTSTRAP_WORKSPACE",
+        }
+    }
     return subprocess.run(
         ["sh", str(harness["script"]), *args],
-        env={**os.environ, **harness["env"], **(env or {})},
+        env={**inherited_env, **harness["env"], **(env or {})},
         cwd=str(cwd) if cwd is not None else None,
         capture_output=True,
         text=True,
@@ -690,9 +784,570 @@ def _run_installer(
     )
 
 
+def _existing_install(
+    harness: dict[str, Any], root: Path | None = None, *, port: str = "8443"
+) -> Path:
+    """Make the machine look like a configured Ciaobot workspace.
+
+    The installer takes the CLI setup path only for a Mac that already has one;
+    a machine with no configured workspace is onboarded in the browser instead.
+    """
+    workspace = root or harness["home"] / "Ciaobot"
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    (workspace / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    return workspace
+
+
 def _log(harness: dict[str, Any], name: str) -> str:
     path: Path = harness["home"] / name
     return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize("explicit_source", [None, "harness", "call"])
+def test_installer_subprocess_isolates_inherited_storage_redirects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_source: str | None
+) -> None:
+    redirects = (
+        "CIAO_WORKSPACE", "CIAO_WORKSPACES", "CIAO_RUNTIME_ROOT",
+        "CIAO_VAULT_ROOT", "CIAO_MEMORY_DIR", "CIAO_BOOTSTRAP_WORKSPACE",
+    )
+    for key in redirects:
+        monkeypatch.setenv(key, "inherited-from-another-workspace")
+    monkeypatch.setenv("INSTALLER_TEST_SENTINEL", "keep-unrelated-environment")
+    script = tmp_path / "environment.sh"
+    script.write_text(
+        f"exec {shlex.quote(sys.executable)} -c "
+        "'import json, os; print(json.dumps(dict(os.environ)))'\n",
+        encoding="utf-8",
+    )
+    explicit = {key: "deliberately-supplied" for key in redirects}
+    harness = {
+        "script": script,
+        "env": explicit if explicit_source == "harness" else {},
+    }
+
+    result = _run_installer(
+        harness, env=explicit if explicit_source == "call" else None
+    )
+
+    assert result.returncode == 0, result.stderr
+    child_env = json.loads(result.stdout)
+    for key in redirects:
+        if explicit_source is None:
+            assert key not in child_env
+        else:
+            assert child_env[key] == "deliberately-supplied"
+        assert os.environ[key] == "inherited-from-another-workspace"
+    assert child_env["INSTALLER_TEST_SENTINEL"] == "keep-unrelated-environment"
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_opens_the_bootstrap_without_a_suggestion(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    calls = _log(harness, "ciao-calls.log").splitlines()
+    bootstrap = next(line for line in calls if line.startswith("run --installer-bootstrap"))
+    assert "--installer-suggest-workspace" not in bootstrap
+    assert "Ciaobot is running from the folder you chose." in result.stdout
+    assert f"  workspace: {harness['home'] / 'Ciaobot'}" in result.stdout
+    assert "/api/startup-status" in _log(harness, "trace.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_consumes_actual_cli_activation_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from argparse import Namespace
+
+    from ciao import cli, installer_handoff, macos_service
+    from ciao.service_backend import MacOSBackend
+
+    harness = _harness(tmp_path)
+    home = harness["home"]
+    _capture_browser_opens(harness)
+    result = installer_handoff.HandoffResult(
+        run_id="11111111-2222-3333-4444-555555555555",
+        startup_id="aaaaaaaabbbb4ccc8dddeeeeeeeeeeee",
+        workspace=home / "Chosen notes",
+        service_backend=MacOSBackend.name,
+        definition_path=home / "Library/LaunchAgents" / f"{macos_service.SERVER_LABEL}.plist",
+        port=18446,
+    )
+
+    # Only activation's OS/service side effects are replaced. The CLI emits
+    # the actual HandoffResult schema consumed by the shell installer.
+    def activate(*, run_id: str) -> installer_handoff.HandoffResult:
+        assert run_id == result.run_id
+        return result
+
+    monkeypatch.setattr(installer_handoff, "activate", activate)
+    assert cli._installer_command(Namespace(as_json=True, run_id=result.run_id)) == 0
+    emitted = capsys.readouterr().out
+    (home / "installer-activation-output").write_text(emitted, encoding="utf-8")
+    (home / "engine-port").write_text(str(result.port), encoding="utf-8")
+
+    installed = _run_installer(harness, "--version", VERSION)
+
+    assert installed.returncode == 0, installed.stderr
+    assert f"  workspace: {result.workspace}" in installed.stdout
+    assert "Ciaobot is running from the folder you chose." in installed.stdout
+    assert _log(harness, "open.log") == "http://localhost:18446\n"
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("port", [8443, 18446])
+def test_fresh_install_uses_the_verified_activation_port(tmp_path: Path, port: int) -> None:
+    harness = _harness(tmp_path)
+    home = harness["home"]
+    (home / "engine-port").write_text(str(port), encoding="utf-8")
+    # Simulate an interactive terminal without launching the host's browser.
+    script = harness["script"]
+    script.write_text(
+        script.read_text(encoding="utf-8").replace(
+            'if [ -t 1 ] && command -v open', 'if command -v open'
+        ),
+        encoding="utf-8",
+    )
+    opener = harness["fakebin"] / "open"
+    opener.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/open.log"\n', encoding="utf-8"
+    )
+    opener.chmod(0o755)
+    (home / "installer-activation-output").write_text(
+        json.dumps({
+            "ok": True,
+            "workspace": str(home / "Chosen notes"),
+            "service_backend": "macos",
+            "definition": str(home / "Library/LaunchAgents/com.ciao.server.plist"),
+            "port": port,
+        }),
+        encoding="utf-8",
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert f"  workspace: {home / 'Chosen notes'}" in result.stdout
+    assert f"http://localhost:{port}/api/startup-status" in _log(harness, "trace.log")
+    assert f"open http://localhost:{port} and log in" in result.stdout
+    assert _log(harness, "open.log") == f"http://localhost:{port}\n"
+    assert (
+        "installer activate --run-id 11111111-2222-3333-4444-555555555555 --json"
+    ) in _log(harness, "ciao-calls.log")
+    if port != 8443:
+        assert "http://localhost:8443" not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("output", [
+    "", "not json", "[]", "null",
+    '{"ok":false,"port":18446}',
+    '{"ok":1,"port":18446}',
+    '{"ok":true}',
+    '{"ok":true,"port":"18446"}',
+    '{"ok":true,"port":true}',
+    '{"ok":true,"port":18446.0}',
+    '{"ok":true,"port":0}',
+    '{"ok":true,"port":65536}',
+    '{"ok":true,"port":8443,"port":18446}',
+    '{"ok":true,"port":"18446; touch /untrusted"}',
+])
+def test_fresh_install_refuses_malformed_activation_output(
+    tmp_path: Path, output: str
+) -> None:
+    harness = _harness(tmp_path)
+    # Keep all unrelated required fields valid so each port/status case tests
+    # its own validation, including the duplicate-key case (no JSON re-encode).
+    if output.startswith('{"ok"'):
+        output = output.replace(
+            '{', '{"workspace":"/chosen-notes","service_backend":"macos",'
+            '"definition":"/LaunchAgents/com.ciao.server.plist",', 1,
+        )
+    (harness["home"] / "installer-activation-output").write_text(output, encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "could not verify the background service activation result" in result.stderr
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert f"Resume with: '{ciao}' installer activate --run-id " in result.stderr
+    assert "Return to the browser tab" not in result.stdout
+    assert "http://localhost:" not in result.stdout
+    assert _install_receipt(harness)["version"] == VERSION
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(("field", "value"), [
+    ("workspace", None), ("workspace", "relative/notes"),
+    ("workspace", "/notes\n18446"), ("workspace", "/notes\r"),
+    ("definition", None), ("definition", "relative.plist"),
+    ("service_backend", None), ("service_backend", "systemd"),
+    ("service_backend", "launchd"), ("service_backend", "windows"),
+])
+def test_fresh_install_refuses_invalid_activation_workspace_schema(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    harness = _harness(tmp_path)
+    payload = {
+        "ok": True, "workspace": str(harness["home"] / "Ciaobot"),
+        "definition": str(harness["home"] / "Library/LaunchAgents/com.ciao.server.plist"),
+        "service_backend": "macos", "port": 8443,
+    }
+    payload[field] = value
+    (harness["home"] / "installer-activation-output").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "could not verify the background service activation result" in result.stderr
+    assert "/api/startup-status" not in _log(harness, "trace.log")
+    assert "Return to the browser tab" not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(
+    ("knob", "code"),
+    [("cancel-installer-bootstrap", 130), ("fail-installer-bootstrap", 1)],
+)
+def test_fresh_install_cancel_leaves_a_resumable_install(
+    tmp_path: Path, knob: str, code: int
+) -> None:
+    harness = _harness(tmp_path)
+    workspace = harness["home"] / "Fresh"
+    (harness["home"] / knob).write_text("", encoding="utf-8")
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--workspace", str(workspace)
+    )
+
+    assert result.returncode == code
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert f"Resume setup with: '{ciao}' run --installer-bootstrap" in result.stderr
+    calls = _log(harness, "ciao-calls.log")
+    assert "installer activate" not in calls
+    assert "setup " not in calls
+    assert not workspace.exists()
+    assert _install_receipt(harness)["version"] == VERSION
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_absolutizes_a_relative_suggestion(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--workspace", "Fresh", cwd=home
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = _log(harness, "ciao-calls.log").splitlines()
+    bootstrap = next(line for line in calls if line.startswith("run --installer-bootstrap"))
+    assert f"--installer-suggest-workspace={home}/Fresh" in bootstrap
+    assert f"bootstrap {home}/Fresh existed=0" in _log(harness, "bootstrap.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_guard_refusal_is_reported(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    (harness["home"] / "refuse-installer-bootstrap").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 64
+    assert "not fresh" in result.stderr
+    assert "installer activate" not in _log(harness, "ciao-calls.log")
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert f"Resume setup with: '{ciao}' run --installer-bootstrap" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_no_start_provisions_nothing(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    workspace = harness["home"] / "Fresh"
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--workspace", str(workspace), "--no-start"
+    )
+
+    assert result.returncode == 0, result.stderr
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert f"Setup was not started. Resume with: '{ciao}' run --installer-bootstrap" in result.stdout
+    calls = _log(harness, "ciao-calls.log")
+    assert "run --installer-bootstrap" not in calls
+    assert "installer activate" not in calls
+    assert "setup " not in calls
+    assert not workspace.exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_activation_failure_is_reported(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    (harness["home"] / "fail-installer-activate").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "the background service did not start" in result.stderr
+    assert "activation refused" in result.stderr
+    ciao = harness["home"] / ".local/bin/ciao"
+    assert (
+        f"Resume with: '{ciao}' installer activate --run-id "
+        "11111111-2222-3333-4444-555555555555"
+    ) in result.stderr
+    assert _install_receipt(harness)["version"] == VERSION
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_warns_on_a_held_default_port_and_accepts_advanced_port(tmp_path: Path) -> None:
+    """A foreign default-port listener must not veto Advanced setup."""
+    harness = _harness(tmp_path)
+    home = harness["home"]
+    (home / "engine-port").write_text("18446", encoding="utf-8")
+    (home / "installer-activation-output").write_text(json.dumps({
+        "ok": True, "workspace": str(home / "Ciaobot"),
+        "service_backend": "macos",
+        "definition": str(home / "Library/LaunchAgents/com.ciao.server.plist"),
+        "port": 18446,
+    }), encoding="utf-8")
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("0.0.0.0", harness["fresh_port"]))
+    holder.listen(1)
+    try:
+        result = _run_installer(harness, "--version", VERSION)
+    finally:
+        holder.close()
+
+    assert result.returncode == 0, result.stderr
+    assert f"port {harness['fresh_port']} is already in use" in result.stderr
+    assert "Choose another port in Advanced setup" in result.stderr
+    calls = _log(harness, "ciao-calls.log")
+    assert "run --installer-bootstrap" in calls
+    assert "installer activate" in calls
+    assert "Ciaobot is running from the folder you chose." in result.stdout
+    assert "open http://localhost:18446 and log in" in result.stdout
+    assert "http://localhost:18446/api/startup-status" in _log(harness, "trace.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_reports_an_engine_that_could_not_bind(tmp_path: Path) -> None:
+    """Activation succeeding is not the engine running: a bind failure after
+    the wizard is reported instead of sending the user back to the browser."""
+    harness = _harness(tmp_path)
+    (harness["home"] / "startup-port-in-use").write_text("8443", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1, result.stderr
+    assert "port 8443 is already in use" in result.stderr
+    assert "Return to the browser tab" not in result.stdout
+    assert "Setup is saved in the folder you chose, but Ciaobot is not answering yet." in result.stdout
+
+
+def _startup_payload() -> dict[str, Any]:
+    return {
+        "phases": [{
+            "name": "server_starting", "status": "done", "message": "",
+            "started_at": "2026-10-25T12:00:00+00:00",
+            "finished_at": "2026-10-25T12:00:01+00:00",
+        }],
+        "overall_ready": True, "port_in_use": False, "version": VERSION,
+        "desktop_api_version": 1,
+        "startup_id": "aaaaaaaabbbb4ccc8dddeeeeeeeeeeee", "pid": 123,
+        "latest_version": None, "update_available": False,
+    }
+
+
+def _capture_browser_opens(harness: dict[str, Any]) -> None:
+    script = harness["script"]
+    script.write_text(script.read_text(encoding="utf-8").replace(
+        'if [ -t 1 ] && command -v open', 'if command -v open'
+    ), encoding="utf-8")
+    _write_exec(
+        harness["fakebin"] / "open",
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$HOME/open.log"\n',
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fresh_install_accepts_actual_locked_engine_startup_serialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    import ciao
+    from ciao.instance_lock import WorkspaceInstanceLock
+    from ciao.main import StartupTracker
+    from ciao.port_in_use import BIND_PHASE
+    from ciao.web import routes_api
+
+    harness = _harness(tmp_path)
+    _capture_browser_opens(harness)
+    # This harness installs a simulated release; let the actual endpoint emit
+    # that version, without performing an external update check.
+    monkeypatch.setattr(ciao, "__version__", VERSION)
+
+    async def update_hint(_request: Any) -> tuple[str, bool]:
+        return VERSION, False
+
+    monkeypatch.setattr(routes_api, "_cached_update_hint", update_hint)
+    with WorkspaceInstanceLock(
+        tmp_path / "locked-runtime", workspace_root=harness["home"] / "Ciaobot", port=8443
+    ) as lock:
+        tracker = StartupTracker(startup_id=lock.startup_id, engine_pid=os.getpid())
+        tracker.start(BIND_PHASE)
+        tracker.done(BIND_PHASE)
+        request = SimpleNamespace(app=SimpleNamespace(
+            state=SimpleNamespace(startup_tracker=tracker)
+        ))
+        response = asyncio.run(routes_api.startup_status_endpoint(request))
+        payload = json.loads(response.body)
+        assert payload["startup_id"] == lock.startup_id
+        assert re.fullmatch(r"[0-9a-f]{32}", payload["startup_id"])
+        (harness["home"] / "startup-response").write_bytes(response.body)
+
+        result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert _log(harness, "startup-response-count").strip() == "1"
+    assert "Ciaobot is running from the folder you chose." in result.stdout
+    assert _log(harness, "open.log") == "http://localhost:8443\n"
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("response", [
+    "<html>unrelated server</html>", "{}", "[]", "null", "not json",
+    json.dumps(_startup_payload())[:-1] + ',"version":"foreign"}',
+    pytest.param(json.dumps(_startup_payload()) + "\x00", id="embedded-nul"),
+    pytest.param(" " * 65537 + json.dumps(_startup_payload()), id="oversized"),
+])
+def test_fresh_install_rejects_foreign_http_200_before_delayed_bind_failure(
+    tmp_path: Path, response: str
+) -> None:
+    harness = _harness(tmp_path)
+    _capture_browser_opens(harness)
+    (harness["home"] / "startup-response").write_text(response, encoding="utf-8")
+    # The foreign server answers first; only after the first health poll does
+    # the engine supervisor publish its bind failure. No real sleep or service.
+    _write_exec(harness["fakebin"] / "sleep", f'''#!/bin/sh
+if [ -f "$HOME/startup-response-count" ]; then
+    {shlex.quote(sys.executable)} - <<'PY'
+import os
+import pathlib
+import time
+path = pathlib.Path.home() / ".local/state/ciaobot/port-in-use.txt"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text("port 8443 is already in use")
+os.utime(path, (time.time() + 2, time.time() + 2))
+PY
+fi
+''')
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "port 8443 is already in use" in result.stderr
+    assert "Ciaobot is running" not in result.stdout
+    assert "Return to the browser tab" not in result.stdout
+    assert _log(harness, "open.log") == ""
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(("field", "value"), [
+    ("version", "0.0.1"), ("overall_ready", 1), ("overall_ready", False),
+    ("port_in_use", 0), ("desktop_api_version", True),
+    ("desktop_api_version", 2), ("startup_id", "not-a-uuid"),
+    ("startup_id", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+    ("startup_id", "AAAAAAAABBBB4CCC8DDDEEEEEEEEEEEE"),
+    ("pid", True), ("pid", 0), ("phases", []),
+    ("phases", [{**_startup_payload()["phases"][0], "status": "in_progress"}]),
+    ("phases", [{**_startup_payload()["phases"][0], "message": 42}]),
+])
+def test_fresh_install_requires_real_bound_ready_startup_schema(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    harness = _harness(tmp_path)
+    _capture_browser_opens(harness)
+    payload = _startup_payload()
+    payload[field] = value
+    (harness["home"] / "startup-response").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "Ciaobot is running" not in result.stdout
+    assert "Return to the browser tab" not in result.stdout
+    assert _log(harness, "open.log") == ""
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("pending_state", ["bind", "overall"])
+def test_fresh_install_waits_for_bind_readiness_before_opening(
+    tmp_path: Path, pending_state: str
+) -> None:
+    harness = _harness(tmp_path)
+    _capture_browser_opens(harness)
+    pending = _startup_payload()
+    if pending_state == "bind":
+        # overall_ready alone is not proof of a bound server.
+        pending["phases"][0]["status"] = "in_progress"
+        pending["phases"][0]["finished_at"] = None
+    else:
+        pending["overall_ready"] = False
+    (harness["home"] / "startup-first-response").write_text(json.dumps(pending), encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert _log(harness, "startup-response-count").strip() == "2"
+    assert "Ciaobot is running from the folder you chose." in result.stdout
+    assert _log(harness, "open.log") == "http://localhost:8443\n"
+    assert "--max-time 5 --max-filesize 65536" in _log(harness, "trace.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize("curl_exit", [28, 63])
+def test_fresh_install_discards_partial_status_after_curl_limit_failure(
+    tmp_path: Path, curl_exit: int
+) -> None:
+    harness = _harness(tmp_path)
+    _capture_browser_opens(harness)
+    (harness["home"] / "startup-response").write_text(
+        json.dumps(_startup_payload()), encoding="utf-8"
+    )
+    (harness["home"] / "startup-response-exit").write_text(str(curl_exit), encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1
+    assert "Ciaobot is running" not in result.stdout
+    assert _log(harness, "open.log") == ""
+    assert "--max-time 5 --max-filesize 65536" in _log(harness, "trace.log")
 
 
 WELCOME_LINE = (
@@ -705,6 +1360,7 @@ WELCOME_LINE = (
 @needs_local_tools
 def test_installer_says_where_the_generated_password_is_shown(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
+    _existing_install(harness)
     home: Path = harness["home"]
     (home / "setup-generates-password").write_text("", encoding="utf-8")
 
@@ -713,6 +1369,203 @@ def test_installer_says_where_the_generated_password_is_shown(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     assert WELCOME_LINE in result.stdout
     assert f"  workspace: {home / 'Ciaobot'}" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_default_zsh_path_update_is_marked_and_idempotent(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    startup = harness["home"] / ".zshrc"
+    startup.write_text("# keep me\n", encoding="utf-8")
+    env = {"SHELL": "/bin/zsh"}
+
+    first = _run_installer(harness, "--version", VERSION, "--no-start", env=env)
+    second = _run_installer(harness, "--version", VERSION, "--no-start", env=env)
+
+    stanza = '# >>> Ciaobot installer PATH >>>'
+    assert first.returncode == second.returncode == 0
+    assert startup.read_text(encoding="utf-8").count(stanza) == 1
+    assert f"export PATH='{harness['home']}/.local/bin':\"$PATH\"" in startup.read_text(encoding="utf-8")
+    assert "PATH entry is already present" in second.stdout
+
+    sourced = subprocess.run(
+        ["sh", "-c", '. "$1"; . "$1"; . "$1"; printf %s "$PATH"', "sh", str(startup)],
+        env={**os.environ, "HOME": str(harness["home"]), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert sourced.returncode == 0, sourced.stderr
+    assert sourced.stdout.split(":").count(str(harness["home"] / ".local/bin")) == 1
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_dangling_zsh_profile_symlink_is_not_followed(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    startup = harness["home"] / ".zshrc"
+    target = harness["home"] / "missing-zsh-profile"
+    startup.symlink_to(target)
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", env={"SHELL": "/bin/zsh"}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert startup.is_symlink()
+    assert not target.exists()
+    assert "not a safe writable file" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_does_not_edit_profile_when_bin_dir_is_already_on_path(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    startup = harness["home"] / ".zshrc"
+    original = "# user config\n"
+    startup.write_text(original, encoding="utf-8")
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start",
+        env={
+            "SHELL": "/bin/zsh",
+            "PATH": f"{harness['fakebin']}:{harness['home']}/.local/bin:/usr/bin:/bin",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert startup.read_text(encoding="utf-8") == original
+    assert "already on PATH" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_no_modify_path_leaves_all_shell_profiles_untouched(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    startup = harness["home"] / ".zshrc"
+    original = "# user content\n"
+    startup.write_text(original, encoding="utf-8")
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", "--no-modify-path",
+        env={"SHELL": "/bin/zsh"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert startup.read_text(encoding="utf-8") == original
+    assert f"export PATH='{harness['home']}/.local/bin':\"$PATH\"" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_unknown_shell_does_not_receive_a_posix_profile_edit(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", env={"SHELL": "/bin/unknown"}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not list(harness["home"].glob(".*rc"))
+    assert "could not update PATH automatically" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_zdotdir_controls_the_zsh_startup_file(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    zdotdir = harness["home"] / "zsh config"
+    zdotdir.mkdir()
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start",
+        env={"SHELL": "/bin/zsh", "ZDOTDIR": str(zdotdir)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (zdotdir / ".zshrc").is_file()
+    assert not (harness["home"] / ".zshrc").exists()
+    assert f"'{harness['home']}/.local/bin'" in (zdotdir / ".zshrc").read_text()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_bash_login_path_update_uses_effective_login_profile(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    profile = harness["home"] / ".bash_login"
+    profile.write_text("# login settings\n", encoding="utf-8")
+    (harness["home"] / ".profile").write_text("# lower precedence\n", encoding="utf-8")
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", env={"SHELL": "/bin/bash"}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "# >>> Ciaobot installer PATH >>>" in profile.read_text(encoding="utf-8")
+    assert "Ciaobot installer PATH >>>" not in (harness["home"] / ".profile").read_text()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_fish_path_update_uses_fish_syntax(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", env={"SHELL": "/usr/local/bin/fish"}
+    )
+
+    fish_config = harness["home"] / ".config/fish/config.fish"
+    assert result.returncode == 0, result.stderr
+    assert "fish_add_path '" in fish_config.read_text(encoding="utf-8")
+    assert "For this terminal run: fish_add_path '" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_custom_uv_bin_directory_is_used_in_path_guidance(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    custom_bin = harness["home"] / "custom tools"
+    uv = harness["fakebin"] / "uv"
+    uv_source = uv.read_text(encoding="utf-8").replace(
+        "$HOME/.local/bin", "$HOME/custom tools"
+    ).replace(
+        'ln -s ../share/uv/tools/ciaobot/bin/ciao "$HOME/custom tools/ciao"',
+        'ln -s "$HOME/.local/share/uv/tools/ciaobot/bin/ciao" "$HOME/custom tools/ciao"',
+    )
+    uv.write_text(
+        uv_source,
+        encoding="utf-8",
+    )
+
+    result = _run_installer(
+        harness, "--version", VERSION, "--no-start", "--no-modify-path",
+        env={"SHELL": "/bin/zsh"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"'{custom_bin}':\"$PATH\"" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_start_failure_hint_quotes_ciao_path_with_spaces(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _existing_install(harness)
+    custom_bin = harness["home"] / "custom tools"
+    uv = harness["fakebin"] / "uv"
+    uv_source = uv.read_text(encoding="utf-8").replace(
+        "$HOME/.local/bin", "$HOME/custom tools"
+    ).replace(
+        'ln -s ../share/uv/tools/ciaobot/bin/ciao "$HOME/custom tools/ciao"',
+        'ln -s "$HOME/.local/share/uv/tools/ciaobot/bin/ciao" "$HOME/custom tools/ciao"',
+    )
+    uv.write_text(uv_source, encoding="utf-8")
+    (harness["home"] / "fail-ciao-service-start").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert f"try: '{custom_bin}/ciao' service status" in result.stderr
 
 
 @runs_the_sh_installer
@@ -730,6 +1583,7 @@ def test_installer_is_quiet_about_a_password_it_did_not_generate(tmp_path: Path)
 @needs_local_tools
 def test_engine_installer_end_to_end_with_fakes(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
+    _existing_install(harness)
     home: Path = harness["home"]
 
     result = _run_installer(harness, "--version", VERSION, "--no-start")
@@ -825,8 +1679,9 @@ def test_a_first_host_install_does_not_warn_about_permissions(tmp_path: Path) ->
 
 @runs_the_sh_installer
 @needs_local_tools
+@pytest.mark.parametrize("revision", sorted(SUPERSEDED_HOST_PROTOCOLS))
 def test_replacing_a_superseded_host_warns_about_permissions(
-    tmp_path: Path,
+    tmp_path: Path, revision: int
 ) -> None:
     # A superseded host is replaced by the new one (#1659). The replacement
     # changes the signed bytes macOS granted Accessibility/Automation to, so the
@@ -835,13 +1690,12 @@ def test_replacing_a_superseded_host_warns_about_permissions(
     # The revision is the constant, not a literal: a copy of the number here
     # would stop matching on the next revision bump, and the warning is exactly
     # what a user needs then.
-    from ciao.server_host import HOST_REVISION, LEGACY_HOST_REVISION
 
     host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
     host_archive.parent.mkdir(parents=True)
     host_archive.write_bytes(b"the signed universal host archive")
     harness = _harness(tmp_path, host_archive=host_archive)
-    _write_host_plist(harness["home"], str(LEGACY_HOST_REVISION))
+    _write_host_plist(harness["home"], str(revision))
 
     result = _run_installer(harness, "--version", VERSION, "--no-start")
 
@@ -1141,6 +1995,7 @@ def test_engine_installer_rejects_cdpath_surprise(tmp_path: Path) -> None:
     # makes the install fail after the wheel is already installed). The decoy
     # `wsrel` under the CDPATH entry is the case that must not win.
     harness = _harness(tmp_path)
+    _existing_install(harness, harness["home"] / "wsrel")
     home: Path = harness["home"]
     (tmp_path / "wsrel").mkdir()
 
@@ -2632,6 +3487,7 @@ def test_install_keeps_going_when_setup_skips_memory_regions(tmp_path: Path) -> 
     # landed. Treating that like any other setup failure would roll back an
     # install that works, so that one code is tolerated and the install goes on.
     harness = _harness(tmp_path)
+    _existing_install(harness)
     _knob(harness, "fail-ciao-setup-memory")
 
     result = _run_installer(harness, "--version", VERSION, "--no-start")
@@ -2748,7 +3604,7 @@ def test_migrate_host_reports_a_bundle_it_could_not_remove(tmp_path: Path) -> No
     # exactly here and nowhere else in the run.
     assert _app_bundle(tmp_path).is_dir()
     assert "Ciaobot.app could not be removed automatically" in result.stdout
-    assert "ciao desktop uninstall" in result.stdout
+    assert f"'{harness['home']}/.local/bin/ciao' desktop uninstall" in result.stdout
     assert "Removed the retired Ciaobot.app." not in result.stdout
 
 
@@ -2960,7 +3816,7 @@ def test_migrate_resumes_a_receipt_that_never_recorded_the_bundle(
     assert not (home / "Library/LaunchAgents/Ciaobot.plist").exists()
     assert _app_bundle(tmp_path).is_dir()
     assert "Ciaobot.app could not be removed automatically" in retry.stdout
-    assert "ciao desktop uninstall" in retry.stdout
+    assert f"'{home}/.local/bin/ciao' desktop uninstall" in retry.stdout
     assert "Removed the retired Ciaobot.app." not in retry.stdout
 
 
@@ -3534,28 +4390,32 @@ def test_migrate_client_ignores_a_workspace_it_never_uses(tmp_path: Path) -> Non
 
 @runs_the_sh_installer
 @needs_local_tools
-def test_ordinary_install_still_creates_its_workspace(tmp_path: Path) -> None:
-    # None of the above is about an ordinary install. A Mac that never ran
-    # Ciaobot.app has no workspace to keep, and `--workspace` is how one is
-    # named; creating it is the whole point of the flag, and the refusal above
-    # must not have leaked into this path.
+def test_ordinary_install_runs_the_browser_bootstrap(tmp_path: Path) -> None:
+    # A Mac that never ran Ciaobot.app has no workspace to keep. The installer
+    # installs the engine, opens the wizard, and lets the wizard provision the
+    # folder the user confirms: nothing may be created before that.
     harness = _harness(tmp_path)
     home: Path = harness["home"]
     workspace = home / "Fresh"
 
     result = _run_installer(
-        harness, "--version", VERSION, "--workspace", str(workspace), "--no-start"
+        harness, "--version", VERSION, "--workspace", str(workspace)
     )
 
     assert result.returncode == 0, result.stderr
-    assert workspace.is_dir()
-    ciao = home / ".local/bin/ciao"
-    assert f"setup --workspace {workspace} --python {ciao}\n" in _log(
-        harness, "ciao-calls.log"
-    )
+    calls = _log(harness, "ciao-calls.log").splitlines()
+    bootstrap = [line for line in calls if line.startswith("run --installer-bootstrap")]
+    assert len(bootstrap) == 1
+    run_id = bootstrap[0].split("--installer-run-id ")[1].split()[0]
+    assert f"--installer-suggest-workspace={workspace}" in bootstrap[0]
+    assert f"installer activate --run-id {run_id} --json" in calls
+    assert not any(line.startswith("setup") for line in calls)
+    # The folder did not exist when the wizard started: the installer had not
+    # created it, and the suggestion is only a suggestion.
+    assert f"bootstrap {workspace} existed=0" in _log(harness, "bootstrap.log")
+    assert _install_receipt(harness)["version"] == VERSION
     assert "migrated" not in _log(harness, "ciao-calls.log")
     assert not (home / ".local/state/ciaobot/migration").exists()
-
 
 def _denial_record(harness, mtime_offset: float) -> str:
     """Write the supervisor's record with an mtime relative to now.
@@ -3662,7 +4522,7 @@ def test_installer_refuses_to_install_over_a_port_something_else_holds(
     # probe is the engine's own bind, so the port has to be really held:
     # a socket on it is what makes the probe fail.
     port = _hold_port(harness)
-    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _existing_install(harness, port=str(port))
     _write_exec(
         harness["fakebin"] / "lsof",
         "#!/bin/sh\n"
@@ -3694,7 +4554,7 @@ def test_installer_refuses_to_install_over_a_port_something_else_holds_no_lsof(
     harness = _harness(tmp_path)
     home: Path = harness["home"]
     port = _hold_port(harness)
-    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _existing_install(harness, port=str(port))
 
     result = _run_installer(harness, "--version", VERSION)
 
@@ -3721,7 +4581,7 @@ def test_installer_accepts_a_port_ciaobots_own_engine_holds(
     # really held by it.
     port = _hold_port(harness)
     (home / "engine-port").write_text(f"{port}\n", encoding="utf-8")
-    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _existing_install(harness, port=str(port))
 
     result = _run_installer(harness, "--version", VERSION)
 
@@ -3744,7 +4604,7 @@ def test_the_port_owner_name_cannot_smuggle_terminal_escapes(
     harness = _harness(tmp_path)
     home: Path = harness["home"]
     port = _hold_port(harness)
-    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _existing_install(harness, port=str(port))
     _write_exec(
         harness["fakebin"] / "lsof",
         "#!/bin/sh\n"
@@ -3777,7 +4637,7 @@ def test_a_process_that_merely_answers_on_the_port_is_not_the_engine(
     harness = _harness(tmp_path)
     home: Path = harness["home"]
     port = _hold_port(harness)
-    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _existing_install(harness, port=str(port))
     _write_exec(
         harness["fakebin"] / "curl",
         "#!/bin/sh\n"
@@ -3832,6 +4692,7 @@ def test_installer_says_why_the_engine_never_came_up(tmp_path: Path) -> None:
     prints no link.
     """
     harness = _harness(tmp_path)
+    _existing_install(harness)
     home: Path = harness["home"]
     (home / "Ciaobot" / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
     (home / "startup-port-in-use").write_text("8443\n", encoding="utf-8")
@@ -3856,6 +4717,7 @@ def test_installer_reads_the_record_the_engine_left_outside_the_workspace(
     workspace, the way the workspace-access denial is read (#1654).
     """
     harness = _harness(tmp_path)
+    _existing_install(harness)
     home: Path = harness["home"]
     (home / "Ciaobot" / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
     record = home / ".local/state/ciaobot/port-in-use.txt"
@@ -3885,9 +4747,9 @@ def test_installer_still_prints_the_link_when_the_engine_came_up(
 ) -> None:
     """The ordinary path is unchanged: a working engine gets its link."""
     harness = _harness(tmp_path)
+    _existing_install(harness)
 
     result = _run_installer(harness, "--version", VERSION)
 
     assert result.returncode == 0, result.stderr
     assert "Open Ciaobot: http://localhost:8443/?setup=tok" in result.stdout
-

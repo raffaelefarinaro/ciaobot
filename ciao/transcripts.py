@@ -25,6 +25,7 @@ from ciao.frontmatter import yaml_scalar
 from ciao.jsonio import read_json_dict
 from ciao.memory_policy import is_unattended_turn
 from ciao.models import (
+    DEFAULT_CHAT_TITLE,
     AgentRequest,
     AssistantTextDelta,
     ChatContext,
@@ -371,7 +372,10 @@ class TranscriptStore:
                 "context_label": context_label,
                 "turns": [],
             }
-        if context_label and not transcript.get("context_label"):
+        # A turn recorded before auto-title landed (the provider-error path
+        # records turn 1 under the placeholder) must not pin the placeholder on
+        # the archive: a real title replaces it.
+        if context_label and transcript.get("context_label") in ("", None, DEFAULT_CHAT_TITLE):
             transcript["context_label"] = context_label
         transcript["updated_at"] = _now_iso()
         transcript["selected_model"] = request.model
@@ -1071,6 +1075,7 @@ _ARCHIVE_BOUNDARY_RE = re.compile(
 _ARCHIVE_MESSAGE_HEADING_RE = re.compile(r"^### (?:User|Assistant)\s*$")
 _ARCHIVE_TURN_LINE_RE = re.compile(r"^## Turn \d+\s*$")
 _ARCHIVE_TIME_RE = re.compile(r"^- Time:\s*(.+)$")
+_ARCHIVE_EFFECTIVE_MODEL_RE = re.compile(r"^- Effective model:\s*(.*)$")
 
 
 def _text_block(body: str) -> list[str]:
@@ -1190,7 +1195,10 @@ def _section_at(lines: list[str], start: int, heading: str) -> tuple[str | None,
 def parse_archive_turns(text: str) -> list[dict[str, Any]]:
     """The turns of an archived transcript, in order, read fence-aware.
 
-    Each turn is ``{"timestamp", "user", "assistant", "trailer"}``: ``user``
+    Each turn is ``{"timestamp", "effective_model", "user", "assistant",
+    "trailer"}``: ``effective_model`` is the header's ``- Effective model:``
+    value (``""`` when the line is missing, empty or ``-``), read from the
+    header lines only, never from a user body; ``user``
     and ``assistant`` are the raw message bodies (``None`` when absent), and
     ``trailer`` is the text after the assistant body up to the next turn, which
     carries the ``### Usage`` and ``### Quota`` sections. Works on both the
@@ -1207,17 +1215,25 @@ def parse_archive_turns(text: str) -> list[dict[str, Any]]:
         meta_start = index
         user, index = _section_at(lines, index, "### User")
         timestamp = ""
+        effective_model = ""
         for row in lines[meta_start:index]:
-            match = _ARCHIVE_TIME_RE.match(row)
-            if match is not None:
-                timestamp = match.group(1).strip()
+            if row.rstrip() == "### User" or _ARCHIVE_TURN_LINE_RE.match(row):
                 break
+            match = _ARCHIVE_TIME_RE.match(row)
+            if match is not None and not timestamp:
+                timestamp = match.group(1).strip()
+                continue
+            match = _ARCHIVE_EFFECTIVE_MODEL_RE.match(row)
+            if match is not None and not effective_model:
+                value = match.group(1).strip()
+                effective_model = "" if value == "-" else value
         assistant, index = _section_at(lines, index, "### Assistant")
         trailer_start = index
         while index < len(lines) and not _ARCHIVE_TURN_LINE_RE.match(lines[index]):
             index += 1
         turns.append({
             "timestamp": timestamp,
+            "effective_model": effective_model,
             "user": user,
             "assistant": assistant,
             "trailer": "\n".join(lines[trailer_start:index]),

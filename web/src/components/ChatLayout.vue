@@ -21,17 +21,19 @@
       aria-hidden="true"
       @click="sidebarCollapsed = true"
     />
-    <div ref="chatMainEl" class="chat-main" :class="{ 'chat-split': !!panelPath }">
-      <!-- Split view when a file is pinned -->
-      <template v-if="panelPath">
-        <div
-          class="chat-split-main"
-          :style="{
-            width: isMobile ? '100%' : (chatSplitRatio * 100) + '%',
-            flex: isMobile ? undefined : '0 0 auto',
-            transition: isDraggingSplit ? 'none' : undefined
-          }"
-        >
+    <div ref="chatMainEl" class="chat-main" :class="{ 'chat-split': sideSlotOccupied }">
+      <!-- The chat column: everything the route shows. The slot beside it is
+           one slot with two possible occupants — a pinned file, and the
+           terminal — and whichever wins it, the divider and the remembered
+           ratio are the same. -->
+      <div
+        ref="chatBodyEl"
+        class="chat-body"
+        :class="{ 'chat-body--split': sideSlotOccupied, 'chat-body--terminal': terminalInTile }"
+        :style="chatColumnStyle"
+      >
+        <!-- Split view when a file is pinned -->
+        <template v-if="panelPath">
           <SubagentChatView
             v-if="subagentRoute"
             :key="subagentRoute.agentId"
@@ -48,7 +50,7 @@
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
               <!-- Skeleton of the home screen this will become (lane header
-                   with the face+status row inside it, housekeeping tile, chat
+                   with the status row inside it, housekeeping tile, chat
                    rows) — a spinner pill read as "nothing is coming", while
                    the shapes promise the layout that is about to land. -->
               <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
@@ -64,7 +66,6 @@
                     <span class="boot-pill boot-shimmer"></span>
                   </div>
                   <div class="boot-status">
-                    <span class="boot-face boot-shimmer" aria-hidden="true"></span>
                     <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
                   </div>
                   <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
@@ -80,31 +81,6 @@
           <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
-              <!-- The glanceable status (face + summary) lives inside the active
-                   workspace's lane header now (HomeRecentChats.vue), right under
-                   the workspace name it summarizes. This header only remains for
-                   the first-run greeting face, which is the sole greeting-bubble
-                   owner: beside a status line that reads "nothing needs you" the
-                   bubble used to collide with it. -->
-              <div v-if="!hasHomeActivity" class="empty-home-header">
-                <div class="empty-mark">
-                  <button
-                    type="button"
-                    class="empty-face-btn"
-                    aria-label="Say hello"
-                    @click="onFaceClick"
-                    @mouseenter="onFaceEnter"
-                    @mouseleave="onFaceLeave"
-                  >
-                    <Transition name="face-bubble">
-                      <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                        {{ speechGreeting }}
-                      </div>
-                    </Transition>
-                    <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
-                  </button>
-                </div>
-              </div>
               <div class="home-workbench">
                 <div class="home-main">
                   <HomeIntake />
@@ -112,6 +88,7 @@
                     <HomeNoticeReopen />
                     <HousekeepingStrip />
                   </template>
+                  <HomeOnboardingResume />
                   <HomeWelcomeCard />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
@@ -138,173 +115,165 @@
               </div>
             </div>
           </div>
-        </div>
-        <div
-          v-if="!isMobile"
-          class="chat-split-resizer"
-          :class="{ 'is-dragging': isDraggingSplit }"
-          @mousedown="startSplitDrag"
-        />
-        <!-- Takes whatever the chat pane and gutter leave, so the tile's inset
-             margin never pushes the pair past 100%. -->
-        <div class="chat-split-side">
-          <PinnedFilePanel ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
-        </div>
-      </template>
-      <template v-else>
-        <SettingsView v-if="viewMode === 'settings'" @open-sidebar="sidebarCollapsed = false" />
-        <SchedulePanel
-          v-else-if="viewMode === 'schedules'"
-          :show-new="showNewSchedule"
-          @created="showNewSchedule = false"
-          @close="showNewSchedule = false"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <TaskBoardView
-          v-else-if="viewMode === 'tasks'"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <MemoryMapView
-          v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <ProjectView
-          v-else-if="projectIdParam"
-          :project-id="projectIdParam"
-          @close="closeProject"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <SubagentChatView
-          v-else-if="subagentRoute"
-          :key="subagentRoute.agentId"
-          :chat-id="subagentRoute.chatId"
-          :agent-id="subagentRoute.agentId"
-          @open-sidebar="sidebarCollapsed = false"
-        />
-        <template v-else-if="store.activeChat">
-          <!-- Narrow shared pin: a compact native opener for the chat's
-               server-owned pin, not a forced split pane and never an
-               auto-opened modal. -->
-          <div v-if="narrowSharedPin" class="narrow-pin-opener">
-            <button
-              type="button"
-              class="narrow-pin-btn"
-              :aria-label="`Open pinned file ${narrowSharedPinBase}`"
-              :title="narrowSharedPin"
-              @click="openNarrowSharedPin"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
-              <span class="narrow-pin-name">{{ narrowSharedPinBase }}</span>
-            </button>
-            <button
-              type="button"
-              class="narrow-pin-close btn-icon"
-              aria-label="Unpin file"
-              :disabled="pinWritePending"
-              @click="unpinCurrent"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-            </button>
-          </div>
-          <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         </template>
-        <!-- The route names a chat the catalog has not delivered yet: the pane
-             is on its way, so it shows the skeleton rather than nothing
-             (#1651). -->
-        <ChatPaneSkeleton v-else-if="chatRoutePending" />
-        <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
-          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
-          <div class="home-boot-body">
-            <!-- Same skeleton as the split-view copy above; only one is ever
-                 mounted, so the two must stay identical. -->
-            <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
-              <div class="boot-tile" aria-hidden="true">
-                <span class="boot-line boot-shimmer" style="width: 38%"></span>
-                <span class="boot-line boot-shimmer" style="width: 88%"></span>
-                <span class="boot-line boot-shimmer" style="width: 62%"></span>
-              </div>
-              <div class="boot-lane" aria-hidden="true">
-                <div class="boot-lane-header">
-                  <span class="boot-chip boot-shimmer"></span>
-                  <span class="boot-line boot-shimmer" style="width: 26%"></span>
-                  <span class="boot-pill boot-shimmer"></span>
+        <template v-else>
+          <SettingsView v-if="viewMode === 'settings'" @open-sidebar="sidebarCollapsed = false" />
+          <SchedulePanel
+            v-else-if="viewMode === 'schedules'"
+            :show-new="showNewSchedule"
+            @created="showNewSchedule = false"
+            @close="showNewSchedule = false"
+            @open-sidebar="sidebarCollapsed = false"
+          />
+          <TaskBoardView
+            v-else-if="viewMode === 'tasks'"
+            @open-sidebar="sidebarCollapsed = false"
+          />
+          <MemoryMapView
+            v-else-if="viewMode === 'memory' || viewMode === 'proposals'"
+            @open-sidebar="sidebarCollapsed = false"
+          />
+          <ProjectView
+            v-else-if="projectIdParam"
+            :project-id="projectIdParam"
+            @close="closeProject"
+            @open-sidebar="sidebarCollapsed = false"
+          />
+          <SubagentChatView
+            v-else-if="subagentRoute"
+            :key="subagentRoute.agentId"
+            :chat-id="subagentRoute.chatId"
+            :agent-id="subagentRoute.agentId"
+            @open-sidebar="sidebarCollapsed = false"
+          />
+          <template v-else-if="store.activeChat">
+            <!-- Narrow shared pin: a compact native opener for the chat's
+                 server-owned pin, not a forced split pane and never an
+                 auto-opened modal. -->
+            <div v-if="narrowSharedPin" class="narrow-pin-opener">
+              <button
+                type="button"
+                class="narrow-pin-btn"
+                :aria-label="`Open pinned file ${narrowSharedPinBase}`"
+                :title="narrowSharedPin"
+                @click="openNarrowSharedPin"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
+                <span class="narrow-pin-name">{{ narrowSharedPinBase }}</span>
+              </button>
+              <button
+                type="button"
+                class="narrow-pin-close btn-icon"
+                aria-label="Unpin file"
+                :disabled="pinWritePending"
+                @click="unpinCurrent"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          </template>
+          <!-- The route names a chat the catalog has not delivered yet: the pane
+               is on its way, so it shows the skeleton rather than nothing
+               (#1651). -->
+          <ChatPaneSkeleton v-else-if="chatRoutePending" />
+          <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
+            <div class="home-boot-body">
+              <!-- Same skeleton as the split-view copy above; only one is ever
+                   mounted, so the two must stay identical. -->
+              <div class="home-boot-skeleton" role="status" aria-live="polite" aria-label="Loading your workspaces">
+                <div class="boot-tile" aria-hidden="true">
+                  <span class="boot-line boot-shimmer" style="width: 38%"></span>
+                  <span class="boot-line boot-shimmer" style="width: 88%"></span>
+                  <span class="boot-line boot-shimmer" style="width: 62%"></span>
                 </div>
-                <div class="boot-status">
-                  <span class="boot-face boot-shimmer" aria-hidden="true"></span>
-                  <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
+                <div class="boot-lane" aria-hidden="true">
+                  <div class="boot-lane-header">
+                    <span class="boot-chip boot-shimmer"></span>
+                    <span class="boot-line boot-shimmer" style="width: 26%"></span>
+                    <span class="boot-pill boot-shimmer"></span>
+                  </div>
+                  <div class="boot-status">
+                    <span class="boot-line boot-shimmer" style="width: 46%" aria-hidden="true"></span>
+                  </div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
+                  <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 44%"></span><span class="boot-meta boot-shimmer"></span></div>
                 </div>
-                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 52%"></span><span class="boot-meta boot-shimmer"></span></div>
-                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 68%"></span><span class="boot-meta boot-shimmer"></span></div>
-                <div class="boot-row"><span class="boot-line boot-shimmer" style="width: 44%"></span><span class="boot-meta boot-shimmer"></span></div>
               </div>
             </div>
           </div>
-        </div>
-        <!-- On mobile, the sidebar already lists every active chat. Showing the
-             homepage behind it after closing a chat would just duplicate the
-             same list. Hide the empty-state whenever the mobile sidebar is open. -->
-        <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
-          <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
-          <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
-            <!-- The glanceable status (face + summary) lives inside the active
-                 workspace's lane header now (HomeRecentChats.vue), right under
-                 the workspace name it summarizes. This header only remains for
-                 the first-run greeting face, which is the sole greeting-bubble
-                 owner: beside a status line that reads "nothing needs you" the
-                 bubble used to collide with it. -->
-            <div v-if="!hasHomeActivity" class="empty-home-header">
-              <div class="empty-mark">
-                <button
-                  type="button"
-                  class="empty-face-btn"
-                  aria-label="Say hello"
-                  @click="onFaceClick"
-                  @mouseenter="onFaceEnter"
-                  @mouseleave="onFaceLeave"
-                >
-                  <Transition name="face-bubble">
-                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
-                      {{ speechGreeting }}
-                    </div>
-                  </Transition>
-                  <img class="empty-face" :src="faceSrc" alt="" draggable="false" />
-                </button>
-              </div>
-            </div>
-            <div class="home-workbench">
-              <div class="home-main">
-                <HomeIntake />
-                <template v-if="!homeAlertsInRail">
-                  <HomeNoticeReopen />
-                  <HousekeepingStrip />
-                </template>
-                <HomeWelcomeCard />
-                <HomeSetupCard />
-                <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
-                <div v-if="showGlobalNewChatActions" class="empty-actions">
-                  <button
-                    v-for="action in generalWorkspaceActions"
-                    :key="action.workspace"
-                    class="btn-primary"
-                    :data-workspace-color="action.color"
-                    :disabled="action.isCreating"
-                    @click="chooseNewChat(action.workspace)"
-                  >
-                    {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
-                  </button>
+          <!-- On mobile, the sidebar already lists every active chat. Showing the
+               homepage behind it after closing a chat would just duplicate the
+               same list. Hide the empty-state whenever the mobile sidebar is open. -->
+          <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
+            <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
+            <div class="empty-state" :class="{ 'empty-state--active': hasHomeActivity }">
+              <div class="home-workbench">
+                <div class="home-main">
+                  <HomeIntake />
+                  <template v-if="!homeAlertsInRail">
+                    <HomeNoticeReopen />
+                    <HousekeepingStrip />
+                  </template>
+                  <HomeOnboardingResume />
+                  <HomeWelcomeCard />
+                  <HomeSetupCard />
+                  <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
+                  <div v-if="showGlobalNewChatActions" class="empty-actions">
+                    <button
+                      v-for="action in generalWorkspaceActions"
+                      :key="action.workspace"
+                      class="btn-primary"
+                      :data-workspace-color="action.color"
+                      :disabled="action.isCreating"
+                      @click="chooseNewChat(action.workspace)"
+                    >
+                      {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <div class="home-rail">
-                <template v-if="homeAlertsInRail">
-                  <HomeNoticeReopen />
-                  <HousekeepingStrip />
-                </template>
-                <HomeReviewSummary />
+                <div class="home-rail">
+                  <template v-if="homeAlertsInRail">
+                    <HomeNoticeReopen />
+                    <HousekeepingStrip />
+                  </template>
+                  <HomeReviewSummary />
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </template>
+        </template>
+      </div>
+      <!-- The slot's divider: the same grip whether a pinned file or the
+           terminal is in the tile beside it. -->
+      <div
+        v-if="sideSlotOccupied && !isMobile"
+        class="chat-split-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        :class="{ 'is-dragging': isDraggingSplit }"
+        @mousedown="startSplitDrag"
+      />
+      <!-- The slot: the tile the file panel and the terminal share. It takes
+           whatever the chat pane and gutter leave, so the tile's inset
+           margin never pushes the pair past 100%. -->
+      <div
+        v-if="sideTileExists"
+        class="chat-split-side"
+        :class="{
+          'chat-split-side--terminal': terminalInTile,
+          'chat-split-side--closed': !sideSlotOccupied,
+        }"
+      >
+        <PinnedFilePanel v-if="panelPath" ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
+        <TerminalPane v-if="terminalMounted && terminalInTile" in-tile @open="terminalOpen = $event" />
+      </div>
+      <!-- The terminal leaves the tile when it cannot have it: a pinned file
+           keeps the slot, and the terminal falls back to the drawer over the
+           pane. -->
+      <TerminalPane v-if="terminalMounted && !terminalInTile" @open="terminalOpen = $event" />
     </div>
     <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
     <ItemPeekHost v-if="itemPeekMounted" />
@@ -316,6 +285,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch 
 import HomeNoticeReopen from './HomeNoticeReopen.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { terminalPanelWanted } from '../lib/terminalPanel'
 import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useItemPeekStore } from '../stores/itemPeek'
@@ -355,6 +325,18 @@ const ChatPanel = defineAsyncComponent({
   timeout: 30000,
 })
 const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
+// The browser terminal's panel, loaded the first time a terminal is asked
+// for. It stays mounted after that: the screen it holds is the session's,
+// and a hide must not throw it away. The signal that asks for it is its own
+// tiny module, so the app shell does not carry the terminal store.
+const TerminalPane = defineAsyncComponent(() => import('./TerminalPane.vue'))
+// The signal is asked for once and stays true for the session, so a shell
+// mounted after that has to read it: a watcher alone only sees the change, and
+// a terminal opened on another page would leave this one without its pane.
+const terminalMounted = ref(terminalPanelWanted.value)
+watch(terminalPanelWanted, (wanted) => {
+  if (wanted) terminalMounted.value = true
+})
 const FileViewerModal = defineAsyncComponent(loadFileViewerModal)
 // Lazy like the file viewer, and not in lib/chatComponents: that module's loaders
 // are the chat chunk's named entry points.
@@ -365,6 +347,7 @@ import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
 import HomeSetupCard from './HomeSetupCard.vue'
+import HomeOnboardingResume from './HomeOnboardingResume.vue'
 import HomeWelcomeCard from './HomeWelcomeCard.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
@@ -372,6 +355,7 @@ import { pendingConfirm } from '../lib/confirm'
 import { pendingPrompt } from '../lib/prompt'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
 import { useKeyboardSettings } from '../composables/useKeyboardSettings'
+import { useAppearanceSettings } from '../composables/useAppearanceSettings'
 import { effectiveBinding, keyboardMatches, type ShortcutId } from '../lib/keyboardShortcuts'
 
 const store = useProjectStore()
@@ -414,6 +398,7 @@ const schedulePanelRef = ref<any>(null)
 const fontScale = useFontScale()
 const keyboard = useKeyboardSettings()
 void keyboard.load().catch(() => {})
+void useAppearanceSettings().load().catch(() => {})
 
 function matchesShortcut(event: KeyboardEvent, id: ShortcutId): boolean {
   return keyboardMatches(event, effectiveBinding(keyboard.settings.value, id))
@@ -512,7 +497,10 @@ function startSplitDrag(e: MouseEvent) {
   isDraggingSplit.value = true
   dragStartX = e.clientX
   
-  const splitContainer = document.querySelector('.chat-main')
+  // The ratio is a share of the pane: the chat column takes that share and
+  // the slot beside it takes the rest, whether a pinned file or the terminal
+  // is in it.
+  const splitContainer = chatMainEl.value
   if (splitContainer) {
     const rect = splitContainer.getBoundingClientRect()
     dragContainerWidth = rect.width
@@ -533,8 +521,12 @@ function handleSplitDrag(e: MouseEvent) {
   const clientX = e.clientX
   let newLeftWidth = clientX - dragContainerLeft
   
-  const minLeft = MIN_CHAT_PANE_WIDTH
-  const maxLeft = dragContainerWidth - MIN_SIDE_PANE_WIDTH - SIDE_TILE_CHROME
+  // The floors belong to whoever is in the slot: a file keeps the widths it
+  // has always had, and the terminal keeps its own — a chat narrower than
+  // that is a sliver, and a shell narrower than that is not a shell.
+  const minLeft = terminalInTile.value ? TERMINAL_CHAT_MIN_PX : MIN_CHAT_PANE_WIDTH
+  const minSide = terminalInTile.value ? TERMINAL_DOCK_MIN_PX : MIN_SIDE_PANE_WIDTH
+  const maxLeft = dragContainerWidth - minSide - SIDE_TILE_CHROME
   
   if (maxLeft < minLeft) {
     chatSplitRatio.value = 0.5
@@ -562,48 +554,6 @@ function stopSplitDrag() {
   }
 }
 
-// Welcome-screen mascot. Hovering shows a comic bubble with "hello" in a
-// different language until the pointer leaves; clicking pins the bubble
-// on until the next click.
-const FACE_GREETINGS = [
-  'Ciao!', '¡Hola!', 'Salut!', 'Hallo!', 'Olá!', 'Hello!',
-  'こんにちは!', '안녕!', '你好!', 'مرحبا!', 'Привет!', 'नमस्ते!',
-  'Merhaba!', 'Γειά σου!', 'Hej!', 'Cześć!', 'สวัสดี!', 'Xin chào!',
-  'שלום!', 'Halo!', 'Ahoj!', 'Szia!', 'Dia dhuit!', 'Sawubona!',
-] as const
-
-const speechGreeting = ref<string | null>(null)
-const speechPinned = ref(false)
-let greetingQueue: string[] = []
-
-function shuffleGreetings(): string[] {
-  const next = [...FACE_GREETINGS]
-  for (let i = next.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    ;[next[i], next[j]] = [next[j], next[i]]
-  }
-  return next
-}
-
-function nextGreeting(): string {
-  if (greetingQueue.length === 0) greetingQueue = shuffleGreetings()
-  return greetingQueue.pop()!
-}
-
-function onFaceClick() {
-  speechPinned.value = !speechPinned.value
-  speechGreeting.value = speechPinned.value ? nextGreeting() : null
-}
-
-function onFaceEnter() {
-  if (!speechPinned.value) speechGreeting.value = nextGreeting()
-}
-
-function onFaceLeave() {
-  if (!speechPinned.value) speechGreeting.value = null
-}
-
-const faceSrc = computed(() => (speechGreeting.value ? '/face_scared.png' : '/face.png'))
 const taskStore = useTaskStore()
 const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
@@ -738,16 +688,69 @@ const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
 
 /** Mirrors `@container chat-pane (max-width: 940px)` in the styles below: the
- *  same element (.chat-main), the same box (content inline size), the same
+ *  same element (.chat-body), the same box (content inline size), the same
  *  threshold. Home's alerts sit in the rail only while the rail is beside the
  *  column; stacked, they stay under the composer instead of below every chat. */
 const HOME_RAIL_MIN_PANE_PX = 940
+/** The chat column: the route's content, and the box the panes answer to. */
+const chatBodyEl = ref<HTMLElement | null>(null)
+/** The pane: the chat column and the terminal's dock, side by side. */
 const chatMainEl = ref<HTMLElement | null>(null)
 const chatPaneWidth = ref<number | null>(null)
 const homeAlertsInRail = computed(() => chatPaneWidth.value === null
   ? !isMobile.value
   : chatPaneWidth.value > HOME_RAIL_MIN_PANE_PX)
+
+// The terminal's shape is decided by the room the pane actually has, not by
+// the window: a dock takes its own width, and a chat squeezed to a sliver
+// beside it is not a chat anyone can read.
+//
+// 360px is the chat column's floor when the terminal docks. It is the width
+// the app's own narrow chat uses (the details sit in a drawer under 940px),
+// and it is the same floor the dock has, so a pane that holds one holds the
+// other. Below that the terminal takes the drawer, which is always usable.
+const TERMINAL_CHAT_MIN_PX = 360
+/** The dock's own floor: the tile is never narrower than this. */
+const TERMINAL_DOCK_MIN_PX = 360
+/** The pane has to hold both columns, and the tile's inset and grip. */
+const TERMINAL_DOCK_MIN_PANE_PX =
+  TERMINAL_CHAT_MIN_PX + TERMINAL_DOCK_MIN_PX + SIDE_TILE_CHROME
+/** The pane's width, measured: the space the columns have to share. */
+const chatMainWidth = ref<number | null>(null)
+const terminalDockFits = computed(() => chatMainWidth.value !== null
+  && chatMainWidth.value >= TERMINAL_DOCK_MIN_PANE_PX)
+/** Whether the terminal is on screen. The pane owns that, and says so. */
+const terminalOpen = ref(false)
+/**
+ * The terminal occupies the slot: no file has claimed it, and the pane is
+ * wide enough to hold both columns.
+ *
+ * A hidden terminal keeps the slot — it is the same element either way, and
+ * the shell it runs in is still there behind the hide.
+ */
+const terminalInTile = computed(() => terminalMounted.value
+  && !isMobile.value
+  && terminalDockFits.value
+  && !panelPath.value)
+/** The slot is on screen: a pinned file, or an open terminal in the tile. */
+const sideSlotOccupied = computed(() => !!panelPath.value
+  || (terminalInTile.value && terminalOpen.value))
+/** The slot's tile exists whenever it has an occupant to keep, or the
+ *  terminal is mounted: the pane stays in it across a hide. */
+const sideTileExists = computed(() => !!panelPath.value || terminalMounted.value)
+/** The chat column's width: the shared ratio while the slot is on screen. */
+const chatColumnStyle = computed(() => {
+  if (!sideSlotOccupied.value) return {}
+  return {
+    width: isMobile.value ? '100%' : (chatSplitRatio.value * 100) + '%',
+    // Shrinkable, so the slot's floor always wins over the ratio: the chat
+    // gives up the room the tile needs rather than the tile overflowing.
+    flex: isMobile.value ? undefined : '0 1 auto',
+    transition: isDraggingSplit.value ? 'none' : undefined,
+  }
+})
 let chatPaneObserver: ResizeObserver | null = null
+let chatMainObserver: ResizeObserver | null = null
 let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
 
 // Only for the true empty state. Every lane carries its own "+ new" and lanes
@@ -1441,12 +1444,24 @@ function onTouchEnd(e: TouchEvent) {
 }
 
 onMounted(() => {
-  if (chatMainEl.value && typeof ResizeObserver !== 'undefined') {
-    chatPaneObserver = new ResizeObserver(entries => {
-      const entry = entries[entries.length - 1]
-      if (entry) chatPaneWidth.value = entry.contentRect.width
-    })
-    chatPaneObserver.observe(chatMainEl.value)
+  if (typeof ResizeObserver !== 'undefined') {
+    // Two observers, one per box: the chat column and the pane that holds
+    // it. The column's width decides where Home's alerts sit; the pane's
+    // decides whether the terminal can dock beside the chat at all.
+    if (chatBodyEl.value) {
+      chatPaneObserver = new ResizeObserver(entries => {
+        const entry = entries[entries.length - 1]
+        if (entry) chatPaneWidth.value = entry.contentRect.width
+      })
+      chatPaneObserver.observe(chatBodyEl.value)
+    }
+    if (chatMainEl.value) {
+      chatMainObserver = new ResizeObserver(entries => {
+        const entry = entries[entries.length - 1]
+        if (entry) chatMainWidth.value = entry.contentRect.width
+      })
+      chatMainObserver.observe(chatMainEl.value)
+    }
   }
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchend', onTouchEnd, { passive: true })
@@ -1458,6 +1473,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   chatPaneObserver?.disconnect()
+  chatMainObserver?.disconnect()
   stopLatestStatusSync()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
@@ -1487,10 +1503,37 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  /* PaneHeader must respond to the space left after the resizable sidebar,
-     not only to the browser viewport width. */
+  /* Layout containment (it used to come with the container type below) keeps
+     this box the containing block for the terminal drawer's absolute inset, so
+     the phone drawer still covers the pane it is in. */
+  contain: layout style;
+}
+
+/* The chat column: the route's content, and the box the panes answer to.
+   PaneHeader must respond to the space left after the resizable sidebar and
+   the slot beside it, not only to the browser viewport width, so this is the
+   element the `chat-pane` container is declared on. */
+.chat-body {
+  flex: 1 1 0%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   container-type: inline-size;
   container-name: chat-pane;
+}
+/* While the slot is on screen the chat column is the split's left half: it
+   keeps the shared ratio, and the split's own container queries answer to
+   it — the same box the file panel's split used to measure. */
+.chat-body--split {
+  min-width: 240px;
+  container-name: chat-pane chat-split;
+}
+/* The terminal's slot keeps the chat column at the width the drag holds it
+   to, so the two floors are the same number on both sides of the divider. */
+.chat-body--terminal {
+  min-width: 360px;
 }
 
 .empty-shell {
@@ -1547,13 +1590,6 @@ onBeforeUnmount(() => {
 
 .boot-status .boot-line {
   margin: 8px 0;
-}
-
-.boot-face {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  border-radius: 50%;
 }
 
 .boot-tile {
@@ -1675,108 +1711,6 @@ onBeforeUnmount(() => {
   order: -1;
 }
 
-.empty-home-header {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  max-width: var(--home-max);
-  min-height: 44px;
-  gap: 10px;
-  margin: 0 auto;
-}
-
-.empty-state--active .empty-home-header {
-  justify-content: flex-start;
-}
-
-.empty-state .empty-mark {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  opacity: 0.85;
-}
-.empty-state .empty-face-btn {
-  position: relative;
-  display: inline-flex;
-  padding: 0;
-  border: none;
-  background: none;
-  cursor: pointer;
-  user-select: none;
-  transition: transform 120ms var(--ease);
-}
-.empty-state .empty-face-btn:active { transform: scale(0.94); }
-.empty-state .empty-face {
-  display: block;
-  width: 120px;
-  height: 120px;
-  image-rendering: pixelated;
-  -webkit-user-drag: none;
-  pointer-events: none;
-  /* Soft accent halo — follows the active workspace without a hard stroke. */
-  filter:
-    drop-shadow(0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent))
-    drop-shadow(1px 0 0 color-mix(in srgb, var(--accent) 40%, transparent))
-    drop-shadow(-1px 0 0 color-mix(in srgb, var(--accent) 40%, transparent))
-    drop-shadow(0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent))
-    drop-shadow(0 -1px 0 color-mix(in srgb, var(--accent) 40%, transparent));
-}
-
-.face-speech-bubble {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 8px 14px;
-  background: #fff;
-  color: #111;
-  border: 3px solid #111;
-  border-radius: 14px 14px 14px 4px;
-  box-shadow: 4px 4px 0 #111;
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 1.2;
-  white-space: nowrap;
-  z-index: 1;
-}
-.face-speech-bubble::after {
-  content: '';
-  position: absolute;
-  left: 18px;
-  bottom: -12px;
-  width: 0;
-  height: 0;
-  border: 6px solid transparent;
-  border-top-color: #111;
-}
-.face-speech-bubble::before {
-  content: '';
-  position: absolute;
-  left: 20px;
-  bottom: -6px;
-  width: 0;
-  height: 0;
-  border: 4px solid transparent;
-  border-top-color: #fff;
-  z-index: 1;
-}
-.face-bubble-enter-active {
-  animation: face-bubble-pop 220ms var(--ease);
-}
-.face-bubble-leave-active {
-  animation: face-bubble-pop 160ms var(--ease) reverse;
-}
-@keyframes face-bubble-pop {
-  from {
-    opacity: 0;
-    transform: translateX(-50%) translateY(6px) scale(0.82);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0) scale(1);
-  }
-}
 .empty-state .empty-hint {
   color: var(--fg3);
   font-size: var(--text-sm);
@@ -1939,29 +1873,21 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
 }
 
-/* Split-screen layout for pinned file viewer. Both panes share width 50/50
-   by default; min-width is a soft floor during drag so a compressed window
-   can still show chat and the pinned document side by side. */
+/* Split-screen layout for the right-hand slot. The chat column and the tile
+   share it: a pinned file is in the tile, and so is the terminal when no
+   file has claimed it. Both panes share width 50/50 by default; min-width is
+   a soft floor during drag so a compressed window can still show chat and
+   the tile side by side. */
 .chat-split {
   flex-direction: row;
-}
-.chat-split-main {
-  width: 50%;
-  flex: 1 1 0;
-  min-width: 240px;
-  container-type: inline-size;
-  container-name: chat-split;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
 }
 /* The pinned file is a window docked inside the pane, not a second flat
    column: inset from the pane edges, in the sidebar's tone (--bg2), so the
    sidebar and the file read as one layer and the chat is the canvas between.
    The inset is Chat details' and the composer's 16px, so every docked window
    keeps the same distance from the pane's edge; with the 44px title bar
-   (PinnedFilePanel) the bar's rule lands on the chat header's. */
+   (PinnedFilePanel) the bar's rule lands on the chat header's. The terminal
+   is the same window with a shell in it. */
 .chat-split-side {
   flex: 1 1 0;
   min-width: 240px;
@@ -1974,6 +1900,17 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-lg);
   box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
   animation: chat-tile-in 180ms var(--ease);
+}
+/* The terminal keeps its own floor in the slot: a shell narrower than that
+   is not worth looking at. */
+.chat-split-side--terminal {
+  min-width: 360px;
+}
+/* The slot is closed — the terminal is hidden, or a file owns the tile and
+   the terminal is the drawer over the pane. The tile keeps the terminal
+   mounted behind it, so the shell it runs in survives a hide. */
+.chat-split-side--closed {
+  display: none;
 }
 :global(:root.theme-light) .chat-split-side {
   box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);

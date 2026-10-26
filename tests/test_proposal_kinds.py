@@ -347,3 +347,49 @@ def test_repo_parses_with_its_path_and_accepts_by_append() -> None:
     assert bullet.kind == "repo"
     assert bullet.target == "/a/b"
     assert pk.accept_for("repo").action == "append_repo_doc"
+
+
+def test_decide_tail_parses_decider_and_reason() -> None:
+    """The decide tail is the last tail and never leaks into text or source."""
+    bullet = pk.parse_bullet(
+        "- [memory] x  _(from: chat-1)_  _(request: r-1)_  _(decide: you; needs your call)_"
+    )
+    assert bullet is not None
+    assert bullet.decider == "you"
+    assert bullet.decide_reason == "needs your call"
+    assert bullet.text == "x"
+    assert bullet.source == "chat-1"
+    assert bullet.request == "r-1"
+
+
+def test_decide_tail_without_reason_and_case_insensitive() -> None:
+    """The reason is optional on disk and the decider word is case-insensitive."""
+    bullet = pk.parse_bullet("- [memory] x  _(from: s)_  _(decide: Nightly)_")
+    assert bullet is not None
+    assert bullet.decider == "nightly"
+    assert bullet.decide_reason == ""
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "- [memory] x",
+        "- [memory] x  _(from: s)_",
+        "- [people Mo] x  _(from: s)_  _(request: r)_",
+    ],
+)
+def test_bullets_without_a_decide_tail_parse_with_decider_none(line: str) -> None:
+    """Legacy bullets keep parsing with no decider."""
+    bullet = pk.parse_bullet(line)
+    assert bullet is not None
+    assert bullet.decider is None
+    assert bullet.decide_reason == ""
+
+
+def test_unknown_decider_word_is_not_a_decide_tail() -> None:
+    """Only the closed decider set forms a tail; anything else stays in text."""
+    # No `from` tail on purpose: the lazy `from` group would otherwise absorb it into source.
+    bullet = pk.parse_bullet("- [memory] x  _(decide: maybe)_")
+    assert bullet is not None
+    assert bullet.decider is None
+    assert "_(decide: maybe)_" in bullet.text

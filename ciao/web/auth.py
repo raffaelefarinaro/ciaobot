@@ -8,6 +8,7 @@ import logging
 import os
 import secrets
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from itsdangerous import URLSafeTimedSerializer, BadSignature
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -142,7 +143,26 @@ def _effective_port(scheme: str, port: int | None) -> int | None:
     return {"http": 80, "https": 443}.get(scheme.lower())
 
 
+def _normalise_scheme(scheme: str) -> str:
+    """The scheme an origin is compared by.
+
+    ``ws``/``wss`` are the WebSocket spellings of ``http``/``https``: a
+    browser reaches the engine over ``wss`` while its own origin is
+    ``https``, so the two have to count as the same scheme.
+    """
+    scheme = scheme.lower()
+    return {"ws": "http", "wss": "https"}.get(scheme, scheme)
+
+
 def _same_origin(request: Request | WebSocket, origin: str) -> bool:
+    """True when ``origin`` is the request's own origin.
+
+    A direct request has to present this engine's own origin: the same host,
+    the same scheme and the same effective port. A request that carries a
+    proxy-declared ``X-Forwarded-Host`` naming the origin's host matches on
+    the host alone, because a TLS-terminating proxy legitimately presents
+    http to the engine while the browser's origin is https.
+    """
     from urllib.parse import urlsplit
 
     try:
@@ -167,17 +187,25 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
         origin_port = parsed.port
     except ValueError:
         return False
+    # A proxy-declared host comes first. A browser cannot set
+    # `X-Forwarded-Host`, so only a fronting proxy does, and a proxy that
+    # forwards a client-supplied one is the configuration this boundary
+    # excludes (see `docs/REMOTE_BOUNDARY.md`). The host alone carries the
+    # match: a TLS-terminating proxy legitimately presents http to the engine
+    # while the browser's origin is https, and the port may differ across the
+    # proxy hop too.
+    if origin_host in _allowed_origin_hosts(request):
+        return True
+    # A direct request: the origin has to be this engine's own origin, in
+    # scheme, host and effective port.
     if origin_host == request_host:
-        request_scheme = str(getattr(request.url, "scheme", "") or parsed.scheme)
-        request_scheme = {"ws": "http", "wss": "https"}.get(
-            request_scheme, request_scheme
-        )
+        request_scheme = _normalise_scheme(request.url.scheme)
+        if request_scheme != parsed.scheme:
+            return False
         return _effective_port(parsed.scheme, origin_port) == _effective_port(
             request_scheme, request_port
         )
-    # Reached under a proxy-declared host (port may differ
-    # across the proxy hop, so it isn't compared here).
-    return origin_host in _allowed_origin_hosts(request)
+    return False
 
 
 def _state_change_origin_allowed(request: Request) -> bool:
@@ -201,9 +229,75 @@ def _loopback_host_header(request: Request) -> bool:
 
 
 def _same_origin_source(request: Request) -> bool:
-    """Origin (else Referer), when sent, must be this exact origin; checked for every method."""
+    """Origin (else Referer), when sent, must be this exact origin; checked for every method.
+
+    A same-host origin has to match the request's scheme as well as its host
+    and effective port.
+    """
     source = request.headers.get("origin") or request.headers.get("referer")
     return not source or _same_origin(request, source)
+
+
+def _host_name(value: str) -> str:
+    host = value.strip()
+    if host.startswith("["):
+        end = host.find("]")
+        host = host[1:end] if end != -1 else host
+    elif host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    return host.rstrip(".").lower()
+
+
+def _localhost_request(request: Request) -> bool:
+    """True when the setup caller is a loopback peer naming a local Host."""
+    if not is_loopback_client(request):
+        return False
+    name = _host_name(request.headers.get("host", ""))
+    if not name:
+        name = (request.url.hostname or "").rstrip(".").lower()
+    return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _same_host_header(request: Request, value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    if not parsed.hostname:
+        return False
+    request_host = _host_name(request.headers.get("host", ""))
+    if not request_host:
+        request_host = (request.url.hostname or "").rstrip(".").lower()
+    return parsed.hostname.rstrip(".").lower() == request_host
+
+
+def _setup_finish_origin_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if origin:
+        return _same_host_header(request, origin)
+    referer = request.headers.get("referer")
+    if referer:
+        return _same_host_header(request, referer)
+    return True
+
+
+def _setup_finish_refusal(request: Request) -> JSONResponse | None:
+    """Canonical bootstrap and local-origin guard for setup finish."""
+    config = request.app.state.config
+    if not getattr(config, "bootstrap_mode", False):
+        return JSONResponse(
+            {"error": "setup finish is only available in bootstrap mode"},
+            status_code=409,
+        )
+    if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
+        return JSONResponse(
+            {
+                "error": "setup finish is localhost-only — open the wizard at "
+                f"http://localhost:{config.pwa_port}"
+            },
+            status_code=403,
+        )
+    return None
 
 
 async def authorize_websocket(websocket: WebSocket) -> bool:

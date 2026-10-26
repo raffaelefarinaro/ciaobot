@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import TaskOriginNote from '../TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { ChatInfo, Task } from '../../lib/types'
@@ -71,6 +71,26 @@ function mountNote(tasks: Task[], chat = CHAT) {
   })
 }
 
+/**
+ * The focus tests need a real document: focus only exists on an element that
+ * is attached to one. Every mount is registered for cleanup, so a test that
+ * fails on an assertion cannot leave its tree behind for the next one.
+ */
+const cleanups: Array<() => void> = []
+
+function mountAttached(tasks: Task[]) {
+  const signals = useTaskSignalsStore()
+  signals.tasks = tasks
+  signals.loadedWorkspace = 'personal'
+  const wrapper = mount(TaskOriginNote, {
+    props: { chat: CHAT },
+    attachTo: document.body,
+    global: { stubs: { RouterLink: RouterLinkStub } },
+  })
+  cleanups.push(() => wrapper.unmount())
+  return wrapper
+}
+
 describe('TaskOriginNote', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -80,7 +100,10 @@ describe('TaskOriginNote', () => {
     askConfirm.mockResolvedValue(true)
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [] })
   })
-  afterEach(() => { vi.restoreAllMocks() })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    for (const cleanup of cleanups.splice(0)) cleanup()
+  })
 
   it('names the task, links to its editor, and says the agent is running', async () => {
     const wrapper = mountNote([task()])
@@ -109,7 +132,7 @@ describe('TaskOriginNote', () => {
     await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(apiPost).not.toHaveBeenCalled()
-    await wrapper.findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === 'Mark done')!.trigger('click')
     await flushPromises()
 
     expect(askConfirm).toHaveBeenCalledTimes(1)
@@ -126,7 +149,7 @@ describe('TaskOriginNote', () => {
     const wrapper = mountNote([task({ attempt_state: 'interrupted', live_attempt_id: '' })])
     await wrapper.get('button').trigger('click')
     await flushPromises()
-    await wrapper.findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === 'Mark done')!.trigger('click')
     await flushPromises()
     expect(askConfirm).toHaveBeenCalledTimes(1)
     expect(apiPost).not.toHaveBeenCalled()
@@ -146,13 +169,91 @@ describe('TaskOriginNote', () => {
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, status: 'done', live_attempt_id: '' }] })
     await button.trigger('click')
     await flushPromises()
-    await wrapper.findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === 'Approve Done')!.trigger('click')
     await flushPromises()
 
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', { workspace: 'personal', expected_revision: REVISION, resolution: '' })
     expect(apiGet).toHaveBeenCalledWith('/api/tasks?workspace=personal')
     expect(wrapper.find('button').exists()).toBe(false)
     expect(wrapper.get('.task-origin-status').text()).toBe('Done')
+  })
+
+  it('sends the typed note as typed, trimmed', async () => {
+    const reviewed = task({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
+    const wrapper = mountNote([reviewed])
+    apiPost.mockResolvedValue({ task: { ...reviewed, status: 'done' } })
+    apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, status: 'done', live_attempt_id: '' }] })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    await wrapper.get('#task-origin-resolution').setValue('  Merged  ')
+    await wrapper.findAll('button').find((b) => b.text() === 'Approve Done')!.trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', { workspace: 'personal', expected_revision: REVISION, resolution: 'Merged' })
+  })
+
+  it('offers one completion action and Cancel, and the note is optional', async () => {
+    const wrapper = mountNote([task()])
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.task-origin-actions button').map(b => b.text())).toEqual(['Mark done', 'Cancel'])
+    expect(wrapper.text()).not.toContain('Complete without note')
+    expect(wrapper.get('label[for="task-origin-resolution"]').text()).toBe('How was this completed? (optional)')
+    // A blank note is allowed: the action is never held back by the field.
+    expect((wrapper.get('.task-origin-actions .task-origin-approve').element as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('moves focus into the note field when the prompt opens', async () => {
+    // Attached to the document, so focus is real: the button that opened the
+    // prompt leaves the DOM, and the keyboard must land in the field.
+    const wrapper = mountAttached([task()])
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+
+    expect(document.activeElement).toBe(wrapper.get('#task-origin-resolution').element)
+  })
+
+  it('gives the keyboard back to the button that opened the prompt when Cancel closes it', async () => {
+    const wrapper = mountAttached([task()])
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find((b) => b.text() === 'Cancel')!.trigger('click')
+    await flushPromises()
+
+    // The prompt is gone, so its only button is the one that opened it.
+    const opener = wrapper.get('button')
+    expect(opener.text()).toBe('Mark done')
+    expect(document.activeElement).toBe(opener.element)
+  })
+
+  it('puts focus back on the note after a refused save', async () => {
+    const reviewed = task({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
+    // The save is held open, so the refusal lands while the test watches.
+    let refuse: (reason: unknown) => void = () => {}
+    apiPost.mockImplementation(() => new Promise((_resolve, reject) => { refuse = reject }))
+    apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, revision: 'b'.repeat(64) }] })
+    const wrapper = mountAttached([reviewed])
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    await wrapper.get('#task-origin-resolution').setValue('Done')
+    await wrapper.findAll('button').find((b) => b.text() === 'Approve Done')!.trigger('click')
+    await flushPromises()
+
+    // jsdom keeps the focus on a disabled field, as Chromium does, so the
+    // refusal would find the field still focused and the assertion would
+    // pass by accident; take it away by hand — the link is the next stop.
+    wrapper.get('a').element.focus()
+    expect(document.activeElement).not.toBe(wrapper.get('#task-origin-resolution').element)
+
+    refuse(Object.assign(new Error('conflict'), { status: 409 }))
+    await flushPromises()
+
+    // The prompt stays open with the draft and the error, and the keyboard is
+    // back in the field.
+    expect(wrapper.get('[role="alert"]').text()).toBe('This task changed since it was read. Check it and approve again.')
+    expect((wrapper.get('#task-origin-resolution').element as HTMLTextAreaElement).value).toBe('Done')
+    expect(document.activeElement).toBe(wrapper.get('#task-origin-resolution').element)
   })
 
   it('answers a stale-revision refusal with a short line and a reload', async () => {
@@ -162,7 +263,7 @@ describe('TaskOriginNote', () => {
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, revision: 'b'.repeat(64) }] })
     await wrapper.get('button').trigger('click')
     await flushPromises()
-    await wrapper.findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === 'Approve Done')!.trigger('click')
     await flushPromises()
 
     expect(wrapper.get('[role="alert"]').text()).toBe('This task changed since it was read. Check it and approve again.')
@@ -203,5 +304,88 @@ describe('TaskOriginNote', () => {
   it('renders nothing for an ordinary chat', () => {
     const wrapper = mountNote([task({ chat_id: 'other' })], { chat_id: 'chat-1' })
     expect(wrapper.find('.task-origin').exists()).toBe(false)
+  })
+
+  it('names a task the chat is linked to, and opens its peek', async () => {
+    const wrapper = mountNote(
+      [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] })],
+      { chat_id: 'chat-1' },
+    )
+    expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
+    const link = wrapper.get('a')
+    expect(link.attributes('href')).toBe('/tasks/linked')
+    await link.trigger('click')
+    expect(openTask).toHaveBeenCalledWith('linked')
+  })
+
+  it('offers no state and no completion for a linked task', () => {
+    for (const attempt of [
+      { status: 'in_progress' as const, attempt_state: 'running' as const },
+      { status: 'in_review' as const, attempt_state: 'ready_for_review' as const },
+      { status: 'in_progress' as const, attempt_state: 'needs_you' as const },
+    ]) {
+      const wrapper = mountNote(
+        [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'], ...attempt })],
+        { chat_id: 'chat-1' },
+      )
+      // The link is a relation, not a delegation: the task's own state and its
+      // completion are none of this chat's business.
+      expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
+      expect(wrapper.find('.task-origin-status').exists()).toBe(false)
+      expect(wrapper.find('button').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('Approve')
+    }
+  })
+
+  it('shows every linked task, in a stable order', () => {
+    const wrapper = mountNote(
+      [
+        task({ id: 'zulu', title: 'Zulu', chat_id: '', linked_chats: ['chat-1'] }),
+        task({ id: 'alpha', title: 'Alpha', chat_id: '', linked_chats: ['chat-1'] }),
+      ],
+      { chat_id: 'chat-1' },
+    )
+    expect(wrapper.findAll('.task-origin-line').map(line => line.text())).toEqual([
+      'This chat is linked to the task Alpha.',
+      'This chat is linked to the task Zulu.',
+    ])
+  })
+
+  it('leaves a modified click on a linked task to the browser', async () => {
+    openTask.mockClear()
+    const wrapper = mountNote(
+      [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] })],
+      { chat_id: 'chat-1' },
+    )
+    await wrapper.get('a').trigger('click', { ctrlKey: true })
+    expect(openTask).not.toHaveBeenCalled()
+  })
+
+  it('drops the row when the link is removed', async () => {
+    const wrapper = mountNote(
+      [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] })],
+      { chat_id: 'chat-1' },
+    )
+    expect(wrapper.findAll('.task-origin-line')).toHaveLength(1)
+
+    useTaskSignalsStore().tasks = [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: [] })]
+    await nextTick()
+    expect(wrapper.find('.task-origin').exists()).toBe(false)
+  })
+
+  it('does not repeat a task the chat is both delegated to and linked to', () => {
+    const wrapper = mountNote([task({ id: 'ship', chat_id: 'chat-1', linked_chats: ['chat-1'] })])
+    expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
+    expect(wrapper.text()).not.toContain('This chat is linked to the task')
+    expect(wrapper.findAll('.task-origin-line')).toHaveLength(1)
+  })
+
+  it('still names a linked task when the chat works on another one', () => {
+    const wrapper = mountNote([
+      task({ id: 'ship', chat_id: 'chat-1', linked_chats: [] }),
+      task({ id: 'other', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] }),
+    ])
+    expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
+    expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
   })
 })

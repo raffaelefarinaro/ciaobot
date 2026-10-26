@@ -2,6 +2,12 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 export const routes: RouteRecordRaw[] = [
   {
+    path: '/onboarding',
+    name: 'onboarding',
+    component: () => import('./components/onboarding/OnboardingView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/login',
     name: 'login',
     component: () => import('./components/LoginView.vue'),
@@ -88,10 +94,9 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
-    // The providers tab folded into models (chat providers are its first
-    // card). Keep old links and bookmarks working.
-    path: '/settings/providers',
-    redirect: { path: '/settings/models', hash: '#chat-providers' },
+    // The Models & providers tab was renamed Providers. Old links and bookmarks keep working.
+    path: '/settings/models',
+    redirect: to => ({ path: '/settings/providers', query: to.query, hash: to.hash }),
   },
   {
     path: '/settings/:tab',
@@ -114,7 +119,7 @@ router.beforeEach(async (to) => {
       await auth.check()
     }
     if (!auth.authenticated) {
-      return { name: 'login', query: to.query.shared ? { shared: to.query.shared } : {} }
+      return { name: 'login', query: { ...to.query, returnTo: to.fullPath } }
     }
   }
 })

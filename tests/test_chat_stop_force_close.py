@@ -41,7 +41,10 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
-async def _wait_for(predicate, timeout: float = 3.0, step: float = 0.01) -> None:
+async def _wait_for(predicate, timeout: float = 30.0, step: float = 0.01) -> None:
+    # A hang guard, not a speed assertion: it returns as soon as the predicate
+    # holds. 3s timed out on a loaded Windows runner (#1747); the bounded-stop
+    # contract is asserted by the `wait_for(stop_chat(...))` calls instead.
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         if predicate():
@@ -801,6 +804,79 @@ async def test_clean_claude_stop_persists_partial_to_archive(
 
     consumer.cancel()
     release.set()
+
+
+async def _stop_claude_with_usage(tmp_path: Path, usage: dict[str, str], name: str):
+    release = asyncio.Event()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield AssistantTextDelta(type="text", text="partial answer")
+            await release.wait()
+            yield ResultEvent(
+                type="result",
+                result="",
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+                usage=usage,
+            )
+
+        return gen()
+
+    pcm, chat, stream, consumer, captured = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="please answer",
+        release=release,
+        script=script,
+        project_name=name,
+    )
+    await _wait_for(lambda: any(e.get("type") == "text_delta" for e in captured))
+    assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
+    await _wait_for(lambda: stream.done)
+    await _wait_for(lambda: any(e.get("type") == "result" for e in captured))
+    ctx = ChatContext.for_web(chat.chat_id)
+    await _wait_for(lambda: bool(pcm._transcripts.current_messages(ctx, "claude")))
+    consumer.cancel()
+    release.set()
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    return pcm, chat, ctx, results[0]
+
+
+async def test_unavailable_stopped_usage_is_omitted(tmp_path: Path) -> None:
+    """The CLI's all-zero interrupt usage is not a measurement."""
+    pcm, chat, ctx, frame = await _stop_claude_with_usage(
+        tmp_path,
+        {
+            "input_tokens": "0",
+            "output_tokens": "0",
+            "cache_read_input_tokens": "0",
+        },
+        "stop-zero-usage",
+    )
+    assert frame["usage"] == {}
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    assert stored["turns"][-1]["usage"] == {}
+    rows = pcm._transcripts.current_messages(ctx, "claude")
+    assert "usage" not in rows[1]
+    archived = await pcm.archive_chat(chat.chat_id)
+    assert archived is not None
+    assert "### Usage" not in archived.path.read_text(encoding="utf-8")
+
+
+async def test_measured_zero_stopped_usage_is_preserved(tmp_path: Path) -> None:
+    """A zero beside a non-zero value is partial usage, kept whole."""
+    usage = {"input_tokens": "1200", "output_tokens": "0"}
+    pcm, _chat, ctx, frame = await _stop_claude_with_usage(
+        tmp_path, usage, "stop-partial-usage"
+    )
+    assert frame["usage"] == usage
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    assert stored["turns"][-1]["usage"] == usage
 
 
 async def test_stop_does_not_hide_substantive_provider_error(

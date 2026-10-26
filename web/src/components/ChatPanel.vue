@@ -19,22 +19,23 @@
     >
       <template #title>
         <div class="header-left">
-          <!-- Same 18px stroke icon in the same 30px box as the trailing header
-               actions, so the close control reads as one of them. It used to be
-               a `&times;` character at 20px, which is a different size from
-               every icon around it and sits on the text baseline rather than in
-               a box - visibly out of line beside the breadcrumb. -->
-          <button class="btn-icon close-btn" @click="$emit('close')" title="Close chat" aria-label="Close chat">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-          <div class="header-breadcrumb" :class="{ 'header-breadcrumb--stacked': !isWidePane }">
-            <!-- The project is the context envelope for this chat. The workspace
-                 is already the sidebar's scope, so repeating it here would add
-                 a second, competing location cue. It links to the project page. -->
+          <div class="header-breadcrumb">
             <div class="chat-title-row">
+              <!-- Same 18px stroke icon in the same 30px box as the trailing header
+                   actions, so the close control reads as one of them. It used to be
+                   a `&times;` character at 20px, which is a different size from
+                   every icon around it and sits on the text baseline rather than in
+                   a box - visibly out of line beside the breadcrumb. It sits in the
+                   title row so it shares the title's vertical centre: with the
+                   project on a second line under the title, a close button outside
+                   the row centred itself against both lines and drifted below the
+                   title it belongs to. -->
+              <button class="btn-icon close-btn" @click="$emit('close')" title="Close chat" aria-label="Close chat">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="18" y1="6" x2="6" y2="18"/>
+                  <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
               <input
                 v-if="editingTitle"
                 class="title-input"
@@ -45,7 +46,25 @@
                 @click.stop
                 autofocus
               />
-              <span v-else class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
+              <!-- While the engine names a brand new chat there is no title to
+                   show yet, and the placeholder the engine hands over ("New
+                   Chat") is not one either. The shared shimmer stands in for it
+                   until the real name arrives, and the close control and the
+                   code badge stay put meanwhile. -->
+              <span
+                v-else-if="chat.title_status === 'pending'"
+                class="chat-title-shimmer"
+                role="status"
+                aria-label="Naming conversation"
+                title="Naming conversation"
+              />
+              <span
+                v-else
+                class="pane-title chat-title"
+                :title="chat.title"
+                @dblclick.stop="startEditTitle"
+                @click.stop
+              >{{ chat.title }}</span>
               <button
                 v-if="codeModeOn && !chat.archived && !editingTitle"
                 type="button"
@@ -53,26 +72,35 @@
                 aria-label="Code mode is on. Show repository details"
                 title="Code mode is on"
                 @click.stop="showDetails('repo')"
-              ><span class="chat-code-badge-tag" aria-hidden="true">code</span></button>
-            </div>
-            <div v-if="projectCrumb && !railShown && project" class="breadcrumb-scope">
-              <router-link
-                :to="`/project/${project.project_id}`"
-                class="breadcrumb-project"
-                :title="`Open ${projectCrumb}`"
-              ><span>{{ projectCrumb }}</span></router-link>
+              ><span class="chat-code-badge-tag" aria-hidden="true">›_</span></button>
             </div>
           </div>
         </div>
       </template>
       <template #actions>
+        <!-- On a narrow pane the Chat details opener sits here, beside Archive,
+             so it never covers the transcript. On a wide pane it floats in the
+             chat body instead (below). -->
+        <button
+          v-if="!isWidePane"
+          ref="inspectorTrigger"
+          type="button"
+          class="btn-icon work-inspector-trigger work-inspector-trigger--header"
+          :aria-expanded="inspectorOpen"
+          aria-controls="chat-work-rail"
+          aria-label="Show chat details"
+          title="Show chat details"
+          @click="toggleWorkDetails"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
+        </button>
         <!-- Archive is the header's one action, so it gets words, not just a
-             glyph. Chat details moved out: it opens from the info tab at the
-             top right of the chat body and hides from its own heading. -->
+             glyph. Chat details opens from the info tab and hides from its own heading. -->
         <button
           v-if="!chat.archived"
           type="button"
           class="btn-icon chat-archive-btn"
+          :class="{ 'chat-archive-btn--icon': !isWidePane }"
           :title="ARCHIVE_ACTION_LABEL"
           :aria-label="ARCHIVE_ACTION_LABEL"
           @click="doArchive"
@@ -91,11 +119,11 @@
     <!-- Chat details, when it is not showing: the rail is hidden on a wide
          pane, or the pane is too narrow for one and it opens as a drawer. -->
     <button
-      v-if="!railShown"
+      v-if="isWidePane && !railShown"
       ref="inspectorTrigger"
       type="button"
       class="btn-icon work-inspector-trigger"
-      :aria-expanded="isWidePane ? false : inspectorOpen"
+      :aria-expanded="false"
       aria-controls="chat-work-rail"
       aria-label="Show chat details"
       title="Show chat details"
@@ -213,7 +241,8 @@
           <TaskHandoverCard :handover="taskHandover.handover" :prompt="item.msg.content" :known-paths="knownFilePaths" />
         </div>
         <!-- A turn the engine wrote (a wake, an automation run, a resume, a webhook,
-             an update task) reads as a notice, not as something the reader typed. -->
+             an update task) or a request the user retried reads as a notice, not
+             as something the reader typed. -->
         <div
           v-else-if="item.kind === 'user' && injectedPrompts.get(item.msg)"
           class="message-wrap injected-prompt-wrap"
@@ -388,7 +417,8 @@
             <button
               v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
               class="retry-btn fix-btn"
-              @click="toggleModelPicker"
+              :disabled="store.isStreaming"
+              @click="openRecoveryPicker(i)"
             >Switch model</button>
             <button
               v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
@@ -426,7 +456,8 @@
             <button
               v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
               class="retry-btn fix-btn"
-              @click="toggleModelPicker"
+              :disabled="store.isStreaming"
+              @click="openRecoveryPicker(i)"
             >Switch model</button>
             <button
               v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
@@ -457,7 +488,7 @@
           </div>
         </div>
         <div class="retry-card-actions">
-          <button class="btn-small" :disabled="store.isStreaming" @click="openHandoverPicker">Continue with...</button>
+          <button class="btn-small" :disabled="store.isStreaming" @click="openRecoveryPicker(null)">Continue with...</button>
           <button class="btn-small" :disabled="store.isStreaming" @click="tryRetryNow">Try now</button>
           <button class="btn-small" @click="stopRetry">Stop trying</button>
         </div>
@@ -829,15 +860,27 @@
       </div>
     </div>
 
+    <!-- The command the assistant suggested for this chat. A transient card
+         above the queue and the composer, so a suggestion waiting to be
+         reviewed is never buried under the transcript. It is shown, copied,
+         opened or dismissed — never run. -->
+    <TerminalOfferCard
+      v-if="terminalOffer"
+      :chat-id="chat.chat_id"
+      :offer="terminalOffer"
+    />
+
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
-      <button
-        v-if="steerAllIds.length >= 2"
-        type="button"
-        class="queued-steer-all"
-        :title="store.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
-        @click="steerQueued($event, steerAllIds, 'steer')"
-      >{{ store.isStreaming ? 'Steer all' : 'Send all now' }}</button>
+      <div v-if="steerAllIds.length >= 2" class="queued-head">
+        <span class="queued-count">{{ store.currentQueued.length }} queued</span>
+        <button
+          type="button"
+          class="queued-steer-all"
+          :title="store.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
+          @click="steerQueued($event, steerAllIds, 'steer')"
+        >{{ store.isStreaming ? 'Steer all' : 'Send all now' }}</button>
+      </div>
       <div
         v-for="(q, i) in store.currentQueued"
         :key="q.id || i"
@@ -848,28 +891,6 @@
         :title="queuedChipTitle(q)"
       >
         <span class="queued-steering">{{ q.steering ? 'Steering…' : '' }}</span>
-        <div
-          v-if="!q.steering && store.isStreaming && !q.waiting"
-          class="queued-mode"
-          role="group"
-          :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
-        >
-          <button
-            type="button"
-            class="queued-mode-option"
-            :aria-pressed="q.delivery === 'queue'"
-            title="Send as the next message when the reply finishes"
-            @click="q.delivery === 'queue' || steerQueued($event, [q.id], 'queue')"
-          >Queue</button>
-          <button
-            type="button"
-            class="queued-mode-option"
-            :aria-pressed="q.delivery === 'steer'"
-            title="Send into the running reply now"
-            @click="q.delivery === 'steer' || steerQueued($event, [q.id], 'steer')"
-          >Steer</button>
-        </div>
-        <span v-else-if="!q.steering" class="queued-label">Waiting</span>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
@@ -885,37 +906,64 @@
           </template>
           <span v-else class="queued-text">{{ q.text }}</span>
         </div>
-        <div v-if="!q.steering" class="queued-actions">
-          <button
-            v-if="q.waiting || !store.isStreaming"
-            type="button"
-            class="queued-send-now"
-            :title="store.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
-            @click="steerQueued($event, [q.id], 'steer')"
-          >{{ store.isStreaming ? 'Steer' : 'Send now' }}</button>
-          <button
-            class="queued-action"
-            :disabled="i === 0"
-            title="Move up"
-            @click="store.reorderQueued(chat.chat_id, i, i - 1)"
-          >▲</button>
-          <button
-            class="queued-action"
-            :disabled="i === store.currentQueued.length - 1"
-            title="Move down"
-            @click="store.reorderQueued(chat.chat_id, i, i + 1)"
-          >▼</button>
-          <button
-            v-if="editingQueueId !== q.id"
-            class="queued-action"
-            title="Edit"
-            @click="startEditQueue(q)"
-          >✎</button>
-          <template v-else>
-            <button class="queued-action" title="Save" @click="saveEditQueue(chat.chat_id, q.id)">✓</button>
-            <button class="queued-action" title="Cancel" @click="cancelEditQueue">✕</button>
-          </template>
-          <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message">&times;</button>
+        <div v-if="!q.steering" class="queued-controls">
+          <div
+            v-if="store.isStreaming && !q.waiting"
+            class="queued-mode"
+            role="group"
+            :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
+          >
+            <button
+              type="button"
+              class="queued-mode-option"
+              :aria-pressed="q.delivery === 'queue'"
+              title="Send as the next message when the reply finishes"
+              @click="q.delivery === 'queue' || steerQueued($event, [q.id], 'queue')"
+            >Queue</button>
+            <button
+              type="button"
+              class="queued-mode-option"
+              :aria-pressed="q.delivery === 'steer'"
+              title="Send into the running reply now"
+              @click="q.delivery === 'steer' || steerQueued($event, [q.id], 'steer')"
+            >Steer</button>
+          </div>
+          <span v-else class="queued-label">Waiting</span>
+          <div class="queued-actions">
+            <button
+              v-if="q.waiting || !store.isStreaming"
+              type="button"
+              class="queued-send-now"
+              :title="store.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
+              @click="steerQueued($event, [q.id], 'steer')"
+            >{{ store.isStreaming ? 'Steer' : 'Send now' }}</button>
+            <button
+              class="queued-action"
+              :disabled="i === 0"
+              title="Move up"
+              aria-label="Move up"
+              @click="store.reorderQueued(chat.chat_id, i, i - 1)"
+            ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
+            <button
+              class="queued-action"
+              :disabled="i === store.currentQueued.length - 1"
+              title="Move down"
+              aria-label="Move down"
+              @click="store.reorderQueued(chat.chat_id, i, i + 1)"
+            ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+            <button
+              v-if="editingQueueId !== q.id"
+              class="queued-action"
+              title="Edit"
+              aria-label="Edit queued message"
+              @click="startEditQueue(q)"
+            ><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
+            <template v-else>
+              <button class="queued-action" title="Save" aria-label="Save edit" @click="saveEditQueue(chat.chat_id, q.id)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7"/></svg></button>
+              <button class="queued-action" title="Cancel" aria-label="Cancel edit" @click="cancelEditQueue"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+            </template>
+            <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+          </div>
         </div>
       </div>
     </div>
@@ -1115,9 +1163,27 @@
                 :filter-section="capabilityPickerSection"
                 placeholder="Model"
                 placement="top-start"
+                :labelled-by="isRecoveryPicker ? 'model-picker-recovery-title' : ''"
+                :described-by="isRecoveryPicker ? 'model-picker-recovery-note' : ''"
                 @select="selectModel"
                 @close="showModelPicker = false"
               >
+                <!-- Recovery only. Here a pick is not a model change but a
+                     retry of the turn that failed, so the picker says so
+                     before the user chooses. The thinking chips below it are
+                     the current model's set: a pick applies and retries in
+                     one go, so there is no moment where the chips could
+                     follow a model the user has not chosen yet. The note
+                     says so, and a staged level the chosen model does not
+                     offer is dropped when the pick is applied. -->
+                <template v-if="isRecoveryPicker" #header>
+                  <div class="model-picker-recovery">
+                    <p id="model-picker-recovery-title" class="model-picker-recovery__title">Choose a model to retry immediately</p>
+                    <p id="model-picker-recovery-note" class="model-picker-recovery__note">
+                      Choosing a model retries the failed request and may incur usage charges. A Thinking level you pick here applies to that retry, within the levels the current model offers.
+                    </p>
+                  </div>
+                </template>
                 <template #footer>
                   <div
                     v-if="showThinkingLevels"
@@ -1130,8 +1196,8 @@
                         :key="level"
                         type="button"
                         class="thinking-chip"
-                        :class="{ 'thinking-chip--active': (chat.thinking_level || '') === level }"
-                        :aria-pressed="(chat.thinking_level || '') === level"
+                        :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
+                        :aria-pressed="thinkingChipLevel === level"
                         @click="selectThinking(level)"
                       >
                         {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
@@ -1150,7 +1216,7 @@
             <ComposerActivity
               :chat-id="chat.chat_id"
               :agent-count="composerAgentCount"
-              :agents="runningSubagents"
+              :agents="runningRows"
               :runs="chatRuns"
               :finished="store.finishedBackgroundRuns[chat.chat_id] ?? null"
               :now="nowTs"
@@ -1240,6 +1306,13 @@
           :archived="!!chat.archived"
         />
       </div>
+      <!-- The terminal is not a repository feature. A chat with no linked
+           folder still needs a shell — a provider sign-in, an install, an MCP
+           server that stopped answering — so every chat has a terminal row,
+           outside the repository's block; the row is its own label. -->
+      <div class="chat-rail-terminal">
+        <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
+      </div>
       <!-- What the agent is given. The project also lives here on wide panes;
            the header only names it when this rail is hidden. -->
       <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
@@ -1249,6 +1322,7 @@
           :context-pct="contextPct"
           :compacting="compacting"
           :compact-disabled="compactDisabled"
+          :reveal-key="contextRevealKey"
           @open-file="openInspectorFile"
           @compact="compactContext"
         />
@@ -1286,21 +1360,24 @@
       <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
         <p id="chat-rail-tools" class="rail-label">Skills and MCP used</p>
         <div class="rail-kvs">
-          <div v-for="skill in toolUsage.skills" :key="`skill-${skill.name}`" class="rail-kv">
-            <span class="chat-rail-tool"><small>Skill</small> {{ skill.name }}</span>
-            <strong v-if="skill.count > 1">×{{ skill.count }}</strong>
-          </div>
-          <div v-for="server in toolUsage.mcp" :key="`mcp-${server.name}`" class="rail-kv">
-            <span class="chat-rail-tool" :title="server.tools?.join(', ')"><small>MCP</small> {{ server.name }}</span>
-            <strong v-if="server.count > 1" :title="`${server.count} calls`">×{{ server.count }}</strong>
+          <div v-for="tool in shownTools" :key="`${tool.kind}-${tool.name}`" class="rail-kv">
+            <span class="chat-rail-tool" :title="tool.tools?.join(', ')"><small>{{ tool.kind === 'skill' ? 'Skill' : 'MCP' }}</small> {{ tool.name }}</span>
+            <strong v-if="tool.count > 1" :title="`${tool.count} calls`">×{{ tool.count }}</strong>
           </div>
         </div>
+        <button
+          v-if="railTools.length > RAIL_LIST_MAX"
+          type="button"
+          class="chat-rail-more"
+          :aria-expanded="railShowAll.tools"
+          @click="railShowAll.tools = !railShowAll.tools"
+        >{{ railShowAll.tools ? 'Show fewer' : `Show all ${railTools.length}` }}</button>
       </section>
       <section class="rail-section" aria-labelledby="chat-rail-files">
         <p id="chat-rail-files" class="rail-label">Files</p>
         <div v-if="inspectorOutputs.length" class="rail-list">
           <button
-            v-for="output in inspectorOutputs"
+            v-for="output in shownOutputs"
             :key="`${output.action}:${output.file_path}`"
             type="button"
             class="rail-item chat-rail-file"
@@ -1311,12 +1388,19 @@
             <small>{{ outputActionTag(output.action) }}<template v-if="shortDirname(output.file_path)"> · {{ shortDirname(output.file_path) }}</template></small>
           </button>
         </div>
-        <p v-else-if="!mentionedFiles.length" class="rail-note">None yet.</p>
+        <button
+          v-if="inspectorOutputs.length > RAIL_LIST_MAX"
+          type="button"
+          class="chat-rail-more"
+          :aria-expanded="railShowAll.files"
+          @click="railShowAll.files = !railShowAll.files"
+        >{{ railShowAll.files ? 'Show fewer' : `Show all ${inspectorOutputs.length}` }}</button>
+        <p v-if="!inspectorOutputs.length && !mentionedFiles.length" class="rail-note">None yet.</p>
         <template v-if="mentionedFiles.length">
           <p class="rail-label chat-rail-sublabel">Mentioned in replies</p>
           <div class="rail-list">
             <button
-              v-for="path in mentionedFiles"
+              v-for="path in shownMentioned"
               :key="`mentioned-${path}`"
               type="button"
               class="rail-item chat-rail-file"
@@ -1327,6 +1411,13 @@
               <small>{{ shortDirname(path) || 'workspace' }}</small>
             </button>
           </div>
+          <button
+            v-if="railMentioned.length > RAIL_LIST_MAX"
+            type="button"
+            class="chat-rail-more"
+            :aria-expanded="railShowAll.mentioned"
+            @click="railShowAll.mentioned = !railShowAll.mentioned"
+          >{{ railShowAll.mentioned ? 'Show fewer' : `Show all ${railMentioned.length}` }}</button>
         </template>
       </section>
     </aside>
@@ -1343,6 +1434,7 @@ import { isApplePlatform } from '../lib/platform'
 import { useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { useTerminalStore } from '../stores/terminal'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
 // them, parsed server-side from the session JSONL), so each panel anchors
 // under the turn that spawned its agents.
@@ -1358,6 +1450,8 @@ import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, ModelsResp
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
+import BrowserTerminalButton from './BrowserTerminalButton.vue'
+import TerminalOfferCard from './TerminalOfferCard.vue'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
@@ -1371,10 +1465,12 @@ import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import InjectedPromptCard from './InjectedPromptCard.vue'
 import { parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText } from '../lib/filePaths'
+import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
+import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
@@ -1428,7 +1524,7 @@ import { useTypeToComment } from '../composables/useTypeToComment'
 import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
-import { subagentLabel, subagentPath } from '../lib/subagentIds'
+import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
 import { handleAppLinkClick } from '../lib/appLinks'
 
 /** The footer facts for one turn: when it landed, how long it took, which
@@ -1727,6 +1823,47 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => store.activeChat!)
 
+/**
+ * The command the assistant suggested for this chat, if it holds one.
+ *
+ * The offer is transient and engine-owned: the browser keeps it in memory and
+ * reads it from the store's map, never from the chat row, because a row's
+ * copy is the payload the list was read at and the map is the live one. An
+ * archived chat holds no offer — the command died with the chat — so the
+ * card is not shown for one.
+ */
+const terminalOffer = computed(() => {
+  const current = chat.value
+  if (!current || current.archived) return null
+  const offer = store.terminalOffers[current.chat_id]
+  return offer ? offer : null
+})
+
+// When the card that holds the focus goes away — dismissed by the user, or
+// dropped by the engine over the socket — it unmounts and the focus would
+// fall to <body>. Hand it to the composer instead, the way the queue hands
+// it over when a chip disappears. The watch is on the card's own render
+// condition, so the handoff also happens when the chat is archived or gone.
+// A replacement patches the card in place, so the focus belongs to the card
+// that is still there.
+watch(
+  () => terminalOffer.value,
+  (offer, previous) => {
+    // Only a removal unmounts the card.
+    if (offer !== null || previous === null) return
+    const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.terminal-offer')
+    if (!held) return
+    void nextTick(() => {
+      // The textarea would raise the soft keyboard on a phone and scroll the
+      // transcript out from under the reader, so the bar takes the focus
+      // there — the same rule the move-to-background chip follows.
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else composerBarEl.value?.focus()
+    })
+  },
+  { flush: 'pre' },
+)
+
 const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_id))
 // The memory pass this chat spawned, recorded on its own postprocess record.
 // Present from the
@@ -1768,7 +1905,7 @@ const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | nul
 })
 
 /** Engine-written user turns (wakes, automation runs, resumes, webhooks, update
- *  tasks), keyed by message identity like taskHandover. */
+ *  tasks) and a retried request, keyed by message identity like taskHandover. */
 const injectedPrompts = computed(() => {
   const map = new Map<ChatMessage, InjectedPrompt>()
   for (const m of store.activeMessages) {
@@ -1816,7 +1953,10 @@ watch(
     const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.queued-chip')
     const id = held?.dataset.queueId
     if (!id || ids.includes(id)) return
-    void nextTick(() => inputEl.value?.focus())
+    void nextTick(() => {
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else composerBarEl.value?.focus()
+    })
   },
   { flush: 'pre' },
 )
@@ -1982,8 +2122,12 @@ const inspectorTrigger = ref<HTMLButtonElement | null>(null)
 // thinks of it as one file.
 // Temp-dir files are the agent's scratch work; the inline cards still show
 // them, but the chat's file list is what it made for the user.
+// Newest first: the merge keeps each file where it is first met, so walking
+// the turns backwards puts a file at its latest touch.
 const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mergeTraceOutputs(
-  renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined)),
+  renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined))
+    .reverse()
+    .map(outputs => outputs && [...outputs].reverse()),
 ).filter(output => !isScratchPath(output.file_path))))
 // Every activity line this chat has produced: its turns, the subagents they
 // ran, and the turn in flight. The rail reads skills and MCP tools from it.
@@ -2024,6 +2168,20 @@ const mentionedFiles = computed<string[]>(() => {
   return found
 })
 
+// The rail's lists show the five most recent entries; the rest are one click
+// away. Turns are kept in order, so newest-first is the order reversed.
+const RAIL_LIST_MAX = 5
+const railShowAll = ref({ files: false, mentioned: false, tools: false })
+watch(() => chat.value?.chat_id, () => { railShowAll.value = { files: false, mentioned: false, tools: false } })
+const railMentioned = computed(() => [...mentionedFiles.value].reverse())
+const railTools = computed(() => [
+  ...toolUsage.value.skills.map(skill => ({ ...skill, kind: 'skill' as const, tools: undefined as string[] | undefined })),
+  ...toolUsage.value.mcp.map(server => ({ ...server, kind: 'mcp' as const })),
+])
+const shownOutputs = computed(() => railShowAll.value.files ? inspectorOutputs.value : inspectorOutputs.value.slice(0, RAIL_LIST_MAX))
+const shownMentioned = computed(() => railShowAll.value.mentioned ? railMentioned.value : railMentioned.value.slice(0, RAIL_LIST_MAX))
+const shownTools = computed(() => railShowAll.value.tools ? railTools.value : railTools.value.slice(0, RAIL_LIST_MAX))
+
 // How full the model's context window was at the end of the latest turn, from
 // the usage the provider reported (the last model call of that turn). This is
 // the transcript's only statement of occupancy: the Chat details rail shows it
@@ -2048,7 +2206,10 @@ function compactContext() {
   void store.compactChat(chat.value.chat_id)
 }
 
-const runningSubagents = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
+// The poll's rows include background shells (`subagent_type: "shell"`); the
+// composer lists those as processes, everything else counts as an agent.
+const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
+const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
 const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))
 // Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
 // the running-subagent poll tick on different clocks, so take the larger.
@@ -2101,17 +2262,25 @@ const detailsFocusEl = computed<HTMLElement | null>(() => {
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
   return railHideButton.value
 })
+// Bumped when a caller points at the agent context, so its Always loaded
+// disclosure opens instead of focusing a closed summary.
+const contextRevealKey = ref(0)
 function showDetails(target: DetailsTarget = 'close') {
   detailsTarget.value = target
+  // The rail may not be mounted yet (narrow drawer, or a wide rail that
+  // starts closed), and its watch is lazy: bump the key once it exists.
+  const reveal = () => { if (target === 'context') contextRevealKey.value += 1 }
   if (!isWidePane.value) {
     // The trap hands focus back to whatever held it on open: make that the
     // trigger, so Escape returns there and not to wherever the click came from.
     inspectorTrigger.value?.focus()
     inspectorOpen.value = true
+    void nextTick(reveal)
     return
   }
   railOpen.value = true
   void nextTick(() => {
+    reveal()
     const el = detailsFocusEl.value
     el?.focus()
     if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
@@ -2138,6 +2307,17 @@ useModalFocus(railEl, drawerShown, {
   onEscape: () => { inspectorOpen.value = false },
 })
 
+// The browser terminal takes the screen on a narrow pane, and the chat
+// details drawer is a modal surface there: while it is up, everything outside
+// it is inert, and it claims Escape in the capture phase. The terminal is
+// opened from this drawer — its Terminal section carries the button — so
+// the drawer steps aside when the terminal opens, rather than leaving a
+// dead, inert pane on top of the screen.
+const terminal = useTerminalStore()
+watch(() => terminal.visible, (open) => {
+  if (open && drawerShown.value) inspectorOpen.value = false
+})
+
 async function openInspectorFile(path: string) {
   inspectorOpen.value = false
   await nextTick()
@@ -2148,12 +2328,6 @@ watch(() => chat.value?.chat_id, () => {
   inspectorOpen.value = false
 })
 
-// The workspace is already the sidebar's scope. The chat header repeats only
-// the project, and only when it adds information beyond the implicit General.
-const projectCrumb = computed(() => {
-  const name = project.value?.name
-  return name && name !== 'General' ? name : null
-})
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
@@ -2191,6 +2365,58 @@ let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
 const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
+
+// Which picker is open. 'normal' is the composer's model chip: a pick there
+// only changes the model. 'recovery' is opened from a failed turn - the
+// retry card's "Continue with..." or the error bubble's "Switch model" - and
+// a pick there retries that turn on the model the user chose.
+type PickerMode = 'normal' | 'recovery'
+
+interface RecoveryContext {
+  chatId: string
+  // The error bubble to resend. Null for a deferred retry, which the engine
+  // resumes on its own schedule.
+  errorIdx: number | null
+}
+
+const pickerMode = ref<PickerMode>('normal')
+const recoveryContext = ref<RecoveryContext | null>(null)
+// A recovery stages its thinking level instead of saving it: the level only
+// counts if the model the user picks supports it, and the picker stays open
+// until a model is picked.
+const stagedThinkingLevel = ref<string | null>(null)
+// One pick at a time. A second click while the first is still applying must
+// not start a second turn.
+const modelSelectBusy = ref(false)
+
+const isRecoveryPicker = computed(() => pickerMode.value === 'recovery')
+
+// The chip that reads as chosen: the staged level in a recovery (it belongs
+// to the retry, not to the chat yet), the chat's own level otherwise.
+const thinkingChipLevel = computed(() => {
+  if (pickerMode.value === 'recovery' && stagedThinkingLevel.value !== null) {
+    return stagedThinkingLevel.value
+  }
+  return chat.value?.thinking_level || ''
+})
+
+// A recovery belongs to the chat it was opened in: closing the picker,
+// switching chat or unmounting drops it, so a later pick cannot retry a turn
+// in another conversation.
+function resetPickerState() {
+  pickerMode.value = 'normal'
+  recoveryContext.value = null
+  stagedThinkingLevel.value = null
+}
+
+watch(() => chat.value?.chat_id, () => {
+  resetPickerState()
+})
+
+onBeforeUnmount(() => {
+  resetPickerState()
+})
+
 interface ContextProjectFile {
   path: string
   vault_path: string
@@ -2415,7 +2641,7 @@ function checkScroll() {
   // page in. The store's loadingOlder flag debounces repeat fires.
   if (el.scrollTop <= 80) {
     const chatId = store.activeChatId
-    if (chatId && store.canLoadOlder(chatId) && !store.isLoadingOlder(chatId)) {
+    if (chatId && store.canLoadOlderByChat[chatId] && !store.isLoadingOlderByChat[chatId]) {
       void loadOlderAnchored()
     }
   }
@@ -3015,7 +3241,11 @@ const bucketLocked = computed(() => {
 })
 
 // Thinking levels are provider-native and may be narrowed per model when the
-// catalog reports levels.
+// catalog reports levels. The chips are the current model's set, in a
+// recovery too: the pick applies the model and retries in one go, so the
+// chips cannot follow a model the user has not chosen yet. A recovery's
+// staged level is validated against the picked model in selectModel, which
+// drops it when that model does not offer it.
 const filteredThinkingLevels = computed(() => {
   const model = chat.value?.model || ''
   const modelLevels = modelsResponse.value?.model_reasoning_levels?.[model]
@@ -3705,6 +3935,35 @@ watch(() => chat.value?.chat_id, (id) => notifyChatFocused(id))
 
 const knownFilePaths = computed(() => touchedFiles.value.map(f => f.file_path))
 
+// The conversations the @-mention picker offers are the conversations this
+// reader can open. Use that same set for message references so a reference
+// can never link a chat the picker omits (see lib/chatLinks.ts).
+function reachableChatLinks(): [string, string][] {
+  const pairs: [string, string][] = []
+  for (const chat of mentionChats.value) {
+    if (!isChatId(chat.chat_id)) continue
+    pairs.push([chat.chat_id, chat.title || ''])
+  }
+  return pairs
+}
+
+// A reference links to the conversation's title, so a renamed conversation
+// changes the rendering too. The key is the id/title pairs themselves, sorted
+// by id: the number of chats says nothing about whether a title moved.
+const knownChatLinksKey = computed(() => JSON.stringify(
+  reachableChatLinks().sort((a, b) => a[0].localeCompare(b[0])),
+))
+
+// The map the renderers take. It is derived from the key, so it is rebuilt
+// only when an id or a title actually changes: a chat-list poll that returns
+// the same conversations leaves the transcript alone.
+const knownChatLinks = computed(() => {
+  const known = new Map<string, string>()
+  const pairs = JSON.parse(knownChatLinksKey.value) as [string, string][]
+  for (const [id, title] of pairs) known.set(id, title)
+  return known
+})
+
 const mdCache = new Map<string, string>()
 // User bubbles render through a different pipeline (raw HTML is escaped, see
 // lib/safeMarkdown.ts), so the two renderings cannot share one text-keyed cache.
@@ -3717,13 +3976,17 @@ watch(() => knownFilePaths.value.join('|'), () => {
   mdCache.clear()
   userMdCache.clear()
 })
+watch(knownChatLinksKey, () => {
+  mdCache.clear()
+  userMdCache.clear()
+})
 
 function renderMarkdown(text: string): string {
   if (!text) return ''
   const cached = mdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeMarkdown(text, knownFilePaths.value)
+  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true })
   if (mdCache.size >= MAX_MD_CACHE_SIZE) {
     // Plain FIFO eviction — fine for chat scroll-back.
     const firstKey = mdCache.keys().next().value
@@ -3738,7 +4001,7 @@ function renderUserMessage(text: string): string {
   const cached = userMdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeUserMarkdown(text, knownFilePaths.value)
+  const rendered = renderSafeUserMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true })
   if (userMdCache.size >= MAX_MD_CACHE_SIZE) {
     const firstKey = userMdCache.keys().next().value
     if (firstKey !== undefined) userMdCache.delete(firstKey)
@@ -3817,6 +4080,7 @@ function handleFileLinkClick(e: MouseEvent): void {
 function handlePanelClick(e: MouseEvent): void {
   if (handleCodeCopyClick(e)) return
   if (handleAppLinkClick(e)) return
+  if (handleOpenLocalFileClick(e, (m) => store.pushErrorToast('Could not open file', m))) return
   handleFileLinkClick(e)
 }
 
@@ -4467,10 +4731,19 @@ function retryFromError(errorIdx: number) {
   // from the live composer) and pass `prepared` to skip the
   // consumePreparedAttachments drain — a retry must not erase whatever
   // the user has currently staged for a fresh send.
-  store.sendMessage(
+  // The turn is tagged as a retry: it is a new turn the user asked to run
+  // again, and the engine records the tag per turn. The tag is the only
+  // thing the client chooses; the text never decides it.
+  return store.sendMessage(
     chat.value.chat_id,
     prior.text,
-    { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
+    {
+      composed: prior.text,
+      imageRefs: prior.images.length ? prior.images : undefined,
+      fileComments: [],
+      chatComments: [],
+      origin: 'retry',
+    },
   )
 }
 
@@ -4523,14 +4796,15 @@ function formatRetryTime(value: string): string {
   return formatTime(d.toISOString())
 }
 
-// Quota retries wait an hour, weekly/monthly limits a day; connection, startup
-// and auth retries 30s.
+// Quota retries back off from an hour (1h, 2h, 4h, then 8h), weekly/monthly
+// limits wait a day; connection, startup and auth retries 30s.
 const retryCardTitle = computed(() => {
   const retry = chat.value?.retry
   if (retry && isProviderAuthError(retry.last_error)) return 'Signed out — retrying this turn'
   const seconds = retry?.interval_seconds || 0
   if (seconds && seconds < 3600) return 'Retrying this turn shortly'
   if (seconds >= 86400) return 'Retrying this turn once a day'
+  if (seconds > 3600) return 'Retrying this turn every few hours'
   return 'Retrying this turn every hour'
 })
 
@@ -4544,8 +4818,16 @@ async function stopRetry() {
   await store.stopChatRetry(chat.value.chat_id)
 }
 
-function openHandoverPicker() {
+// Open the picker for a recovery: the retry card's "Continue with..." or the
+// error bubble's "Switch model". The chat and the error bubble are captured
+// now, so the retry lands on the turn that failed even if the screen moves
+// while the picker is open.
+function openRecoveryPicker(errorIdx: number | null) {
+  if (!chat.value || chat.value.archived) return
   if (store.isStreaming) return
+  recoveryContext.value = { chatId: chat.value.chat_id, errorIdx }
+  pickerMode.value = 'recovery'
+  stagedThinkingLevel.value = null
   showModelPicker.value = true
 }
 
@@ -4557,7 +4839,16 @@ async function saveTitle() {
   editingTitle.value = false
 }
 function toggleModelPicker() {
-  showModelPicker.value = !showModelPicker.value
+  if (showModelPicker.value) {
+    showModelPicker.value = false
+    return
+  }
+  // The composer's chip is selection-only: a pick there changes the model
+  // and never retries.
+  pickerMode.value = 'normal'
+  recoveryContext.value = null
+  stagedThinkingLevel.value = null
+  showModelPicker.value = true
 }
 
 function tierAlias(model: string): TierAlias | null {
@@ -4608,12 +4899,69 @@ function bucketForSelectedModel(model: string): BucketKey {
 }
 
 
+// Put the chosen model on the chat. A provider change is a handover, and the
+// handover keeps the chat's own thinking level: the staged one belongs to
+// the retry, so it goes on top. Returns false when the change did not
+// happen, so nothing is retried after a failure.
+async function applyModelChoice(
+  chatId: string,
+  updates: { provider: ProviderKey; model: string; thinking_level?: string },
+  handover: boolean,
+  staged: string | null,
+): Promise<boolean> {
+  try {
+    if (handover) {
+      // The handover route reads only the provider and model; the thinking
+      // level is applied by the PATCH below, so it is not sent here.
+      await store.handoverChat(chatId, { provider: updates.provider, model: updates.model })
+      if (staged !== null) {
+        // The handover keeps the chat's own thinking level; the staged one
+        // belongs to the retry, so it goes on top. Best effort: the handover
+        // itself already happened.
+        try {
+          await store.updateChat(chatId, { thinking_level: updates.thinking_level ?? '' })
+        } catch (e) {
+          store.pushErrorToast('Could not apply the thinking level', errorMessage(e))
+        }
+      }
+    } else {
+      await store.updateChat(chatId, updates)
+    }
+    return true
+  } catch (e) {
+    store.pushErrorToast('Could not switch model', errorMessage(e))
+    return false
+  }
+}
+
+// The second half of a recovery: the failed turn runs again on the model the
+// user just picked. A deferred retry resumes the engine's own schedule; an
+// error bubble resends the turn it failed on, with that turn's images.
+async function runRecovery(recovery: RecoveryContext) {
+  // The user may have moved to another chat while the picker was open: the
+  // retry belongs to the chat it was captured in.
+  if (chat.value?.chat_id !== recovery.chatId) return
+  if (recovery.errorIdx !== null) {
+    retryFromError(recovery.errorIdx)
+    return
+  }
+  await store.tryChatRetryNow(recovery.chatId)
+}
+
 async function selectModel(value: string | string[], sectionKey = '') {
+  // One pick at a time: a second click while the first is still applying
+  // must not start a second turn.
+  if (modelSelectBusy.value) return
   const model = Array.isArray(value) ? value[0] : value
   if (!model || !chat.value) {
     showModelPicker.value = false
     return
   }
+  // Capture the intent before the first await: the picker closes itself on a
+  // pick (which drops the recovery) and a confirmation dialog can sit over a
+  // chat that changes.
+  const recovery = pickerMode.value === 'recovery' ? recoveryContext.value : null
+  const chatId = chat.value.chat_id
   const sectionBucket: Partial<Record<string, BucketKey>> = {
     anthropic: 'claude',
     opencode: 'opencode',
@@ -4624,7 +4972,9 @@ async function selectModel(value: string | string[], sectionKey = '') {
   const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
   const currentEntry = canonicalTier(chat.value.model)
   const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
-  if (sameModelAndRoute) {
+  if (sameModelAndRoute && !recovery) {
+    // The composer's picker is selection-only: the model already in use is a
+    // no-op. In a recovery the same model still retries.
     showModelPicker.value = false
     return
   }
@@ -4641,43 +4991,75 @@ async function selectModel(value: string | string[], sectionKey = '') {
     model,
   }
   const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
-  if (
+  // A recovery's staged level belongs to the model the user is about to pick:
+  // when the catalog says that model cannot do it, the retry falls back to
+  // the provider default.
+  const staged = recovery ? stagedThinkingLevel.value : null
+  if (staged !== null) {
+    const providerLevels = modelsResponse.value?.thinking_levels?.[updates.provider]
+    const allowed = targetLevels?.length ? targetLevels : providerLevels
+    updates.thinking_level = (allowed?.length && staged && !allowed.includes(staged)) ? '' : staged
+  } else if (
     chat.value.thinking_level
     && targetLevels
     && !targetLevels.includes(chat.value.thinking_level)
   ) {
     updates.thinking_level = ''
   }
-  if (bucketLocked.value && targetRoute !== currentRoute) {
-    const ok = await askConfirm(
-      `Hand over this chat to ${bucketLabel(targetBucket)} / ${model}? The same visible chat will continue with a fresh provider session.`,
-      {
-        title: 'Hand over chat',
-        confirmLabel: 'Hand over',
-      },
-    )
-    if (!ok) return
-    // Picking a model from the pending-retry card's "Continue with..." is
-    // the whole point of switching model there: fire the retry immediately
-    // on the new provider instead of leaving it parked for a manual "Try now".
-    const hadPendingRetry = chat.value.retry?.status === 'pending'
-    const chatId = chat.value.chat_id
-    await store.handoverChat(chatId, updates)
-    showModelPicker.value = false
-    if (hadPendingRetry) {
-      await store.tryChatRetryNow(chatId)
+  modelSelectBusy.value = true
+  try {
+    // A recovery that keeps the model already in use and staged no thinking
+    // level has nothing to apply: only the retry is left to do.
+    if (!sameModelAndRoute || staged !== null) {
+      if (bucketLocked.value && targetRoute !== currentRoute) {
+        const ok = await askConfirm(
+          `Hand over this chat to ${bucketLabel(targetBucket)} / ${model}? The same visible chat will continue with a fresh provider session.`,
+          {
+            title: 'Hand over chat',
+            confirmLabel: 'Hand over',
+          },
+        )
+        // A cancelled handover changes no model and retries nothing.
+        if (!ok) return
+        // The user answered a dialog: the chat may have moved under it.
+        if (chat.value?.chat_id !== chatId) return
+        const applied = await applyModelChoice(chatId, updates, true, staged)
+        if (!applied) return
+      } else {
+        const applied = await applyModelChoice(chatId, updates, false, staged)
+        if (!applied) return
+      }
     }
-    return
+    // The model is in place. Only a recovery retries: the composer's picker
+    // never does, not even with a deferred retry waiting.
+    if (recovery) {
+      try {
+        await runRecovery(recovery)
+      } catch (e) {
+        store.pushErrorToast('Could not retry the failed turn', errorMessage(e))
+      }
+    }
+  } finally {
+    modelSelectBusy.value = false
+    showModelPicker.value = false
   }
-  await store.updateChat(chat.value.chat_id, updates)
-  showModelPicker.value = false
 }
 
 async function selectThinking(level: string) {
+  if (pickerMode.value === 'recovery') {
+    // A recovery stages the level for the retry: the model that is about to
+    // be picked may not support it, and the picker stays open until then.
+    stagedThinkingLevel.value = level
+    return
+  }
   // '' = provider default. Safe mid-chat: it never invalidates the
   // provider session, so no handover is involved.
-  await store.updateChat(chat.value.chat_id, { thinking_level: level })
-  showModelPicker.value = false
+  try {
+    await store.updateChat(chat.value.chat_id, { thinking_level: level })
+    showModelPicker.value = false
+  } catch (e) {
+    store.pushErrorToast('Could not change the thinking level', errorMessage(e))
+  }
 }
 
 /* Close picker on click outside or Escape */
@@ -4686,6 +5068,9 @@ watch(showModelPicker, (open) => {
     // A capability-card "Open picker" filtered the sections; drop the filter
     // so the next normal open shows the full list again.
     capabilityPickerSection.value = ''
+    // The picker closed: the recovery is over and its staged thinking level
+    // goes with it.
+    resetPickerState()
     return
   }
   // Refetched on every open, not only on mount: a provider whose catalog was
@@ -4869,6 +5254,23 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   .work-inspector-trigger { min-width: var(--touch); min-height: var(--touch); }
 }
 .work-inspector-trigger:hover { color: var(--fg); border-color: var(--border-strong); }
+/* The header's own button rules set `position: relative`, which would let the
+   floating trigger's `top` push this one below the header's centre line. */
+.work-inspector-trigger--header {
+  position: static;
+  top: auto;
+  right: auto;
+  flex: none;
+  /* Borderless like Archive beside it: no tile, the same hover fill. */
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg2);
+}
+.work-inspector-trigger--header:hover {
+  color: var(--fg);
+  border-color: transparent;
+  background: var(--bg3);
+}
 
 .chat-rail-head {
   display: flex;
@@ -5007,7 +5409,28 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* The shared rail rhythm is `.rail-section + .rail-section`; this wrapper
    (the focus target for "See what Ciao knows") sits between two of them. */
 .chat-rail-agent-context + .rail-section { margin-top: var(--space-5); }
-.chat-rail-repo + .chat-rail-agent-context { margin-top: var(--space-5); }
+/* The terminal row closes the repository block, a little tighter than the
+   gap between sections; with no repository it starts the rail. */
+.chat-rail-repo + .chat-rail-terminal { margin-top: var(--space-3); }
+.chat-rail-terminal + .chat-rail-agent-context { margin-top: var(--space-5); }
+.chat-rail-more {
+  margin-top: var(--space-1);
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.chat-rail-more:hover { color: var(--fg); text-decoration-color: currentColor; }
+.chat-rail-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+@media (pointer: coarse) {
+  .chat-rail-more { min-height: var(--touch); }
+}
 .chat-rail-repo:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
@@ -5112,11 +5535,10 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 .header-left {
   display: flex;
-  /* The close button is a 30px box, the breadcrumb is a one- or two-line block
-     of text: centring the two keeps the icon on the optical middle of whichever
-     the breadcrumb turns out to be. */
+  /* One child now: the breadcrumb, which is a one- or two-line block of text.
+     Centring it keeps the title row on the optical middle of whichever the
+     block turns out to be. */
   align-items: center;
-  gap: 4px;
   min-width: 0;
   text-align: left;
 }
@@ -5124,13 +5546,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* Sizing, hover fill and touch padding all come from PaneHeader's shared
    .btn-icon rules, so this only sets the resting colour: the same quiet --fg3
    as the trailing actions, since closing the chat is not the errand you came
-   here for. */
-.close-btn { color: var(--fg3); }
+   here for. `flex: none` keeps the box its own size inside the title row. */
+.close-btn { color: var(--fg3); flex: none; }
 .close-btn:hover { color: var(--fg); }
 
-/* One line: the chat title, then its project as a muted context control
-   (opens the project context). The workspace is the sidebar's scope, so it
-   is not repeated here. */
+/* The title header names the conversation only; project context lives in
+   Chat details and the sidebar rather than competing with the title. */
 .header-breadcrumb {
   display: flex;
   align-items: center;
@@ -5151,74 +5572,31 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   min-width: 0;
   max-width: 100%;
 }
-.chat-title-row .chat-title { flex: 0 1 auto; min-width: 0; }
-.chat-code-badge { display: inline-grid; place-items: center; flex: none; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
-.chat-code-badge-tag { display: inline-grid; place-items: center; height: 16px; padding: 0 4px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: var(--radius-xs); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font: 600 calc(10px * var(--font-scale))/1 var(--font-mono); }
-.chat-code-badge:hover .chat-code-badge-tag { border-color: var(--accent); }
+/* A long title wraps to at most two lines instead of pushing the code badge
+   out of the header. PaneHeader's shared .pane-title rules are `nowrap` with
+   an ellipsis, so they are overridden here rather than globally: the chat
+   title is the one title that may take a second line, and the full title
+   stays in the title attribute. `overflow-wrap: anywhere` breaks a title
+   that has no spaces in it (a URL, a path). */
+.chat-title-row .chat-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+.chat-code-badge { display: inline-grid; place-items: center; flex: none; min-width: 24px; min-height: 24px; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
+.chat-code-badge-tag { display: inline-grid; place-items: center; height: 20px; padding: 0 3px; color: var(--accent); font: 700 calc(14px * var(--font-scale))/1 var(--font-mono); letter-spacing: -0.04em; }
+.chat-code-badge:hover { background: var(--bg3); }
 .chat-code-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (pointer: coarse), (max-width: 768px) { .chat-code-badge { min-width: var(--touch); min-height: var(--touch); } }
 
-/* A pane too narrow for the Chat details rail (a phone, or a desktop pane
-   squeezed by the sidebar or a pinned file) gives the title its own row and
-   puts the project under it, so neither truncates the other to a stub. */
-.header-breadcrumb--stacked {
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  row-gap: 2px;
-}
-.header-breadcrumb--stacked .chat-title-row {
-  width: 100%;
-}
-.header-breadcrumb--stacked .breadcrumb-scope {
-  max-width: 100%;
-}
-
-.breadcrumb-scope {
-  flex: 0 1 auto;
-  max-width: 40%;
-  font-size: var(--text-sm);
-  line-height: 1.35;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* The project links to its page. */
-.breadcrumb-project {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  max-width: 100%;
-  min-height: 28px;
-  padding: 2px var(--space-1);
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--fg3);
-  font: inherit;
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.breadcrumb-project > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.breadcrumb-project:hover {
-  border-color: var(--border);
-  background: var(--bg3);
-  color: var(--accent);
-}
-
-.breadcrumb-project:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
 .chat-title {
   cursor: pointer;
 }
@@ -6120,6 +6498,19 @@ details[open] > .activity-summary::before {
   color: var(--accent);
   text-decoration: underline solid;
 }
+/* A reference to another conversation (#1768). An ordinary accent link, so
+   it reads as a link into the app and not as the dotted file-path chip. */
+.message-content :deep(a.chat-link),
+:deep(a.chat-link) {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.message-content :deep(a.chat-link:hover),
+:deep(a.chat-link:hover) {
+  color: var(--accent-strong);
+}
 /* A wide table may run past the reading measure into the empty space on its
    right (up to --chat-wide), so its columns stay readable instead of
    scrolling inside a narrow box; it still scrolls once that runs out. */
@@ -6634,7 +7025,8 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
 }
 /* A real keycap: readable glyphs at body size, bordered, so the chord is
-   legible next to the send button rather than a faint mono smudge. */
+   legible next to the send button rather than a faint mono smudge. It follows
+   the body font (--font), so Serif or Mono in Settings > Appearance changes it. */
 .composer-kbd kbd {
   display: inline-grid;
   place-items: center;
@@ -6647,7 +7039,7 @@ details[open] > .activity-summary::before {
   border-radius: 5px;
   background: var(--bg-elev);
   color: var(--fg2);
-  font-family: var(--font-sans);
+  font-family: var(--font);
   font-size: var(--text-sm);
   font-weight: 600;
   line-height: 1;
@@ -6803,114 +7195,64 @@ details[open] > .activity-summary::before {
   display: inline-block;
 }
 
-/* Queued message chips */
-.queued-steer-all,
-.queued-send-now {
-  align-self: flex-start;
-  background: var(--bg3);
-  color: var(--accent);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 10px;
-  cursor: pointer;
+/* Queued message chips. Each chip is the message text, then one control row:
+   the delivery toggle on the left, the edit actions on the right. In a wide
+   pane the two share a line; in a narrow one the controls wrap under the text
+   instead of the text being squeezed between them. */
+.queued-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
   flex-shrink: 0;
 }
-.queued-steer-all:hover,
-.queued-send-now:hover { background: var(--bg2); }
-.queued-mode {
-  display: inline-flex;
-  flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
+.queued-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 0 12px;
 }
-.queued-mode-option {
-  background: none;
-  border: none;
-  color: var(--fg2);
+.queued-count {
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.03em;
-  padding: 3px 8px;
-  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg3);
 }
-.queued-mode-option[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
-.queued-mode-option:not([aria-pressed="true"]):hover { background: var(--bg2); color: var(--fg); }
-.queued-steering:empty { display: none; }
+.queued-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 2px;
+  padding: 4px 4px 4px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--fg2);
+}
 .queued-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.queued-steer-all:disabled,
-.queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
-/* Inset and in --fg: the pressed option is filled with --accent, so an accent
-   ring would vanish on it, and an outer ring is clipped by the group. */
-.queued-mode-option:focus-visible {
-  outline: 2px solid var(--fg);
-  outline-offset: -2px;
-}
+.queued-chip.is-steering { opacity: 0.85; padding: 8px 12px; }
 .queued-steering {
   font-size: 11px;
   font-weight: 600;
   color: var(--accent);
   flex-shrink: 0;
 }
-.queued-chip.is-steering { opacity: 0.85; }
-.steer-notice {
-  padding: 0 0 6px;
-  margin: 0;
-  font-size: 12px;
-  color: var(--fg2);
-}
-.queued-steer-all:focus-visible,
-.queued-send-now:focus-visible,
-.queued-action:focus-visible,
-.queued-remove:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.queued-remove:disabled { opacity: 0.3; cursor: not-allowed; }
-@media (pointer: coarse) {
-  .queued-steer-all,
-  .queued-send-now,
-  .queued-mode-option,
-  .queued-action,
-  .queued-remove {
-    min-height: 44px;
-    min-width: 44px;
-  }
-}
-.queued-messages {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px 0;
-  flex-shrink: 0;
-}
-.queued-chip {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--bg3);
-  border-radius: var(--radius);
-  font-size: 13px;
-  color: var(--fg2);
-}
-.queued-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--accent);
-  flex-shrink: 0;
-}
+.queued-steering:empty { display: none; }
+/* The body's grow factor dwarfs the controls': on a shared line the text takes
+   the free space and the controls sit at their own width on the right; once
+   wrapped, the controls are alone on their line and stretch to push the
+   actions to the far edge. */
 .queued-body {
-  flex: 1 1 140px;
+  flex: 1000 1 240px;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding: 4px 0;
 }
 .queued-images {
   display: flex;
@@ -6929,38 +7271,117 @@ details[open] > .activity-summary::before {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--fg);
 }
-.queued-remove {
-  background: none;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: 16px;
-  line-height: 1;
-  padding: 2px 6px;
-  border-radius: 4px;
+.queued-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 0 auto;
+}
+.queued-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
   flex-shrink: 0;
 }
-.queued-remove:hover { color: var(--fg); background: var(--bg2); }
+.queued-mode {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bg);
+  border-radius: var(--radius-sm);
+}
+.queued-mode-option {
+  background: none;
+  border: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--fg2);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.queued-mode-option[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+.queued-mode-option:not([aria-pressed="true"]):hover { background: var(--bg2); color: var(--fg); }
+/* Inset and in --fg: the pressed option is filled with --accent, so an accent
+   ring would vanish on it. */
+.queued-mode-option:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: -2px;
+}
 .queued-actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.queued-steer-all,
+.queued-send-now {
+  background: none;
+  color: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
   flex-shrink: 0;
 }
-.queued-action {
+.queued-steer-all:hover,
+.queued-send-now:hover { background: var(--bg2); }
+.queued-steer-all:disabled,
+.queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
+.queued-action,
+.queued-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--fg2);
   cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-  padding: 4px 6px;
-  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--radius-sm);
   flex-shrink: 0;
 }
-.queued-action:hover:not(:disabled) { color: var(--fg); background: var(--bg2); }
-.queued-action:disabled { opacity: 0.3; cursor: not-allowed; }
+.queued-action:hover:not(:disabled),
+.queued-remove:hover { color: var(--fg); background: var(--bg2); }
+.queued-action:disabled,
+.queued-remove:disabled { opacity: 0.3; cursor: not-allowed; }
+.queued-steer-all:focus-visible,
+.queued-send-now:focus-visible,
+.queued-action:focus-visible,
+.queued-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+@media (pointer: coarse) {
+  .queued-steer-all,
+  .queued-send-now,
+  .queued-mode-option {
+    min-height: 44px;
+  }
+  .queued-action,
+  .queued-remove {
+    width: 44px;
+    height: 44px;
+  }
+  .queued-mode { padding: 0; gap: 0; }
+  .queued-mode-option { min-width: 64px; }
+}
+.steer-notice {
+  padding: 0 0 6px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg2);
+}
 .queued-edit-input {
   width: 100%;
   background: var(--bg);
@@ -7326,6 +7747,28 @@ details[open] > .activity-summary::before {
   align-items: center;
 }
 
+/* Recovery picker: here a pick is a retry of the failed turn, not a model
+   change, and the picker says so before the user chooses. */
+.model-picker-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-picker-recovery__title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.model-picker-recovery__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  line-height: 1.4;
+}
+
 .thinking-levels {
   display: flex;
   align-items: center;
@@ -7339,7 +7782,7 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
 }
 
-/* Segmented control, the same shape as Settings → Models' thinking picker. */
+/* Segmented control, the same shape as Settings → Providers' thinking picker. */
 .thinking-levels__chips {
   display: inline-flex;
   flex-wrap: wrap;
@@ -7393,7 +7836,17 @@ details[open] > .activity-summary::before {
 }
 .chat-archive-btn.btn-icon::before { inset: 0; }
 .chat-archive-btn svg { flex-shrink: 0; }
-@media (pointer: coarse) { .chat-archive-btn { min-height: var(--touch); } }
+/* Beside the header's Chat details opener Archive is icon-only and squares to
+   the opener's 34px; coarse pointers get the touch minimum below. */
+.chat-archive-btn--icon .chat-archive-label { display: none; }
+.chat-archive-btn.btn-icon.chat-archive-btn--icon {
+  padding: 0;
+  min-width: 34px;
+}
+@media (pointer: coarse) {
+  .chat-archive-btn { min-height: var(--touch); }
+  .chat-archive-btn.btn-icon.chat-archive-btn--icon { min-width: var(--touch); }
+}
 
 .model-picker-dropdown {
   position: absolute;
@@ -7463,8 +7916,9 @@ details[open] > .activity-summary::before {
   opacity: 0.7;
 }
 
-/* Pinned-file split: when the chat column is narrow, reclaim horizontal
-   space from gutter padding so bubbles stay readable without extra scroll. */
+/* The split — a pinned file beside the chat, or the terminal's tile: when
+   the chat column is narrow, reclaim horizontal space from gutter padding so
+   bubbles stay readable without extra scroll. */
 @container chat-split (max-width: 560px) {
   .messages {
     padding: 8px 6px 16px 6px;
@@ -7482,20 +7936,13 @@ details[open] > .activity-summary::before {
 }
 
 @media (max-width: 768px) {
-  /* Mobile header: the title/project stack comes from
-     .header-breadcrumb--stacked (a phone is never wide enough for the rail);
-     this keeps the action buttons on safe tap targets. */
+  /* Keep the title header compact while preserving safe tap targets. */
   :deep(.pane-header) {
     padding-left: calc(12px + var(--safe-left));
     padding-right: calc(12px + var(--safe-right));
   }
   :deep(.header-title) { text-align: left; min-width: 0; }
   .header-left { min-width: 0; }
-  /* With the project on the line below, the title keeps to one line so the
-     pair stays as tall as the icons beside it. */
-  .header-breadcrumb--stacked:has(.breadcrumb-scope) .pane-title.chat-title {
-    -webkit-line-clamp: 1;
-  }
   .chat-archive-btn {
     color: var(--fg2);
   }
@@ -7505,14 +7952,13 @@ details[open] > .activity-summary::before {
      `pointer: coarse` rule below never fires on a fine-pointer device at a
      narrow viewport, so without this the button measures 46x34 and
      narrow-viewport.spec.ts fails. min-height beats the fixed height. */
-  .chat-archive-btn.btn-icon {
+  .chat-archive-btn.btn-icon,
+  .chat-archive-btn.btn-icon.chat-archive-btn--icon {
     min-width: var(--touch);
     min-height: var(--touch);
   }
   .chat-archive-btn:hover { color: var(--fg); }
   .chat-archive-label { display: none; }
-  /* The scope/title stack is the base layout now, so this block only carries
-     what a narrow header changes about it. */
   /* PaneHeader drops every pane title to --text-sm on narrow screens, which is
      right for a title competing with a page tag and a wordmark. This header has
      neither, and the title has its own full-width row, so it keeps body size and
@@ -7725,3 +8171,11 @@ details[open] > .activity-summary::before {
 </style>
 
 <style scoped src="./chatTrace.css"></style>
+
+<!-- The openable dead link: a `file:` path rendered as a button the engine
+     can act on. Shared with the file viewer and the pinned-file panel. -->
+<style scoped src="./markdownDeadLink.css"></style>
+
+<!-- The shared naming placeholder: the same bar the sidebar shows while the
+     engine names a chat. -->
+<style scoped src="./titleShimmer.css"></style>

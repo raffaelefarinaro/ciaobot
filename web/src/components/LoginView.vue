@@ -17,7 +17,7 @@
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
         <p class="line line--sys">
-          Ciaobot is finishing setup. If you started it with ciao run, keep that terminal open until it says setup is complete and Ciaobot is moving to the background service. Then close the terminal and open Ciaobot Server.app.
+          Ciaobot is finishing setup and moving to the background service. Keep the terminal that started it open until it says setup is complete, then you can close it.
         </p>
         <p class="line line--sys">
           When it comes back, log in with the password you just set.
@@ -37,7 +37,7 @@
         <section class="setup-run-note" aria-label="First launch instructions">
           <span class="run-note-kicker">First launch from Terminal</span>
           <p>
-            Keep the terminal running ciao run open while you finish this setup. When setup completes, Ciaobot moves to the background service, then you can close the terminal and open Ciaobot Server.app.
+            Keep the terminal that started Ciaobot open while you finish this setup. When setup completes, Ciaobot moves to the background service: you can close the terminal and keep using this tab.
           </p>
         </section>
 
@@ -129,7 +129,7 @@
               >{{ name }}</li>
             </ul>
             <p class="hint hint--muted">
-              You can rename or add more in Settings → Workspaces after setup.
+              You can rename or add more in Settings → Manage workspaces after setup.
             </p>
           </div>
           <template v-else>
@@ -143,7 +143,7 @@
               :disabled="loading"
             />
             <span class="hint">Choose the logical name for this folder — for example personal, work,
-              journal, or a client. You can add more later in Settings → Workspaces.</span>
+              journal, or a client. You can add more later in Settings → Manage workspaces.</span>
           </template>
         </div>
 
@@ -174,7 +174,7 @@
           />
           <span class="hint">Ciaobot is password-protected: this is what you type to open it
             in a browser, and what another device needs to connect as a client. At least
-            {{ minPasswordLength }} characters — you can change it later in Settings → PWA password.</span>
+            {{ minPasswordLength }} characters — you can change it later in Settings → Access & devices → PWA password.</span>
           <span v-if="passwordProblem" class="hint hint--warn">{{ passwordProblem }}</span>
         </div>
 
@@ -464,6 +464,11 @@ const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
 const setupStatus = ref<SetupStatus | null>(null)
 const workspace = ref('~/ciaobot')
+const workspaceEdited = ref(false)
+watch(workspace, () => { workspaceEdited.value = true })
+watch(setupStatus, (status) => {
+  if (status?.suggested_workspace && !workspaceEdited.value) workspace.value = status.suggested_workspace
+}, { immediate: true })
 const port = ref(8443)
 const python = ref('')
 const provider = ref('claude')
@@ -728,7 +733,7 @@ async function hostSignIn() {
   try {
     await api.post('/api/auth/host-sign-in')
     hostSignInStatus.value =
-      'A signed-in Ciaobot tab is opening in your default browser. Then choose a new password in Settings → PWA password.'
+      'A signed-in Ciaobot tab is opening in your default browser. Then choose a new password in Settings → Access & devices → PWA password.'
     startHostSignInPoll()
   } catch (e) {
     const { status, payload } = e as { status?: number; payload?: { reason?: string } }

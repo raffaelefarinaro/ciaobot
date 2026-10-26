@@ -136,8 +136,10 @@ describe('LoginView setup wizard tests', () => {
     // default VAPID subject, so setup never asks for a contact.
     expect(wrapper.find('#setup-push').exists()).toBe(false)
     expect(wrapper.text()).toContain('claude auth login')
-    expect(wrapper.text()).toContain('Keep the terminal running ciao run open while you finish this setup')
-    expect(wrapper.text()).toContain('close the terminal and open Ciaobot Server.app')
+    expect(wrapper.text()).toContain('Keep the terminal that started Ciaobot open while you finish this setup')
+    expect(wrapper.text()).toContain('you can close the terminal and keep using this tab')
+    // The same wizard runs on Windows and Linux: no macOS-only app names.
+    expect(wrapper.text()).not.toContain('Server.app')
 
     // feature tour fills the 2-column grid: six tiles, no empty slot
     const tourItems = wrapper.findAll('.tour-list li')
@@ -698,7 +700,7 @@ describe('LoginView setup wizard tests', () => {
         await button.trigger('click')
         await flushPromises()
         expect(mockApiPost).toHaveBeenCalledWith('/api/auth/host-sign-in', undefined)
-        expect(wrapper.get('.login-host-status').text()).toContain('Settings → PWA password')
+        expect(wrapper.get('.login-host-status').text()).toContain('Settings → Access & devices → PWA password')
         await vi.advanceTimersByTimeAsync(2000)
         expect(fetchMock).toHaveBeenCalled()
         expect(replace).toHaveBeenCalledWith('/')
@@ -848,5 +850,41 @@ describe('LoginView setup wizard tests', () => {
         } finally { restore() }
       })
     })
+  })
+})
+
+describe('installer folder suggestion', () => {
+  const bootstrap = (suggested?: string) => ({
+    configured: false,
+    bootstrap: true,
+    mode: 'bootstrap',
+    workspace_root: '/scratch',
+    vault_root: '/scratch/memory-vault',
+    ...(suggested ? { suggested_workspace: suggested } : {}),
+    providers: {},
+  })
+
+  it('seeds the main folder from the installer suggestion', async () => {
+    mockApiGet.mockResolvedValue(bootstrap('/Users/ada/Notes'))
+    const wrapper = await mountLoginView()
+    const field = wrapper.get('#setup-workspace').element as HTMLInputElement
+    expect(field.value).toBe('/Users/ada/Notes')
+  })
+
+  it('keeps the default folder when the installer suggests none', async () => {
+    mockApiGet.mockResolvedValue(bootstrap())
+    const wrapper = await mountLoginView()
+    const field = wrapper.get('#setup-workspace').element as HTMLInputElement
+    expect(field.value).toBe('~/ciaobot')
+  })
+
+  it('never overwrites a folder the user typed', async () => {
+    mockApiGet.mockResolvedValue(bootstrap('/Users/ada/Notes'))
+    const wrapper = await mountLoginView()
+    const input = wrapper.get('#setup-workspace')
+    await input.setValue('/Users/ada/Other')
+    await flushPromises()
+    const field = input.element as HTMLInputElement
+    expect(field.value).toBe('/Users/ada/Other')
   })
 })
