@@ -25,15 +25,21 @@ import { computed, effectScope, onScopeDispose, ref, watch } from 'vue'
 import type { EffectScope } from 'vue'
 import { useProjectStore } from './projects'
 import { useTaskSignalsStore } from './taskSignals'
+import { useHousekeepingStore } from './housekeeping'
+import { useTaskStore } from './tasks'
+import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { isMemoryPassChat } from '../lib/memoryPass'
 import {
   notificationAccessibleName,
   notificationBadgeText,
+  operatorInScope,
   projectNotificationInbox,
 } from '../lib/notificationInbox'
 import type {
   ChatCandidate,
   NotificationSourceKey,
+  OperatorCandidate,
+  ScheduleCandidate,
   SourceSnapshot,
 } from '../lib/notificationInbox'
 import { checkingHealth } from '../lib/sourceHealth'
@@ -69,6 +75,8 @@ function combineHealth(parts: readonly SourceHealth[]): SourceHealth {
 export const useNotificationInboxStore = defineStore('notificationInbox', () => {
   const projects = useProjectStore()
   const taskSignals = useTaskSignalsStore()
+  const housekeeping = useHousekeepingStore()
+  const tasks = useTaskStore()
 
   const generation = ref(0)
   const initialized = ref(false)
@@ -77,6 +85,9 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
 
   const inflight = new Map<RefreshSourceKey, Promise<void>>()
   const again = new Set<RefreshSourceKey>()
+  // The tasks store keeps no timestamp, so the adapter stamps list replacements.
+  // The stamp only advances while initialized (the watcher lives in init()'s scope).
+  const schedulesStampedAt = ref('')
   let lastFocusRefreshAt = 0
   let scope: EffectScope | null = null
   let removeListeners: (() => void) | null = null
@@ -108,10 +119,40 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
         activityAt: chat.last_activity_at ?? '',
         pendingQuestion: projects.chatPendingQuestion(id) ?? '',
         snippet: projects.chatLastSnippet(id) ?? '',
+        scheduleId: chat.schedule_id ?? '',
       })
     }
     return out
   })
+
+  const operatorCandidates = computed<OperatorCandidate[]>(() =>
+    housekeeping.actions
+      .filter((a) => operatorInScope(a.workspace, projects.activeWorkspace))
+      .map((a) => ({
+        id: a.id,
+        kind: a.kind,
+        workspace: a.workspace,
+        title: a.title,
+        detail: a.detail,
+        blocking: !!a.blocking,
+        viewRoute: a.view_route,
+      })),
+  )
+
+  const scheduleCandidates = computed<ScheduleCandidate[]>(() =>
+    tasks.schedules
+      .filter((s) => scheduleInWorkspace(s, projects.activeWorkspace, projects.chats, projects.projects))
+      .map((s) => ({
+        scheduleId: s.schedule_id,
+        title: s.title ?? '',
+        prompt: s.prompt ?? '',
+        frequency: s.frequency,
+        enabled: !!s.enabled,
+        missed: !!s.missed,
+        lastStatus: s.last_status ?? '',
+        needsAttention: scheduleNeedsAttention(s),
+      })),
+  )
 
   // One entry per source; a missing key is a compile error once INBOX_SOURCES grows.
   const SNAPSHOT_BUILDERS: Record<RefreshSourceKey, () => SourceSnapshot> = {
@@ -124,6 +165,19 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       const h = combineHealth([projects.chatsHealth, signals])
       return { source: 'chats', status: h.status, lastSuccessAt: h.lastSuccessAt }
     },
+    // Installation-wide. ProjectSidebar owns the housekeeping poll; before it
+    // first answers, the health reads checking.
+    operator: () => {
+      const h = housekeeping.actionsHealth
+      return { source: 'operator', status: h.status, lastSuccessAt: h.lastSuccessAt }
+    },
+    automations: () => {
+      let status: SourceSnapshot['status']
+      if (!tasks.schedulesLoaded && !tasks.scheduleLoadError) status = 'checking'
+      else if (tasks.scheduleLoadError) status = tasks.schedulesLoaded ? 'stale' : 'unavailable'
+      else status = 'ready'
+      return { source: 'automations', status, lastSuccessAt: schedulesStampedAt.value }
+    },
   }
 
   const REFRESHERS: Record<RefreshSourceKey, (workspace: string) => Promise<unknown>> = {
@@ -135,6 +189,9 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
         projects.chatsHealth.lastSuccessAt ? projects.syncLatest() : projects.fetchAll(),
         taskSignals.reload(ws),
       ]),
+    // Both owners record their own failure; neither throws or needs an interval here.
+    operator: () => housekeeping.refresh(),
+    automations: () => tasks.fetchSchedules().catch(() => {}),
   }
 
   const snapshots = computed<SourceSnapshot[]>(() =>
@@ -142,7 +199,12 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
   )
 
   const inbox = computed(() =>
-    projectNotificationInbox({ chats: chatCandidates.value, sources: snapshots.value }),
+    projectNotificationInbox({
+      chats: chatCandidates.value,
+      operators: operatorCandidates.value,
+      schedules: scheduleCandidates.value,
+      sources: snapshots.value,
+    }),
   )
   const rows = computed(() => inbox.value.rows)
   const sections = computed(() => inbox.value.sections)
@@ -213,6 +275,8 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     scope.run(() => {
       // projects.ts already reloads task signals on a switch: no refresh here.
       watch(() => projects.activeWorkspace, resetInflight, { flush: 'sync' })
+      // Shallow on purpose: an in-place push is not a load.
+      watch(() => tasks.schedules, () => { schedulesStampedAt.value = new Date().toISOString() }, { flush: 'sync' })
     })
     window.addEventListener('focus', onFocusOrVisible)
     document.addEventListener('visibilitychange', onFocusOrVisible)
@@ -239,6 +303,8 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     initialized,
     refreshing,
     chatCandidates,
+    operatorCandidates,
+    scheduleCandidates,
     snapshots,
     inbox,
     rows,

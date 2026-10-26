@@ -16,6 +16,8 @@ import { api } from '../lib/api'
 import { FOCUS_REFRESH_MIN_MS, useNotificationInboxStore } from './notificationInbox'
 import { useProjectStore } from './projects'
 import { useTaskSignalsStore } from './taskSignals'
+import { useHousekeepingStore } from './housekeeping'
+import { useTaskStore } from './tasks'
 import projectsSrc from './projects.ts?raw'
 import taskSignalsSrc from './taskSignals.ts?raw'
 import housekeepingSrc from './housekeeping.ts?raw'
@@ -60,6 +62,8 @@ function setChats(projects: ReturnType<typeof useProjectStore>, chats: unknown[]
 }
 
 function markHealthy(projects: ReturnType<typeof useProjectStore>, signals: ReturnType<typeof useTaskSignalsStore>) {
+  useHousekeepingStore().actionsHealth = ready()
+  useTaskStore().schedulesLoaded = true
   projects.chatsHealth = ready()
   signals.healthWorkspace = projects.activeWorkspace
   signals.health = ready()
@@ -130,6 +134,10 @@ describe('notification inbox store', () => {
     projects.chatsHealth = ready()
     signals.healthWorkspace = 'personal'
     signals.health = ready()
+    expect(inbox.allClear).toBe(false)
+    useHousekeepingStore().actionsHealth = ready()
+    expect(inbox.allClear).toBe(false)
+    useTaskStore().schedulesLoaded = true
     expect(inbox.allClear).toBe(true)
   })
 
@@ -364,5 +372,211 @@ describe('notification inbox store', () => {
       if (original) Object.defineProperty(globalThis, 'Notification', original)
       else delete (globalThis as Record<string, unknown>).Notification
     }
+  })
+
+  describe('operator and automation sources', () => {
+    type Sched = Record<string, unknown>
+    const action = (id: string, kind: string, o: Record<string, unknown> = {}) => ({
+      id, kind, severity: 1, title: `Title ${id}`, detail: '', glyph: '', workspace: '',
+      run_label: '', chat_label: '', chat_prompt: '', view_label: '', view_route: '', blocking: false, ...o,
+    })
+    const schedule = (id: string, o: Sched = {}) => ({
+      schedule_id: id, title: `Sched ${id}`, prompt: 'p', frequency: 'daily', enabled: true,
+      workspace: 'personal', missed: false, last_status: 'ok', ...o,
+    })
+    function seed() {
+      const ctx = setup()
+      markHealthy(ctx.projects, ctx.signals)
+      const hk = useHousekeepingStore()
+      const tasks = useTaskStore()
+      const setActions = (a: unknown[]) => { hk.actions = a as unknown as typeof hk.actions }
+      const setSchedules = (a: unknown[]) => { tasks.schedules = a as unknown as typeof tasks.schedules }
+      return { ...ctx, hk, tasks, setActions, setSchedules }
+    }
+
+    it('operator_inclusion_and_exclusion_matrix', () => {
+      const { inbox, setActions } = seed()
+      setActions([
+        action('pu', 'package-update'),
+        action('pv', 'provider-update'),
+        action('wu', 'workspace-unmigrated', { blocking: true }),
+        action('st', 'skill-triage-pending'),
+        action('gs', 'github-star'),
+        action('missed-schedules', 'missed-schedules'),
+      ])
+      expect(inbox.rows.map((r) => `${r.section}:${r.key}`).sort()).toEqual([
+        'needsYou:operator:shared:missed-schedules',
+        'needsYou:operator:shared:wu',
+        'toReview:operator:shared:pu',
+        'toReview:operator:shared:pv',
+        'toReview:operator:shared:st',
+      ])
+    })
+
+    it('operator_scope', () => {
+      const { projects, inbox, setActions } = seed()
+      setActions([
+        action('w', 'skill-triage-pending', { workspace: 'work' }),
+        action('s', 'skill-triage-pending'),
+      ])
+      setChats(projects, [makeChat('other-ws', { project_id: 'p-work', last_read_at: '' })])
+      expect(inbox.rows.map((r) => r.key)).toEqual(['operator:shared:s'])
+      projects.activeWorkspace = 'work'
+      expect(inbox.rows.map((r) => r.key).sort()).toEqual(['chat:other-ws', 'operator:shared:s', 'operator:work:w'])
+      projects.activeWorkspace = 'personal'
+      expect(inbox.rows.map((r) => r.key)).toEqual(['operator:shared:s'])
+    })
+
+    it('package_status_does_not_double_count', () => {
+      const { projects, inbox, setActions } = seed()
+      projects.packageStatus = { update_available: true } as unknown as typeof projects.packageStatus
+      expect(inbox.rows).toHaveLength(0)
+      setActions([action('pu', 'package-update', { view_route: '/settings' })])
+      expect(inbox.rows.map((r) => r.key)).toEqual(['operator:shared:pu'])
+    })
+
+    it('disabled_healthy_schedule_absent', () => {
+      const { inbox, setSchedules } = seed()
+      setSchedules([
+        schedule('h', { enabled: false }),
+        schedule('m', { enabled: false, last_status: 'missing-chat' }),
+      ])
+      expect(inbox.rows.map((r) => r.key)).toEqual(['schedule:m'])
+      expect(inbox.rows[0].reason).toBe('Its chat was deleted, so it is turned off.')
+    })
+
+    it('recovered_schedule_clears', () => {
+      const { inbox, setSchedules } = seed()
+      setSchedules([schedule('e', { last_status: 'error' })])
+      expect(inbox.rows.map((r) => r.key)).toEqual(['schedule:e'])
+      setSchedules([schedule('e', { last_status: 'ok' })])
+      expect(inbox.rows).toHaveLength(0)
+    })
+
+    it('schedule_in_other_workspace_excluded', () => {
+      const { projects, inbox, setSchedules } = seed()
+      setChats(projects, [makeChat('wc', { project_id: 'p-work' }), makeChat('pc')])
+      setSchedules([
+        schedule('other', { workspace: 'work', last_status: 'error' }),
+        schedule('viaChat', { workspace: undefined, web_chat_id: 'pc', last_status: 'error' }),
+        schedule('viaWorkChat', { workspace: undefined, web_chat_id: 'wc', last_status: 'error' }),
+      ])
+      expect(inbox.rows.map((r) => r.key)).toEqual(['schedule:viaChat'])
+    })
+
+    it('one_time_aggregate_dedupe', () => {
+      const { inbox, setActions, setSchedules } = seed()
+      setActions([action('missed-schedules', 'missed-schedules')])
+      setSchedules([schedule('o', { frequency: 'once', missed: true, last_status: '' })])
+      expect(inbox.rows.map((r) => r.key)).toEqual(['operator:shared:missed-schedules'])
+    })
+
+    it('matching_failed_chat_suppressed_but_live_question_retained', () => {
+      const { projects, inbox, setSchedules } = seed()
+      setSchedules([schedule('S', { last_status: 'error' })])
+      setChats(projects, [makeChat('c1', { schedule_id: 'S', last_status: 'error', last_read_at: '' })])
+      vi.spyOn(projects, 'chatFailed').mockReturnValue(true)
+      expect(inbox.rows.map((r) => r.key)).toEqual(['schedule:S'])
+      setChats(projects, [makeChat('c1', { schedule_id: 'S', last_read_at: '', pending_permission: '{"tool":"Bash"}' })])
+      expect(inbox.rows.map((r) => r.key).sort()).toEqual(['chat:c1', 'schedule:S'])
+    })
+
+    it('operator_source_status', () => {
+      const { hk, inbox, projects, signals } = seed()
+      hk.actionsHealth = checking()
+      const status = () => inbox.sources.find((s) => s.source === 'operator')!.status
+      expect(status()).toBe('checking')
+      hk.actionsHealth = unavailable()
+      expect(status()).toBe('unavailable')
+      expect(inbox.count).toBe(0)
+      expect(inbox.allClear).toBe(false)
+      hk.actionsHealth = stale()
+      expect(status()).toBe('stale')
+      hk.actionsHealth = ready()
+      expect(status()).toBe('ready')
+      expect(projects.activeWorkspace && signals.health).toBeTruthy()
+    })
+
+    it('automations_source_status', () => {
+      const { tasks, inbox, setSchedules } = seed()
+      const status = () => inbox.sources.find((s) => s.source === 'automations')!.status
+      tasks.schedulesLoaded = false
+      expect(status()).toBe('checking')
+      tasks.scheduleLoadError = 'boom'
+      expect(status()).toBe('unavailable')
+      expect(inbox.allClear).toBe(false)
+      tasks.scheduleLoadError = ''
+      tasks.schedulesLoaded = true
+      setSchedules([schedule('e', { last_status: 'error' })])
+      tasks.scheduleLoadError = 'boom'
+      expect(status()).toBe('stale')
+      expect(inbox.rows.map((r) => r.key)).toEqual(['schedule:e'])
+      expect(inbox.rows[0].freshness).toBe('stale')
+    })
+
+    it('automations_stamp_advances_only_while_initialized', () => {
+      const { tasks, inbox, setSchedules } = seed()
+      const stamp = () => inbox.snapshots.find((s) => s.source === 'automations')!.lastSuccessAt
+      setSchedules([])
+      expect(stamp()).toBe('')
+      inbox.init()
+      setSchedules([schedule('a')])
+      expect(stamp()).not.toBe('')
+      const first = stamp()
+      tasks.schedules.push(schedule('b') as unknown as (typeof tasks.schedules)[number])
+      expect(stamp()).toBe(first)
+      inbox.dispose()
+    })
+
+    it('retry_operator_and_automations_use_owner_reads_only', async () => {
+      const { hk, tasks, inbox } = seed()
+      const hkRefresh = vi.spyOn(hk, 'refresh').mockResolvedValue()
+      const fetchSchedules = vi.spyOn(tasks, 'fetchSchedules').mockRejectedValue(new Error('down'))
+      const run = vi.spyOn(hk, 'run')
+      const dismiss = vi.spyOn(hk, 'dismiss')
+      const updateTasks = vi.spyOn(hk, 'refreshUpdateTasks')
+      await inbox.retry('operator')
+      expect(hkRefresh).toHaveBeenCalledTimes(1)
+      expect(fetchSchedules).not.toHaveBeenCalled()
+      await expect(inbox.retry('automations')).resolves.toBeUndefined()
+      expect(fetchSchedules).toHaveBeenCalledTimes(1)
+      expect(hkRefresh).toHaveBeenCalledTimes(1)
+      expect(run).not.toHaveBeenCalled()
+      expect(dismiss).not.toHaveBeenCalled()
+      expect(updateTasks).not.toHaveBeenCalled()
+      expect(api.post).not.toHaveBeenCalled()
+      expect(api.patch).not.toHaveBeenCalled()
+      expect(api.del).not.toHaveBeenCalled()
+    })
+
+    it('web_push_permission_denied_no_effect', () => {
+      const { inbox, setActions, setSchedules } = seed()
+      const original = Object.getOwnPropertyDescriptor(globalThis, 'Notification')
+      Object.defineProperty(globalThis, 'Notification', {
+        configurable: true,
+        get() { throw new Error('Notification must not be read') },
+      })
+      try {
+        setActions([action('a', 'skill-triage-pending')])
+        setSchedules([schedule('e', { last_status: 'error' })])
+        expect(inbox.rows.map((r) => r.key).sort()).toEqual(['operator:shared:a', 'schedule:e'])
+      } finally {
+        if (original) Object.defineProperty(globalThis, 'Notification', original)
+        else delete (globalThis as Record<string, unknown>).Notification
+      }
+    })
+
+    it('refresh_coalesces_for_new_sources', async () => {
+      const { tasks, inbox } = seed()
+      const gate = deferred()
+      const fetchSchedules = vi.spyOn(tasks, 'fetchSchedules').mockImplementation(() => gate.promise)
+      const a = inbox.refresh(['automations'])
+      const b = inbox.refresh(['automations'])
+      const c = inbox.refresh(['automations'])
+      gate.resolve()
+      await Promise.all([a, b, c])
+      expect(fetchSchedules.mock.calls.length).toBeGreaterThanOrEqual(1)
+      expect(fetchSchedules.mock.calls.length).toBeLessThanOrEqual(2)
+    })
   })
 })

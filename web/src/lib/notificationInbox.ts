@@ -27,9 +27,13 @@ export const SECTION_TITLES: Record<NotificationSection, string> = {
 
 export type SourceStatus = 'checking' | 'ready' | 'stale' | 'unavailable'
 /** Sources the inbox requires. Later units append keys here; a key with no snapshot counts as 'checking'. */
-export const INBOX_SOURCES = ['chats'] as const
+export const INBOX_SOURCES = ['chats', 'operator', 'automations'] as const
 export type NotificationSourceKey = typeof INBOX_SOURCES[number]
-export const SOURCE_LABELS: Record<NotificationSourceKey, string> = { chats: 'Chats' }
+export const SOURCE_LABELS: Record<NotificationSourceKey, string> = {
+  chats: 'Chats',
+  operator: 'Settings',
+  automations: 'Automations',
+}
 
 export interface SourceSnapshot {
   source: NotificationSourceKey
@@ -37,8 +41,18 @@ export interface SourceSnapshot {
   lastSuccessAt: string // '' when never succeeded
 }
 
-export type NotificationKind = 'chat-needs-you' | 'chat-unread'
-export type NotificationDestination = { kind: 'chat'; chatId: string }
+export type NotificationKind =
+  | 'chat-needs-you'
+  | 'chat-unread'
+  | 'operator-action'
+  | 'missed-schedules'
+  | 'automation-attention'
+export type NotificationDestination =
+  | { kind: 'chat'; chatId: string }
+  | { kind: 'schedule'; scheduleId: string }
+  | { kind: 'settings'; tab: '' | 'providers' }
+  // TEMPORARY: a later unit adds { kind: 'home-notice'; noticeKey: string } and re-points its callers.
+  | { kind: 'home' }
 /** Within a section, lower rank sorts first. Needs-you: input < blocking < failure. */
 export type NotificationUrgency = 'input' | 'blocking' | 'failure' | 'review' | 'reply'
 
@@ -68,10 +82,38 @@ export interface ChatCandidate {
   activityAt: string
   pendingQuestion: string
   snippet: string
+  /** The schedule that produced this chat ('' or absent when none). */
+  scheduleId?: string
+}
+
+export interface OperatorCandidate {
+  id: string
+  kind: string
+  /** '' = installation-wide. */
+  workspace: string
+  title: string
+  detail: string
+  blocking: boolean
+  /** OperatorAction.view_route, '' when none. */
+  viewRoute: string
+}
+
+export interface ScheduleCandidate {
+  scheduleId: string
+  title: string
+  prompt: string
+  frequency: string
+  enabled: boolean
+  missed: boolean
+  lastStatus: string
+  /** Adapter: scheduleInWorkspace(...) && scheduleNeedsAttention(s). */
+  needsAttention: boolean
 }
 
 export interface NotificationInboxInput {
   chats: readonly ChatCandidate[]
+  operators?: readonly OperatorCandidate[]
+  schedules?: readonly ScheduleCandidate[]
   sources: readonly SourceSnapshot[]
 }
 
@@ -94,6 +136,32 @@ export interface NotificationInbox {
 }
 
 const REASON_MAX = 160
+
+/** Operator kinds that never reach the inbox. */
+export const EXCLUDED_OPERATOR_KINDS: readonly string[] = ['github-star']
+const MISSED_SCHEDULES_KIND = 'missed-schedules'
+
+/** Mirrors HousekeepingStrip.scopedActions: installation-wide or the active workspace. */
+export function operatorInScope(actionWorkspace: string, activeWorkspace: string): boolean {
+  return !activeWorkspace || !actionWorkspace || actionWorkspace === activeWorkspace
+}
+
+/** Mirrors HomeReviewSummary.automationName. */
+export function scheduleDisplayName(s: { title: string; prompt: string; scheduleId: string }): string {
+  const title = (s.title || '').trim()
+  if (title) return title
+  const line = (s.prompt || '').trim().split('\n')[0].trim()
+  if (line) return line.length > 60 ? `${line.slice(0, 57)}…` : line
+  return s.scheduleId
+}
+
+function stripMarkdown(s: string): string {
+  return s
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\*\*/g, '')
+    .replace(/`/g, '')
+    .replace(/^\s*(?:- |# )/gm, '')
+}
 
 const URGENCY_RANK: Record<NotificationUrgency, number> = {
   input: 0,
@@ -143,6 +211,70 @@ function chatRow(c: ChatCandidate, freshness: 'fresh' | 'stale'): NotificationRo
   return row
 }
 
+function operatorDestination(o: OperatorCandidate): NotificationDestination {
+  if (o.kind === 'package-update') return { kind: 'settings', tab: '' }
+  if (o.kind === 'provider-update') return { kind: 'settings', tab: 'providers' }
+  if (o.viewRoute === '/settings') return { kind: 'settings', tab: '' }
+  if (o.viewRoute === '/settings/providers') return { kind: 'settings', tab: 'providers' }
+  return { kind: 'home' }
+}
+
+function operatorRow(o: OperatorCandidate, freshness: 'fresh' | 'stale'): NotificationRow | null {
+  if (EXCLUDED_OPERATOR_KINDS.includes(o.kind)) return null
+  const key = `operator:${o.workspace || 'shared'}:${o.id}`
+  if (o.kind === MISSED_SCHEDULES_KIND) {
+    return {
+      key,
+      kind: 'missed-schedules',
+      section: 'needsYou',
+      urgency: 'failure',
+      source: 'operator',
+      title: plainText(`All workspaces: ${o.title}`, Number.MAX_SAFE_INTEGER),
+      reason: 'All workspaces. Open Home to fire or dismiss them.',
+      destination: { kind: 'home' },
+      unread: false,
+      freshness,
+    }
+  }
+  return {
+    key,
+    kind: 'operator-action',
+    section: o.blocking ? 'needsYou' : 'toReview',
+    urgency: o.blocking ? 'blocking' : 'review',
+    source: 'operator',
+    title: plainText(o.title, Number.MAX_SAFE_INTEGER),
+    reason: plainText(stripMarkdown(o.detail), REASON_MAX),
+    destination: operatorDestination(o),
+    unread: false,
+    freshness,
+  }
+}
+
+/** The enabled one-time reminder Home already covers with the missed-schedules notice. */
+function coveredByMissedAggregate(s: ScheduleCandidate): boolean {
+  return s.frequency === 'once' && s.enabled && s.missed
+    && s.lastStatus !== 'error' && s.lastStatus !== 'missing-chat'
+}
+
+function automationRow(s: ScheduleCandidate, freshness: 'fresh' | 'stale'): NotificationRow {
+  const reason =
+    s.lastStatus === 'missing-chat' ? 'Its chat was deleted, so it is turned off.'
+    : s.lastStatus === 'error' ? 'The last run failed.'
+    : 'It did not run when expected.'
+  return {
+    key: `schedule:${s.scheduleId}`,
+    kind: 'automation-attention',
+    section: 'needsYou',
+    urgency: 'failure',
+    source: 'automations',
+    title: plainText(scheduleDisplayName(s), Number.MAX_SAFE_INTEGER),
+    reason,
+    destination: { kind: 'schedule', scheduleId: s.scheduleId },
+    unread: false,
+    freshness,
+  }
+}
+
 function compareRows(section: NotificationSection): (a: NotificationRow, b: NotificationRow) => number {
   if (section === 'newReplies') {
     return (a, b) => {
@@ -178,17 +310,36 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     }
   })
   const overall = overallStatus(sources)
-  const chatsFreshness = sources.find((s) => s.source === 'chats')!.status === 'ready' ? 'fresh' : 'stale'
+  const freshnessOf = (source: NotificationSourceKey): 'fresh' | 'stale' =>
+    sources.find((s) => s.source === source)!.status === 'ready' ? 'fresh' : 'stale'
 
   // A duplicate key keeps the row in the earlier section, then the first seen.
   const byKey = new Map<string, NotificationRow>()
-  for (const c of input.chats) {
-    const row = chatRow(c, chatsFreshness)
-    if (!row) continue
+  const add = (row: NotificationRow | null) => {
+    if (!row) return
     const prev = byKey.get(row.key)
     if (!prev || SECTION_ORDER.indexOf(row.section) < SECTION_ORDER.indexOf(prev.section)) {
       byKey.set(row.key, row)
     }
+  }
+
+  const operators = input.operators ?? []
+  for (const o of operators) add(operatorRow(o, freshnessOf('operator')))
+
+  const hasMissedAggregate = operators.some((o) => o.kind === MISSED_SCHEDULES_KIND)
+  const incidentSchedules = new Set<string>()
+  for (const s of input.schedules ?? []) {
+    if (!s.needsAttention) continue
+    if (hasMissedAggregate && coveredByMissedAggregate(s)) continue
+    add(automationRow(s, freshnessOf('automations')))
+    incidentSchedules.add(s.scheduleId)
+  }
+
+  for (const c of input.chats) {
+    // The failed chat of an incident, and its unread-result twin, are the same
+    // problem as the schedule row. A live question or a delegated wait stays.
+    if (c.scheduleId && incidentSchedules.has(c.scheduleId) && !c.needsInput && (c.failed || !c.needsYou)) continue
+    add(chatRow(c, freshnessOf('chats')))
   }
 
   const all = [...byKey.values()]
@@ -213,8 +364,14 @@ export function notificationPath(d: NotificationDestination): string {
   switch (d.kind) {
     case 'chat':
       return `/chat/${encodeURIComponent(d.chatId)}`
+    case 'schedule':
+      return `/schedules/${encodeURIComponent(d.scheduleId)}`
+    case 'settings':
+      return d.tab ? `/settings/${d.tab}` : '/settings'
+    case 'home':
+      return '/'
     default: {
-      const unreachable: never = d.kind
+      const unreachable: never = d
       return unreachable
     }
   }

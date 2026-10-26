@@ -3292,6 +3292,8 @@ describe('ChatLayout chat route without a catalog entry', () => {
       const signals = useTaskSignalsStore()
       const inbox = useNotificationInboxStore()
       vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+      useHousekeepingStore().actionsHealth = { status: 'ready', lastSuccessAt: '2026-08-12T10:00:00.000Z', error: '' }
+      useTaskStore().schedulesLoaded = true
       vi.spyOn(store, 'fetchAll').mockImplementation(async () => {
         store.projects = [{
           project_id: 'project-1', name: 'General', workspace: 'personal',
