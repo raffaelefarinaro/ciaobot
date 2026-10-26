@@ -2099,6 +2099,9 @@ describe('decision card', () => {
     })
 
     it('a refused accept does not leak its reason onto a later dismissal', async () => {
+      // The refusal hands the row to a merge chat. A real send schedules a
+      // reconnect retry that fires after the environment is torn down.
+      vi.spyOn(useProjectStore(), 'sendMessage').mockImplementation(() => true as never)
       const wrapper = await mountRow()
       await openFromRow(wrapper)
       await wrapper.find('.pr-card .decision-reason textarea').setValue('one-off')
