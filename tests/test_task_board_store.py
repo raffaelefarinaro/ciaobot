@@ -155,23 +155,28 @@ def test_create_get_and_list_have_stable_identity_and_defaults(tmp_path: Path) -
     assert result.invalid == ()
 
 
-def test_sort_is_due_date_then_creation_and_id(tmp_path: Path) -> None:
-    clock = Clock()
-    store = make_store(tmp_path / "vault", tmp_path / "runtime", clock)
-    undated = store.create(title="undated")
-    clock.now = datetime(2026, 10, 3, 12, 1, tzinfo=UTC)
-    later_due = store.create(title="later due", due="2026-11-01")
-    clock.now = datetime(2026, 10, 3, 12, 2, tzinfo=UTC)
-    earlier_due = store.create(title="earlier due", due="2026-10-05")
-    clock.now = datetime(2026, 10, 3, 12, 3, tzinfo=UTC)
-    # Same due date and same creation instant: id breaks the tie.
-    first_tie = store.create(title="tie one", due="2026-10-05")
-    second_tie = store.create(title="tie two", due="2026-10-05")
+def test_sort_is_baseline_due_then_title_and_id(tmp_path: Path) -> None:
+    # Hand-made files have no stored order, so the baseline applies: dated
+    # first, then title, then id. Created tasks keep creation order instead
+    # (tests/test_task_order.py), because create appends to the order.
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    ids = {name: f"a{index:031x}" for index, name in enumerate(
+        ["undated", "later", "earlier", "tie_a", "tie_b"], start=1
+    )}
+    for name, due, title in [
+        ("undated", None, "undated"),
+        ("later", "2026-11-01", "later due"),
+        ("earlier", "2026-10-05", "earlier due"),
+        ("tie_a", "2026-10-05", "tie one"),
+        ("tie_b", "2026-10-05", "tie one"),
+    ]:
+        hand_file(vault, ids[name], valid_frontmatter(ids[name], title=title, due=due))
 
     result = store.list()
-    ids = [document.record.id for document in result.tasks]
-    tie = sorted([first_tie.record.id, second_tie.record.id])
-    assert ids == [earlier_due.record.id, *tie, later_due.record.id, undated.record.id]
+    assert [d.record.id for d in result.tasks] == [
+        ids["earlier"], ids["tie_a"], ids["tie_b"], ids["later"], ids["undated"]
+    ]
 
 
 def test_dates_are_calendar_dates_not_schedule_instants(tmp_path: Path) -> None:

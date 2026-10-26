@@ -457,3 +457,262 @@ describe('taskBoard store', () => {
     expect(post).not.toHaveBeenCalled()
   })
 })
+
+function orderOf(version: number, backlog: string[] = ['ship'], in_progress: string[] = []) {
+  return { version, sequences: { backlog, in_progress, in_review: [], done: [] } }
+}
+
+function board(version: number, extra: Record<string, unknown> = {}) {
+  return { workspace: 'personal', tasks: [task()], order: orderOf(version), order_error: null, ...extra }
+}
+
+function refusal(code: string, message = 'refused') {
+  return Object.assign(new Error('HTTP 409'), { payload: { error: { code, message } } })
+}
+
+describe('taskBoard store: card order', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  async function loaded(version = 3) {
+    const store = useTaskBoardStore()
+    get.mockResolvedValue(board(version))
+    await store.reload('personal')
+    return store
+  }
+
+  it('reload stores the server order and resets it on a workspace switch', async () => {
+    const store = await loaded(3)
+    expect(store.order.version).toBe(3)
+    expect(store.order.sequences.backlog).toEqual(['ship'])
+
+    get.mockResolvedValue({ workspace: 'work', tasks: [] })
+    await store.reload('work')
+
+    expect(store.order.version).toBe(0)
+    expect(store.order.sequences.backlog).toEqual([])
+  })
+
+  it('update with placement sends placement and expected_order_version and adopts the returned order', async () => {
+    const store = await loaded(3)
+    patch.mockResolvedValue({ ...stored({ status: 'in_progress' }), order: orderOf(4, [], ['ship']), order_error: null })
+
+    const saved = await store.update('personal', 'ship', REVISION, { status: 'in_progress' }, undefined, {
+      before_id: null,
+      after_id: 'other',
+    })
+
+    expect(saved?.status).toBe('in_progress')
+    expect(patch.mock.calls[0]![1]).toMatchObject({
+      status: 'in_progress',
+      placement: { before_id: null, after_id: 'other', expected_order_version: 3 },
+    })
+    expect(store.order.version).toBe(4)
+    expect(store.order.sequences.in_progress).toEqual(['ship'])
+  })
+
+  it('does not send a placement on an update that keeps the status', async () => {
+    const store = await loaded(3)
+    patch.mockResolvedValue(stored({ title: 'Renamed' }))
+
+    await store.update('personal', 'ship', REVISION, { title: 'Renamed' }, undefined, { before_id: 'x', after_id: null })
+
+    expect(patch.mock.calls[0]![1]).not.toHaveProperty('placement')
+  })
+
+  it('complete with placement posts placement along with the resolution in one request', async () => {
+    const store = await loaded(3)
+    post.mockResolvedValue({ ...stored({ status: 'done' }), order: orderOf(4, [], []), order_error: null })
+
+    await store.complete('personal', 'ship', REVISION, 'Shipped', undefined, { before_id: 'x', after_id: null })
+
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(post.mock.calls[0]![0]).toBe('/api/tasks/ship/complete')
+    expect(post.mock.calls[0]![1]).toMatchObject({
+      resolution: 'Shipped',
+      placement: { before_id: 'x', after_id: null, expected_order_version: 3 },
+    })
+    expect(store.order.version).toBe(4)
+  })
+
+  it('reorder posts to /order with the held version, then adopts order and the row', async () => {
+    const store = await loaded(3)
+    post.mockResolvedValue({ ...stored({ title: 'Moved' }), order: orderOf(4, ['b', 'ship']), order_error: null })
+
+    const result = await store.reorder('personal', 'ship', { before_id: null, after_id: 'b' }, 3)
+
+    expect(result).toEqual({ ok: true })
+    expect(post).toHaveBeenCalledWith('/api/tasks/ship/order', {
+      workspace: 'personal',
+      before_id: null,
+      after_id: 'b',
+      expected_order_version: 3,
+    })
+    expect(store.order.sequences.backlog).toEqual(['b', 'ship'])
+    expect(readableTasks(store.rows)[0]!.revision).toBe(NEXT_REVISION)
+  })
+
+  it('reorder conflict reloads and reports a retry message without replaying', async () => {
+    const store = await loaded(3)
+    post.mockRejectedValue(refusal('task_order_conflict'))
+    get.mockResolvedValue(board(5))
+
+    const result = await store.reorder('personal', 'ship', { before_id: null, after_id: 'b' }, 3)
+
+    expect(result).toMatchObject({ ok: false, conflict: true })
+    expect(store.error).toBe('The board changed while you were moving that. It has been refreshed; try again.')
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(store.order.version).toBe(5)
+  })
+
+  it('reorder failure restores authoritative state (reload) and keeps the plain-language error', async () => {
+    const store = await loaded(3)
+    post.mockRejectedValue(refusal('task_order_invalid', 'That card is not in this column.'))
+    get.mockClear()
+    get.mockResolvedValue(board(3))
+
+    const result = await store.reorder('personal', 'ship', { before_id: 'zzz', after_id: null }, 3)
+
+    expect(result).toEqual({ ok: false, conflict: false, message: 'That card is not in this column.' })
+    expect(store.error).toBe('That card is not in this column.')
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(store.order.version).toBe(3)
+  })
+
+  it('late order response from an older request is ignored', async () => {
+    const store = await loaded(3)
+    const slow = deferred<unknown>()
+    post.mockReturnValueOnce(slow.promise as never)
+    const pending = store.reorder('personal', 'ship', { before_id: null, after_id: null }, 3)
+    await Promise.resolve()
+    // A newer read lands first and takes the newest ticket.
+    get.mockResolvedValue(board(6))
+    await store.reload('personal')
+    slow.resolve({ ...stored(), order: orderOf(4), order_error: null })
+    await pending
+    expect(store.order.version).toBe(6)
+
+    // A lower version from a request that still holds the newest ticket is dropped too.
+    patch.mockResolvedValue({ ...stored({ title: 'Renamed' }), order: orderOf(2), order_error: null })
+    await store.update('personal', 'ship', REVISION, { title: 'Renamed' })
+    expect(store.order.version).toBe(6)
+  })
+
+  it('writes are serialised: a second reorder waits for the first', async () => {
+    const store = await loaded(3)
+    const first = deferred<unknown>()
+    post.mockReturnValueOnce(first.promise as never)
+    post.mockResolvedValueOnce({ ...stored(), order: orderOf(5), order_error: null })
+
+    const a = store.reorder('personal', 'ship', { before_id: null, after_id: 'b' }, 3)
+    const b = store.reorder('personal', 'ship', { before_id: null, after_id: 'c' }, 4)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(post).toHaveBeenCalledTimes(1)
+
+    first.resolve({ ...stored(), order: orderOf(4), order_error: null })
+    expect(await a).toEqual({ ok: true })
+    expect(await b).toEqual({ ok: true })
+    expect(post).toHaveBeenCalledTimes(2)
+    expect(store.order.version).toBe(5)
+  })
+
+  it('a write queued behind a conflict is dropped without a request, not replayed', async () => {
+    const store = await loaded(3)
+    let reject!: (e: unknown) => void
+    post.mockReturnValueOnce(new Promise((_, r) => { reject = r }) as never)
+    get.mockResolvedValue(board(5))
+
+    const a = store.reorder('personal', 'ship', { before_id: null, after_id: 'b' }, 3)
+    const b = store.reorder('personal', 'ship', { before_id: null, after_id: 'c' }, 3)
+    reject(refusal('task_order_conflict'))
+
+    expect(await a).toMatchObject({ ok: false, conflict: true })
+    expect(await b).toMatchObject({ ok: false, conflict: true })
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('order response from a workspace the pane left is dropped', async () => {
+    const store = await loaded(3)
+    const slow = deferred<unknown>()
+    post.mockReturnValueOnce(slow.promise as never)
+    const pending = store.reorder('personal', 'ship', { before_id: null, after_id: null }, 3)
+    await Promise.resolve()
+    get.mockResolvedValue({ workspace: 'work', tasks: [], order: orderOf(9, []), order_error: null })
+    await store.reload('work')
+
+    slow.resolve({ ...stored(), order: orderOf(4, ['ship']), order_error: null })
+    await pending
+
+    expect(store.order.version).toBe(9)
+    expect(store.rows).toHaveLength(0)
+  })
+
+  it("remoteChangeEpoch increments for an external change and not for the store's own write reload", async () => {
+    const store = await loaded(3)
+    expect(store.remoteChangeEpoch).toBe(0)
+
+    get.mockResolvedValue(board(4))
+    await store.reload('personal')
+    expect(store.remoteChangeEpoch).toBe(1)
+
+    get.mockResolvedValue(board(4))
+    await store.reload('personal')
+    expect(store.remoteChangeEpoch).toBe(1)
+
+    post.mockRejectedValue(refusal('task_order_conflict'))
+    get.mockResolvedValue(board(7))
+    await store.reorder('personal', 'ship', { before_id: null, after_id: null }, 4)
+    expect(store.order.version).toBe(7)
+    expect(store.remoteChangeEpoch).toBe(1)
+  })
+
+  it('a placement queued behind another write sends the version read when it was asked', async () => {
+    const store = await loaded(3)
+    const first = deferred<unknown>()
+    patch.mockReturnValueOnce(first.promise as never)
+    patch.mockResolvedValueOnce({ ...stored({ status: 'in_review' }), order: orderOf(5), order_error: null })
+
+    const a = store.update('personal', 'ship', REVISION, { status: 'in_progress' }, undefined, {
+      before_id: null,
+      after_id: null,
+    })
+    const b = store.update('personal', 'ship', REVISION, { status: 'in_review' }, undefined, {
+      before_id: null,
+      after_id: null,
+    })
+    first.resolve({ ...stored({ status: 'in_progress' }), order: orderOf(4), order_error: null })
+    await a
+    await b
+
+    expect(patch).toHaveBeenCalledTimes(2)
+    expect(patch.mock.calls[0]![1]).toMatchObject({ placement: { expected_order_version: 3 } })
+    expect(patch.mock.calls[1]![1]).toMatchObject({ placement: { expected_order_version: 3 } })
+  })
+
+  it('rejects order writes locally while the order file is unreadable', async () => {
+    const store = useTaskBoardStore()
+    get.mockResolvedValue(board(-1, { order_error: 'task-order.json is not valid JSON' }))
+    await store.reload('personal')
+    expect(store.orderError).toBe('task-order.json is not valid JSON')
+
+    const moved = await store.reorder('personal', 'ship', { before_id: null, after_id: null }, -1)
+    const updated = await store.update('personal', 'ship', REVISION, { status: 'in_progress' }, undefined, {
+      before_id: null,
+      after_id: null,
+    })
+    const completed = await store.complete('personal', 'ship', REVISION, undefined, undefined, {
+      before_id: null,
+      after_id: null,
+    })
+
+    expect(moved).toEqual({ ok: false, conflict: false, message: 'task-order.json is not valid JSON' })
+    expect(updated).toBeNull()
+    expect(completed).toBeNull()
+    expect(store.error).toBe('task-order.json is not valid JSON')
+    expect(post).not.toHaveBeenCalled()
+    expect(patch).not.toHaveBeenCalled()
+  })
+})
