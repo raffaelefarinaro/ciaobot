@@ -774,7 +774,7 @@ describe('ProjectSidebar update badge', () => {
     const wrapper = await mountSidebar()
     await nextTick()
     const alert = wrapper.get('a[href="/schedules"] .nav-item-alert')
-    expect(alert.find('.activity-glyph--run-failed').exists()).toBe(true)
+    expect(alert.find('.activity-glyph--alert').exists()).toBe(true)
     wrapper.unmount()
   })
 

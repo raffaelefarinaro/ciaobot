@@ -47,7 +47,7 @@
         :aria-label="`Background run: ${outcome.text}. Show in Chat details`"
         @click="openDetails"
       >
-        <ActivityGlyph :kind="outcome.tone === 'error' ? 'run-failed' : 'run'" />
+        <ActivityGlyph :kind="outcome.tone === 'error' ? 'alert' : 'run'" />
         <span v-if="!compact" class="composer-activity-label">{{ outcome.text }}</span>
       </button>
     </div>

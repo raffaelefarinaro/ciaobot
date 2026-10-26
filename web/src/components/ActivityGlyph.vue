@@ -1,7 +1,7 @@
 <template>
   <span class="activity-glyph" :class="`activity-glyph--${kind}`" aria-hidden="true">
     <svg
-      v-if="kind === 'run-failed'"
+      v-if="kind === 'alert'"
       width="12"
       height="11"
       viewBox="0 0 16 14"
@@ -32,9 +32,10 @@
 // semantic colour. Running work is a 3x3 pixel grid whose lit pixel chases the
 // perimeter: a working turn (or its subagents) over a dim grid, a background
 // run as a lit hub with one pixel orbiting it and nothing else drawn.
-// Something broke is a filled alert triangle, still.
+// Anything that wants the owner (a question, a failure, a stuck pass) is a
+// filled alert triangle, still.
 // Decorative only: the caller owns the accessible name.
-export type ActivityGlyphKind = 'working' | 'run' | 'run-failed'
+export type ActivityGlyphKind = 'working' | 'run' | 'alert'
 defineProps<{ kind: ActivityGlyphKind }>()
 
 // Per kind, the chase step of each of the 9 cells in row-major order (-1 never
@@ -43,7 +44,7 @@ defineProps<{ kind: ActivityGlyphKind }>()
 const PIXEL_GRIDS = {
   working: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [0, 2, 4, 6, 8] },
   run: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [2, 4] },
-} satisfies Record<Exclude<ActivityGlyphKind, 'run-failed'>, { chase: number[]; still: number[] }>
+} satisfies Record<Exclude<ActivityGlyphKind, 'alert'>, { chase: number[]; still: number[] }>
 </script>
 
 <style scoped>
@@ -81,8 +82,8 @@ const PIXEL_GRIDS = {
 .activity-glyph-pixel--fixed { animation: none; }
 .activity-glyph--run .activity-glyph-pixel--fixed { opacity: 1; }
 
-/* Failure is a filled alert triangle with a knocked-out "!". */
-.activity-glyph--run-failed { color: var(--accent); }
+/* The alert: a filled triangle with a knocked-out "!". */
+.activity-glyph--alert { color: var(--accent); }
 .activity-glyph-knock { fill: var(--on-accent); }
 
 @keyframes activity-glyph-chase {

@@ -80,7 +80,7 @@ describe('ComposerActivity', () => {
     const seg = failed.get('.composer-activity-seg--outcome')
     expect(seg.classes()).toContain('composer-activity-seg--error')
     expect(seg.get('.composer-activity-label').text()).toBe('uv sync failed (exit 1)')
-    expect(seg.find('.activity-glyph--run-failed').exists()).toBe(true)
+    expect(seg.find('.activity-glyph--alert').exists()).toBe(true)
     await seg.trigger('click')
     expect(failed.emitted('open-details')).toHaveLength(1)
     failed.unmount()

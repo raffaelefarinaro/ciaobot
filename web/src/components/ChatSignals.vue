@@ -11,13 +11,14 @@
       aria-label="Needs your answer"
     >
       <span v-if="density === 'card'" class="chat-signal-label">needs you</span>
+      <ActivityGlyph v-else kind="alert" />
     </span>
     <span
       v-else-if="primarySignal === 'memory'"
       class="chat-signal chat-signal--memory"
       title="Memory pass needs you"
       aria-label="Memory pass needs you"
-    ><ActivityGlyph kind="run-failed" /></span>
+    ><ActivityGlyph kind="alert" /></span>
     <span
       v-else-if="primarySignal === 'working'"
       class="chat-signal chat-signal--working"
@@ -31,7 +32,7 @@
       class="chat-signal chat-signal--retry"
       title="Run failed, retry scheduled"
       aria-label="Run failed, retry scheduled"
-    ><ActivityGlyph kind="run-failed" /></span>
+    ><ActivityGlyph kind="alert" /></span>
     <!-- Not on the ladder: a run can outlive everything else on the row (a dev
          server goes for hours), so it shows beside needs-you and working
          instead of hiding behind them. -->
@@ -166,13 +167,6 @@ const scheduleTitle = computed(() => {
   line-height: 1;
 }
 
-.chat-signal--needs {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
 /* Unread is an eye in the row's accent, still: status takes the accent and
    shape carries the meaning, because a workspace accent can sit next to the
    semantic error red. */
@@ -192,8 +186,8 @@ const scheduleTitle = computed(() => {
    deliberately: the pill shape reads as a count badge, and counts mean something
    else in this vocabulary. */
 .chat-signals--card .chat-signal--needs {
-  width: auto;
   min-height: 20px;
+  background: var(--accent);
   padding: 0 var(--space-2);
   border-radius: var(--radius-xs);
   color: var(--bg);

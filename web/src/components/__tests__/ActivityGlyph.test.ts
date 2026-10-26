@@ -8,7 +8,7 @@ describe('ActivityGlyph', () => {
     const expected: Array<[ActivityGlyphKind, string]> = [
       ['working', ''],
       ['run', ''],
-      ['run-failed', ''],
+      ['alert', ''],
     ]
     for (const [kind, text] of expected) {
       const wrapper = mount(ActivityGlyph, { props: { kind } })
@@ -29,7 +29,7 @@ describe('ActivityGlyph', () => {
       const still = pixels.flatMap((p, i) => (p.classes('activity-glyph-pixel--still') ? [i] : []))
       expect(still, kind).toEqual(lit)
     }
-    expect(mount(ActivityGlyph, { props: { kind: 'run-failed' } }).find('svg').exists()).toBe(true)
+    expect(mount(ActivityGlyph, { props: { kind: 'alert' } }).find('svg').exists()).toBe(true)
     expect(mount(ActivityGlyph, { props: { kind: 'run' } }).find('svg').exists()).toBe(false)
   })
 })

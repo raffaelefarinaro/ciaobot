@@ -42,6 +42,12 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--needs').exists()).toBe(true)
     expect(wrapper.text()).toContain('needs you')
     expect(wrapper.find('.chat-signal--needs').attributes('aria-label')).toBe('Needs your answer')
+    expect(wrapper.find('.activity-glyph--alert').exists()).toBe(false)
+
+    // At row density needs-you is the alert triangle, the one mark for "wants you".
+    const row = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(row.find('.chat-signal--needs .activity-glyph--alert').exists()).toBe(true)
+    expect(row.find('.chat-signal-label').exists()).toBe(false)
   })
 
   // Working is the transcript's own activity pulse now, with no text label: the
@@ -149,7 +155,7 @@ describe('ChatSignals', () => {
     }] as unknown as typeof taskStore.schedules
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
     expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Run failed, retry scheduled')
-    expect(wrapper.find('.chat-signal--retry .activity-glyph--run-failed').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--retry .activity-glyph--alert').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--schedule .schedule-glyph').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--schedule').classes()).toContain('stopped')
     expect(wrapper.find('.chat-signal--schedule').attributes('aria-label')).toBe('An automation attached to this chat (paused)')
@@ -220,7 +226,7 @@ describe('ChatSignals', () => {
     expect(wrapper.find('.chat-signal--memory').attributes('aria-label')).toBe('Memory pass needs you')
     expect(wrapper.find('.chat-signal--memory').attributes('title')).toBe('Memory pass needs you')
     // Stuck memory is a failure like any other: the alert triangle, not a glyph of its own.
-    expect(wrapper.find('.chat-signal--memory .activity-glyph--run-failed').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--memory .activity-glyph--alert').exists()).toBe(true)
   })
 
   it('leaves the memory chip off a pass that is still running or done', () => {
