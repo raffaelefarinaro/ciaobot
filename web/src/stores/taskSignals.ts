@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../lib/api'
+import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 import { readableTasks, taskRowsFrom } from '../lib/taskBoard'
 import type { ChatInfo, Task } from '../lib/types'
 
@@ -28,6 +29,11 @@ function byTitleThenId(a: Task, b: Task): number {
 export const useTaskSignalsStore = defineStore('taskSignals', () => {
   const tasks = ref<Task[]>([])
   const loadedWorkspace = ref('')
+  /** Whether the read worked, for `healthWorkspace`. Reset to `checking` only
+   *  when the workspace changes, so a retry of a failed first read stays
+   *  `unavailable` instead of flickering. */
+  const health = ref<SourceHealth>(checkingHealth())
+  const healthWorkspace = ref('')
   let inflight: Promise<void> | null = null
   let inflightWorkspace = ''
   // A reload asked for while one is reading the same workspace. The read in
@@ -43,6 +49,10 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
       return inflight
     }
     inflightWorkspace = workspace
+    if (healthWorkspace.value !== workspace) {
+      healthWorkspace.value = workspace
+      health.value = checkingHealth()
+    }
     again = false
     if (workspace !== loadedWorkspace.value) {
       // Another workspace's rows are not this one's: task slugs collide across
@@ -65,8 +75,12 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
             if (inflight !== run) return
             tasks.value = readableTasks(taskRowsFrom(data))
             loadedWorkspace.value = workspace
-          } catch {
-            // Keep the last rows: a dropped read must not clear the counts.
+            health.value = readyHealth()
+          } catch (e) {
+            // Keep the last rows: a dropped read must not clear the counts. A
+            // read that was overtaken must not mark the current one stale.
+            if (inflight !== run) return
+            health.value = failedHealth(health.value, e)
           }
         } while (again && inflight === run)
       } finally {
@@ -168,6 +182,8 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
   return {
     tasks,
     loadedWorkspace,
+    health,
+    healthWorkspace,
     reload,
     taskForChat,
     isAwaitingReview,
