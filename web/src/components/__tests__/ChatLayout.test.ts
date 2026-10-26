@@ -18,6 +18,7 @@ import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { useFontScale } from '../../composables/useFontScale'
 import { homeNewChatProjectId, pendingNewChat } from '../../lib/newChat'
 import { terminalPanelWanted } from '../../lib/terminalPanel'
+import { pendingConfirm } from '../../lib/confirm'
 
 const toggleModelPicker = vi.fn()
 const handleSendShortcut = vi.fn(() => true)
@@ -3376,5 +3377,190 @@ describe('ChatLayout chat route without a catalog entry', () => {
       expect(fetchSchedules).not.toHaveBeenCalled()
       wrapper.unmount()
     })
+  })
+})
+
+describe('ChatLayout notifications view', () => {
+  class MemoryStorage {
+    private values = new Map<string, string>()
+    getItem(key: string): string | null { return this.values.get(key) ?? null }
+    setItem(key: string, value: string): void { this.values.set(key, value) }
+    removeItem(key: string): void { this.values.delete(key) }
+    clear(): void { this.values.clear() }
+  }
+
+  const SidebarStub = defineComponent({
+    name: 'ProjectSidebar',
+    props: { mode: { type: String, default: '' }, collapsed: { type: Boolean, default: false } },
+    emits: ['chat-selected', 'toggle', 'new-schedule'],
+    setup(_props, { emit }) {
+      return () => h('button', { 'data-testid': 'sidebar-stub', onClick: () => emit('chat-selected') })
+    },
+  })
+  const NotificationsStub = defineComponent({
+    name: 'NotificationsView',
+    setup() {
+      return () => h('div', { 'data-testid': 'notifications-pane' })
+    },
+  })
+
+  let router: ReturnType<typeof createRouter>
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+    localStorage.clear()
+    pendingConfirm.value = null
+    if (!Element.prototype.scrollIntoView) {
+      Element.prototype.scrollIntoView = () => {}
+    }
+  })
+
+  afterEach(() => {
+    pendingConfirm.value = null
+    vi.restoreAllMocks()
+  })
+
+  async function mountInbox(startPath = '/notifications', width = 1180) {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+    router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/settings', component: EmptyStub },
+        { path: '/schedules', component: EmptyStub },
+        { path: '/tasks', component: EmptyStub },
+        { path: '/memory', component: EmptyStub },
+        { path: '/notifications', component: EmptyStub },
+      ],
+    })
+    await router.push(startPath)
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '', default_provider: 'claude', gws_profile: '' },
+    ]
+    store.projects = [
+      { project_id: 'personal-project', name: 'General', workspace: 'personal' },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue(true)
+    const newChatInProject = vi.spyOn(store, 'newChatInProject').mockResolvedValue(undefined)
+    vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      attachTo: document.body,
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: SidebarStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+          MemoryMapView: EmptyStub,
+          NotificationsView: NotificationsStub,
+        },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+    return { wrapper, store, switchWorkspace, newChatInProject }
+  }
+
+  async function press(init: KeyboardEventInit, target?: EventTarget) {
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init })
+    ;(target ?? window).dispatchEvent(event)
+    await flushPromises()
+    return event
+  }
+
+  it('renders_the_notifications_pane_not_home', async () => {
+    const { wrapper } = await mountInbox()
+    expect(wrapper.find('[data-testid="notifications-pane"]').exists()).toBe(true)
+    expect(wrapper.find('.empty-shell').exists()).toBe(false)
+    expect(wrapper.findComponent(SidebarStub).props('mode')).toBe('notifications')
+    wrapper.unmount()
+  })
+
+  it('document_title_names_the_page', async () => {
+    const { wrapper } = await mountInbox()
+    expect(document.title).toContain('notifications')
+    wrapper.unmount()
+  })
+
+  it('option_arrow_walks_to_and_from_notifications', async () => {
+    const { wrapper } = await mountInbox('/memory')
+    await press({ key: 'ArrowRight', altKey: true })
+    expect(router.currentRoute.value.path).toBe('/notifications')
+    await press({ key: 'ArrowRight', altKey: true })
+    expect(router.currentRoute.value.path).toBe('/settings')
+    await press({ key: 'ArrowLeft', altKey: true })
+    expect(router.currentRoute.value.path).toBe('/notifications')
+    await press({ key: 'ArrowLeft', altKey: true })
+    expect(router.currentRoute.value.path).toBe('/memory')
+    wrapper.unmount()
+  })
+
+  it('escape_leaves_notifications_for_home', async () => {
+    const { wrapper } = await mountInbox()
+    await press({ key: 'Escape' })
+    expect(router.currentRoute.value.path).toBe('/')
+    wrapper.unmount()
+  })
+
+  it('chat_only_shortcuts_are_inert', async () => {
+    const { wrapper, newChatInProject } = await mountInbox()
+    await press({ key: 'n', code: 'KeyN', altKey: true })
+    expect(newChatInProject).not.toHaveBeenCalled()
+    await press({ key: 'ArrowRight' })
+    expect(router.currentRoute.value.path).toBe('/notifications')
+    wrapper.unmount()
+  })
+
+  it('workspace_number_keys_still_work_and_stay_on_the_page', async () => {
+    const { wrapper, switchWorkspace } = await mountInbox()
+    await press({ key: '2' })
+    expect(switchWorkspace).toHaveBeenCalledWith('work', { transition: false })
+    expect(router.currentRoute.value.path).toBe('/notifications')
+
+    switchWorkspace.mockClear()
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    await press({ key: '2' }, textarea)
+    expect(switchWorkspace).not.toHaveBeenCalled()
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  it('modal_precedence_unchanged', async () => {
+    const { wrapper, switchWorkspace } = await mountInbox()
+    pendingConfirm.value = { title: 'Sure?', message: 'x', resolve: () => {} } as unknown as typeof pendingConfirm.value
+    await flushPromises()
+    await press({ key: 'Escape' })
+    await press({ key: '2' })
+    expect(router.currentRoute.value.path).toBe('/notifications')
+    expect(switchWorkspace).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('direct_load_keeps_shell_and_mobile', async () => {
+    const { wrapper } = await mountInbox('/notifications', 390)
+    expect(wrapper.find('[data-testid="notifications-pane"]').exists()).toBe(true)
+    const sidebar = wrapper.findComponent(SidebarStub)
+    expect(sidebar.props('collapsed')).toBe(true)
+    sidebar.vm.$emit('chat-selected')
+    await nextTick()
+    expect(wrapper.findComponent(SidebarStub).props('collapsed')).toBe(true)
+    wrapper.unmount()
   })
 })

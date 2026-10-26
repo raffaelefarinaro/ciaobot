@@ -35,7 +35,7 @@ const inbox = useNotificationInboxStore()
           </template>
         </p>
 
-        <ul aria-label="Source status" class="notif-sources">
+        <ul v-if="inbox.sources.some(s => s.status !== 'ready')" aria-label="Source status" class="notif-sources">
           <template v-for="source in inbox.sources" :key="source.source">
             <li v-if="source.status !== 'ready'" :data-testid="`source-${source.source}`" class="notif-source">
               <span v-if="source.status === 'checking'">{{ source.label }}: checking...</span>
@@ -95,6 +95,7 @@ const inbox = useNotificationInboxStore()
 
 .notif-summary {
   margin: 0 0 12px;
+  padding-top: var(--space-4);
   color: var(--fg2);
   font-size: var(--text-sm);
 }
