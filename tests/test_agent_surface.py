@@ -271,11 +271,14 @@ def test_task_operations_register_reads_writes_and_destructive_delete(
         ), name
 
 
-def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path) -> None:
+def test_an_agent_can_file_and_move_a_task_but_completes_only_with_a_reason(
+    tmp_path: Path,
+) -> None:
     """The store's completion rule, end to end through the CLI surface.
 
-    Filing and moving work; completing does not, however it is spelled, and the
-    refusal leaves the record exactly where it was.
+    Filing and moving work; completing does not unless the user's reason comes
+    with it, however it is spelled, and a refusal leaves the record exactly
+    where it was.
     """
     service = _task_service(tmp_path)
     token = _token(service)
@@ -313,6 +316,15 @@ def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path
         )
         assert edited.json()["error"]["code"] == "task_completion_requires_user"
         assert _post(client, token, "task_get", {"task_id": task["id"]}).json()["data"]["status"] == "in_progress"
+
+        # With the user's reason, `complete` is the one route that closes it.
+        done = _post(
+            client, token, "task_action",
+            {"action": "complete", "task_id": task["id"], "expected_revision": revision,
+             "reason": "The user said it shipped."},
+        )
+        assert done.status_code == 200, done.text
+        assert done.json()["data"]["status"] == "done"
 
 
 def test_a_stale_task_revision_is_a_retryable_refusal_over_the_cli(tmp_path: Path) -> None:
@@ -366,16 +378,25 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         assert response.json()["error"]["code"] == "plan_mode_read_only"
 
 
-def test_task_delete_cli_mapping() -> None:
-    """One task id and the revision read with it; nothing that widens the blast radius."""
+def test_task_delete_cli_mapping(tmp_path: Path) -> None:
+    """One task id, the revision read with it and the user's reason; nothing that widens the blast radius."""
     parser = agent_cli.build_parser()
+    reason = tmp_path / "why.txt"
+    reason.write_text("I never use it.", encoding="utf-8")
     assert agent_cli.resolve(
-        parser.parse_args(["task", "delete", "a" * 32, "--revision", "rev1"])
-    ) == ("task_delete", {"task_id": "a" * 32, "expected_revision": "rev1"})
+        parser.parse_args(
+            ["task", "delete", "a" * 32, "--revision", "rev1", "--reason-file", str(reason)]
+        )
+    ) == (
+        "task_delete",
+        {"task_id": "a" * 32, "expected_revision": "rev1", "reason": "I never use it."},
+    )
 
     for argv in (
-        ["task", "delete", "a" * 32],
-        ["task", "delete", "--revision", "rev1"],
+        ["task", "delete", "a" * 32, "--reason-file", str(reason)],
+        ["task", "delete", "--revision", "rev1", "--reason-file", str(reason)],
+        # The reason is required on the agent surface.
+        ["task", "delete", "a" * 32, "--revision", "rev1"],
     ):
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(argv)
@@ -383,9 +404,32 @@ def test_task_delete_cli_mapping() -> None:
     for flag in ("--force", "--workspace", "--path"):
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(
-                ["task", "delete", "a" * 32, "--revision", "rev1", flag, "x"]
+                ["task", "delete", "a" * 32, "--revision", "rev1",
+                 "--reason-file", str(reason), flag, "x"]
             )
         assert excinfo.value.code == 2
+
+
+def test_task_complete_cli_requires_a_reason(tmp_path: Path) -> None:
+    parser = agent_cli.build_parser()
+    reason = tmp_path / "why.txt"
+    reason.write_text("The user said it shipped.", encoding="utf-8")
+    assert agent_cli.resolve(
+        parser.parse_args(
+            ["task", "complete", "a" * 32, "--revision", "rev1", "--reason-file", str(reason)]
+        )
+    ) == (
+        "task_action",
+        {
+            "action": "complete",
+            "task_id": "a" * 32,
+            "expected_revision": "rev1",
+            "reason": "The user said it shipped.",
+        },
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["task", "complete", "a" * 32, "--revision", "rev1"])
+    assert excinfo.value.code == 2
 
 
 def test_task_delete_is_destructive_and_mutating(tmp_path: Path) -> None:
@@ -405,7 +449,7 @@ def test_task_delete_is_destructive_and_mutating(tmp_path: Path) -> None:
             client,
             token,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert response.status_code == 200, response.text
         assert response.json() == {
@@ -441,7 +485,7 @@ def test_an_unattended_turn_cannot_delete_task(tmp_path: Path) -> None:
             client,
             token,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert refused.status_code == 422
         assert refused.json()["error"]["code"] == "unattended_forbidden"
@@ -453,7 +497,7 @@ def test_an_unattended_turn_cannot_delete_task(tmp_path: Path) -> None:
             client,
             token,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert allowed.status_code == 200, allowed.text
         assert allowed.json()["data"] == {"id": created["id"], "deleted": True}
@@ -479,7 +523,7 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             client,
             token,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert denied.status_code == 422
         assert denied.json()["error"]["code"] == "plan_mode_read_only"
@@ -489,7 +533,7 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             client,
             "",
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert unauthenticated.status_code == 401
         assert unauthenticated.json()["error"]["code"] == "unauthorized"
@@ -501,7 +545,7 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             client,
             other_workspace,
             "task_delete",
-            {"task_id": created["id"], "expected_revision": created["revision"]},
+            {"task_id": created["id"], "expected_revision": created["revision"], "reason": "user asked"},
         )
         assert cross.status_code == 422
         assert cross.json()["error"]["code"] == "task_not_found"
@@ -611,16 +655,8 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "status": "in_review"}),
         ),
         (
-            ["task", "delete", "a1b2", "--revision", "rev1"],
-            ("task_delete", {"task_id": "a1b2", "expected_revision": "rev1"}),
-        ),
-        (
             ["task", "move", "a1b2", "--to", "in_progress", "--revision", "rev1"],
             ("task_action", {"action": "move", "task_id": "a1b2", "status": "in_progress", "expected_revision": "rev1"}),
-        ),
-        (
-            ["task", "complete", "a1b2", "--revision", "rev1"],
-            ("task_action", {"action": "complete", "task_id": "a1b2", "expected_revision": "rev1"}),
         ),
         (
             ["task", "link-chat", "a" * 32, "--revision", "r"],
@@ -719,9 +755,9 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
         "project complete": ["p"], "project delete": ["p"], "task create": ["--title", "t"],
         "task get": ["a" * 32], "task update": ["a" * 32, "--revision", "r"],
-        "task delete": ["a" * 32, "--revision", "r"],
+        "task delete": ["a" * 32, "--revision", "r", "--reason-file", str(summary)],
         "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
-        "task complete": ["a" * 32, "--revision", "r"],
+        "task complete": ["a" * 32, "--revision", "r", "--reason-file", str(summary)],
         "task delegate": ["a" * 32, "--revision", "r"],
         "task add-update": ["a" * 32, "--revision", "r", "--text-file", str(summary)],
         "task link-chat": ["a" * 32, "--revision", "r"],
@@ -1437,23 +1473,10 @@ def test_reason_file_refuses_a_credential_adjacent_path(tmp_path: Path) -> None:
     assert "--reason-file" in str(excinfo.value)
 
 
-def test_no_reason_file_sends_no_reason_key() -> None:
+def test_attempt_without_a_reason_file_sends_no_reason_key() -> None:
     parser = agent_cli.build_parser()
-    _name, deleted = agent_cli.resolve(
-        parser.parse_args(["task", "delete", "a" * 32, "--revision", "rev1"])
-    )
     _name, attempt = agent_cli.resolve(parser.parse_args(["task", "attempt", "b" * 32, "detach"]))
-    assert "reason" not in deleted
     assert "reason" not in attempt
-
-
-def test_task_complete_has_no_reason_flag() -> None:
-    parser = agent_cli.build_parser()
-    with pytest.raises(SystemExit) as excinfo:
-        parser.parse_args(
-            ["task", "complete", "a" * 32, "--revision", "rev1", "--reason-file", "x"]
-        )
-    assert excinfo.value.code == 2
 
 
 def test_mcp_task_attempt_action_refuses_a_reason_on_non_detach(tmp_path: Path) -> None:

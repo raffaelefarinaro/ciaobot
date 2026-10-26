@@ -164,7 +164,8 @@ is waiting for the user's decision, and continuing it is the reviewer's call.
 **Board state is not execution state.** None of these states is a column. A
 turn the agent reported done moves the card to *In review* (#1069), and only
 the user's own completion action moves it to `Done`. The store's
-`completion_requires_user` rule is unchanged by any of this.
+`completion_requires_user` rule is unchanged by any of this: an agent never
+approves a delegated result.
 
 The review badge moves the task's revision, so the watcher rebinds the attempt to
 the revision that write left behind (`bind_revision`). An attempt's `task_revision`
@@ -421,8 +422,12 @@ conflict, not a silent overwrite.
 These bind `update` through the managed API, not direct file editors —
 a hand edit may hold any schema-valid state:
 
-- An `agent` caller cannot set status `done` (`completion_requires_user`).
-  A `user` can complete a manual (unlinked) task.
+- An `agent` caller can set status `done` only on a write that carries a
+  non-empty `resolution`, the user's reason for closing it (otherwise
+  `completion_requires_user`). The agent CLI reaches this only through
+  `task complete --reason-file`; `update --status done` and `move --to done`
+  carry no resolution and stay refused. A `user` can complete a manual
+  (unlinked) task with or without one.
 - A task linked to a live chat or attempt (`chat_id`/`attempt_id`
   non-null) cannot be completed or reassigned here at all — by **any** actor,
   including the signed-in user's own session, because a turn is in flight. The

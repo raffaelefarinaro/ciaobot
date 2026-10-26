@@ -125,6 +125,24 @@ def test_task_digest_uses_actor_user_only(tmp_path: Path) -> None:
     assert _group(section, "state:ready")["accepted"] == 1
 
 
+def test_agent_rows_with_a_reason_are_operator_evidence(tmp_path: Path) -> None:
+    # An agent delete or completion made on the user's request carries the
+    # user's words; one with no reason stays a bare agent count.
+    _task(tmp_path, actor="agent", via="cli", task_id="t1", reason="stale, I never use it")
+    _task(tmp_path, actor="agent", via="cli", task_id="t2")
+    _task(tmp_path, kind="complete", actor="agent", via="cli", task_id="t3", reason="shipped it")
+    _task(tmp_path, kind="complete", actor="agent", via="cli", task_id="t4")
+    _task(tmp_path, kind="reject", actor="agent", via="cli", task_id="t5", reason="not a delete")
+    section = dr.build_digest(tmp_path, today=TODAY)["task"]
+    assert section["rows"] == 2
+    assert section["agent_counts"] == {"delete": 1, "complete": 1, "reject": 1}
+    assert _group(section, "kind:delete:agent")["n"] == 1
+    assert _group(section, "kind:complete:agent")["n"] == 1
+    # A completion is the user closing a task, so it sits on the keep side.
+    assert _group(section, "kind:complete:agent")["accepted"] == 1
+    assert _group(section, "kind:delete:agent")["dismissed"] == 1
+
+
 def test_digest_window_drops_old_rows(tmp_path: Path) -> None:
     _memory(
         tmp_path,

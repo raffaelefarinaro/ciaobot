@@ -70,7 +70,7 @@ When onboarding someone, walk through these hands-on:
 3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews.
 4. **Memory** — archive → memory pass; confident facts are filed, unsure ones wait, and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept).
 5. **Schedules** — set up one small routine they'd actually use.
-6. **Task board** — file one task with a due date, open it and press **Delegate to agent**, watch the badge go running, open the chat it works in, then **Approve Done** when the result lands. The step worth stopping on is that the agent's turn finishing never marks the task done: that gesture is theirs.
+6. **Task board** — file one task with a due date, open it and press **Delegate to agent**, watch the badge go running, open the chat it works in, then **Approve Done** when the result lands. The step worth stopping on is that the agent's turn finishing never marks the task done: that gesture is theirs (an agent can close a manual task only when you tell it the task is done).
 7. **Webhooks** — point an external system at one trigger URL, if they have something that reports events.
 8. **Settings** — models & providers, package updates, and the engine's own service controls.
 

@@ -5,8 +5,8 @@ A task record says *what* is wanted; this module says *whether an agent is
 working on it right now, in which chat, and how far it got*. The board's four
 columns and this module's states are deliberately different vocabularies: a
 column is a place a task sits, a state is the execution of one attempt, and a
-finished turn is ``ready_for_review`` rather than ``done`` — completion is the
-user's act, and the store refuses it (``completion_requires_user``).
+finished turn is ``ready_for_review`` rather than ``done`` — approving it is
+the user's act, and an agent completion of a linked task is refused.
 
 Five rules, and each of them is a refusal somebody could otherwise have taken:
 

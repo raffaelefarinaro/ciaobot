@@ -178,8 +178,14 @@ def _split_reason(reason: str, chips: tuple[str, ...]) -> tuple[list[str], str]:
 # ── Digest ────────────────────────────────────────────────────────────────
 
 
+# How a task decision kind reads in the digest. A completion is the user closing
+# a task as done, so it counts on the keep side with an approval; every other
+# kind (a delete, a reject) is a dismissal.
+_TASK_ACTIONS = {"approve": "accepted", "complete": "completed"}
+
+
 def _group(key: str, entries: list[dict[str, str]]) -> dict[str, Any]:
-    accepted = sum(1 for e in entries if e["action"] == "accepted")
+    accepted = sum(1 for e in entries if e["action"] in ("accepted", "completed"))
     n = len(entries)
     dismissed = n - accepted
     lean = "mixed"
@@ -251,10 +257,18 @@ def _entries_task(
         if day is None or day < cutoff:
             continue
         actor = row.get("actor")
-        if actor == "user":
+        kind = str(row.get("kind", ""))
+        # An agent delete or completion that carries a reason was done on the
+        # user's explicit request and holds their words, so it is operator
+        # evidence; any other agent row is only counted.
+        on_request = (
+            actor == "agent"
+            and kind in ("delete", "complete")
+            and bool(str(row.get("reason", "")).strip())
+        )
+        if actor == "user" or on_request:
             operator.append({**row, "_day": day.isoformat()})
         elif actor == "agent":
-            kind = str(row.get("kind", ""))
             agent[kind] = agent.get(kind, 0) + 1
     return operator, agent
 
@@ -286,7 +300,7 @@ def _section(
             keys = [f"kind:{label}"]
         else:
             label = str(row.get("kind", ""))
-            action = "accepted" if label == "approve" else "dismissed"
+            action = _TASK_ACTIONS.get(label, "dismissed")
             text_raw = str(row.get("task_title", ""))
             fp_rows.append((str(row.get("at", "")), label, action, str(row.get("task_id", "")), reason))
             keys = [f"kind:{label}:{row.get('task_created_by', '')}"]

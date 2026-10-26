@@ -542,7 +542,7 @@ def test_agent_task_delete_removes_only_the_requested_record(tmp_path: Path) -> 
     )
 
     removed = plane.task_delete(
-        principal, doomed["id"], expected_revision=linked["revision"]
+        principal, doomed["id"], expected_revision=linked["revision"], reason="user asked"
     )
 
     assert removed == {
@@ -570,7 +570,7 @@ def test_agent_task_delete_refuses_an_unattended_turn(tmp_path: Path) -> None:
 
     with pytest.raises(ControlPlaneError) as excinfo:
         plane.task_delete(
-            principal, created["id"], expected_revision=created["revision"]
+            principal, created["id"], expected_revision=created["revision"], reason="user asked"
         )
     assert excinfo.value.code == "unattended_forbidden"
     assert path.read_bytes() == before
@@ -578,7 +578,7 @@ def test_agent_task_delete_refuses_an_unattended_turn(tmp_path: Path) -> None:
     # The guard reads the current turn: an attended turn may still delete.
     chat.user_turn_unattended = {}
     removed = plane.task_delete(
-        principal, created["id"], expected_revision=created["revision"]
+        principal, created["id"], expected_revision=created["revision"], reason="user asked"
     )
     assert removed["data"] == {"id": created["id"], "deleted": True}
     assert not path.exists()
@@ -595,14 +595,16 @@ def test_agent_task_delete_is_workspace_scoped(tmp_path: Path) -> None:
 
     with pytest.raises(ControlPlaneError) as excinfo:
         plane.task_delete(
-            personal, theirs["id"], expected_revision=theirs["revision"]
+            personal, theirs["id"], expected_revision=theirs["revision"], reason="user asked"
         )
     assert excinfo.value.code == "task_not_found"
     assert plane.task_get(work, theirs["id"])["data"]["title"] == "Work"
 
     for task_id in ("../keep-me", "chat-1"):
         with pytest.raises(ControlPlaneError) as excinfo:
-            plane.task_delete(personal, task_id, expected_revision=mine["revision"])
+            plane.task_delete(
+                personal, task_id, expected_revision=mine["revision"], reason="user asked"
+            )
         assert excinfo.value.code == "task_invalid", task_id
     assert outside.read_text(encoding="utf-8") == "not a task\n"
     assert plane.task_get(personal, mine["id"])["data"]["title"] == "Personal work"
@@ -615,7 +617,7 @@ def test_agent_task_delete_requires_current_revision(tmp_path: Path) -> None:
     path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
 
     with pytest.raises(ControlPlaneError) as excinfo:
-        plane.task_delete(principal, created["id"], expected_revision="  ")
+        plane.task_delete(principal, created["id"], expected_revision="  ", reason="user asked")
     assert excinfo.value.code == "task_invalid"
     assert path.is_file()
 
@@ -627,20 +629,20 @@ def test_agent_task_delete_requires_current_revision(tmp_path: Path) -> None:
     )["data"]
     with pytest.raises(ControlPlaneError) as excinfo:
         plane.task_delete(
-            principal, created["id"], expected_revision=created["revision"]
+            principal, created["id"], expected_revision=created["revision"], reason="user asked"
         )
     assert excinfo.value.code == "task_revision_conflict"
     assert excinfo.value.retryable is True
     assert path.is_file()
 
     removed = plane.task_delete(
-        principal, created["id"], expected_revision=updated["revision"]
+        principal, created["id"], expected_revision=updated["revision"], reason="user asked"
     )
     assert removed["data"] == {"id": created["id"], "deleted": True}
     assert not path.exists()
     with pytest.raises(ControlPlaneError) as excinfo:
         plane.task_delete(
-            principal, created["id"], expected_revision=updated["revision"]
+            principal, created["id"], expected_revision=updated["revision"], reason="user asked"
         )
     assert excinfo.value.code == "task_not_found"
 
@@ -696,8 +698,9 @@ def test_a_resolution_is_the_users_and_only_on_a_done_task(tmp_path: Path) -> No
     plane = _world(tmp_path)
     task = _create(plane, "personal", title="Mine to close")
 
-    # The agent surface has no resolution parameter, and the shared update
-    # path refuses one from an agent actor.
+    # The agent surface has no resolution parameter (`task_action complete`
+    # takes a reason and turns it into one), and the shared update path refuses
+    # one from an agent unless the write completes the task.
     assert "resolution" not in inspect.signature(plane.task_action).parameters
     with pytest.raises(ControlPlaneError) as excinfo:
         _update(
@@ -875,3 +878,190 @@ def test_a_failing_decision_append_does_not_fail_the_delete(
     )
     assert result["deleted"] is True
     assert not (_tasks_dir(plane, "personal") / f"{created['id']}.md").exists()
+
+
+# ── Agent delete and complete take the user's reason (#2068, #2069) ───────
+
+
+def test_agent_task_delete_needs_a_reason_and_keeps_the_task_without_one(
+    tmp_path: Path,
+) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Keep until asked")["data"]
+    path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
+    for reason in ("", "   \n"):
+        with pytest.raises(ControlPlaneError) as excinfo:
+            plane.task_delete(
+                principal, created["id"], expected_revision=created["revision"], reason=reason
+            )
+        assert excinfo.value.code == "invalid_task"
+        assert "reason is required" in str(excinfo.value)
+        assert path.is_file()
+    assert read_decisions(plane.config.workspace_vault_root("personal")) == []
+
+    plane.task_delete(
+        principal, created["id"], expected_revision=created["revision"],
+        reason="  It is a duplicate, drop it.  ",
+    )
+    rows = read_decisions(plane.config.workspace_vault_root("personal"))
+    assert [(r["kind"], r["actor"], r["reason"]) for r in rows] == [
+        ("delete", "agent", "It is a duplicate, drop it.")
+    ]
+
+
+def _bind_loop_and_queue(plane: CiaoControlPlane) -> tuple[list[dict[str, Any]], Any]:
+    """Give the plane an engine loop and a recording learning-pass queue."""
+    import asyncio
+    import threading
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    plane._loop = loop
+    queued: list[dict[str, Any]] = []
+
+    def enqueue(**kwargs: Any) -> str:
+        queued.append(kwargs)
+        return "memory-chat-1"
+
+    plane.pcm.enqueue_task_completion = enqueue
+
+    def stop() -> None:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+    return queued, stop
+
+
+def test_agent_complete_with_a_reason_closes_records_and_learns(tmp_path: Path) -> None:
+    import time
+
+    plane = _world(tmp_path)
+    queued, stop = _bind_loop_and_queue(plane)
+    principal = _principal()
+    try:
+        created = plane.task_create(principal, title="Ship the board")["data"]
+        done = plane.task_action(
+            principal, "complete", created["id"],
+            expected_revision=created["revision"], reason="  Shipped on Friday.  ",
+        )["data"]
+        assert done["status"] == "done"
+        assert [c["resolution"] for c in _get(plane, "personal", created["id"])["completions"]] == [
+            "Shipped on Friday."
+        ]
+        rows = read_decisions(plane.config.workspace_vault_root("personal"))
+        assert [(r["kind"], r["actor"], r["via"], r["reason"], r["task_id"]) for r in rows] == [
+            ("complete", "agent", "cli", "Shipped on Friday.", created["id"])
+        ]
+        for _ in range(200):
+            if queued:
+                break
+            time.sleep(0.01)
+        assert [q["resolution"] for q in queued] == ["Shipped on Friday."]
+    finally:
+        stop()
+
+
+def test_agent_complete_without_a_reason_is_refused_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Not yet")["data"]
+    path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
+    before = path.read_bytes()
+    for reason in (None, "", "  "):
+        with pytest.raises(ControlPlaneError) as excinfo:
+            plane.task_action(
+                principal, "complete", created["id"],
+                expected_revision=created["revision"], reason=reason,
+            )
+        assert excinfo.value.code == "task_completion_requires_user"
+        assert "reason is required" in str(excinfo.value)
+        assert path.read_bytes() == before
+    assert read_decisions(plane.config.workspace_vault_root("personal")) == []
+
+
+def test_agent_move_to_done_stays_refused(
+    tmp_path: Path,
+) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Only complete closes it")["data"]
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_action(
+            principal, "move", created["id"],
+            expected_revision=created["revision"], status="done",
+        )
+    assert excinfo.value.code == "task_completion_requires_user"
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_action(
+            principal, "move", created["id"],
+            expected_revision=created["revision"], status="done", reason="done",
+        )
+    assert excinfo.value.code == "invalid_action"
+    assert _get(plane, "personal", created["id"])["status"] == "backlog"
+
+
+def test_agent_cannot_reword_a_past_completion(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    created = _create(plane, "personal", title="Closed by the user")
+    done = _action(
+        plane, "personal", "complete", created["id"],
+        expected_revision=created["revision"], actor="user", resolution="Done by me.",
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _update(
+            plane, "personal", created["id"],
+            expected_revision=done["revision"], changes={}, resolution="Rewritten.",
+            actor="agent",
+        )
+    assert excinfo.value.code == "task_completion_requires_user"
+    assert [c["resolution"] for c in _get(plane, "personal", created["id"])["completions"]] == [
+        "Done by me."
+    ]
+
+
+def test_agent_complete_is_refused_on_a_linked_task(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Being worked")["data"]
+    path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("attempt_id: null", "attempt_id: att-1"),
+        encoding="utf-8",
+    )
+    linked = _get(plane, "personal", created["id"])
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_action(
+            principal, "complete", created["id"],
+            expected_revision=linked["revision"], reason="The user said so.",
+        )
+    assert excinfo.value.code == "task_invalid"
+    assert "approves" in str(excinfo.value)
+    assert _get(plane, "personal", created["id"])["status"] == "backlog"
+    assert read_decisions(plane.config.workspace_vault_root("personal")) == []
+
+
+def test_agent_complete_refuses_an_unattended_turn(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Not from a schedule")["data"]
+    chat = plane.pcm.get_chat("chat-1")
+    chat.user_turn_count = 2
+    chat.user_turn_unattended = {"1": True}
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_action(
+            principal, "complete", created["id"],
+            expected_revision=created["revision"], reason="The user said so.",
+        )
+    assert excinfo.value.code == "unattended_forbidden"
+    assert _get(plane, "personal", created["id"])["status"] == "backlog"
+    # Moving a column is not completion: an unattended turn may still do that.
+    moved = plane.task_action(
+        principal, "move", created["id"],
+        expected_revision=created["revision"], status="in_progress",
+    )
+    assert moved["data"]["status"] == "in_progress"
