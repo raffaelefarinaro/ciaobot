@@ -26,12 +26,12 @@ The steps are deliberately ordered so a refusal leaves nothing installed:
 5. :func:`ciao.server_host.verify_owned_host` must accept the installed bundle
    and the record.
 
-A **superseded** host — the one revision this engine replaces — is the one
+A **superseded** host — one of the revisions this engine replaces — is the one
 bundle that may already be at the target: :func:`ciao.server_host.verify_superseded_host`
 proves it is ours from the same private record, and the install then moves it
 aside, writes the new record, and renames the new bundle in. Without that path
 a host revision bump would silently de-install the host on every existing Mac:
-the revision-2 record is refused, the installer says "a host already exists",
+a revision-2 or -3 record is refused, the installer says "a host already exists",
 and the engine install continues with no host at all (#1659). The replaced host
 and its old record are put back if anything fails, so a failed replacement
 leaves the Mac exactly as it was.

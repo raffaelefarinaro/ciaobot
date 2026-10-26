@@ -257,9 +257,9 @@ def test_identity_is_distinct_from_pwa_retired_and_experiment() -> None:
 def test_revision_is_independent_of_engine_version() -> None:
     info = BUILD.bundle_info()
     # The bundle version expresses the host revision, never the engine release.
-    assert BUILD.HOST_REVISION == 3
-    assert info["CFBundleVersion"] == "3"
-    assert info["CFBundleShortVersionString"] == "3"
+    assert BUILD.HOST_REVISION == 4
+    assert info["CFBundleVersion"] == "4"
+    assert info["CFBundleShortVersionString"] == "4"
     assert info[BUILD.HOST_PROTOCOL_KEY] == 2
     assert info["LSMinimumSystemVersion"] == "13.0"
 
@@ -373,7 +373,7 @@ def test_a_bundle_with_the_folder_usage_strings_still_verifies(
         plistlib.dump(BUILD.bundle_info(), handle)
 
     snapshot = server_host.inspect_host_bundle(bundle, runner=_plist_runner())
-    assert snapshot.host_revision == 3
+    assert snapshot.host_revision == 4
     assert snapshot.host_protocol == 2
     # The sealed plist really carries the new keys.
     plist_bytes = (bundle / "Contents" / "Info.plist").read_bytes()
@@ -579,7 +579,7 @@ def test_injected_build_order_and_metadata(tmp_path: Path) -> None:
 
     metadata = result["metadata"]
     assert metadata["bundle_id"] == "local.ciaobot.server"
-    assert metadata["host_revision"] == 3
+    assert metadata["host_revision"] == 4
     assert metadata["host_protocol"] == 2
     assert metadata["minimum_system_version"] == "13.0"
     assert metadata["architectures"] == ["arm64", "x86_64"]
@@ -690,8 +690,8 @@ def test_the_built_app_carries_the_folder_usage_strings(tmp_path: Path) -> None:
     with (app / "Contents" / "Info.plist").open("rb") as handle:
         info = plistlib.load(handle)
 
-    assert info["CFBundleVersion"] == "3"
-    assert info["CFBundleShortVersionString"] == "3"
+    assert info["CFBundleVersion"] == "4"
+    assert info["CFBundleShortVersionString"] == "4"
     for key, folder in _FOLDER_USAGE_KEYS.items():
         text = info[key]
         assert isinstance(text, str)
@@ -1350,6 +1350,130 @@ def test_host_stop_during_startup_launches_nothing(host_binary: Path, tmp_path: 
                     os.kill(pid, signal.SIGKILL)
     if handled == 0:
         pytest.skip("no stop landed inside the startup window on this machine")
+
+
+# The deterministic startup-stop tests need the host's main queue held between
+# the first event-loop turn and the launch, which cannot be done from outside
+# the process. They compile a copy of the shipped source with a pause inserted at
+# that one point; the shipped host has no such hook. The transformation anchors on
+# the exact launch block and fails if it moves.
+_LAUNCH_BLOCK = "DispatchQueue.main.async { self?.launch() }"
+_PAUSE_BLOCK = (
+    "DispatchQueue.main.async {\n"
+    "                if let base = getenv(\"HOST_PAUSE\") {\n"
+    "                    let prefix = String(cString: base)\n"
+    "                    close(open(prefix + \".paused\", O_WRONLY | O_CREAT, 0o644))\n"
+    "                    while access(prefix + \".go\", F_OK) != 0 { usleep(1000) }\n"
+    "                }\n"
+    "                self?.launch()\n"
+    "            }"
+)
+
+
+@pytest.fixture(scope="module")
+def paused_host_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if not HAS_TOOLS:
+        pytest.skip("the native host build requires macOS Command Line Tools")
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    assert source.count(_LAUNCH_BLOCK) == 1, "the launch block moved; update the pause anchor"
+    workdir = tmp_path_factory.mktemp("server-host-paused")
+    patched = workdir / "ServerHostPaused.swift"
+    patched.write_text(source.replace(_LAUNCH_BLOCK, _PAUSE_BLOCK), encoding="utf-8")
+    binary = workdir / "Ciaobot Server"
+    completed = subprocess.run(
+        ["xcrun", "swiftc", str(patched), "-target", _host_target(), "-O", "-o", str(binary)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return binary
+
+
+def _start_paused_host(binary: Path, child: Path, prefix: Path) -> subprocess.Popen[Any]:
+    host = subprocess.Popen(
+        [str(binary), "serve", "--python", str(child)],
+        env=_child_env(HOST_PAUSE=prefix),
+    )
+    assert _wait_for(lambda: Path(f"{prefix}.paused").exists(), 30), "host never reached the launch"
+    return host
+
+
+@requires_macos_tools
+def test_host_startup_stop_precedes_child_launch(
+    paused_host_binary: Path, tmp_path: Path
+) -> None:
+    # The host's main queue is held after the launch block was queued, so the
+    # signal source cannot run its handler. A stop sent now is pending, not yet
+    # handled, when the launch decision is made, and must still win: no fork.
+    pids = tmp_path / "launched.pids"
+    child = _write_fake_child(
+        tmp_path, f"#!/bin/sh\necho $$ >> \"{pids}\"\nexec sleep 30\n"
+    )
+    prefix = tmp_path / "pause"
+    host = _start_paused_host(paused_host_binary, child, prefix)
+    queue = select.kqueue()
+    try:
+        queue.control(
+            [
+                select.kevent(
+                    host.pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD,
+                    fflags=select.KQ_NOTE_FORK | select.KQ_NOTE_EXIT,
+                )
+            ],
+            0,
+        )
+        host.send_signal(signal.SIGTERM)
+        # kill() records the signal in the host's kqueue synchronously, and the
+        # main queue is blocked, so releasing the launch now is deterministic.
+        Path(f"{prefix}.go").touch()
+        events: list[Any] = []
+        while not any(event.fflags & select.KQ_NOTE_EXIT for event in events):
+            batch = queue.control(None, 8, 30)
+            assert batch, "host did not exit after the stop"
+            events.extend(batch)
+        assert host.wait(timeout=5) == 0
+        assert not _host_forked(events), "a child was launched although a stop was pending"
+        assert not pids.exists()
+    finally:
+        queue.close()
+        _terminate_exact(host)
+
+
+@requires_macos_tools
+def test_host_startup_launch_then_stop_reaps_its_child(
+    paused_host_binary: Path, tmp_path: Path
+) -> None:
+    # The opposite ordering: the launch decision is made with no stop pending, the
+    # child starts, and the stop that follows is forwarded, the child reaped and the
+    # host exits 0. Not a startup violation.
+    pids = tmp_path / "launched.pids"
+    got_term = tmp_path / "got_term"
+    ready = tmp_path / "ready"
+    child = _write_fake_child(
+        tmp_path,
+        f"#!/bin/sh\ntrap 'touch \"{got_term}\"; exit 0' TERM\n"
+        f"echo $$ >> \"{pids}\"\ntouch \"{ready}\"\n"
+        "while :; do sleep 0.1; done\n",
+    )
+    prefix = tmp_path / "pause"
+    host = _start_paused_host(paused_host_binary, child, prefix)
+    child_pid = 0
+    try:
+        Path(f"{prefix}.go").touch()
+        # The child touches `ready` only after its trap is installed.
+        assert _wait_for(ready.exists, 10), "the child never became ready"
+        child_pid = int(pids.read_text().split()[0])
+        host.send_signal(signal.SIGTERM)
+        assert host.wait(timeout=45) == 0
+        assert got_term.exists(), "the child never received the forwarded stop"
+        assert _await_dead(child_pid)
+    finally:
+        _terminate_exact(host)
+        if child_pid and _pid_alive(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
 
 
 def _host_forked(events: list[Any]) -> bool:

@@ -403,7 +403,7 @@ def test_manifest_with_host_signed_round_trip(tmp_path: Path) -> None:
         ("host_protocol", 3),
         ("host_protocol", None),
         ("host_revision", True),
-        ("host_revision", 4),
+        ("host_revision", 5),
         ("host_revision", None),
         ("size", 0),
         ("size", -1),
@@ -433,7 +433,7 @@ def test_verify_manifest_accepts_an_unsupported_host_beside_the_wheel() -> None:
     priv, public_key, key_id = _keypair()
     future_host = _host_entry(
         filename="ciaobot-server-host-macos-universal-v2.tar.gz",
-        host_revision=4,
+        host_revision=5,
         host_protocol=3,
     )
     document = build_manifest(

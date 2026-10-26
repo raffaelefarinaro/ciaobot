@@ -312,6 +312,11 @@ final class ChildController {
     private var signalSources: [DispatchSourceSignal] = []
     private var escalation: DispatchSourceTimer?
     private var stopRequested = false
+    /// A private kqueue that counts SIGTERM/SIGINT from the moment `begin`
+    /// registers it. The dispatch signal sources deliver on the main queue, so
+    /// a stop that arrives after the launch block is queued would run after it;
+    /// this queue is read synchronously by `launch` instead.
+    private var stopQueue: Int32 = -1
 
     init(python: String, childName: String, spawn: @escaping () -> SpawnOutcome) {
         self.python = python
@@ -330,6 +335,26 @@ final class ChildController {
     /// therefore queued again from the first main-queue turn: by then every stop
     /// delivered during startup is already queued ahead of it.
     func begin() {
+        // Registered before the signal sources and before SIG_IGN, so no stop
+        // that either of them sees can be missed here. Every stop signal
+        // sent from now on stays readable until `launch` looks.
+        // Failing to build it is fatal: without it a stop that races the launch
+        // could be missed, so the host refuses to start rather than run without
+        // the guarantee. No child exists yet, so exiting here is safe.
+        stopQueue = kqueue()
+        if stopQueue < 0 || fcntl(stopQueue, F_SETFD, FD_CLOEXEC) < 0 {
+            failStartup("could not create the stop queue")
+        }
+        for sig in [SIGTERM, SIGINT] {
+            var change = kevent(
+                ident: UInt(sig), filter: Int16(EVFILT_SIGNAL),
+                flags: UInt16(EV_ADD | EV_ENABLE), fflags: 0, data: 0,
+                udata: nil
+            )
+            if kevent(stopQueue, &change, 1, nil, 0, nil) < 0 {
+                failStartup("could not watch signal \(sig)")
+            }
+        }
         for sig in [SIGTERM, SIGINT] {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler { [weak self] in self?.handleStop() }
@@ -349,9 +374,28 @@ final class ChildController {
         }
     }
 
-    /// A stop that lands before this runs exits the host from `handleStop`, so
-    /// reaching here means no stop has been requested yet.
+    private func failStartup(_ reason: String) -> Never {
+        writeStderr("Ciaobot Server: \(reason) (errno \(errno))\n")
+        exit(EXIT_LAUNCH_FAILURE)
+    }
+
+    /// True when a stop signal has arrived since `begin`, whether or not its
+    /// dispatch source has run its handler yet. A non-blocking poll.
+    private func stopSignalArrived() -> Bool {
+        var event = kevent()
+        var immediately = timespec(tv_sec: 0, tv_nsec: 0)
+        return kevent(stopQueue, nil, 0, &event, 1, &immediately) > 0
+    }
+
+    /// A stop whose handler already ran exits the host from `handleStop`. A stop
+    /// that arrived after this block was queued has not run its handler yet
+    /// (the handler would run after this block), so it is read from the stop
+    /// queue first: the launch decision always sees every stop already sent.
     private func launch() {
+        if stopSignalArrived() {
+            handleStop()
+            return
+        }
         switch spawn() {
         case .failed(let message):
             writeStderr(

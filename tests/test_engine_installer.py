@@ -25,6 +25,7 @@ from typing import Any
 
 import pytest
 
+from ciao.server_host import SUPERSEDED_HOST_PROTOCOLS
 from ciao.release_manifest import (
     RELEASE_PUBLIC_KEY,
     SERVER_HOST_FILENAME,
@@ -1678,8 +1679,9 @@ def test_a_first_host_install_does_not_warn_about_permissions(tmp_path: Path) ->
 
 @runs_the_sh_installer
 @needs_local_tools
+@pytest.mark.parametrize("revision", sorted(SUPERSEDED_HOST_PROTOCOLS))
 def test_replacing_a_superseded_host_warns_about_permissions(
-    tmp_path: Path,
+    tmp_path: Path, revision: int
 ) -> None:
     # A superseded host is replaced by the new one (#1659). The replacement
     # changes the signed bytes macOS granted Accessibility/Automation to, so the
@@ -1688,13 +1690,12 @@ def test_replacing_a_superseded_host_warns_about_permissions(
     # The revision is the constant, not a literal: a copy of the number here
     # would stop matching on the next revision bump, and the warning is exactly
     # what a user needs then.
-    from ciao.server_host import HOST_REVISION, LEGACY_HOST_REVISION
 
     host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
     host_archive.parent.mkdir(parents=True)
     host_archive.write_bytes(b"the signed universal host archive")
     harness = _harness(tmp_path, host_archive=host_archive)
-    _write_host_plist(harness["home"], str(LEGACY_HOST_REVISION))
+    _write_host_plist(harness["home"], str(revision))
 
     result = _run_installer(harness, "--version", VERSION, "--no-start")
 
