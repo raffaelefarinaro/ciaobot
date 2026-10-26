@@ -4,12 +4,17 @@
 //
 // Rendering contract for the views that use it:
 // - Render `entriesFor(scopeId)` instead of the raw list. An `item` entry is the
-//   real row; a `placeholder` entry is rendered as a keyed
+//   real row; in a pointer drag a `placeholder` entry is rendered as a keyed
 //   `<li class="drag-placeholder" aria-hidden="true">`.
-// - The source row stays mounted. While `isSource(id)` is true it carries the
-//   class `drag-source`, which collapses it (`height: 0; margin: 0; padding: 0;
-//   border: 0; overflow: hidden; opacity: 0`) but keeps it focusable and in the
-//   DOM, so the keyboard grip keeps focus.
+// - In a pointer drag the source row stays mounted. While `isSource(id)` is
+//   true it carries the class `drag-source`, which collapses it (`height: 0;
+//   margin: 0; padding: 0; border: 0; overflow: hidden; opacity: 0`) but keeps
+//   it in the DOM; the overlay stands in for it.
+// - In a keyboard drag there is no overlay and no placeholder: the row itself
+//   stays visible and `entriesFor` moves it to its preview position (and
+//   between scopes). `isSource` is false then; `isLifted(id)` is true instead.
+//   Views style the lifted row as picked up: the `--border-strong` outline plus
+//   the open-menu elevation, keeping its focus ring visible.
 // - Wrap each list in `<TransitionGroup name="drag-reorder">` so neighbours
 //   animate with Vue's FLIP move class: `.drag-reorder-move { transition:
 //   transform 120ms var(--ease) }`, and `none` under `prefers-reduced-motion:
@@ -118,6 +123,8 @@ interface Session {
   raf: number
 }
 
+// Same shadow as the open menus (`.workspace-scope-menu` in ProjectSidebar.vue);
+// there is no shadow token to reference.
 const OVERLAY_ELEVATION = '0 1rem 2.5rem rgb(0 0 0 / 38%)'
 const HEIGHT_VAR = '--drag-item-height'
 
@@ -424,6 +431,11 @@ export function useDragSort(options: UseDragSortOptions) {
     const rect = source.getBoundingClientRect()
     const overlay = source.cloneNode(true) as HTMLElement
     overlay.querySelectorAll('[data-drag-handle]').forEach((n) => n.removeAttribute('data-drag-handle'))
+    // The clone is decoration: it must not duplicate ids or radio groups, or
+    // re-point labels, in the live document.
+    for (const n of [overlay, ...overlay.querySelectorAll('[id],[name],[for]')]) {
+      for (const attr of ['id', 'name', 'for']) n.removeAttribute(attr)
+    }
     overlay.classList.add('drag-overlay')
     overlay.setAttribute('aria-hidden', 'true')
     overlay.setAttribute('inert', '')
@@ -611,12 +623,21 @@ export function useDragSort(options: UseDragSortOptions) {
   function entriesFor(scopeId: string): PreviewEntry[] {
     const ids = options.itemIds(scopeId)
     const d = drag.value
+    if (d?.mode === 'keyboard') {
+      const rest = ids.filter((id) => id !== d.id)
+      if (d.toScope === scopeId) rest.splice(d.index, 0, d.id)
+      return rest.map((id): PreviewEntry => ({ kind: 'item', id }))
+    }
     if (d && d.toScope === scopeId) return previewEntries(ids, d.id, d.index)
     return ids.map((id): PreviewEntry => ({ kind: 'item', id }))
   }
 
   function isSource(id: string): boolean {
-    return drag.value?.id === id
+    return drag.value?.mode === 'pointer' && drag.value.id === id
+  }
+
+  function isLifted(id: string): boolean {
+    return drag.value?.mode === 'keyboard' && drag.value.id === id
   }
 
   function cancel(_reason?: string): void {
@@ -667,6 +688,7 @@ export function useDragSort(options: UseDragSortOptions) {
     gripHandlers,
     entriesFor,
     isSource,
+    isLifted,
     cancel,
     move,
   }

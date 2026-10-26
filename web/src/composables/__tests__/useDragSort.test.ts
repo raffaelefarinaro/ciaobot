@@ -431,4 +431,62 @@ describe('useDragSort', () => {
     expect(h.dnd.drag.value).toBeNull()
     expect(overlay()).toBeNull()
   })
+
+  it('keyboard drag keeps the source visible and moves it in entriesFor', async () => {
+    const h = setup()
+    const handlers = h.handlers('a2', 'todo')
+    handlers.onKeydown(key(' '))
+    handlers.onKeydown(key('ArrowDown'))
+    expect(h.dnd.isSource('a2')).toBe(false)
+    expect(h.dnd.isLifted('a2')).toBe(true)
+    expect(h.dnd.isLifted('a1')).toBe(false)
+    expect(h.dnd.entriesFor('todo')).toEqual([
+      { kind: 'item', id: 'a1' },
+      { kind: 'item', id: 'a3' },
+      { kind: 'item', id: 'a2' },
+    ])
+    handlers.onKeydown(key('Escape'))
+    await flush()
+    expect(h.dnd.isLifted('a2')).toBe(false)
+    expect(h.dnd.entriesFor('todo').map((e) => (e.kind === 'item' ? e.id : '-'))).toEqual([
+      'a1',
+      'a2',
+      'a3',
+    ])
+  })
+
+  it('keyboard drag across scopes moves the source between entriesFor lists', () => {
+    const h = setup()
+    const handlers = h.handlers('a2', 'todo')
+    handlers.onKeydown(key(' '))
+    handlers.onKeydown(key('ArrowRight'))
+    expect(h.dnd.isSource('a2')).toBe(false)
+    expect(h.dnd.isLifted('a2')).toBe(true)
+    expect(h.dnd.entriesFor('todo')).toEqual([
+      { kind: 'item', id: 'a1' },
+      { kind: 'item', id: 'a3' },
+    ])
+    expect(h.dnd.entriesFor('doing')).toEqual([
+      { kind: 'item', id: 'b1' },
+      { kind: 'item', id: 'a2' },
+      { kind: 'item', id: 'b2' },
+    ])
+  })
+
+  it('overlay clone strips id, name and for', () => {
+    const h = setup()
+    const li = h.root.querySelector('[data-item="a1"]')!
+    li.id = 'card-a1'
+    li.insertAdjacentHTML(
+      'beforeend',
+      '<label for="chk">x</label><input id="chk" name="grp" type="radio">',
+    )
+    press(h, 'a1', 'todo')
+    move(h, 10, 30)
+    const el = overlay()!
+    expect(el.id).toBe('')
+    expect(el.querySelectorAll('[id],[name],[for]').length).toBe(0)
+    expect(li.id).toBe('card-a1')
+    expect(li.querySelector('input')!.name).toBe('grp')
+  })
 })
