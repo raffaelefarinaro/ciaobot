@@ -310,11 +310,11 @@ onBeforeUnmount(() => { observer?.disconnect() })
 }
 .composer-activity-seg--agents .composer-activity-count { color: var(--accent); }
 
-/* Outcome tones. The glyph's own colour is overridden with a 3-class selector
-   so it beats ActivityGlyph's scoped rule. */
-.composer-activity-seg--ok,
-.composer-activity-seg--ok .activity-glyph { color: var(--success); }
-.composer-activity-seg--error { color: var(--error); }
+/* Outcome tones. Ok and error keep the segment's text colour and the accent
+   glyph: the still diamond or the alert triangle says how the run ended, and
+   a semantic hue would clash with a pink or lime workspace accent. Muted
+   overrides the glyph with a 3-class selector so it beats ActivityGlyph's
+   scoped rule. */
 .composer-activity-seg--muted,
 .composer-activity-seg--muted .activity-glyph { color: var(--fg3); }
 /* A settled run's mark is still. */

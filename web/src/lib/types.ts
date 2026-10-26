@@ -1617,9 +1617,19 @@ export interface TaskInvalidRow {
 /** What one entry of `GET /api/tasks`'s `tasks` array may be. */
 export type TaskRow = Task | TaskInvalidRow
 
+/**
+ * The board's persisted card order: one id sequence per status, plus the
+ * version the server stamps on every change to it.
+ */
+export interface TaskOrder {
+  version: number
+  sequences: Record<TaskStatus, string[]>
+}
+
 export interface TaskListResponse {
   workspace: string
   tasks: TaskRow[]
+  order: TaskOrder
 }
 
 /**

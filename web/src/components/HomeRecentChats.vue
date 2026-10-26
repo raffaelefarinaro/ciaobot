@@ -1273,8 +1273,8 @@ defineExpose({ onArrow })
   animation: home-lane-tidy-breathe 2.6s ease-in-out infinite;
 }
 
-/* A pass blocked on the owner takes the accent, and a pass that stopped with
-   work left takes the warn colour. Both are rows you are meant to
+/* A pass blocked on the owner and a pass that stopped with work left both take
+   the accent; the words, not the colour, tell them apart. Both are rows you are meant to
    act on, so neither reads as the muted background chatter an in-flight row is.
    One rule per phase, so nothing has to win a specificity fight to colour a
    row correctly. */
@@ -1283,7 +1283,7 @@ defineExpose({ onArrow })
 }
 
 .home-chat-item--insight-attention .home-chat-tidy-note {
-  color: var(--warning);
+  color: var(--accent);
 }
 
 .remote-chip {

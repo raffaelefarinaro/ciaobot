@@ -201,7 +201,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Automations</span>
-            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"></span>
+            <span v-if="hasAutomationWarning" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="run-failed" /></span>
           </router-link>
           <router-link
             to="/memory"
@@ -302,7 +302,7 @@
               </svg>
             </span>
             <span class="nav-item-label" aria-hidden="true">Settings</span>
-            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"></span>
+            <span v-if="hasBlockingHousekeeping" class="nav-item-alert" aria-hidden="true"><ActivityGlyph kind="run-failed" /></span>
           </router-link>
         </nav>
 
@@ -381,7 +381,7 @@
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span class="schedule-time">{{ oneOffWhen(s) }}</span>
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
               </router-link>
             </div>
           </div>
@@ -417,7 +417,7 @@
                   class="spinner-dot"
                   title="This automation is working"
                 />
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
               </router-link>
             </div>
         </div>
@@ -441,7 +441,7 @@
                   class="spinner-dot"
                   title="This automation is working"
                 />
-                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="run-failed" /></span>
               </router-link>
             </div>
           </div>
@@ -651,12 +651,26 @@
             </svg>
           </button>
         </div>
-        <div class="project-list">
+        <TransitionGroup
+          :ref="setProjectListRoot"
+          tag="div"
+          name="drag-reorder"
+          class="project-list"
+        >
+          <!-- One element per entry, never a fragment: TransitionGroup moves
+               its direct children, and the placeholder shares that shape. -->
           <div
-            v-for="project in store.workspaceProjects"
-            :key="project.project_id"
-            class="project-group"
+            v-for="{ project } in projectEntries"
+            :key="project?.project_id ?? 'drag-placeholder'"
+            :class="project ? {
+              'project-group': true,
+              'drag-source': projectDrag.isSource(project.project_id),
+              'drag-lifted': projectDrag.isLifted(project.project_id),
+            } : 'drag-placeholder'"
+            :data-project-id="project?.project_id"
+            :aria-hidden="project ? undefined : 'true'"
           >
+          <template v-if="project">
             <DropdownMenuRoot
               :open="projectMenu === project.project_id"
               :modal="false"
@@ -667,15 +681,18 @@
                 :class="{
                   'is-system': project.is_auto,
                   'drag-over': isDragOverProject(project),
-                  'dragging': dragProjectId === project.project_id,
                 }"
-                :draggable="isDraggable(project)"
-                @dragstart="onProjectDragStart(project, $event)"
+                :data-drag-row="isReorderable(project) ? '' : undefined"
                 @dragover.prevent="onProjectDragOver(project)"
                 @drop.prevent="onProjectDrop(project)"
-                @dragend="onProjectDragEnd"
                 @contextmenu.prevent="openProjectMenuAt($event, project)"
               >
+                <DragGrip
+                  v-if="isReorderable(project)"
+                  :id="project.project_id"
+                  :label="`Reorder ${project.name}`"
+                  v-bind="projectDrag.gripHandlers(project.project_id, PROJECTS_SCOPE)"
+                />
                 <button
                   type="button"
                   class="project-icon"
@@ -772,6 +789,23 @@
                   <DropdownMenuItem as-child>
                     <button @click="startEditProject(project.project_id)">Rename</button>
                   </DropdownMenuItem>
+                  <template v-if="isReorderable(project)">
+                    <DropdownMenuItem as-child :disabled="projectPosition(project.project_id) <= 0">
+                      <button
+                        :disabled="projectPosition(project.project_id) <= 0"
+                        @click="void projectDrag.move(project.project_id, PROJECTS_SCOPE, 'up')"
+                      >Move up</button>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      as-child
+                      :disabled="projectPosition(project.project_id) >= reorderableIds.length - 1"
+                    >
+                      <button
+                        :disabled="projectPosition(project.project_id) >= reorderableIds.length - 1"
+                        @click="void projectDrag.move(project.project_id, PROJECTS_SCOPE, 'down')"
+                      >Move down</button>
+                    </DropdownMenuItem>
+                  </template>
                   <DropdownMenuItem as-child>
                     <button @click="confirmDeleteProject(project.project_id)">Delete</button>
                   </DropdownMenuItem>
@@ -934,8 +968,10 @@
 
               </template>
             </div>
+          </template>
           </div>
-        </div>
+        </TransitionGroup>
+        <div class="sr-only" role="status" aria-live="polite">{{ projectLiveMessage }}</div>
         </template>
       </div>
 
@@ -990,7 +1026,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick, shallowRef } from 'vue'
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -1014,6 +1050,8 @@ import { useVaultReviewStore } from '../stores/vaultReview'
 import { useNotificationInboxStore } from '../stores/notificationInbox'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
+import DragGrip from './DragGrip.vue'
+import { useDragSort, type DragCommit } from '../composables/useDragSort'
 import ActivityGlyph from './ActivityGlyph.vue'
 import TaskGlyph from './TaskGlyph.vue'
 import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
@@ -1189,7 +1227,7 @@ const memoryCount = computed(() => {
   const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
   return proposals.scopedRows(workspace).length + retirement
 })
-// Settings has no count. A blocking action is the warning dot like any other
+// Settings has no count. A blocking action is the alert glyph like any other
 // failure; an available update is news, not trouble, so it is a muted word.
 const settingsNote = computed(() => (store.packageStatus?.update_available ? 'update' : ''))
 
@@ -1622,32 +1660,90 @@ function selectChat(chatId: string) {
 }
 
 // ── Drag-to-reorder projects ──────────────────────────────────────────────
-// General is auto-managed and pinned to the top (order 0) by the server, so
-// it isn't draggable; everything else can be dragged into a new order.
-const dragProjectId = ref<string | null>(null)
+// Projects are sorted by the pointer + keyboard engine (useDragSort) through
+// their grip. General and the auto-managed projects are pinned: no grip, not in
+// the engine's list, rendered first. Chats still move between projects with
+// native HTML drag and drop.
+const PROJECTS_SCOPE = 'projects'
 const dragChatId = ref<string | null>(null)
 const dragChatProjectId = ref<string | null>(null)
 const dragOverProjectId = ref<string | null>(null)
 
-function isDraggable(project: ProjectInfo): boolean {
-  return project.name !== 'General' && !project.is_auto
+function isReorderable(project: ProjectInfo): boolean {
+  return !project.is_auto
 }
 
-function onProjectDragStart(project: ProjectInfo, event: DragEvent) {
-  if (!isDraggable(project)) return
-  dragChatId.value = null
-  dragChatProjectId.value = null
-  dragProjectId.value = project.project_id
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    // Firefox requires data to be set for the drag to start.
-    event.dataTransfer.setData('text/plain', project.project_id)
-  }
+const reorderableIds = computed(() => store.reorderableProjects.map(p => p.project_id))
+const projectListRoot = shallowRef<HTMLElement | null>(null)
+// A function ref on the TransitionGroup receives its instance; the engine
+// needs the list element.
+function setProjectListRoot(instance: unknown) {
+  projectListRoot.value = (instance as { $el?: HTMLElement } | null)?.$el ?? null
 }
+const projectSortMessage = ref('')
+
+function projectPosition(projectId: string): number {
+  return reorderableIds.value.indexOf(projectId)
+}
+
+function projectGroupEl(projectId: string): HTMLElement | null {
+  const groups = projectListRoot.value?.querySelectorAll<HTMLElement>('[data-project-id]') ?? []
+  for (const group of groups) if (group.dataset.projectId === projectId) return group
+  return null
+}
+
+async function commitProjectOrder(commit: DragCommit): Promise<boolean> {
+  const expected = reorderableIds.value
+  const ids = expected.filter(id => id !== commit.id)
+  ids.splice(commit.index, 0, commit.id)
+  const result = await store.reorderProjects(ids, expected)
+  if (result.ok) return true
+  projectSortMessage.value = `Could not save the project order. ${result.message}`
+  store.pushErrorToast('Could not save the project order', result.message)
+  void nextTick(() => {
+    projectListRoot.value
+      ?.querySelector<HTMLElement>(`[data-drag-handle="${CSS.escape(commit.id)}"]`)
+      ?.focus()
+  })
+  return false
+}
+
+const projectDrag = useDragSort({
+  root: projectListRoot,
+  scopes: () => [{ id: PROJECTS_SCOPE, el: () => projectListRoot.value }],
+  itemIds: () => reorderableIds.value,
+  itemEl: projectGroupEl,
+  canDrag: id => reorderableIds.value.includes(id) && editingProject.value !== id,
+  label: id => store.workspaceProjects.find(p => p.project_id === id)?.name ?? 'project',
+  scopeLabel: () => 'projects',
+  onCommit: commitProjectOrder,
+})
+
+// The pinned rows first, as the server orders them, then the sortable ones
+// with the engine's placeholder.
+const projectEntries = computed<Array<{ project: ProjectInfo | null }>>(() => {
+  const byId = new Map(store.workspaceProjects.map(p => [p.project_id, p]))
+  const pinned = store.workspaceProjects.filter(p => !isReorderable(p))
+  const sortable = projectDrag.entriesFor(PROJECTS_SCOPE).map(entry =>
+    entry.kind === 'placeholder' ? null : (byId.get(entry.id) ?? null),
+  )
+  return [...pinned.map(project => ({ project })), ...sortable.map(project => ({ project }))]
+})
+
+// Mine wins over the engine's own text, so a failed save is not overwritten by
+// the engine's generic one; a new pickup clears it.
+const projectLiveMessage = computed(() => projectSortMessage.value || projectDrag.announcement.value)
+watch(() => projectDrag.drag.value?.id, id => { if (id) projectSortMessage.value = '' })
+
+watch(() => store.activeWorkspace, () => projectDrag.cancel())
+watch(() => store.projectOrderEpoch, () => {
+  if (!projectDrag.drag.value) return
+  projectDrag.cancel()
+  projectSortMessage.value = 'Projects were reordered elsewhere, so your move was cancelled.'
+})
 
 function onChatDragStart(chat: ChatInfo, event: DragEvent) {
   if (chat.local === false) return
-  dragProjectId.value = null
   dragChatId.value = chat.chat_id
   dragChatProjectId.value = chat.project_id
   if (event.dataTransfer) {
@@ -1659,42 +1755,21 @@ function onChatDragStart(chat: ChatInfo, event: DragEvent) {
 }
 
 function onProjectDragOver(project: ProjectInfo) {
-  if (dragChatId.value) {
-    if (dragChatProjectId.value === project.project_id) {
-      dragOverProjectId.value = null
-      return
-    }
-    dragOverProjectId.value = project.project_id
+  if (!dragChatId.value) return
+  if (dragChatProjectId.value === project.project_id) {
+    dragOverProjectId.value = null
     return
   }
-  if (dragProjectId.value && dragProjectId.value !== project.project_id) {
-    dragOverProjectId.value = project.project_id
-  }
+  dragOverProjectId.value = project.project_id
 }
 
 function onProjectDrop(target: ProjectInfo) {
   const draggedChatId = dragChatId.value
   const draggedChatProjectId = dragChatProjectId.value
-  if (draggedChatId) {
-    onChatDragEnd()
-    if (!draggedChatProjectId || draggedChatProjectId === target.project_id) return
-    void moveChatToProject(draggedChatId, target.project_id)
-    return
-  }
-  const draggedId = dragProjectId.value
-  onProjectDragEnd()
-  if (!draggedId || draggedId === target.project_id) return
-  const ids = store.workspaceProjects.map(p => p.project_id)
-  const from = ids.indexOf(draggedId)
-  const to = ids.indexOf(target.project_id)
-  if (from < 0 || to < 0 || from === to) return
-  ids.splice(to, 0, ids.splice(from, 1)[0])
-  void store.reorderProjects(ids)
-}
-
-function onProjectDragEnd() {
-  dragProjectId.value = null
-  dragOverProjectId.value = null
+  if (!draggedChatId) return
+  onChatDragEnd()
+  if (!draggedChatProjectId || draggedChatProjectId === target.project_id) return
+  void moveChatToProject(draggedChatId, target.project_id)
 }
 
 function onChatDragEnd() {
@@ -1704,8 +1779,7 @@ function onChatDragEnd() {
 }
 
 function isDragOverProject(project: ProjectInfo): boolean {
-  if (dragOverProjectId.value !== project.project_id) return false
-  return dragProjectId.value !== project.project_id || dragChatProjectId.value !== project.project_id
+  return dragOverProjectId.value === project.project_id
 }
 
 function toggleProject(id: string) {
@@ -2352,7 +2426,7 @@ async function confirmDeleteChat(chatId: string) {
 /* Subtle section counts: plain numerals on the right of the row, drawn from
    a data attribute so they stay out of the link's text (its aria-label
    carries the full sentence). One colour role per signal: every count is
-   the same muted numeral, a failure is the warning dot (.nav-item-alert),
+   the same muted numeral, a failure is the accent alert glyph (.nav-item-alert),
    live work is the spinner dot, and the accent marks only the current row.
    Icons never change colour. */
 .nav-item[data-count]::after,
@@ -2366,11 +2440,8 @@ async function confirmDeleteChat(chatId: string) {
 .nav-item[data-note]::after { content: attr(data-note); font-family: var(--font); }
 
 .nav-item-alert {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 7px;
-  border-radius: 50%;
-  background: var(--warning);
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
 .nav-item-alert--partial {
@@ -2494,6 +2565,8 @@ async function confirmDeleteChat(chatId: string) {
   flex-direction: column;
   gap: 6px;
   flex-shrink: 0;
+  /* The drag engine overrides this inline with the picked-up group's height. */
+  --drag-item-height: 0px;
 }
 
 .project-group {
@@ -2521,6 +2594,17 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Fine pointers take prototype A's 36px row. The header's controls keep their
    44px boxes (negative margins); only the row's own padding shrinks. */
+/* The grip sits in the row on a coarse pointer; a pinned row has none, so a
+   spacer of the grip's width (and the flex gap after it) keeps its chevron and
+   name aligned with the rows that do. */
+@media (pointer: coarse) {
+  .project-header.is-system::before {
+    content: '';
+    flex: none;
+    width: 20px;
+  }
+}
+
 @media (pointer: fine) {
   .project-header {
     min-height: 36px;
@@ -2550,16 +2634,55 @@ async function confirmDeleteChat(chatId: string) {
   .project-list .chat-item {
     min-height: 36px;
   }
+
+  /* The grip floats over the header's leading edge instead of taking a slot,
+     so an idle name keeps the width it had. It only shows on hover or focus,
+     where it sits beside the chevron's glyph rather than on it. */
+  .project-header {
+    position: relative;
+  }
+
+  .project-header .drag-grip {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    z-index: 1;
+    transform: translateY(-50%);
+  }
 }
 
-/* Drag-to-reorder affordances. The header shows a grab cursor when draggable,
-   dims while being dragged, and draws an accent line where a drop will land. */
-.project-header[draggable="true"] {
-  cursor: grab;
+/* A chat dragged over a project header draws an accent line where it will land.
+   Project reordering is the grip's (useDragSort): the source group collapses
+   while the overlay stands in for it, and the placeholder holds its height. */
+.drag-source {
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  opacity: 0;
 }
-.project-header.dragging {
-  opacity: 0.4;
-  cursor: grabbing;
+.drag-placeholder {
+  height: var(--drag-item-height);
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+}
+.drag-reorder-move {
+  transition: transform 120ms var(--ease);
+}
+.project-group.drag-lifted {
+  outline: 1px solid var(--border-strong);
+  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 38%);
+}
+.project-group.drag-overlay {
+  max-height: 60vh;
+  overflow: hidden;
+  background: var(--bg-elev);
+}
+@media (prefers-reduced-motion: reduce) {
+  .drag-reorder-move {
+    transition: none;
+  }
 }
 .project-header.drag-over {
   box-shadow: inset 0 2px 0 0 var(--accent);
@@ -2763,11 +2886,6 @@ async function confirmDeleteChat(chatId: string) {
   text-transform: none;
   letter-spacing: 0;
   vertical-align: middle;
-}
-.badge--missed {
-  margin-left: 0;
-  background: var(--warning);
-  color: var(--bg);
 }
 
 .chat-item:hover {
@@ -3366,10 +3484,7 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedule-item--disabled .schedule-label { color: var(--fg3); }
 .schedule-item .missed-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warning);
+  display: inline-flex;
   flex-shrink: 0;
 }
 

@@ -209,6 +209,10 @@ RESERVED_UNINDEXED_FILES = frozenset(
         # machine identity in it, and indexed JSON would put a raw uuid in the
         # middle of an ordinary recall result.
         "learnings-cleanup.json",
+        # The task board's manual order (`ciao/task_order.py`): one id sequence
+        # per status column, shared across devices. Raw task uuids in indexed
+        # JSON would surface as recall hits, so the name is reserved up front.
+        "task-order.json",
     }
 )
 

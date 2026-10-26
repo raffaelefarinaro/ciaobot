@@ -397,12 +397,12 @@
         aria-modal="true"
         aria-labelledby="project-closure-title"
       >
-        <header class="task-sheet-head">
+        <header class="closure-head">
           <h3 id="project-closure-title">Close {{ project.name }}</h3>
           <button type="button" class="btn-icon" aria-label="Close" :disabled="closureBusy" @click="closeClosure">×</button>
         </header>
-        <form class="task-form" novalidate @submit.prevent="submitClosure()">
-          <fieldset class="form-group">
+        <form class="closure-form" novalidate @submit.prevent="submitClosure()">
+          <fieldset class="closure-outcome">
             <legend>How did it end?</legend>
             <label><input v-model="closureOutcome" type="radio" value="completed" :disabled="closureBusy" /> Completed</label>
             <label><input v-model="closureOutcome" type="radio" value="stopped" :disabled="closureBusy" /> Stopped</label>
@@ -423,7 +423,7 @@
             {{ activeChats.length }} chat{{ activeChats.length === 1 ? '' : 's' }} will be archived.
             <template v-if="openTaskCount !== null"> {{ openTaskCount }} open task{{ openTaskCount === 1 ? '' : 's' }} stay on the board.</template>
           </p>
-          <p v-if="closureError" class="task-action-error" role="alert">{{ closureError }}</p>
+          <p v-if="closureError" class="closure-error" role="alert">{{ closureError }}</p>
           <div class="form-actions">
             <button type="submit" class="btn-primary" :disabled="closureBusy">{{ closureBusy ? 'Closing…' : (closureOutcome === 'stopped' ? 'Stop project' : 'Complete project') }}</button>
             <button type="button" class="btn-small" :disabled="closureBusy" @click="closeClosure">Cancel</button>
@@ -1130,6 +1130,50 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   align-items: center;
   gap: var(--space-2);
   min-height: 44px;
+}
+
+/* The closure sheet. It used to borrow the task board's sheet classes, which
+   are scoped to TaskBoardView and so never reached this component: the sheet
+   rendered with no padding, a loose close button and an uppercase radio list. */
+.closure-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.closure-head h3 {
+  margin: 0;
+  font-size: calc(15px * var(--font-scale));
+  font-weight: 650;
+}
+.closure-head .btn-icon { min-width: var(--touch); min-height: var(--touch); }
+.closure-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+.closure-form .hint { margin: 0; }
+.closure-form textarea {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 50dvh;
+  resize: vertical;
+}
+.closure-outcome legend {
+  margin-bottom: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.closure-error {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--text-sm);
 }
 
 .project-grid {
