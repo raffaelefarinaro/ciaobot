@@ -49,6 +49,7 @@ import type {
   WorkspacesResponse,
 } from '../lib/types'
 import { bareAgentId, sameAgent } from '../lib/subagentIds'
+import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
 export interface NewChatRuntime {
@@ -161,6 +162,8 @@ export const useProjectStore = defineStore('projects', () => {
   // False until the first fetchAll() resolves. Gates the home empty state so
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
+  // Whether the active-chat list could be read, as opposed to what it said.
+  const chatsHealth = ref<SourceHealth>(checkingHealth())
   // Every switch re-reads, whichever path made it (the scope menu, a deep link
   // into another workspace's chat, a new chat there). Boot reads from
   // `fetchAll` once the workspace is known, so a value restored from local
@@ -1982,7 +1985,10 @@ export const useProjectStore = defineStore('projects', () => {
         api.get<WorkspacesResponse>('/api/workspaces'),
         api.get<ProjectInfo[]>('/api/projects'),
         api.get<ChatInfo[]>('/api/chats?active_only=1'),
-      ])
+      ]).catch((e) => {
+        chatsHealth.value = failedHealth(chatsHealth.value, e)
+        throw e
+      })
       workspaces.value = workspaceResponse.workspaces || []
       workspaceProviderOptions.value = workspaceResponse.provider_options?.length
         ? workspaceResponse.provider_options
@@ -2316,6 +2322,7 @@ export const useProjectStore = defineStore('projects', () => {
    * wholesale array replace. Active rows replace their peers in place.
    */
   function reconcileActiveChats(activeChats: ChatInfo[], readStartedAt: number = terminalOfferClock) {
+    chatsHealth.value = readyHealth()
     const merged: ChatInfo[] = []
     const activeById = new Map(activeChats.map(c => [c.chat_id, c]))
     for (const existing of chats.value) {
@@ -2385,7 +2392,13 @@ export const useProjectStore = defineStore('projects', () => {
       // This keeps the every-15s refresh light instead of re-shipping the
       // whole registry to the client on each tick.
       const listReadStart = terminalOfferReadStart()
-      const latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
+      let latestChats: ChatInfo[]
+      try {
+        latestChats = await api.get<ChatInfo[]>('/api/chats?active_only=1')
+      } catch (e) {
+        chatsHealth.value = failedHealth(chatsHealth.value, e)
+        throw e
+      }
       reconcileActiveChats(latestChats, listReadStart)
 
       const chatId = activeChatId.value
@@ -6894,7 +6907,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
+    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     terminalOffers,

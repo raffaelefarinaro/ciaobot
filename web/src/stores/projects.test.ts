@@ -9328,3 +9328,58 @@ describe('reorderWorkspaces', () => {
     expect(store.activeWorkspace).toBe('beta')
   })
 })
+
+describe('chatsHealth', () => {
+  const chat = (id: string) => ({
+    chat_id: id, project_id: 'p1', title: id, model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false,
+  })
+
+  function mockChatList(handler: () => Promise<unknown>) {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') return handler()
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [] })
+      return Promise.resolve([])
+    })
+  }
+
+  test('chats_health_initial_checking_then_ready_after_fetch_all', async () => {
+    const store = useProjectStore()
+    expect(store.chatsHealth.status).toBe('checking')
+    mockChatList(() => Promise.resolve([chat('c1')]))
+    await store.fetchAll()
+    expect(store.chatsHealth.status).toBe('ready')
+    expect(Number.isNaN(Date.parse(store.chatsHealth.lastSuccessAt))).toBe(false)
+  })
+
+  test('chats_health_first_failure_unavailable_and_fetch_all_still_rejects', async () => {
+    const store = useProjectStore()
+    mockChatList(() => Promise.reject(new Error('boom')))
+    await expect(store.fetchAll()).rejects.toThrow('boom')
+    expect(store.chatsHealth.status).toBe('unavailable')
+    expect(store.chatsHealth.lastSuccessAt).toBe('')
+  })
+
+  test('chats_health_sync_latest_failure_after_success_is_stale_rows_kept', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    mockChatList(() => Promise.resolve([chat('c1')]))
+    await store.fetchAll()
+    const success = store.chatsHealth.lastSuccessAt
+    mockChatList(() => Promise.reject(new Error('offline')))
+    await expect(store.syncLatest()).resolves.toBeUndefined()
+    expect(store.chatsHealth.status).toBe('stale')
+    expect(store.chatsHealth.lastSuccessAt).toBe(success)
+    expect(store.chats.map(c => c.chat_id)).toEqual(['c1'])
+  })
+
+  test('chats_health_recovers_to_ready', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    mockChatList(() => Promise.reject(new Error('boom')))
+    await expect(store.fetchAll()).rejects.toThrow('boom')
+    mockChatList(() => Promise.resolve([chat('c1')]))
+    await store.syncLatest()
+    expect(store.chatsHealth.status).toBe('ready')
+    expect(store.chatsHealth.error).toBe('')
+  })
+})
