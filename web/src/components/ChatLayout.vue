@@ -290,6 +290,7 @@ import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useItemPeekStore } from '../stores/itemPeek'
 import { useTaskStore } from '../stores/tasks'
+import { useNotificationInboxStore } from '../stores/notificationInbox'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
 import type ChatPanelComponent from './ChatPanel.vue'
@@ -555,6 +556,7 @@ function stopSplitDrag() {
 }
 
 const taskStore = useTaskStore()
+const notificationInbox = useNotificationInboxStore()
 const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
 const router = useRouter()
@@ -980,8 +982,11 @@ onMounted(async () => {
     // the workspaces are still on their way. The store is not bootstrapped
     // in this state, so the home-boot branch is the honest answer.
     chatLookupPendingId.value = null
+    // Init on this path too, so the inbox's Retry can re-bootstrap.
+    notificationInbox.init()
     return
   }
+  notificationInbox.init()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
   // The route is re-read here, after the awaits, never captured before them.
@@ -1475,6 +1480,7 @@ onBeforeUnmount(() => {
   chatPaneObserver?.disconnect()
   chatMainObserver?.disconnect()
   stopLatestStatusSync()
+  notificationInbox.dispose()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
   window.removeEventListener('touchend', onTouchEnd)
