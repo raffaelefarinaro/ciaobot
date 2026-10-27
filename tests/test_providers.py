@@ -1308,6 +1308,56 @@ async def test_claude_workspace_scope_sets_sandbox_and_roots(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_env", "process_env", "expected"),
+    [
+        ({"CLAUDE_CODE_TMPDIR": "/from/extra"}, None, "/from/extra"),
+        ({}, "/from/process", "/from/process"),
+        ({"CLAUDE_CODE_TMPDIR": "/from/extra"}, "/from/process", "/from/extra"),
+        ({}, None, None),
+    ],
+)
+async def test_claude_workspace_scope_passes_the_cli_tmp_base_to_the_guard(
+    tmp_path: Path, monkeypatch, extra_env, process_env, expected,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    if process_env is None:
+        monkeypatch.delenv("CLAUDE_CODE_TMPDIR", raising=False)
+    else:
+        monkeypatch.setenv("CLAUDE_CODE_TMPDIR", process_env)
+    captured: dict = {}
+
+    def fake_guard(**kwargs):
+        captured.update(kwargs)
+
+        async def hook(*args):
+            return {}
+
+        return hook
+
+    class FakeClient:
+        def __init__(self, options):
+            pass
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    monkeypatch.setattr("ciao.providers.claude.claude_file_tool_guard", fake_guard)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(tmp_path / "agent"),),
+        extra_env=extra_env,
+    )
+
+    await provider._ensure_connected(request)
+
+    assert captured["cli_tmp_base"] == expected
+
+
+@pytest.mark.asyncio
 async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_dirs(
     tmp_path: Path, monkeypatch,
 ) -> None:
