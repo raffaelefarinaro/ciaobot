@@ -80,9 +80,7 @@ from ciao.web.routes_api import (
     chat_prompt,
     chat_stop,
     chat_move_to_background,
-    chat_background_run_cancel,
     chat_background_task_stop,
-    chat_background_run_log,
     chat_new_session,
     chat_subagents,
     running_subagents,
@@ -469,16 +467,6 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route("/api/chats/{chat_id}/stop", chat_stop, methods=["POST"]),
         Route("/api/chats/{chat_id}/move-to-background", chat_move_to_background, methods=["POST"]),
         Route(
-            "/api/chats/{chat_id}/background-runs/{run_id}/log",
-            chat_background_run_log,
-            methods=["GET"],
-        ),
-        Route(
-            "/api/chats/{chat_id}/background-runs/{run_id}/cancel",
-            chat_background_run_cancel,
-            methods=["POST"],
-        ),
-        Route(
             "/api/chats/{chat_id}/background-tasks/{task_id}/stop",
             chat_background_task_stop,
             methods=["POST"],
@@ -853,7 +841,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         finally:
             # Shutdown runs even if the lifespan exits by raising or
             # cancellation (not just a normal shutdown message), so provider
-            # subprocesses and background runs are not leaked across an
+            # subprocesses are not leaked across an
             # abnormal restart.
             #
             # The terminal sessions' own shutdown is appended to the
@@ -863,8 +851,8 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
             callbacks.append(_shutdown_terminal_sessions)
             for callback in callbacks:
                 # One failing callback must not skip the ones after it. Shutdown
-                # is the last chance to terminate provider subprocesses and
-                # background runs; leaking them because an earlier hook raised is
+                # is the last chance to terminate provider subprocesses;
+                # leaking them because an earlier hook raised is
                 # how a restart ends up with orphan processes.
                 try:
                     await callback()
