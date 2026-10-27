@@ -51,3 +51,51 @@ test('a long agent name truncates inside the agents popover', async ({ page }) =
   expect(tag!.x + tag!.width).toBeLessThanOrEqual(pop!.x + pop!.width)
   await page.screenshot({ path: 'test-results/composer-activity-popover.png' })
 })
+
+test.describe('native shell row', () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
+
+  test('lists a running native shell with its age and a Stop that fits a touch target', async ({ page }) => {
+    const startedAt = new Date(Date.now() - 65 * 60_000).toISOString()
+    let stopped = ''
+    await page.route('**/api/subagents/running', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        chats: {
+          [CHAT_ID]: [{
+            agent_id: 'task:by55qns1w',
+            description: "bash -c 'ping -c 4200 127.0.0.1 >/dev/null; echo SOAK_DONE'",
+            subagent_type: 'shell',
+            is_async: true,
+            status: 'running',
+            turn_index: null,
+            started_at: startedAt,
+            stoppable: true,
+          }],
+        },
+      }),
+    }))
+    await page.route('**/api/chats/*/background-tasks/*/stop', route => {
+      stopped = route.request().url()
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+    })
+    await boot(page, CHAT_PATH, COMPOSER)
+
+    const seg = page.locator('.composer-activity-seg--runs')
+    await expect(seg).toBeVisible({ timeout: 8_000 })
+    await seg.click()
+    const row = page.locator('.composer-activity-pop-row').first()
+    await expect(row).toContainText('1h 5m')
+    const stop = row.locator('.composer-activity-pop-stop')
+    const pop = (await page.locator('.composer-activity-popover').boundingBox())!
+    const box = (await stop.boundingBox())!
+    expect(box.height).toBeGreaterThanOrEqual(44)
+    expect(box.x + box.width).toBeLessThanOrEqual(pop.x + pop.width)
+    await page.screenshot({ path: test.info().outputPath('native-shell-row.png') })
+
+    await stop.click()
+    await expect(stop).toHaveText('Stopping…')
+    expect(stopped).toContain('/background-tasks/by55qns1w/stop')
+  })
+})
