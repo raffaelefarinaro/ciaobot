@@ -159,6 +159,23 @@ def test_note_related_is_a_read(tmp_path: Path) -> None:
     assert mcp_server.OPERATIONS_BY_NAME["note_related"].annotations == mcp_server._READ
 
 
+def test_note_create_is_a_write(tmp_path: Path) -> None:
+    from ciao import mcp_server
+
+    service, _ = _service(tmp_path)
+    assert "note_create" in service.operation_table
+    assert mcp_server.OPERATIONS_BY_NAME["note_create"].annotations == mcp_server._WRITE
+
+
+def test_a_plan_mode_chat_cannot_create_a_note(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path, mode="plan")
+    token = _token(service)
+    with _client(service) as client:
+        response = _post(client, token, "note_create", {"note_type": "person", "title": "Sofia"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "plan_mode_read_only"
+
+
 def test_a_plan_mode_chat_cannot_verify_a_note(tmp_path: Path) -> None:
     """The gate, end to end, through the CLI surface."""
     service, _ = _service(tmp_path, mode="plan")
@@ -632,6 +649,21 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
         (["note", "related", "People/Mo.md"], ("note_related", {"path": "People/Mo.md", "limit": 15})),
         (["note", "verify", "--payload-file", "out/verify.json"], ("verify_note", {"payload_file": "out/verify.json"})),
         (
+            ["note", "create", "--type", "person", "--title", "Sofia Rossi"],
+            ("note_create", {
+                "note_type": "person", "title": "Sofia Rossi", "description_file": "",
+                "tags": [], "body_file": "", "path": "",
+            }),
+        ),
+        (
+            ["note", "create", "--type", "note", "--title", "T", "--description-file", "d.txt",
+             "--tags", "a, b,,c", "--body-file", "b.md", "--path", "Docs/Drafts"],
+            ("note_create", {
+                "note_type": "note", "title": "T", "description_file": "d.txt",
+                "tags": ["a", "b", "c"], "body_file": "b.md", "path": "Docs/Drafts",
+            }),
+        ),
+        (
             ["chat", "list", "--project", "p1"],
             ("chats_list", {"project_id": "p1", "limit": 20, "offset": 0, "compact": True}),
         ),
@@ -801,6 +833,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
         "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
         "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
+        "note create": ["--type", "note", "--title", "t"],
         "note related": ["People/Mo.md"], "note verify": ["--payload-file", "p.json"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat terminal-offer": ["--command-file", str(command)],
@@ -892,6 +925,13 @@ def test_cli_json_flag_is_accepted_anywhere(
     # Parsing succeeds (the run reaches the session check) with --json after the verb.
     assert agent_cli.main(["vault", "search", "x", "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "no_agent_session"
+
+
+@pytest.mark.parametrize("argv", [["--title", "t"], ["--type", "note"]])
+def test_note_create_requires_type_and_title(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        agent_cli.main(["note", "create", *argv])
+    assert excinfo.value.code == 2
 
 
 def test_cli_rejects_bad_enums_before_any_request(capsys: pytest.CaptureFixture[str]) -> None:

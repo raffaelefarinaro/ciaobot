@@ -204,7 +204,25 @@ def build_parser() -> argparse.ArgumentParser:
         if verb == "delete":
             sub.add_argument("--confirm", required=True, help="Repeat the candidate id.")
 
-    note = _verbs(nouns.add_parser("note", help="Verification of stale vault notes."))
+    note = _verbs(nouns.add_parser("note", help="Vault notes: create one, relate, verify."))
+    create = note.add_parser("create", help="Create a vault note with canonical frontmatter.")
+    create.add_argument("--type", required=True, dest="note_type", help="Category id or alias from VOCABULARY.md.")
+    create.add_argument("--title", required=True, help="The note's title; it also names the file.")
+    # The paths travel exactly as written; the server confines them to this
+    # workspace and caps their size, so prose never rides in argv.
+    create.add_argument(
+        "--description-file", default=None, metavar="FILE",
+        help="A file in this workspace holding the one-line description.",
+    )
+    create.add_argument("--tags", default="", help="Comma-separated tags (default: the type).")
+    create.add_argument(
+        "--body-file", default=None, metavar="FILE",
+        help="A file in this workspace holding the body, without frontmatter.",
+    )
+    create.add_argument(
+        "--path", default="", metavar="DIR",
+        help="Vault-relative folder; overrides the category's folder.",
+    )
     related = note.add_parser("related", help="List the vault notes connected to one note.")
     related.add_argument("path", help="The note, vault-relative (People/Sofia.md).")
     related.add_argument("--limit", type=int, default=15, help="At most this many related notes (1-50).")
@@ -641,6 +659,15 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     if noun == "note":
         if verb == "related":
             return "note_related", {"path": args.path, "limit": args.limit}
+        if verb == "create":
+            return "note_create", {
+                "note_type": args.note_type,
+                "title": args.title,
+                "description_file": args.description_file or "",
+                "tags": [t.strip() for t in args.tags.split(",") if t.strip()],
+                "body_file": args.body_file or "",
+                "path": args.path,
+            }
         # The path crosses to the server as written. Reading the document here
         # and posting the parsed object would move the size cap, the workspace
         # confinement and the "is this actually a file" check into the one place

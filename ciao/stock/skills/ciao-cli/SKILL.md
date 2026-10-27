@@ -63,10 +63,11 @@ For a long command use the provider's native background shell (Bash `run_in_back
 | `vault review restore-completed --candidate ID` | Undo a completion: put the project, its `status:` line and every rewritten link back. Refuses when the original path is occupied or a note the completion rewrote has been edited since. | Same attended-turn guard. |
 | `vault review delete --candidate ID --confirm ID` | Permanently delete a trashed note. | Same attended-turn guard, plus `--confirm` must repeat the candidate id; irreversible. |
 
-### Note verification
+### Notes
 
 | Command | Purpose | Guard |
 |---|---|---|
+| `note create --type TYPE --title TITLE [--description-file F] [--tags a,b] [--body-file F] [--path DIR]` | Create a vault note with canonical frontmatter (`type`, `title`, `description`, `tags`, `created`, `updated`). | `TYPE` is a category id or alias from `VOCABULARY.md`; an unknown type lists the valid ones. The folder is the category's, and a category with no folder needs `--path`, a vault-relative folder. Each `FILE` is inside this workspace; prose never goes as an argument. It never overwrites an existing note. For a project, use `project create`. |
 | `note related PATH [--limit N]` | List the vault notes connected to one note: the ones it links to, the ones linking to it and the ones whose body names its title or an alias. Read it before a verdict on a stale note. | Read-only, scoped to this workspace's vault, `PATH` vault-relative. Each related note prints its own `revision` and `due`: `revision` is the `expected_revision` a `note verify` payload for that note needs, and `due: false` means a check already settles it. |
 | `note verify --payload-file FILE` | Record one stale note's verification verdict, or one stale **entry's** with `entry` + `entry_fingerprint`: `still_valid`, `update`, `retire` or `unverified`, with its evidence. | `FILE` is JSON inside this workspace (note prose never travels as a shell argument). Fields, the `expected_revision` rule, the entry-level steps and an example are in the `ciao-memory` skill, `references/note-verify.md`. |
 

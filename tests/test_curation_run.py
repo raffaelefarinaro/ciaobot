@@ -1612,6 +1612,10 @@ def test_the_memory_skill_points_at_note_related() -> None:
     assert "ciao note related" in _stock("skills/ciao-memory/SKILL.md")
 
 
+def test_the_memory_skill_points_at_note_create() -> None:
+    assert "ciao note create" in _stock("skills/ciao-memory/SKILL.md")
+
+
 def test_the_memory_skill_did_not_grow() -> None:
     skill = _stock("skills/ciao-memory/SKILL.md")
 

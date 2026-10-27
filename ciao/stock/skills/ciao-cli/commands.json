@@ -10,6 +10,7 @@
   "vault review complete": "vault_review",
   "vault review restore-completed": "vault_review",
   "vault review delete": "vault_review",
+  "note create": "note_create",
   "note verify": "verify_note",
   "note related": "note_related",
   "file surface": "file_surface",
