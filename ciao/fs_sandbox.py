@@ -482,7 +482,7 @@ def path_outside_roots(value: str, *, cwd: Path, roots: list[Path]) -> bool:
     Relative paths resolve against *cwd*, ``~`` expands, and symlinks resolve,
     so a link inside a root that points outside it counts as outside. Glob
     characters cut the path at the last literal directory. A path that cannot
-    be resolved (a NUL byte, a symlink loop) counts as outside, so the guard
+    be resolved (a NUL byte, an unknown ``~user``) counts as outside, so the guard
     denies it rather than raising: a hook that raises is not a deny.
     """
     text = _static_prefix(value.strip())
@@ -491,9 +491,10 @@ def path_outside_roots(value: str, *, cwd: Path, roots: list[Path]) -> bool:
         if not candidate.is_absolute():
             candidate = cwd / candidate
         resolved = candidate.resolve()
+        resolved_roots = [root.resolve() for root in roots]
     except (ValueError, OSError, RuntimeError):
         return True
-    return not any(resolved.is_relative_to(root.resolve()) for root in roots)
+    return not any(resolved.is_relative_to(root) for root in resolved_roots)
 
 
 _TASK_SESSION_ID = re.compile(r"[0-9A-Za-z-]{8,64}")
@@ -516,10 +517,10 @@ def claude_task_output_path_allowed(
     if any(char in value for char in "*?[{\x00\n\r"):
         return False
     base = Path(tmp_base or "/tmp").expanduser().resolve() / f"claude-{uid}"
-    candidate = Path(value).expanduser()
-    if not candidate.is_absolute():
-        candidate = cwd / candidate
     try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
         if os.path.islink(candidate):
             return False
         resolved = candidate.resolve()
@@ -564,6 +565,8 @@ def claude_file_tool_guard(*, cwd: Path, roots: list[Path], cli_tmp_base: str | 
         session_id = str(input_data.get("session_id") or "")
         keys = CLAUDE_FILE_TOOL_PATH_KEYS.get(tool_name, ())
         tool_input = input_data.get("tool_input") or {}
+        if not isinstance(tool_input, dict):
+            tool_input = {}
         for key in keys:
             value = tool_input.get(key)
             if isinstance(value, str) and value.strip():
