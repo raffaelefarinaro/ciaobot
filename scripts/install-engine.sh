@@ -1685,6 +1685,11 @@ install_step "could not write the install receipt" \
 # CLI setup path below.
 fresh_macos=0
 fresh_completed=0
+# Whether this run's `ciao setup` generated the password. The welcome-pending
+# marker alone cannot answer that: an update keeps the marker left by the
+# install that generated the password, so the final summary must not claim the
+# password was created now (#2162).
+password_created=0
 if [ "$migrate_path" = skip ] && [ "$(uname -s)" = Darwin ]; then
     fresh_candidate=$workspace
     [ -n "$fresh_candidate" ] || fresh_candidate="$HOME/Ciaobot"
@@ -1856,13 +1861,26 @@ print(port)
     # up by exiting 3, which is not a failed install: everything else it
     # scaffolds is there, and a rollback would throw all of that away. Only
     # that one code is tolerated.
+    #
+    # Its stdout is kept out of the terminal but captured, because setup names
+    # every path it wrote, one per line. The welcome-pending marker appears in
+    # that list only when setup generated the password itself, which is the
+    # per-run evidence the final summary needs; the marker's mere existence is
+    # not (an update leaves the old one in place). The file can carry a sign-in
+    # credential, so it is never printed.
     setup_rc=0
-    "$ciao" setup "$@" >/dev/null || setup_rc=$?
+    "$ciao" setup "$@" >"$tmp/setup-output" || setup_rc=$?
     case "$setup_rc" in
         0) ;;
         3) echo "warning: ciao setup could not set up memory regions (see the warning above); continuing install" >&2 ;;
         *) abort_install "ciao setup failed" ;;
     esac
+    # Literal, full-line match: a workspace path with spaces or metacharacters
+    # must not turn into a pattern, and a path that merely contains the marker's
+    # spelling is not the marker setup wrote.
+    if grep -Fxq -- "$workspace/.runtime/welcome-pending" "$tmp/setup-output"; then
+        password_created=1
+    fi
     fi
 fi
 
@@ -2096,9 +2114,10 @@ elif [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ]; then
     echo "Open Ciaobot: $url"
     echo "This link signs you in once. Do not share it."
 fi
-# `ciao setup` leaves this marker only when it generated the password itself
-# (ciao.setup_marker.WELCOME_PENDING_FILENAME); the app shows it once on Home.
-if [ "$migrate_path" != client ] && [ -f "$workspace/.runtime/welcome-pending" ]; then
+# `ciao setup` generates the password only for a workspace that has none yet,
+# so the final summary must key on this run's own written-files output rather
+# than on a welcome-pending marker an update inherited (#2162).
+if [ "$migrate_path" != client ] && [ "$password_created" -eq 1 ]; then
     echo "Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager."
 fi
 if [ -t 1 ] && [ "$fresh_macos" -eq 0 ] && [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ] && command -v open >/dev/null 2>&1; then

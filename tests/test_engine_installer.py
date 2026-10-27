@@ -430,7 +430,28 @@ case "${1:-}" in
             exit 143
         fi
         if [ -f "$HOME/fail-ciao-setup" ]; then exit 1; fi
-        if [ -f "$HOME/setup-generates-password" ]; then mkdir -p "$HOME/Ciaobot/.runtime" && : > "$HOME/Ciaobot/.runtime/welcome-pending"; fi
+        if [ -f "$HOME/setup-generates-password" ] || [ -f "$HOME/fail-ciao-setup-after-password" ]; then
+            # `ciao setup` prints every path it wrote, one per line. A generated
+            # password is what writes the welcome-pending marker, so that path
+            # is in the list; an update keeps any older marker and prints
+            # nothing for it.
+            setup_workspace=$HOME/Ciaobot
+            previous=
+            for argument in "$@"; do
+                if [ "$previous" = "--workspace" ]; then setup_workspace=$argument; fi
+                previous=$argument
+            done
+            mkdir -p "$setup_workspace/.runtime"
+            : > "$setup_workspace/.runtime/welcome-pending"
+            printf '%s\n' "$setup_workspace/.runtime/welcome-pending"
+        fi
+        if [ -f "$HOME/fail-ciao-setup-after-password" ]; then
+            # Setup wrote the password, then failed for a reason the installer
+            # treats as hard. Whatever it printed is already captured and may
+            # hold a sign-in credential; it must not reach the terminal.
+            printf '%s\n' "__SETUP_STDOUT_SENTINEL__"
+            exit 1
+        fi
         # `ciao setup` reporting a workspace whose memory regions could not be
         # set up: its own exit code, with the warning on stderr, and every other
         # step of the workspace in place.
@@ -544,11 +565,18 @@ EOF
 esac
 """
 
+# A fake `ciao setup` prints this after the welcome marker it wrote, standing in
+# for the sign-in credential setup's stdout can carry. A failed install must
+# never echo the captured output (#2162).
+SETUP_STDOUT_SENTINEL = "SYNTHETIC-SETUP-CREDENTIAL-2162-do-not-echo"
+
+
 def _fake_uv() -> str:
     return (
         _UV_STUB.replace("__REPO_ROOT__", str(REPO_ROOT))
         .replace("__PYTHON__", sys.executable)
         .replace("__VERSION__", VERSION)
+        .replace("__SETUP_STDOUT_SENTINEL__", SETUP_STDOUT_SENTINEL)
     )
 
 
@@ -1358,6 +1386,26 @@ WELCOME_LINE = (
 
 @runs_the_sh_installer
 @needs_local_tools
+def test_installer_update_does_not_announce_an_existing_password(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    workspace = _existing_install(harness)
+    env_path = workspace / ".env"
+    env_path.write_text("PWA_PORT=8443\nPWA_AUTH_TOKEN=synthetic-existing-password\n", encoding="utf-8")
+    marker = workspace / ".runtime" / "welcome-pending"
+    marker.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+    original_env = env_path.read_bytes()
+    original_marker = marker.read_bytes()
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert env_path.read_bytes() == original_env
+    assert marker.read_bytes() == original_marker
+    assert WELCOME_LINE not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
 def test_installer_says_where_the_generated_password_is_shown(tmp_path: Path) -> None:
     harness = _harness(tmp_path)
     _existing_install(harness)
@@ -1369,6 +1417,139 @@ def test_installer_says_where_the_generated_password_is_shown(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     assert WELCOME_LINE in result.stdout
     assert f"  workspace: {home / 'Ciaobot'}" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param("generated", id="new-password"),
+        pytest.param("generated-memory-warning", id="new-password-with-tolerated-exit-3"),
+        pytest.param("stale-marker", id="update-with-stale-marker"),
+        pytest.param("no-marker", id="update-without-marker"),
+        pytest.param("literal-path", id="literal-path-with-spaces-and-metacharacters"),
+    ],
+)
+def test_installer_password_announcement_tracks_this_setup(
+    tmp_path: Path, case: str
+) -> None:
+    # The announcement is about this run, not about a marker an older install
+    # left behind: only setup's own written-files output can say whether a
+    # password was generated now (#2162).
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    args = ["--version", VERSION, "--no-start"]
+    password_generated = case in {
+        "generated",
+        "generated-memory-warning",
+        "literal-path",
+    }
+    if case == "literal-path":
+        # A literal full-line match, not a pattern: these are real characters
+        # in a real folder name.
+        workspace = _existing_install(harness, home / "Ciaobot [draft] * (copy)")
+        args += ["--workspace", str(workspace)]
+    else:
+        workspace = _existing_install(harness)
+    marker = workspace / ".runtime" / "welcome-pending"
+
+    if password_generated:
+        (home / "setup-generates-password").write_text("", encoding="utf-8")
+    else:
+        # An update keeps the password it already has, and an unacknowledged
+        # marker from the run that generated it can still be on disk.
+        (workspace / ".env").write_text(
+            "PWA_PORT=8443\nPWA_AUTH_TOKEN=synthetic-existing-password\n",
+            encoding="utf-8",
+        )
+        if case == "stale-marker":
+            marker.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+    if case == "generated-memory-warning":
+        # Setup generated the password, then reported memory regions it could
+        # not scaffold; exit 3 is tolerated and the password still exists.
+        (home / "fail-ciao-setup-memory").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, *args)
+
+    assert result.returncode == 0, result.stderr
+    if password_generated:
+        assert WELCOME_LINE in result.stdout
+        assert marker.is_file()
+    else:
+        assert WELCOME_LINE not in result.stdout
+        if case == "stale-marker":
+            # The marker the earlier run left is untouched, and this run does
+            # not mistake it for a password it created.
+            assert marker.read_text(encoding="utf-8") == "2026-01-01T00:00:00+00:00\n"
+        else:
+            assert not marker.exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_ready_update_keeps_sign_in_link_without_password_announcement(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    workspace = _existing_install(harness)
+    (workspace / ".env").write_text(
+        "PWA_PORT=8443\nPWA_AUTH_TOKEN=synthetic-existing-password\n",
+        encoding="utf-8",
+    )
+    marker = workspace / ".runtime" / "welcome-pending"
+    marker.write_text("2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+    original_marker = marker.read_bytes()
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "Open Ciaobot: http://localhost:8443/?setup=tok" in result.stdout
+    assert WELCOME_LINE not in result.stdout
+    assert marker.read_bytes() == original_marker
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_failed_setup_never_announces_a_password(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    _existing_install(harness)
+    home: Path = harness["home"]
+    (home / "setup-generates-password").write_text("", encoding="utf-8")
+    (home / "fail-ciao-setup").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode != 0
+    assert "ciao setup failed" in result.stderr
+    assert WELCOME_LINE not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_failed_setup_after_writing_password_stays_quiet(
+    tmp_path: Path,
+) -> None:
+    # Setup can write the password and its welcome marker, then fail before the
+    # workspace is complete. The install fails, so nothing may claim a password
+    # was created - and setup's captured stdout can carry a sign-in credential,
+    # so a hard failure must never echo it either (#2162).
+    harness = _harness(tmp_path)
+    workspace = _existing_install(harness)
+    home: Path = harness["home"]
+    (home / "fail-ciao-setup-after-password").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 1
+    assert "ciao setup failed" in result.stderr
+    assert WELCOME_LINE not in result.stdout
+    assert WELCOME_LINE not in result.stderr
+    assert SETUP_STDOUT_SENTINEL not in result.stdout
+    assert SETUP_STDOUT_SENTINEL not in result.stderr
+    # The marker really was written before the failure, so the old
+    # marker-existence check would have had something to misread.
+    assert (workspace / ".runtime" / "welcome-pending").is_file()
 
 
 @runs_the_sh_installer
