@@ -81,7 +81,7 @@ def _record_failure(
     error: str,
     *,
     extra: dict | None = None,
-    job: str = "background_run",
+    job: str = "vault_index",
     ended: datetime | None = None,
 ) -> None:
     when = (ended or datetime.now(UTC)).isoformat()
@@ -360,7 +360,7 @@ async def test_context_logs_redacts_failed_job_errors(tmp_path: Path) -> None:
     body = _fenced_body(error)
     assert "https://[redacted]@github.com/x" in body
     assert "ghp_abc" not in body
-    raw = job_runs.load_runs()["background_run"]["recent"][0]["error"]
+    raw = job_runs.load_runs()["vault_index"]["recent"][0]["error"]
     assert "ghp_abc" in raw
 
 

@@ -247,6 +247,32 @@ def test_terminal_env_drops_engine_secrets(monkeypatch: pytest.MonkeyPatch) -> N
     assert env["PATH"] == "/term/path"
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "GH_TOKEN",
+        "github_token",
+        "PRIVATE_KEY",
+        "OPENAI_API_KEY",
+        "SERVICE_API_TOKEN",
+        "X_AUTH_TOKEN",
+        "X_ACCESS_TOKEN",
+        "MY_SECRET",
+        "MY_SECRET_KEY",
+        "DB_PASSWORD",
+        "SLACK_TOKEN",
+        "AWS_PRIVATE_KEY_ID",
+    ],
+)
+def test_sensitive_env_keys_are_stripped(key: str) -> None:
+    assert host_terminal._is_sensitive_env_key(key)
+
+
+@pytest.mark.parametrize("key", ["HOME", "PATH", "LANG", "TOKENIZERS_PARALLELISM", "EDITOR"])
+def test_ordinary_env_keys_are_kept(key: str) -> None:
+    assert not host_terminal._is_sensitive_env_key(key)
+
+
 def test_unsupported_platform(monkeypatch: pytest.MonkeyPatch) -> None:
     _setup(monkeypatch, "sunos5")
     assert host_terminal.capabilities().reason == "unsupported_platform"

@@ -34,5 +34,17 @@
     "completion_check": "vault-relocate-recorded",
     "prompt_resource": "prompts/vault-relocate-1.md",
     "depends_on": []
+  },
+  {
+    "id": "remove-background-run-state",
+    "revision": 1,
+    "since_version": "0.0.0",
+    "scope": "install",
+    "title": "Delete the old background-run state folder",
+    "why": "This install still has the `background/` folder in its runtime directory, where the removed `ciao run` runner kept its registry and logs. Nothing reads it any more. Deleting it frees the space; it holds only finished or orphaned command logs. This card is offered only while the folder exists and is done when it is gone.",
+    "detector": "legacy-background-state-present",
+    "completion_check": "legacy-background-state-removed",
+    "prompt_resource": "prompts/remove-background-run-state-1.md",
+    "depends_on": []
   }
 ]

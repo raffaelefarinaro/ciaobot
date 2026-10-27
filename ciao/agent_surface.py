@@ -22,7 +22,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 #: Bearer capability for the agent CLI, injected into the managed provider's
-#: foreground shell only. Background runs strip it (see ``ciao/background.py``).
+#: foreground shell only.
 AGENT_TOKEN_ENV = "CIAO_AGENT_TOKEN"
 #: Base URL the CLI posts to; ``{op}`` is appended.
 AGENT_URL_ENV = "CIAO_AGENT_URL"

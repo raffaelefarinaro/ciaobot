@@ -755,6 +755,40 @@ def _learnings_revision(vault_root: Path) -> str | None:
         return None
 
 
+# ── The legacy background-run state probes (#2225) ───────────────────────────
+
+#: Where the removed ``ciao run`` runner kept its registry and logs, relative to
+#: the runtime directory.
+LEGACY_BACKGROUND_STATE_DIRNAME = "background"
+
+
+def _legacy_background_state_present(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether the removed ``ciao run`` runner left its state directory behind.
+
+    Read-only and one ``lstat``: no walk. A missing directory is "nothing to
+    do", so a fresh install, and an install that already cleaned up, are
+    ``not_applicable`` rather than offered an empty chore.
+    """
+    del workspace, today  # install-scoped
+    path = _runtime_root(config) / LEGACY_BACKGROUND_STATE_DIRNAME
+    return Detection(path.exists() or path.is_symlink(), {"reason": "legacy_state_dir"})
+
+
+def _legacy_background_state_removed(
+    *, config: Any, workspace: str = "", today: date | None = None
+) -> Detection:
+    """Whether the legacy state directory is gone. Idempotent by construction.
+
+    The postcondition is the absence of the directory itself, so running the
+    cleanup twice, or finding nothing to clean, is the same finished task.
+    """
+    del workspace, today  # install-scoped
+    present = _legacy_background_state_present(config=config)
+    return Detection(not present.applicable, {"reason": "legacy_state_dir_absent"})
+
+
 #: Every detector this engine ships. All are read-only, and all are registered in
 #: :data:`ciao.update_task_catalog.DETECTORS`, so a catalog row cannot name
 #: anything this engine has no code for. The functions live here rather than in
@@ -765,6 +799,7 @@ DETECTOR_FUNCTIONS: dict[str, Probe] = {
     "learnings-cleanup-review-needed": _learnings_cleanup_review_needed,
     "unrehomed-people-review-needed": _unrehomed_people_rehome_needed,
     "vault-relocate-review-needed": _vault_relocate_needed,
+    "legacy-background-state-present": _legacy_background_state_present,
 }
 
 #: Registered completion checks, same contract. A name with no implementation
@@ -774,6 +809,7 @@ COMPLETION_FUNCTIONS: dict[str, Probe] = {
     "learnings-cleanup-review-recorded": _learnings_cleanup_review_recorded,
     "unrehomed-people-rehome-recorded": _unrehomed_people_rehome_recorded,
     "vault-relocate-recorded": _vault_relocate_recorded,
+    "legacy-background-state-removed": _legacy_background_state_removed,
 }
 
 

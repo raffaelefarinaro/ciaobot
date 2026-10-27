@@ -127,11 +127,32 @@ def _spawn(
     )
 
 
+# Do not let a spawned terminal inherit provider credentials, API keys, or
+# tokens belonging to the engine. The suffix rules also cover user-configured
+# MCP and service credentials whose names are not known to Ciaobot ahead of time.
+_SENSITIVE_ENV_SUFFIXES = (
+    "_API_KEY",
+    "_API_TOKEN",
+    "_AUTH_TOKEN",
+    "_ACCESS_TOKEN",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_PASSWORD",
+    "_TOKEN",
+)
+
+
+def _is_sensitive_env_key(key: str) -> bool:
+    upper = key.upper()
+    return (
+        upper in {"GH_TOKEN", "GITHUB_TOKEN", "PRIVATE_KEY"}
+        or upper.endswith(_SENSITIVE_ENV_SUFFIXES)
+        or "_PRIVATE_KEY" in upper
+    )
+
+
 def _terminal_env() -> dict[str, str]:
     """The engine's environment minus secrets."""
-    # Private name on purpose: reuse the one suffix list rather than copy it.
-    from ciao.background import _is_sensitive_env_key
-
     env = {
         key: value
         for key, value in os.environ.items()

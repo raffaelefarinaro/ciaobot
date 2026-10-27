@@ -54,9 +54,9 @@ def _resolve(entry):
     return ("claude", "sonnet", "auto", "claude")
 
 
-def _record_failure(ended: datetime, job: str = "background_run") -> None:
+def _record_failure(ended: datetime, job: str = "vault_index") -> None:
     job_runs.record_run(job_runs.JobRun(
-        job=job, label="Background command run",
+        job=job, label="Vault index refresh",
         started_at=ended.isoformat(), ended_at=ended.isoformat(),
         status="error", error="one-off boom",
     ))

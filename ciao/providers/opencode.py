@@ -62,7 +62,7 @@ import httpx
 if TYPE_CHECKING:
     import subprocess
 
-from ciao.background import format_finished_runs
+from ciao.background_notice import format_finished_runs
 from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
     AgentRequest,

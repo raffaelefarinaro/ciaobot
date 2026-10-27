@@ -12,7 +12,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
 from ciao.execution_modes import cap_schedule_mode
@@ -437,9 +437,7 @@ def _ensure_tool_dirs_on_path() -> None:
 RESTART_WATCHDOG_GRACE_S = 15
 
 # Longer than the Claude SDK's 5 s stdin-EOF grace, so a CLI that is flushing
-# its session file is not cut off mid-write. Provider disconnect runs alongside
-# background-run shutdown (see _shutdown_concurrently), so this wait does not
-# eat into the time the watchdog leaves for terminating background commands.
+# its session file is not cut off mid-write.
 PROVIDER_SHUTDOWN_TIMEOUT_S = 6
 
 
@@ -458,19 +456,6 @@ async def _disconnect_for_shutdown(svc: ProviderService) -> None:
         )
     except Exception:
         logger.exception("Provider disconnect failed during shutdown")
-
-
-async def _shutdown_concurrently(*steps: Callable[[], Awaitable[None]]) -> None:
-    """Run independent shutdown steps at once, so their waits overlap.
-
-    The restart watchdog's grace covers the whole teardown; steps that wait on
-    unrelated children (provider CLIs, background commands) should not queue
-    behind each other. One step failing never cancels the others.
-    """
-    results = await asyncio.gather(*(step() for step in steps), return_exceptions=True)
-    for step, result in zip(steps, results):
-        if isinstance(result, Exception):
-            logger.error("Shutdown step %s failed", step.__name__, exc_info=result)
 
 
 # asyncio.run's cleanup phase (cancel tasks, shut down the default
@@ -1011,45 +996,6 @@ async def _run_server_locked(
         chat_dispatchable=_interval_target_dispatchable,
     )
 
-    # Background command runs (issue #282): one command, no model in the loop.
-    # Completions wake the chat that started the run after a short coalescing
-    # window, so a batch finishing together produces one turn.
-    from ciao.background import BackgroundRun, BackgroundRunner, BackgroundRunStore
-
-    def _background_started(run: BackgroundRun) -> None:
-        pcm.announce_background_runs(run.parent_chat_id)
-
-    def _background_finished(run: BackgroundRun, tail: list[str]) -> None:
-        # Drop the indicator now. The wake below is coalesced over a short
-        # window, so waiting for it would leave the chat claiming a run is
-        # live for seconds after it exited.
-        pcm.announce_background_runs(run.parent_chat_id, finished=run)
-        # The agent cancelled this run itself and already has its final state.
-        if not run.wake_owner:
-            return
-        pcm.queue_background_wake(
-            run.parent_chat_id,
-            run_id=run.run_id,
-            label=run.label,
-            status=run.status,
-            exit_code=run.exit_code,
-            last_lines=tail,
-            log_path=str(background_runner.log_path(run.run_id)),
-            error=run.error,
-        )
-
-    background_runner = BackgroundRunner(
-        BackgroundRunStore(config.state_path.parent),
-        workspace_root=config.workspace_root,
-        # A run resolves its cwd and relative cmd path against the owning
-        # workspace's agent root — the same directory its chat runs in. The
-        # install root is only the fallback for a pre-re-rooting layout; see
-        # BackgroundRunner.root_for.
-        agent_root=config.agent_root,
-        on_start=_background_started,
-        on_finish=_background_finished,
-    )
-
     # Create and wire up web app. The MCP control plane is mandatory for chat;
     # first-run setup is the one state without one, and a chat attempted there
     # fails loudly rather than running an agent that cannot reach Ciaobot.
@@ -1089,10 +1035,6 @@ async def _run_server_locked(
         logger.warning("Could not backfill schedule fallback projects", exc_info=True)
 
     app.state.schedule_manager = schedule_manager
-    app.state.background_runner = background_runner
-    # Lets the wake flusher defer runs to the runner when the restart drain
-    # blocks delivery, so the next start replays those wakes.
-    pcm._background_runner = background_runner
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
@@ -1273,18 +1215,6 @@ async def _run_server_locked(
         # within an interval of boot; they are excluded from the catch-up pass
         # because replaying intervals missed during downtime is worthless.
         schedule_manager.start()
-
-        # Resolve any background run left non-terminal by a crash (the
-        # graceful path terminates them on shutdown, so this normally finds
-        # nothing), replay wakes deferred by a draining restart, prune expired
-        # ones, and arm the janitor. Orphans are woken here rather than left
-        # sitting in `running` forever.
-        orphaned = background_runner.start()
-        if orphaned:
-            logger.warning(
-                "Resolved %d orphaned/replayed background run(s) after restart: %s",
-                len(orphaned), ", ".join(run.run_id for run in orphaned),
-            )
 
         # Import batch retention (C6, #1032): drop terminal batches past the
         # 30-day snapshot window, keeping accepted fact evidence. Once per
@@ -1574,17 +1504,6 @@ async def _run_server_locked(
                 *(_disconnect_for_shutdown(s) for s in services), return_exceptions=True
             )
 
-    async def _shutdown_background_runs() -> None:
-        # Terminate every live background command before the loop closes. This
-        # is what makes "a restart does not leak orphan processes" true on the
-        # graceful path: without it, a detached child (own session, by design,
-        # so cancel can reach its whole tree) would survive the engine and the
-        # next boot could only report it, never reclaim it.
-        try:
-            await background_runner.stop()
-        except Exception:
-            logger.exception("Background runner shutdown failed")
-
     async def _shutdown_links_scan() -> None:
         # Cancel a Home wikilink scan still in flight and wait for it to
         # acknowledge, before the read executor below is closed. The walk itself
@@ -1616,7 +1535,7 @@ async def _run_server_locked(
         backup_stop.set()
 
     async def _shutdown_children() -> None:
-        await _shutdown_concurrently(_shutdown_providers, _shutdown_background_runs)
+        await _shutdown_providers()
 
     app.state.shutdown_callbacks = [
         _shutdown_children,
