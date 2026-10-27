@@ -29,14 +29,12 @@ export const SECTION_TITLES: Record<NotificationSection, string> = {
 
 export type SourceStatus = 'checking' | 'ready' | 'stale' | 'unavailable'
 /** Sources the inbox requires. Later units append keys here; a key with no snapshot counts as 'checking'. */
-export const INBOX_SOURCES = ['chats', 'operator', 'automations', 'proposals', 'revisit', 'updateTasks'] as const
+export const INBOX_SOURCES = ['chats', 'operator', 'automations', 'updateTasks'] as const
 export type NotificationSourceKey = typeof INBOX_SOURCES[number]
 export const SOURCE_LABELS: Record<NotificationSourceKey, string> = {
   chats: 'Chats',
   operator: 'Settings',
   automations: 'Automations',
-  proposals: 'Memory suggestions',
-  revisit: 'Notes to revisit',
   updateTasks: 'Update tasks',
 }
 
@@ -53,19 +51,14 @@ export type NotificationKind =
   | 'missed-schedules'
   | 'automation-attention'
   | 'task-review'
-  | 'proposals-review'
-  | 'revisit-review'
   | 'memory-attention'
   | 'update-task'
-/** The two memory review queues the inbox links to (`/memory/review?show=`). */
-export type ReviewQueue = 'suggested' | 'revisit'
 export type NotificationDestination =
   | { kind: 'chat'; chatId: string }
   | { kind: 'schedule'; scheduleId: string }
   | { kind: 'settings'; tab: '' | 'providers' }
   | { kind: 'home-notice'; noticeKey: string }
   | { kind: 'task'; taskId: string }
-  | { kind: 'review'; filter: ReviewQueue }
 /** Within a section, lower rank sorts first. Needs-you: input < blocking < failure. */
 export type NotificationUrgency = 'input' | 'blocking' | 'failure' | 'review' | 'reply'
 
@@ -167,8 +160,6 @@ export interface NotificationInboxInput {
   operators?: readonly OperatorCandidate[]
   schedules?: readonly ScheduleCandidate[]
   reviewTasks?: readonly TaskReviewCandidate[]
-  proposalCount?: number
-  revisitCount?: number
   memoryInsights?: readonly MemoryInsightCandidate[]
   updateTasks?: readonly UpdateTaskCandidate[]
   sources: readonly SourceSnapshot[]
@@ -203,7 +194,7 @@ export function operatorInScope(actionWorkspace: string, activeWorkspace: string
   return !activeWorkspace || !actionWorkspace || actionWorkspace === activeWorkspace
 }
 
-/** The automation display name Home's At a glance used to compute. */
+/** Mirrors HomeReviewSummary.automationName. */
 export function scheduleDisplayName(s: { title: string; prompt: string; scheduleId: string }): string {
   const title = (s.title || '').trim()
   if (title) return title
@@ -367,29 +358,6 @@ function taskReviewRow(t: TaskReviewCandidate, ws: string, freshness: 'fresh' | 
   }
 }
 
-function queueRow(
-  queue: ReviewQueue,
-  count: number,
-  ws: string,
-  freshness: 'fresh' | 'stale',
-): NotificationRow {
-  const proposals = queue === 'suggested'
-  return {
-    key: `${proposals ? 'proposals' : 'revisit'}:${ws}`,
-    kind: proposals ? 'proposals-review' : 'revisit-review',
-    section: 'toReview',
-    urgency: 'review',
-    source: proposals ? 'proposals' : 'revisit',
-    title: proposals ? 'Memory proposals' : 'Notes to revisit',
-    reason: proposals
-      ? `${count} suggested ${count === 1 ? 'memory is' : 'memories are'} waiting to accept, edit, or reject.`
-      : `${count} ${count === 1 ? 'note needs' : 'notes need'} a freshness or duplication decision.`,
-    destination: { kind: 'review', filter: queue },
-    unread: false,
-    freshness,
-  }
-}
-
 function memoryInsightRow(m: MemoryInsightCandidate, freshness: 'fresh' | 'stale'): NotificationRow {
   const needsYou = m.phase === 'needsYou'
   const row: NotificationRow = {
@@ -518,10 +486,6 @@ export function projectNotificationInbox(input: NotificationInboxInput): Notific
     add(taskReviewRow(t, ws, freshnessOf('chats')))
     reviewedTaskIds.add(t.taskId)
   }
-  const proposalCount = input.proposalCount ?? 0
-  if (proposalCount > 0) add(queueRow('suggested', proposalCount, ws, freshnessOf('proposals')))
-  const revisitCount = input.revisitCount ?? 0
-  if (revisitCount > 0) add(queueRow('revisit', revisitCount, ws, freshnessOf('revisit')))
   const passChatIds = new Set<string>()
   for (const m of input.memoryInsights ?? []) {
     add(memoryInsightRow(m, freshnessOf('chats')))
@@ -578,9 +542,6 @@ export function notificationPath(d: NotificationDestination): string {
       return `/?notice=${encodeURIComponent(d.noticeKey)}`
     case 'task':
       return `/tasks/${encodeURIComponent(d.taskId)}`
-    // Mirrors stores/memoryMap.reviewPath (a store, so not importable here).
-    case 'review':
-      return `/memory/review?show=${d.filter}`
     default: {
       const unreachable: never = d
       return unreachable
