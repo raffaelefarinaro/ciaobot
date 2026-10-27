@@ -26,7 +26,7 @@ export type InjectedPrompt =
   | { kind: 'update_task' }
   | { kind: 'retry' }
 
-// Mirrors ProjectChatManager._build_background_wake_prompt (ciao/web/project_chats.py).
+// Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
 export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\./
 // Mirrors subagent_tracking.CLI_TASK_WAKE_PREFIX + SubagentWatchers.build_cli_task_wake_prompt.
 export const CLI_TASK_WAKE_PREFIX = '[Ciaobot] Lost CLI tasks:'
