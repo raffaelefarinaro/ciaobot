@@ -886,6 +886,28 @@ def safe_note_stem(name: str) -> str:
     return cleaned[:80]
 
 
+WINDOWS_RESERVED_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
+
+
+def portable_name_problem(part: str) -> str | None:
+    """Why *part* cannot be a file or folder name on every platform, or None.
+
+    A vault is synced between machines, and ``NUL.md`` or ``a:b`` would be
+    silently discarded or rejected where the note lands next.
+    """
+    if (
+        any(ch in '<>:"|?*' for ch in part)
+        or part.endswith((".", " "))
+        or part.split(".")[0].strip().upper() in WINDOWS_RESERVED_STEMS
+    ):
+        return "is not a valid file name on every platform"
+    return None
+
+
 EntityNoteOutcome = Literal["written", "exists", "refused"]
 """What one entity-note write did.
 
@@ -969,7 +991,7 @@ def entity_note_path(
     """
     folder = _entity_folder(registry_root, type_id)
     stem = safe_note_stem(name)
-    if folder is None or not stem:
+    if folder is None or not stem or portable_name_problem(stem):
         return None
     note = vault_root / folder / f"{stem}.md"
     if not _inside(vault_root, note):
