@@ -1207,3 +1207,79 @@ def test_prune_rows_for_wire_only_truncates_oversized_thinking() -> None:
     )
     assert "lazy" not in rows[2]
     assert rows[3]["content"] == "x" * 3000
+
+
+def _native_record(task_id: str, status: str, summary: str) -> str:
+    return (
+        "<task-notification>\n"
+        f"<task-id>{task_id}</task-id>\n"
+        "<tool-use-id>toolu_01</tool-use-id>\n"
+        f"<output-file>/tmp/tasks/{task_id}.output</output-file>\n"
+        f"<status>{status}</status>\n"
+        f"<summary>{summary}</summary>\n"
+        "</task-notification>"
+    )
+
+
+async def _render_user_records(monkeypatch, contents: list[str]) -> list[dict]:
+    monkeypatch.setattr(
+        transcript_service,
+        "_read_session_segment",
+        lambda _sid, _dirs: [
+            SimpleNamespace(type="user", message={"content": c}) for c in contents
+        ],
+    )
+    return await transcript_service._assemble_chat_messages(
+        _pcm([]), _config(), _chat()
+    )
+
+
+FAILED_PROBE = _native_record(
+    "be0mbj0cr",
+    "failed",
+    'Background command "Run probe A in background" failed with exit code 3',
+)
+OK_PROBE = _native_record(
+    "b2k9x1",
+    "completed",
+    'Background command "Run probe B in background" completed (exit code 0)',
+)
+
+
+@pytest.mark.asyncio
+async def test_claude_native_bash_notification_renders_a_background_run_notice(
+    monkeypatch,
+) -> None:
+    rows = await _render_user_records(monkeypatch, [FAILED_PROBE, "next turn"])
+
+    assert [r["role"] for r in rows] == ["system", "user"]
+    notice = rows[0]
+    assert notice["origin"] == "background_run"
+    assert notice["content"].startswith("[Ciaobot] 1 background run finished.")
+    assert "— Run probe A in background (be0mbj0cr, FAILED, exit 3)" in notice["content"]
+    assert "log: None" in notice["content"]
+    assert "Subagent" not in notice["content"]
+    assert rows[1]["turn_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_claude_two_bash_notifications_in_one_record_make_one_card(
+    monkeypatch,
+) -> None:
+    rows = await _render_user_records(monkeypatch, [FAILED_PROBE + "\n" + OK_PROBE])
+
+    assert len(rows) == 1
+    assert rows[0]["origin"] == "background_run"
+    assert rows[0]["content"].startswith("[Ciaobot] 2 background runs finished.")
+    assert "(be0mbj0cr, FAILED, exit 3)" in rows[0]["content"]
+    assert "(b2k9x1, ok, exit 0)" in rows[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_claude_subagent_notification_still_renders_the_status_line(
+    monkeypatch,
+) -> None:
+    record = _native_record("agent1", "completed", 'Agent "Review" completed')
+    rows = await _render_user_records(monkeypatch, [record])
+
+    assert rows == [{"role": "system", "content": '\U0001F916 Agent "Review" completed'}]

@@ -47,6 +47,45 @@ describe('parseInjectedPrompt', () => {
     })
   })
 
+  it('parses a native notice without a log or tail', () => {
+    const notice = [
+      '[Ciaobot] 1 background run finished.',
+      '',
+      `${D} Run probe A in background (be0mbj0cr, FAILED, exit 3)`,
+      'log: None',
+      '(no output)',
+    ].join('\n')
+    const p = parseInjectedPrompt(notice, 'background_run')
+    expect(p).toEqual({
+      kind: 'background_run',
+      count: 1,
+      runs: [{
+        label: 'Run probe A in background',
+        runId: 'be0mbj0cr',
+        verdict: 'failed',
+        exitCode: 3,
+        error: '',
+        logPath: '',
+        tail: [],
+      }],
+    })
+
+    const two = [
+      '[Ciaobot] 2 background runs finished.',
+      '',
+      `${D} Run probe A in background (be0mbj0cr, FAILED, exit 3)`,
+      'log: None',
+      '(no output)',
+      '',
+      `${D} Run probe B in background (b2k9x1, ok, exit 0)`,
+      'log: None',
+      '(no output)',
+    ].join('\n')
+    const parsed = parseInjectedPrompt(two, 'background_run')
+    expect(parsed).not.toBeNull()
+    expect(summarizeInjectedPrompt(parsed!, 'chat').facts).toContain('1 failed · 1 ok')
+  })
+
   it('parses several runs and an ok run with no output', () => {
     const text = [
       '[Ciaobot] 2 background runs finished.',

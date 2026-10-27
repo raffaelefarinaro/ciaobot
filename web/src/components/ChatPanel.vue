@@ -435,6 +435,24 @@
           />
         </div>
         <!-- System message (errors, etc) -->
+        <!-- A background shell the provider ran itself: the same card as a
+             `ciao run` wake, drawn from a system row so it never counts as a turn. -->
+        <div
+          v-else-if="item.kind === 'system' && injectedPrompts.get(item.msg)"
+          class="message-wrap injected-prompt-wrap"
+          :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`"
+          :data-msg-index="i"
+          data-msg-role="system"
+        >
+          <InjectedPromptCard
+            :prompt="injectedPrompts.get(item.msg)!"
+            :raw="''"
+            :timestamp="item.msg.timestamp"
+            :chat-title="chat.title"
+            :schedule="injectedSchedule"
+            :known-paths="knownFilePaths"
+          />
+        </div>
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
           <div v-if="isErrorMsg(item.msg.content)" class="error-attribution" role="status">
@@ -1909,7 +1927,9 @@ const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | nul
 const injectedPrompts = computed(() => {
   const map = new Map<ChatMessage, InjectedPrompt>()
   for (const m of store.activeMessages) {
-    if (m.role !== 'user') continue
+    // A user turn the engine wrote, or the system row the backend draws for a
+    // background shell the provider ran itself.
+    if (m.role !== 'user' && !(m.role === 'system' && m.origin === 'background_run')) continue
     const parsed = parseInjectedPrompt(m.content, m.origin)
     if (parsed) map.set(m, parsed)
   }

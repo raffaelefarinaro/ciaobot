@@ -46,7 +46,9 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
 
 const summary = computed(() => summarizeInjectedPrompt(props.prompt, props.chatTitle))
 const icon = computed(() => ICONS[props.prompt.kind])
+// A notice the engine did not write (a provider's own shell) has no prompt to show.
 const hasRawToggle = computed(() =>
+  props.raw.length > 0 &&
   ['background_run', 'cli_task_wake', 'schedule', 'webhook'].includes(props.prompt.kind),
 )
 const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])

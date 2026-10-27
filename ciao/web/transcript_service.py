@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ciao import cli_envelopes, subagent_tracking
+from ciao.background import format_finished_runs
 from ciao.models import ChatContext
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (
@@ -396,6 +397,38 @@ def _summarize_task_notification(content: str) -> str | None:
         snippet = first_line if len(first_line) <= 120 else first_line[:117] + "..."
         return f"{icon} Subagent {status}: {snippet}"
     return f"{icon} Subagent {status}"
+
+
+def _native_task_notice(content: str) -> str | None:
+    """Wake-format text for provider-native shell completions, else None.
+
+    The first notification decides: a subagent completion or a ``Monitor
+    event`` falls through to the one-line status bubble. A record can
+    concatenate several completions; the consecutive native ones share one
+    notice. No log path or tail: the provider's output file is outside the
+    file sandbox and the notice carries only a summary.
+    """
+    runs: list[cli_envelopes.NativeTaskRun] = []
+    for fields, _task_ids in cli_envelopes.envelope_notifications(content):
+        run = cli_envelopes.native_task_run(fields)
+        if run is None:
+            break
+        runs.append(run)
+    if not runs:
+        return None
+    entries: list[dict[str, Any]] = [
+        {
+            "status": run.status,
+            "label": run.label,
+            "run_id": run.run_id,
+            "exit_code": run.exit_code,
+            "error": run.error,
+            "log_path": None,
+            "last_lines": [],
+        }
+        for run in runs
+    ]
+    return format_finished_runs(entries, tail_lines=50)[0]
 
 
 def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
@@ -1712,6 +1745,14 @@ async def _assemble_chat_messages(
                 # <bash-stdout> from a command that printed a session JSONL
                 # stays hidden instead of rendering a status line assembled
                 # out of shell output.
+                native_notice = _native_task_notice(content)
+                if native_notice is not None:
+                    result.append({
+                        "role": "system",
+                        "content": native_notice,
+                        "origin": "background_run",
+                    })
+                    continue
                 task_summary = _summarize_task_notification(content)
                 if task_summary is not None:
                     result.append({"role": "system", "content": task_summary})
