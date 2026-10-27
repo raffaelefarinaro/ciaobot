@@ -205,6 +205,18 @@ async function stopUsingHere(): Promise<void> {
 <style scoped src="./settingsPanels.css"></style>
 
 <style scoped>
+/* The badge, Sign in again and the menu need ~300px, which on a phone left the
+   name and email no room: the name truncated to "Pe..." and the email ran under
+   the badge. Below that the actions wrap onto their own line. */
+.gws-account .set-row-head {
+  flex-wrap: wrap;
+}
+.gws-account .set-row-main {
+  flex-basis: 12rem;
+}
+.gws-account .set-row-sub {
+  overflow-wrap: anywhere;
+}
 .gws-account-none {
   display: flex;
   flex-direction: column;

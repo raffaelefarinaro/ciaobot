@@ -305,8 +305,10 @@ defineExpose({ open, close })
   padding: 0 16px 8px;
 }
 
+/* The bell is a `.touch-hit`, which already pads it to 44px around its 30px
+   face; sizing it to 44px as well made its layout box 44px wide on phones and
+   pushed the sidebar's collapse control out of the 320px drawer. */
 @media (pointer: coarse) {
-  .notif-bell,
   .notif-popover-close { width: var(--touch); height: var(--touch); }
 }
 </style>

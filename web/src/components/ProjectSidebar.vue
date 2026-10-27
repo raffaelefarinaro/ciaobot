@@ -1989,7 +1989,14 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .sidebar-header--expanded .toggle-btn {
+  flex: none;
   margin-left: auto;
+}
+
+/* Touch targets grow the row's controls to 44px boxes; the tighter gap keeps
+   the collapse control inside the 320px phone drawer. */
+@media (pointer: coarse) {
+  .sidebar-header--expanded .sidebar-brand-row { gap: 6px; }
 }
 
 /* The Ciaobot face in the workspace accent (it is drawn in currentColor). */

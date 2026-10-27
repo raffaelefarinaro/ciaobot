@@ -44,6 +44,50 @@ test.describe('narrow viewport', () => {
     }
   })
 
+  // On a phone every brand-row control is a 44px touch box; the bell used to
+  // size itself to 44px on top of its touch padding, which pushed the collapse
+  // control past the 320px drawer's edge.
+  test('the drawer brand row keeps the collapse control inside the drawer', async ({ page }) => {
+    await boot(page)
+    const open = page.getByRole('button', { name: /open sidebar|menu/i }).first()
+    if (await open.isVisible().catch(() => false)) await open.click()
+    const row = page.locator('.sidebar-brand-row')
+    await expect(row).toBeVisible()
+    // The drawer slides in, so measure once it has settled.
+    await expect(async () => {
+      const aside = (await page.locator('aside.sidebar').boundingBox())!
+      const rowBox = (await row.boundingBox())!
+      const toggle = (await row.locator('.toggle-btn').boundingBox())!
+      expect(aside.x).toBe(0)
+      expect(toggle.width).toBeGreaterThanOrEqual(44)
+      expect(toggle.x + toggle.width).toBeLessThanOrEqual(aside.x + aside.width)
+      // The visible 30px face ends on the row's edge, where the cards below end.
+      expect(toggle.x + toggle.width - 7).toBeLessThanOrEqual(rowBox.x + rowBox.width + 1)
+    }).toPass({ timeout: 5_000 })
+  })
+
+  test('an expired Google account row keeps its name and email clear of the actions', async ({ page }) => {
+    const profile = {
+      name: 'alpha', label: 'Personal', purpose: '', examples: [], configured: true,
+      credentials_present: true, client_secret_present: true, config_dir: '/synthetic/alpha',
+      workspaces: ['alpha'], setup_command: '', headless_auth_command: '',
+      email: 'a-long-address-for-a-phone@example.com', token_valid: false,
+      token_error: 'Token has been expired or revoked.', needs_relogin: true, loopback_eligible: true,
+    }
+    await page.route('**/api/integrations/gws*', route => route.fulfill({
+      json: { installed: true, binary_path: '/usr/local/bin/gws', cli_available: true, profiles: [profile] },
+    }))
+    await boot(page, '/settings/workspace', '.settings-main .section-title')
+    const head = page.locator('.gws-account .set-row-head')
+    await expect(head).toContainText('Sign-in expired')
+    const main = (await head.locator('.set-row-main').boundingBox())!
+    const actions = (await head.locator('.set-row-actions').boundingBox())!
+    // The actions wrap below the name instead of squeezing it to "Pe...".
+    expect(actions.y).toBeGreaterThanOrEqual(main.y + main.height - 1)
+    const title = head.locator('.set-row-title')
+    expect(await title.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+  })
+
   test('an open chat does not scroll sideways at 390px', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 
