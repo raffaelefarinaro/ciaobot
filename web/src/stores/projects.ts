@@ -31,8 +31,6 @@ import type {
   RunningSubagent,
   RunningSubagentsResponse,
   MoveToBackgroundResponse,
-  BackgroundRunLog,
-  BackgroundRunSummary,
   SubagentTranscript,
   TerminalOffer,
   WsEvent,
@@ -48,7 +46,7 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
-import { bareAgentId, isShellRow, sameAgent } from '../lib/subagentIds'
+import { bareAgentId, isShellRow, sameAgent, shellTaskId } from '../lib/subagentIds'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
@@ -97,9 +95,6 @@ export { setListIndex } from '../lib/safeList'
 // Must match `_DEFAULT_CHAT_TITLE` on the server: `_is_empty_chat` uses it to
 // tell an abandoned draft from a chat the user deliberately named.
 const DEFAULT_CHAT_TITLE = 'New Chat'
-
-// How long the composer says how a background run ended before the line goes.
-const FINISHED_RUN_NOTICE_MS = 6000
 
 /**
  * The boot's draft candidates whose chat is gone for good.
@@ -306,17 +301,6 @@ export const useProjectStore = defineStore('projects', () => {
   // running" indicator so the user can see work is ongoing during the quiet
   // gap between the turn ending and the agents reporting back.
   const backgroundAgents = ref<Record<string, number>>({})
-  // Per-chat live `background_run_start` command runs, oldest first. Driven
-  // by `chat_background_runs` over /ws/events and re-seeded from the snapshot.
-  // Separate from `backgroundAgents`: a background run has no transcript to
-  // open, only a command, a log and a Stop. Without it the chat goes fully
-  // idle the moment the turn ends, with nothing saying a command is still
-  // going — the tool is non-blocking by design.
-  const backgroundRuns = ref<Record<string, BackgroundRunSummary[]>>({})
-  // The run that most recently ended in each chat, held for a few seconds so
-  // the composer can say how it ended instead of the line just vanishing.
-  const finishedBackgroundRuns = ref<Record<string, BackgroundRunSummary>>({})
-  const finishedRunTimers = new Map<string, ReturnType<typeof setTimeout>>()
   // Full-screen restart overlay while the server drains active chats and
   // relaunches. Driven by /ws/events `server_restarting` (and the same
   // signal on the per-chat socket when a send is rejected mid-drain).
@@ -1091,9 +1075,6 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
-  const activeBackgroundRuns = computed<BackgroundRunSummary[]>(() =>
-    backgroundRuns.value[activeChatId.value || ''] || []
-  )
   const backgroundableCalls = ref<Record<string, BackgroundableCalls>>({})
   const activeBackgroundableCalls = computed<BackgroundableCalls>(() =>
     backgroundableCalls.value[activeChatId.value || ''] || {}
@@ -1209,12 +1190,11 @@ export const useProjectStore = defineStore('projects', () => {
   )
 
   // The UI-facing "is anything happening?" — deliberately NOT `anyChatWorking`,
-  // which is the poll gate above. A background run is the assistant working and
-  // must light the nav item, but it is not a subagent, so folding it into the
-  // gate would poll /api/subagents/running for rows that cannot exist.
+  // which is the poll gate above. A native background shell is the assistant
+  // working and must light the nav item, but it is not a subagent.
   const anyChatBusy = computed(() =>
     anyChatWorking.value
-    || Object.values(backgroundRuns.value).some(runs => runs.length > 0),
+    || Object.values(runningSubagents.value).some(rows => rows.some(isShellRow)),
   )
 
   // The server keeps a row "running" until the agent's transcript goes idle,
@@ -1349,33 +1329,68 @@ export const useProjectStore = defineStore('projects', () => {
     return (backgroundAgents.value[chatId] || 0) > 0
   }
 
-  function chatHasBackgroundRuns(chatId: string): boolean {
-    return (backgroundRuns.value[chatId]?.length || 0) > 0
+  // Per-task stop state, keyed chat id then bare task id. It lives here, not in
+  // the rows: the composer popover unmounts on close and the Chat details rail
+  // is a second view of the same rows, and both must show a stop still pending.
+  const stoppingTasks = ref<Record<string, Record<string, true>>>({})
+  const stopTaskErrors = ref<Record<string, Record<string, string>>>({})
+  const stopTaskTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  // A task the provider never reports ended must not leave Stop locked for good.
+  const STOP_LOCK_MS = 15_000
+
+  function dropTaskEntry(map: Record<string, Record<string, unknown>>, chatId: string, taskId: string) {
+    const rows = map[chatId]
+    if (!rows || !(taskId in rows)) return
+    delete rows[taskId]
+    if (!Object.keys(rows).length) delete map[chatId]
   }
 
-  async function fetchBackgroundRunLog(chatId: string, runId: string): Promise<BackgroundRunLog> {
-    return api.get<BackgroundRunLog>(
-      `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/log`,
-    )
+  function releaseStoppingTask(chatId: string, taskId: string) {
+    const key = `${chatId}\u0000${taskId}`
+    cancelTimer(stopTaskTimers.get(key))
+    stopTaskTimers.delete(key)
+    dropTaskEntry(stoppingTasks.value, chatId, taskId)
   }
 
-  // The row leaves when the finish edge arrives over /ws/events, not here, so
-  // every client drops it at the same moment.
-  async function cancelBackgroundRun(chatId: string, runId: string): Promise<void> {
-    await api.post(
-      `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/cancel`,
-      {},
-    )
-  }
-
-  // Stops one native shell or Monitor from the Processes list. The row leaves
-  // with the next running-subagent poll, once the provider reports it ended.
+  // Stops one native shell or Monitor from the Processes list. It stays
+  // "stopping" until the row leaves the running list: the engine answers
+  // before the provider has reported the task ended. A failure is recorded
+  // for the row, not thrown.
   async function stopBackgroundTask(chatId: string, taskId: string): Promise<void> {
-    await api.post(
-      `/api/chats/${encodeURIComponent(chatId)}/background-tasks/${encodeURIComponent(taskId)}/stop`,
-      {},
+    if (stoppingTasks.value[chatId]?.[taskId]) return
+    dropTaskEntry(stopTaskErrors.value, chatId, taskId)
+    stoppingTasks.value[chatId] = { ...stoppingTasks.value[chatId], [taskId]: true }
+    stopTaskTimers.set(
+      `${chatId}\u0000${taskId}`,
+      scheduleTimer(() => releaseStoppingTask(chatId, taskId), STOP_LOCK_MS),
     )
+    try {
+      await api.post(
+        `/api/chats/${encodeURIComponent(chatId)}/background-tasks/${encodeURIComponent(taskId)}/stop`,
+        {},
+      )
+    } catch {
+      releaseStoppingTask(chatId, taskId)
+      stopTaskErrors.value[chatId] = {
+        ...stopTaskErrors.value[chatId],
+        [taskId]: 'Could not stop this process. Try again.',
+      }
+    }
   }
+
+  // A row that left the poll has ended: its stopping state and error go too.
+  watch(runningSubagents, (all) => {
+    for (const map of [stoppingTasks.value, stopTaskErrors.value]) {
+      for (const chatId of Object.keys(map)) {
+        const live = new Set((all[chatId] || []).filter(isShellRow).map(r => shellTaskId(r.agent_id)))
+        for (const taskId of Object.keys(map[chatId])) {
+          if (live.has(taskId)) continue
+          if (map === stoppingTasks.value) releaseStoppingTask(chatId, taskId)
+          else dropTaskEntry(map, chatId, taskId)
+        }
+      }
+    }
+  }, { deep: false })
 
   // Subagents this chat has working right now, from /api/subagents/running.
   // Sidebar rows and the per-row "working" signal read this; it is deliberately
@@ -1393,15 +1408,13 @@ export const useProjectStore = defineStore('projects', () => {
    * Is this chat doing anything right now?
    *
    * One definition for every "working" surface. Each consumer used to OR the
-   * sources by hand, so adding one meant finding them all — and the last
-   * addition (background runs) reached the home lanes but not the project
-   * header, which is why the two disagreed for a chat whose only activity was
-   * a running subagent. Add new activity sources here, not at the call sites.
+   * sources by hand, so adding one meant finding them all, and the surfaces
+   * disagreed for a chat whose only activity was a running subagent. Add new
+   * activity sources here, not at the call sites.
    */
   function chatIsWorking(chatId: string): boolean {
     return isChatStreaming(chatId)
       || chatHasBackgroundAgents(chatId)
-      || chatHasBackgroundRuns(chatId)
       || chatHasRunningSubagents(chatId)
   }
 
@@ -3945,6 +3958,31 @@ export const useProjectStore = defineStore('projects', () => {
     // the turn is over whatever the last row is.
     if (!projectStreaming.value[chatId]) clearStreamingState(chatId)
     void loadSubagents(chatId)
+    // But a missing reply is not proof there is none: a fetch that failed
+    // while a resumed phone was still waking its network reads the same as an
+    // empty answer here. Keep checking, more slowly, so the user's own bubble
+    // is never left last until they reload.
+    if (!hasSettledHistory(chatId)) awaitLateReply(chatId)
+  }
+
+  // Follow-up checks for a finished turn whose reply history has not shown:
+  // about two minutes in all, then the turn really ended without one (a stop).
+  const LATE_REPLY_DELAYS_MS = [5000, 10000, 15000, 30000, 60000]
+  const lateReplyTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+
+  function awaitLateReply(chatId: string, attempt = 0) {
+    cancelTimer(lateReplyTimers[chatId])
+    delete lateReplyTimers[chatId]
+    if (attempt >= LATE_REPLY_DELAYS_MS.length) return
+    if (attempt === 0) console.warn(`chat ${chatId}: turn ended but history has no reply yet; checking again`)
+    lateReplyTimers[chatId] = scheduleTimer(async () => {
+      delete lateReplyTimers[chatId]
+      // Another chat is open, or a new turn owns the timeline: its own result
+      // reconciles it, and the next open of this chat fetches afresh.
+      if (activeChatId.value !== chatId || streaming.value[chatId] || projectStreaming.value[chatId]) return
+      await loadMessages(chatId, { background: true })
+      if (!hasSettledHistory(chatId)) awaitLateReply(chatId, attempt + 1)
+    }, LATE_REPLY_DELAYS_MS[attempt])
   }
 
   // ── Subagents ───────────────────────────────────────────────────────
@@ -4459,6 +4497,12 @@ export const useProjectStore = defineStore('projects', () => {
       if (activeChatId.value) sendFocus(activeChatId.value)
     })
 
+    // A phone resumed from a push can wake before its network does, so the
+    // resume fetches fail. Retry the moment the network is back.
+    listen(window, 'online', () => {
+      void resumeActiveChat()
+    })
+
     listen(document, 'visibilitychange', () => {
       documentVisible.value = document.visibilityState === 'visible'
       if (document.visibilityState === 'visible') {
@@ -4732,13 +4776,6 @@ export const useProjectStore = defineStore('projects', () => {
         // count left stale by a missed event (WS gap, server restart) heals
         // on reconnect.
         backgroundAgents.value = { ...(msg.background_agents || {}) }
-        // Same, for tracked command runs. Authoritative for the same reason,
-        // and it matters more here: a run outlives the turn that started it,
-        // so the snapshot is how a client learns about one that was already
-        // going when it connected. (A server restart does not carry runs
-        // over — the runner resolves them as orphans — so an empty map after
-        // one is the truth, not a gap.)
-        backgroundRuns.value = { ...(msg.background_runs || {}) }
         // Authoritative per-chat pin state for every persisted chat (including
         // closed/archived), so a client that missed a pin/unpin while its socket
         // was down heals to server truth instead of writing stale browser state.
@@ -4886,26 +4923,6 @@ export const useProjectStore = defineStore('projects', () => {
         // the Activity view (which fires a visibilitychange).
         if (msg.chat_id === activeChatId.value) {
           void reconcileAfterResult(msg.chat_id)
-        }
-        break
-      }
-      case 'chat_background_runs': {
-        // No transcript to pull and no agent row to refresh, unlike
-        // `chat_subagents_ready`. The finishing run delivers its own wake
-        // turn, which arrives as a normal chat result.
-        if (msg.runs?.length) {
-          backgroundRuns.value[msg.chat_id] = msg.runs
-        } else {
-          delete backgroundRuns.value[msg.chat_id]
-        }
-        if (msg.finished) {
-          const chatId = msg.chat_id
-          finishedBackgroundRuns.value[chatId] = msg.finished
-          cancelTimer(finishedRunTimers.get(chatId))
-          finishedRunTimers.set(chatId, scheduleTimer(() => {
-            delete finishedBackgroundRuns.value[chatId]
-            finishedRunTimers.delete(chatId)
-          }, FINISHED_RUN_NOTICE_MS))
         }
         break
       }
@@ -6995,14 +7012,14 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
-    projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     terminalOffers,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, stopBackgroundTask, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, stopBackgroundTask, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
