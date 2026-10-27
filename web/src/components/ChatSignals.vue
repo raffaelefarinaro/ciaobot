@@ -25,13 +25,13 @@
       :title="workingTitle"
       :aria-label="workingTitle"
     ><ActivityGlyph kind="working" /></span>
-    <!-- A retry only exists because a run failed, so it is the failure mark;
-         the label says a retry is queued. -->
+    <!-- A retry follows a failed run, or was scheduled by the agent from a
+         turn that succeeded; the alert mark is the same for both, the label says which. -->
     <span
       v-else-if="primarySignal === 'retry'"
       class="chat-signal chat-signal--retry"
-      title="Run failed, retry scheduled"
-      aria-label="Run failed, retry scheduled"
+      :title="retryTitle"
+      :aria-label="retryTitle"
     ><ActivityGlyph kind="alert" /></span>
     <!-- Not on the ladder: a run can outlive everything else on the row (a dev
          server goes for hours), so it shows beside needs-you and working
@@ -117,6 +117,13 @@ const runsTitle = computed(() =>
     : `${runCount.value} background runs`,
 )
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
+// An agent can schedule a retry from a turn that succeeded, so only say
+// "failed" when there is an error on the chat.
+const retryTitle = computed(() =>
+  store.chats.find(c => c.chat_id === props.chatId)?.last_error
+    ? 'Run failed, retry scheduled'
+    : 'Retry scheduled',
+)
 const unread = computed(() => store.chatUnread(props.chatId) > 0)
 
 // A memory pass that ended unclean. Ranked below `needs` and above `working`:

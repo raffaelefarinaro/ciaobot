@@ -1,18 +1,13 @@
 <script setup lang="ts">
-import { nextTick, ref, useId } from 'vue'
+import { nextTick, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useNotificationInboxStore } from '../stores/notificationInbox'
 import { notificationPath } from '../lib/notificationInbox'
 import type { NotificationRow } from '../lib/notificationInbox'
 import { formatRelative } from '../lib/time'
 
-withDefaults(defineProps<{ density?: 'popover' | 'sheet'; showSummary?: boolean }>(), {
-  density: 'popover',
-  showSummary: true,
-})
+withDefaults(defineProps<{ density?: 'popover' | 'sheet' }>(), { density: 'popover' })
 const emit = defineEmits<{ navigate: [] }>()
-// Home's list and the popover can be on the page together.
-const uid = useId()
 
 const inbox = useNotificationInboxStore()
 const router = useRouter()
@@ -65,7 +60,7 @@ async function open(row: NotificationRow, ev: MouseEvent) {
       class="notif-unavailable"
     >That item is no longer available. The list has been refreshed.</p>
 
-    <p v-if="showSummary" role="status" data-testid="inbox-summary" class="notif-summary">
+    <p role="status" data-testid="inbox-summary" class="notif-summary">
       <template v-if="inbox.count > 0">
         {{ inbox.count }} {{ inbox.count === 1 ? 'item needs' : 'items need' }} a look.<template
           v-if="inbox.overall !== 'ready'"
@@ -106,8 +101,8 @@ async function open(row: NotificationRow, ev: MouseEvent) {
     </ul>
 
     <template v-for="section in inbox.sections" :key="section.section">
-      <section v-if="section.rows.length > 0" :aria-labelledby="`${uid}-h-${section.section}`" class="notif-section">
-        <h3 :id="`${uid}-h-${section.section}`">
+      <section v-if="section.rows.length > 0" :aria-labelledby="`notif-h-${section.section}`" class="notif-section">
+        <h3 :id="`notif-h-${section.section}`">
           {{ section.title }} <span class="notif-section-count">{{ section.rows.length }}</span>
         </h3>
         <ul class="notif-list">

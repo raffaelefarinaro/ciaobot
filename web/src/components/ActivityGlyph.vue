@@ -11,14 +11,20 @@
       <rect x="7.2" y="4.6" width="1.6" height="4.4" class="activity-glyph-knock" />
       <rect x="7.2" y="10" width="1.6" height="1.6" class="activity-glyph-knock" />
     </svg>
+    <template v-else-if="kind === 'run'">
+      <svg class="activity-glyph-prompt" width="7" height="11" viewBox="0 0 7 11" aria-hidden="true">
+        <path d="M3.5 0.5V10.5M6 3.1C5.8 2.2 4.9 1.6 3.5 1.6 2 1.6 1 2.3 1 3.4 1 4.6 2.2 5 3.5 5.4 4.8 5.8 6 6.3 6 7.6 6 8.7 5 9.4 3.5 9.4 2 9.4 1 8.8 0.9 7.9" />
+      </svg>
+      <i class="activity-glyph-cursor"></i>
+    </template>
     <template v-else>
       <i
-        v-for="(order, cell) in PIXEL_GRIDS[kind].chase"
+        v-for="(order, cell) in WORKING_CHASE"
         :key="cell"
         class="activity-glyph-pixel"
         :class="{
           'activity-glyph-pixel--fixed': order < 0,
-          'activity-glyph-pixel--still': PIXEL_GRIDS[kind].still.includes(cell),
+          'activity-glyph-pixel--still': cell % 2 === 0,
         }"
         :style="{ '--i': order }"
       ></i>
@@ -29,22 +35,17 @@
 <script setup lang="ts">
 // One mark per kind of live work, all in the row's accent: shape and motion
 // carry the meaning, never hue, because an accent preset can sit next to any
-// semantic colour. Running work is a 3x3 pixel grid whose lit pixel chases the
-// perimeter: a working turn (or its subagents) over a dim grid, a background
-// run as a lit hub with one pixel orbiting it and nothing else drawn.
-// Anything that wants the owner (a question, a failure, a stuck pass) is a
-// filled alert triangle, still.
+// semantic colour. A working turn (or its subagents) is a 3x3 pixel grid whose
+// lit pixel chases the perimeter; a background run is a shell prompt, `$` and
+// a blinking block cursor. Anything that wants the owner (a question, a failure, a stuck
+// pass) is a filled alert triangle, still.
 // Decorative only: the caller owns the accessible name.
 export type ActivityGlyphKind = 'working' | 'run' | 'alert'
 defineProps<{ kind: ActivityGlyphKind }>()
 
-// Per kind, the chase step of each of the 9 cells in row-major order (-1 never
-// animates: the dim centre of `working`, the lit hub of `run`), and the cells
-// lit in the frozen reduced-motion frame.
-const PIXEL_GRIDS = {
-  working: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [0, 2, 4, 6, 8] },
-  run: { chase: [0, 1, 2, 7, -1, 3, 6, 5, 4], still: [2, 4] },
-} satisfies Record<Exclude<ActivityGlyphKind, 'alert'>, { chase: number[]; still: number[] }>
+// Chase step of each of the 9 grid cells in row-major order; -1 is the dim
+// centre, which never animates. The even cells are the reduced-motion checker.
+const WORKING_CHASE = [0, 1, 2, 7, -1, 3, 6, 5, 4]
 </script>
 
 <style scoped>
@@ -57,18 +58,14 @@ const PIXEL_GRIDS = {
   line-height: 1;
 }
 
-/* Running work: a 3x3 pixel grid, one lit pixel chasing a path through it
-   and leaving a short tail. The kinds differ in rest level and hub. */
-.activity-glyph--working,
-.activity-glyph--run {
+/* A working turn: a 3x3 pixel grid, one lit pixel chasing the perimeter and
+   leaving a short tail over a dim grid. */
+.activity-glyph--working {
   --pixel-rest: 0.18;
   display: inline-grid;
   grid-template-columns: repeat(3, 3px);
   gap: 1px;
 }
-
-/* A background run: no grid, just a lit hub and the pixel orbiting it. */
-.activity-glyph--run { --pixel-rest: 0; }
 
 .activity-glyph-pixel {
   width: 3px;
@@ -80,7 +77,29 @@ const PIXEL_GRIDS = {
 }
 
 .activity-glyph-pixel--fixed { animation: none; }
-.activity-glyph--run .activity-glyph-pixel--fixed { opacity: 1; }
+
+/* A background run: a shell prompt waiting on its command, `$` and a block
+   cursor that blinks. Sized to sit on the same 11px line as the grid. */
+.activity-glyph--run {
+  gap: 1px;
+  height: 11px;
+  color: var(--accent);
+}
+
+/* Drawn, not typed: a font's `$` sits on the baseline, below the cursor. */
+.activity-glyph-prompt {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.activity-glyph-cursor {
+  width: 4px;
+  height: 8px;
+  background: currentColor;
+  animation: activity-glyph-blink 1.1s steps(1, end) infinite;
+}
 
 /* The alert: a filled triangle with a knocked-out "!". */
 .activity-glyph--alert { color: var(--accent); }
@@ -92,13 +111,18 @@ const PIXEL_GRIDS = {
   70%, 100% { opacity: var(--pixel-rest); }
 }
 
+@keyframes activity-glyph-blink {
+  50% { opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .activity-glyph-pixel {
+  .activity-glyph-pixel,
+  .activity-glyph-cursor {
     animation: none;
   }
 
-  /* Frozen into a shape per kind, never a bare dot: the working grid a
-     checker, the run its hub and satellite. */
+  /* Frozen into a shape, never a bare dot: the working grid a checker, the
+     run its prompt with a solid cursor. */
   .activity-glyph-pixel--still { opacity: 1; }
 }
 </style>

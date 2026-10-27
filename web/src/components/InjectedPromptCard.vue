@@ -30,6 +30,7 @@ const open = ref(false)
 const rawOpen = ref(false)
 const detailOpen = ref(false)
 const bodyId = useId()
+const hintId = useId()
 const detailId = useId()
 const rawId = useId()
 
@@ -59,6 +60,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
         class="injected-card-toggle"
         :aria-expanded="open ? 'true' : 'false'"
         :aria-controls="bodyId"
+        :aria-describedby="!open && summary.hint ? hintId : undefined"
         @click="open = !open"
       >
         <AppIcon :name="icon" :size="14" />
@@ -74,6 +76,8 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
       >{{ schedule.title }}</router-link>
       <time v-if="timestamp" class="injected-card-time" :datetime="timestamp">{{ formatTime(timestamp) }}</time>
     </div>
+
+    <p v-if="!open && summary.hint" :id="hintId" class="injected-card-hint">{{ summary.hint }}</p>
 
     <div v-if="open" :id="bodyId" class="injected-card-body">
       <template v-if="prompt.kind === 'background_run'">
@@ -283,6 +287,17 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 }
 .injected-card-muted { color: var(--fg3); }
 .injected-card-error { margin: 4px 0 0; color: var(--error); }
+.injected-card-hint {
+  margin: 0 0 8px;
+  color: var(--error);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .injected-card-log { margin: 4px 0 0; }
 .injected-card-prose { max-height: 320px; overflow: auto; margin-top: 8px; line-height: 1.5; }
 .injected-card-prose :deep(> :first-child) { margin-top: 0; }
