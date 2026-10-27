@@ -895,7 +895,7 @@ def test_every_note_stem_writer_checks_portable_names() -> None:
         if "__pycache__" in path.parts:
             continue
         text = path.read_text(encoding="utf-8")
-        if "safe_note_stem(" in text and "portable_name_problem" not in text:
+        if "safe_note_stem(" in text and "portable_name_problem(" not in text:
             offenders.append(path.as_posix())
     assert offenders == []
 
