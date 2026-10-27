@@ -104,6 +104,8 @@ def _restored_pin_paths(raw: Any) -> list[str]:
 
 
 import yaml
+from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking
@@ -386,6 +388,50 @@ def _plain_markdown(value: str) -> str:
     message the app renders.
     """
     return value.translate(_MARKDOWN_ESCAPE_TABLE)
+
+
+# ── Plain-text reply excerpts ─────────────────────────────────────────────
+#
+# The unread card and the result push show a reply as text, not as rendered
+# Markdown, so the syntax comes off before the excerpt is truncated. One
+# established parser does that: markdown-it's token stream, with HTML and
+# linkify disabled, so nothing is rendered, executed or fetched. Only token
+# text is collected — inline text and code, fenced/indented code, image alt
+# text, breaks — while syntax tokens carry none and block boundaries separate.
+_MARKDOWN_TOKENS = MarkdownIt("js-default", {"html": False, "linkify": False})
+
+
+def _inline_plain_text(token: Token) -> str:
+    """The visible text of one inline token, without its syntax."""
+    pieces: list[str] = []
+    for child in token.children or []:
+        if child.type in {"text", "code_inline"}:
+            pieces.append(child.content)
+        elif child.type in {"softbreak", "hardbreak"}:
+            pieces.append(" ")
+        elif child.type == "image":
+            # An image contributes its alt text, never its source.
+            pieces.append(
+                _inline_plain_text(child) if child.children else child.content
+            )
+    return "".join(pieces)
+
+
+def _reply_plain_text(text: str) -> str:
+    """Render a reply's Markdown as the plain text a notification can show."""
+    blocks: list[str] = []
+    for token in _MARKDOWN_TOKENS.parse(text or ""):
+        if token.type == "inline":
+            plain = _inline_plain_text(token)
+            if plain:
+                blocks.append(plain)
+        elif token.type in {"fence", "code_block"}:
+            code = token.content.rstrip("\n")
+            if code:
+                blocks.append(code)
+        # Every other token is syntax: markers, emphasis/link open and close,
+        # rules. It carries no text, and block boundaries are the separators.
+    return "\n\n".join(blocks)
 
 
 @contextmanager
@@ -7786,13 +7832,18 @@ class ProjectChatManager:
 
     @staticmethod
     def _result_snippet(text: str, limit: int = 280) -> str:
-        """Flatten a reply to one line for the unread card and the push body.
+        """Flatten a reply to a plain-text excerpt for the unread card and push.
+
+        The one helper behind both surfaces: ``ChatInfo.last_snippet`` (the
+        Home card) and the pushed body, so the two cannot disagree (#2139).
+        The Markdown renders to plain text BEFORE the truncation, so syntax
+        never spends the budget, and the result is collapsed to one line.
 
         The default is sized for the two-line clamp on the Home unread card
         (`.home-chat-snippet`): at 140 the string ran out before the first line
         did, so the card's second line was always blank.
         """
-        flat = " ".join((text or "").strip().splitlines()).strip()
+        flat = " ".join(_reply_plain_text(text).split())
         if len(flat) > limit:
             flat = flat[: limit - 3] + "..."
         return flat

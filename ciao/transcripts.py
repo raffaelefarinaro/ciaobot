@@ -112,6 +112,52 @@ class TextStepJoiner:
         return "".join(self._parts)
 
 
+class FinalAnswerTracker:
+    """Track the assistant text block a turn ends on.
+
+    The live view commits accumulated text to the Activity trace whenever a
+    tool call fires, so the response bubble is the text streamed after the
+    turn's last top-level tool call. A thinking block does not end that
+    bubble: the client keeps streaming into the same bubble across it. Text
+    from inside a subagent carries a ``parent_tool_use_id`` and belongs to the
+    subagent's own transcript, so it is ignored here.
+
+    ``split`` reports whether a tool call separated the tracked text from what
+    came before, which lets a caller tell "the answer is this later block"
+    from "this provider streams one block and the terminal result is all there
+    is". Only top-level events feed it; nothing is persisted.
+    """
+
+    def __init__(self) -> None:
+        # Fragments, not one growing string: a turn can stream thousands of
+        # deltas and `+=` on the accumulated text would copy it each time.
+        # Same shape as TextStepJoiner's.
+        self._parts: list[str] = []
+        self._split = False
+
+    def feed(self, event: Any) -> None:
+        """Advance the tracker for one stream event."""
+        if getattr(event, "parent_tool_use_id", None) is not None:
+            return
+        if isinstance(event, AssistantTextDelta):
+            self._parts.append(event.text)
+        elif isinstance(event, ToolUseEvent):
+            # A result frame marks a call's completion; it paints no trace
+            # line and does not end the response bubble, so only a call does.
+            if event.type == "tool_result":
+                return
+            self._parts.clear()
+            self._split = True
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts).strip()
+
+    @property
+    def split(self) -> bool:
+        return self._split
+
+
 class TurnJournal:
     """Append-only crash journal for one in-flight turn.
 

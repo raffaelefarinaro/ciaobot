@@ -1734,6 +1734,11 @@ class OpencodeProvider(BaseSDKProvider):
         # empty made replayed opencode chats render blank turns (#295).
         # Dict insertion order doubles as the part order.
         self._answer_parts: dict[str, list[str]] = {}
+        # The turn's visible items in the order they appeared — ("text",
+        # part id) and ("tool", call id) — so the answer can be the text after
+        # the last top-level tool call instead of the last text part (#2139).
+        self._answer_order: list[tuple[str, str]] = []
+        self._answer_known: set[tuple[str, str]] = set()
         # What opencode actually ran, as `providerID/modelID`. A workspace may
         # pin opencode without naming a model, in which case the request carries
         # none and only the assistant message says what was used.
@@ -1771,6 +1776,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._context_usage = {}
         self._cost = None
         self._answer_parts.clear()
+        self._answer_order.clear()
+        self._answer_known.clear()
         self._effective_model = ""
         self._turn_recovered_via_poll = False
         self._poll_idle_outcome: str = ""
@@ -2120,6 +2127,7 @@ class OpencodeProvider(BaseSDKProvider):
             usage=self._usage,
             cost_usd=self._cost,
             origin="task-notification",
+            final_text=self._answer_final_text(),
         )
 
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
@@ -3272,7 +3280,33 @@ class OpencodeProvider(BaseSDKProvider):
 
     def _note_answer(self, part_id: str, text: str) -> None:
         """Accumulate one emitted fragment of the visible reply."""
+        self._mark_answer_text(part_id)
         self._answer_parts.setdefault(part_id, []).append(text)
+
+    def _mark_answer_text(self, part_id: str) -> None:
+        """Record this text part as the visible item now in progress."""
+        key = ("text", part_id)
+        if key not in self._answer_known:
+            self._answer_known.add(key)
+            self._answer_order.append(key)
+
+    def _mark_answer_tool(self, call_id: str) -> None:
+        """Record a top-level tool call.
+
+        Only a call moves the boundary: a completion frame, a duplicate or a
+        replayed call already in the log is not a new visible item.
+        """
+        if not call_id:
+            return
+        key = ("tool", call_id)
+        if key not in self._answer_known:
+            self._answer_known.add(key)
+            self._answer_order.append(key)
+
+    def _reset_answer_order(self) -> None:
+        """Forget the live order: a recovery poll's part list is authoritative."""
+        self._answer_order.clear()
+        self._answer_known.clear()
 
     def _turn_scope(self, messages: list[Any]) -> list[Mapping[str, Any]]:
         """Return this turn's projected rows through its first idle boundary.
@@ -3328,6 +3362,39 @@ class OpencodeProvider(BaseSDKProvider):
                     part for part in message_parts if isinstance(part, Mapping)
                 )
         return parts
+
+    def _apply_recovered_parts(
+        self, messages: list[Any], *, authoritative: bool
+    ) -> list[StreamEvent]:
+        """Replay a recovery poll's parts in their authoritative order.
+
+        Only a poll that carries this turn's user row may replace the live
+        order. It must also be complete for this turn: every text part the
+        live stream already placed in the answer has to appear in the
+        projection. A projection that omits one is incomplete — the SSE drop
+        hid the rest — and replacing the order with it would make earlier
+        narration the answer, so the live order stands until a complete poll
+        arrives. A strict superset is adopted, because it carries text parts
+        the live stream never saw. Rejection never resets the order.
+        """
+        if not authoritative:
+            return []
+        parts = self._turn_assistant_parts(messages)
+        if not parts:
+            return []
+        live_text = {key for kind, key in self._answer_order if kind == "text"}
+        projected_text = {
+            str(part.get("id") or "")
+            for part in parts
+            if str(part.get("type") or "") == "text"
+        }
+        if live_text and not live_text.issubset(projected_text):
+            return []
+        self._reset_answer_order()
+        events: list[StreamEvent] = []
+        for part in parts:
+            events.extend(self._part_updated({"part": dict(part)}))
+        return events
 
     def _restore_turn_metadata(self, messages: list[Any]) -> None:
         """Restore model, usage, cost, and assistant error after SSE loss."""
@@ -3433,9 +3500,13 @@ class OpencodeProvider(BaseSDKProvider):
                 )
                 signature = current or signature
                 self._restore_turn_metadata(messages)
-                for part in self._turn_assistant_parts(messages):
-                    for converted in self._part_updated({"part": dict(part)}):
-                        yield converted
+                # Replay this poll's parts only when it is authoritative: an
+                # empty or not-yet-visible projection must not erase the live
+                # answer order (#2139 review).
+                for converted in self._apply_recovered_parts(
+                    messages, authoritative=user_seen
+                ):
+                    yield converted
                 if quiesced:
                     self._turn_recovered_via_poll = True
                     return
@@ -3453,6 +3524,32 @@ class OpencodeProvider(BaseSDKProvider):
             "".join(chunks).strip() for chunks in self._answer_parts.values()
         )
         return "\n\n".join(part for part in parts if part)
+
+    def _answer_final_text(self) -> str:
+        """The visible answer block after the turn's last top-level tool call.
+
+        ``_answer_text`` joins every part for the durable transcript; a preview
+        or push must not excerpt the narration before the tool. Everything the
+        chat renders after the last tool call is one response block — text
+        parts separated only by thinking included — so join those parts the
+        same way ``_answer_text`` does. A tool call with no text after it means
+        there is no answer block: an explicit empty, never the narration.
+        """
+        boundary = 0
+        for position, (kind, _key) in enumerate(self._answer_order):
+            if kind == "tool":
+                boundary = position + 1
+        parts: list[str] = []
+        for kind, key in self._answer_order[boundary:]:
+            if kind != "text":
+                continue
+            chunks = self._answer_parts.get(key)
+            if not chunks:
+                continue
+            text = "".join(chunks).strip()
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)
 
     async def _reload_pending_requests(
         self, client: httpx.AsyncClient, session_id: str
@@ -3570,7 +3667,10 @@ class OpencodeProvider(BaseSDKProvider):
 
         if kind in {"session.reasoning.started", "session.text.started"}:
             part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
-            self._part_types[_v2_part_key(props, part_kind)] = part_kind
+            key = _v2_part_key(props, part_kind)
+            self._part_types[key] = part_kind
+            if part_kind == "text":
+                self._mark_answer_text(key)
             return []
         if kind in {"session.reasoning.delta", "session.text.delta"}:
             part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
@@ -3599,6 +3699,9 @@ class OpencodeProvider(BaseSDKProvider):
             return []
         if kind == "session.tool.called":
             call_id = str(props.get("id") or "")
+            # The call is the visible item even when a duplicate frame is
+            # ignored below, so record it before the settled check.
+            self._mark_answer_tool(call_id)
             if call_id in self._settled_tool_ids:
                 return []
             tool = str(props.get("name") or self._tool_calls.get(call_id) or "tool")
@@ -3720,6 +3823,10 @@ class OpencodeProvider(BaseSDKProvider):
             # already exists, so replaying it would duplicate the prompt.
             if part.get("messageID") and part.get("messageID") == self._user_message_id:
                 return []
+            if part_type == "text":
+                # Record the part even when its text was already emitted: the
+                # order is what places it relative to the tool calls.
+                self._mark_answer_text(part_id)
             suffix = self._emit_suffix(part_id, str(part.get("text") or ""))
             if not suffix:
                 return []
@@ -3739,6 +3846,9 @@ class OpencodeProvider(BaseSDKProvider):
     def _tool_part(self, part: Mapping[str, Any]) -> list[StreamEvent]:
         """One tool call, emitted once on start and once on settle."""
         call_id = str(part.get("callID") or part.get("id") or "")
+        # A call is a visible item from the moment its part exists, even when
+        # this frame is a repeat and emits no event.
+        self._mark_answer_tool(call_id)
         tool = str(part.get("tool") or "")
         state = part.get("state")
         state = state if isinstance(state, Mapping) else {}
@@ -4337,6 +4447,9 @@ class OpencodeProvider(BaseSDKProvider):
             cost_usd=self._cost,
             fallback_final=(bool(error) and saw_output) or degraded_final,
             recovered_with_pending=recovered_with_pending,
+            # The last part, not the joined turn: the preview and push excerpt
+            # this, while `result` above stays the complete durable reply.
+            final_text=self._answer_final_text(),
         )
 
     async def _augment_context_pct(
