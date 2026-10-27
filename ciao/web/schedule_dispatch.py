@@ -665,44 +665,69 @@ class ScheduleDispatcher:
             if chat:
                 orig_model, orig_mode = chat.model, chat.mode
 
-        # Global diagnostic inputs taint a model run: the composed prompt can
-        # carry another workspace's log/report text even when every execution
-        # owner matches. Capture this before substitution; scoped reads are a
-        # later child, so such runs stay unscoped here.
-        prompt_uses_global_diagnostics = (
-            "{{ERROR_LOG}}" in prompt or "{{ISSUE_REPORT}}" in prompt
-        )
-        # Substitute error-log placeholder for weekly maintenance schedules
+        # Placeholder inputs differ by schedule scope. A trusted system routine
+        # (startup triage, memory care) may see the engine-wide report; a user
+        # schedule may see only the workspace it dispatches into, and its
+        # {{ERROR_LOG}} is an omission notice rather than another workspace's
+        # log text. Engine-wide inputs taint the run, so it records no
+        # workspace; scoped user inputs do not.
+        system_scope = entry.scope == "system"
         had_error_placeholder = "{{ERROR_LOG}}" in prompt
-        if had_error_placeholder:
-            errors = await asyncio.to_thread(
-                tail_error_log, self._host._config.workspace_root, 200
-            )
-            prompt = prompt.replace(
-                "{{ERROR_LOG}}",
-                errors or "(no errors logged this week)",
-            )
-        # Richer variant: error log + failed background-job runs
         had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
+        prompt_uses_engine_wide_diagnostics = system_scope and (
+            had_error_placeholder or had_issue_placeholder
+        )
+        # Substitute error-log placeholder for weekly maintenance schedules.
+        if had_error_placeholder:
+            if system_scope:
+                errors = await asyncio.to_thread(
+                    tail_error_log, self._host._config.workspace_root, 200
+                )
+                prompt = prompt.replace(
+                    "{{ERROR_LOG}}",
+                    errors or "(no errors logged this week)",
+                )
+            else:
+                from ciao.debug_report import ERROR_LOG_OMISSION_NOTICE
+
+                prompt = prompt.replace("{{ERROR_LOG}}", ERROR_LOG_OMISSION_NOTICE)
+        # Richer variant: scoped failed job runs for a user schedule, or the
+        # engine-wide error log + failed runs for a trusted system routine.
+        user_issue_report_text: str | None = None
         if had_issue_placeholder:
-            prompt_uses_global_diagnostics = True
-            from ciao.debug_report import build_issue_report
+            from ciao.debug_report import (
+                build_issue_report,
+                build_workspace_issue_report,
+            )
             from ciao.startup_triage import TRIAGE_SCHEDULE_ID, fill_triage_prompt
 
-            # Exclude the triage's own past runs so a triage prompt built from
-            # {{ISSUE_REPORT}} never re-triages its own recorded summary.
-            issue_report = await asyncio.to_thread(
-                build_issue_report,
-                self._host._config.workspace_root,
-                exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
-            )
-            prompt = fill_triage_prompt(prompt, issue_report["report_text"])
+            if system_scope:
+                # Exclude the triage's own past runs so a triage prompt built
+                # from {{ISSUE_REPORT}} never re-triages its own recorded
+                # summary.
+                issue_report = await asyncio.to_thread(
+                    build_issue_report,
+                    self._host._config.workspace_root,
+                    exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
+                )
+                prompt = fill_triage_prompt(prompt, issue_report["report_text"])
+            else:
+                # Scope is the target captured before prompt processing.
+                # Unknown is empty, and the builder then yields no jobs; it
+                # never falls back to engine-wide data. Hold the text until
+                # ownership is re-checked below: the build awaits, and a
+                # retarget during it must not carry this workspace's failures
+                # into the prompt of the workspace the run actually enters.
+                issue_report = await asyncio.to_thread(
+                    build_workspace_issue_report, _sched_prompt_workspace
+                )
+                user_issue_report_text = issue_report["report_text"]
 
         # Capture the owner right before the call, with no await in between.
         # Mixed evidence is unknown: command, prompt processing and execution
         # must all name the same non-empty workspace.
         _sched_exec_workspace = self._chat_workspace(target_id)
-        if prompt_uses_global_diagnostics:
+        if prompt_uses_engine_wide_diagnostics:
             _sched_workspace = ""
         elif command_requested:
             if (
@@ -723,6 +748,34 @@ class ScheduleDispatcher:
                 and _sched_prompt_workspace == _sched_exec_workspace
                 else ""
             )
+
+        # The scoped report goes into the prompt only now, with prompt and
+        # execution ownership proven equal. A retarget during the report build
+        # leaves the placeholder unfilled and turns it into an omission notice
+        # instead. No await may be added between this and start_stream.
+        if user_issue_report_text is not None:
+            from ciao.debug_report import (
+                SCOPED_REPORT_FENCE_LABEL,
+                SCOPED_REPORT_OMISSION_NOTICE,
+            )
+            from ciao.prompt_fence import commonmark_fence
+            from ciao.startup_triage import fence_safe_report
+
+            if (
+                _sched_prompt_workspace
+                and _sched_exec_workspace
+                and _sched_prompt_workspace == _sched_exec_workspace
+            ):
+                report_block = commonmark_fence(
+                    # Job labels/errors are attacker-influenced prompt data.
+                    # Escaping the triage tag also keeps a hostile error from
+                    # closing a fence the user wrapped around the placeholder.
+                    fence_safe_report(user_issue_report_text),
+                    label=SCOPED_REPORT_FENCE_LABEL,
+                )
+            else:
+                report_block = SCOPED_REPORT_OMISSION_NOTICE
+            prompt = prompt.replace("{{ISSUE_REPORT}}", report_block)
 
         try:
             stream = self._host.start_stream(target_id, prompt, unattended=True, origin="schedule")
@@ -747,10 +800,12 @@ class ScheduleDispatcher:
                     outcome.completed = True
                     outcome.is_error = bool(payload.get("is_error"))
                     outcome.final_text = str(payload.get("text") or "")
-            # Clear only after a clean run: a failed triage must not wipe
-            # the backlog it never processed.
+            # Only a trusted system routine consumed engine-wide evidence.
+            # Clear it after a clean run; a failed triage must not wipe the
+            # backlog it never processed, and a user schedule never owns this
+            # shared log, so its success never truncates it.
             if (
-                (had_error_placeholder or had_issue_placeholder)
+                prompt_uses_engine_wide_diagnostics
                 and chat_service._schedule_run_clean(outcome)
             ):
                 await asyncio.to_thread(

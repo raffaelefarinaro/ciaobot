@@ -28,7 +28,7 @@ File and project routing:
 - For project work, inspect the active project's canonical document and relevant live files before editing.
 - Use workspace-relative paths for files. Recall and surfacing a deliverable in the user's file panel use the `ciao` commands the system prompt names (`ciao vault search`, `ciao file surface <path>`); read and write files with the provider's native file tools.
 
-When helping diagnose Ciaobot or prepare a GitHub issue, start with `ciao context logs` (it works under workspace-only file access, where the `.runtime/` files above are unreadable); use sanitized excerpts from the runtime logs above plus reproduction steps, platform, install method/version, and expected vs actual behavior. Ask before creating or posting a public issue.
+When helping diagnose Ciaobot or prepare a GitHub issue, start with `ciao context logs` (it works under workspace-only file access, where the `.runtime/` files above are unreadable). It shows the installed version and this workspace's recorded failed jobs, but omits engine-wide logs because they cannot be scoped to a workspace. Add reproduction steps, platform, install method/version, and expected vs actual behavior; use sanitized excerpts from the runtime logs only when you can read them. Ask before creating or posting a public issue.
 
 If the user asks what Ciaobot can customize, start with `CIAO_CUSTOMIZATION.md`.
 
