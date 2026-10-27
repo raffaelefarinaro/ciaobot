@@ -33,6 +33,18 @@
       :title="retryTitle"
       :aria-label="retryTitle"
     ><ActivityGlyph kind="alert" /></span>
+    <!-- Not on the ladder: a shell can outlive everything else on the row (a dev
+         server goes for hours), so it shows beside needs-you and working
+         instead of hiding behind them. -->
+    <span
+      v-if="shellCount > 0"
+      class="chat-signal chat-signal--runs"
+      :title="shellsTitle"
+      :aria-label="shellsTitle"
+    >
+      <ActivityGlyph kind="run" />
+      <span v-if="density === 'card' && shellCount > 1" class="chat-signal-count">{{ shellCount }}</span>
+    </span>
     <span
       v-if="scheduleSummary"
       class="chat-signal chat-signal--schedule"
@@ -63,7 +75,7 @@ import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import type { WorkspaceAccent } from '../lib/workspaceColors'
-import { isShellRow } from '../lib/subagentIds'
+import { isShellRow, subagentLabel } from '../lib/subagentIds'
 import ActivityGlyph from './ActivityGlyph.vue'
 import ScheduleGlyph from './ScheduleGlyph.vue'
 
@@ -94,6 +106,15 @@ const workingTitle = computed(() => {
   if (working.value || agentCount.value === 0) return 'Working'
   return agentCount.value === 1 ? '1 agent running' : `${agentCount.value} agents running`
 })
+// Background shells and Monitors from the same poll. One is named, the way the
+// composer names it, so hovering the row says what is going.
+const shells = computed(() => store.runningSubagentsFor(props.chatId).filter(isShellRow))
+const shellCount = computed(() => shells.value.length)
+const shellsTitle = computed(() =>
+  shellCount.value === 1
+    ? `Background run: ${subagentLabel(shells.value[0])}`
+    : `${shellCount.value} background runs`,
+)
 const retryPending = computed(() => store.chats.find(c => c.chat_id === props.chatId)?.retry?.status === 'pending')
 // An agent can schedule a retry from a turn that succeeded, so only say
 // "failed" when there is an error on the chat.
@@ -189,9 +210,18 @@ const scheduleTitle = computed(() => {
   white-space: nowrap;
 }
 
-/* Working draws ActivityGlyph; the gap keeps a label clear of it. */
-.chat-signal--working {
+/* Working and runs draw ActivityGlyph; the gap keeps a count clear of it. */
+.chat-signal--working,
+.chat-signal--runs {
   gap: var(--space-1);
+}
+
+/* Only shown for more than one run, where the number is the point. */
+.chat-signal-count {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 /* An attribute of the chat, not a state, so it stays muted like the task and
