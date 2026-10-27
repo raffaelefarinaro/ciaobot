@@ -18,9 +18,13 @@ from typing import cast
 import pytest
 
 from ciao import curation_run
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.job_runs import JobRun
 from ciao.models import BridgeMode
+from ciao.schedule_command import CommandRun
 from ciao.schedules import ScheduleEntry
+from ciao.sessions import StateStore
+from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream, EventsHub
 from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectChatManager, ProjectInfo
 from ciao.web.schedule_dispatch import ScheduleDispatchHost, ScheduleDispatcher
@@ -32,6 +36,19 @@ class _Stream:
 
     async def subscribe(self):
         for event in self._events:
+            yield event
+
+
+class _MutatingStream(_Stream):
+    """Move the target after the turn started, then finish normally."""
+
+    def __init__(self, host: "_ScheduleHost", events: list[dict[str, object]]) -> None:
+        super().__init__(events)
+        self._host = host
+
+    async def subscribe(self):
+        self._host._projects["project-1"].workspace = "work"
+        async for event in super().subscribe():
             yield event
 
 
@@ -65,6 +82,7 @@ class _ScheduleHost:
             )
         }
         self.schedule_store = None
+        self.command_workspace = "personal"
         self._events_hub = EventsHub()
         self.events_published: list[dict[str, object]] = []
         self._events_hub.publish = self.events_published.append  # type: ignore[method-assign]
@@ -98,7 +116,10 @@ class _ScheduleHost:
 
     def schedule_command_env(self, entry: ScheduleEntry) -> tuple[Path, dict[str, str]]:
         del entry
-        return self._config.workspace_root, {"CIAO_WORKSPACE": str(self._config.workspace_root)}
+        return self._config.workspace_root, {
+            "CIAO_WORKSPACE": str(self._config.workspace_root),
+            "CIAO_ACTIVE_WORKSPACE": self.command_workspace,
+        }
 
     def _resolve_schedule_project(
         self, stale_id: str, entry: ScheduleEntry
@@ -216,6 +237,12 @@ def _entry(*, archive_policy: str = "manual") -> ScheduleEntry:
         archive_policy=archive_policy,
         workspace="personal",
     )
+
+
+def _capture_run_records(monkeypatch: pytest.MonkeyPatch) -> list[JobRun]:
+    rows: list[JobRun] = []
+    monkeypatch.setattr("ciao.web.schedule_dispatch.job_runs.record_run", rows.append)
+    return rows
 
 
 @pytest.mark.asyncio
@@ -527,3 +554,441 @@ async def test_other_schedules_never_read_curation_state(
 
     assert result["status"] == "ok"
     assert host.vault_root_calls == []
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_records_run_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path, [{"type": "result", "text": "done", "is_error": False}]
+    )
+    rows = _capture_run_records(monkeypatch)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        _entry(), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert rows[0].extra["workspace"] == "personal"
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_target_workspace_overrides_stale_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path, [{"type": "result", "text": "done", "is_error": False}]
+    )
+    rows = _capture_run_records(monkeypatch)
+    entry = _entry()
+    entry.workspace = "stale-work"
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert rows[0].extra["workspace"] == "personal"
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_workspace_does_not_change_during_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path, [{"type": "result", "text": "done", "is_error": False}]
+    )
+    rows = _capture_run_records(monkeypatch)
+    host.start_stream = (  # type: ignore[method-assign]
+        lambda chat_id, prompt, images=None, *, is_retry=False, unattended=False, origin="": cast(
+            ChatStream, _MutatingStream(host, host._stream_events)
+        )
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        _entry(), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert host._projects["project-1"].workspace == "work"
+    assert rows[0].extra["workspace"] == "personal"
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_records_empty_workspace_when_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path, [{"type": "result", "text": "done", "is_error": False}]
+    )
+    host._projects["project-1"].workspace = ""
+    rows = _capture_run_records(monkeypatch)
+    entry = _entry()
+    entry.workspace = "stale-work"
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert rows[0].extra["workspace"] == ""
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_command_to_turn_mixed_workspace_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path, [{"type": "result", "text": "done", "is_error": False}]
+    )
+    rows = _capture_run_records(monkeypatch)
+    entry = _entry()
+    entry.command = "probe"
+
+    async def _command(*args: object, **kwargs: object) -> CommandRun:
+        del args, kwargs
+        host._projects["project-1"].workspace = "work"
+        return CommandRun(
+            command="probe",
+            exit_code=0,
+            stdout="command output\n",
+            stderr="",
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.run_schedule_command", _command
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert host._projects["project-1"].workspace == "work"
+    assert rows[0].extra["workspace"] == ""
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_command_with_unknown_prompt_owner_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path, [{"type": "result", "text": "done", "is_error": False}]
+    )
+    host._projects.clear()
+    rows = _capture_run_records(monkeypatch)
+    entry = _entry()
+    entry.command = "probe"
+    entry.workspace = "original"
+
+    async def _command(*args: object, **kwargs: object) -> CommandRun:
+        del args, kwargs
+        entry.workspace = "mutated"
+        return CommandRun(
+            command="probe",
+            exit_code=0,
+            stdout="command output\n",
+            stderr="",
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.run_schedule_command", _command
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert entry.workspace == "mutated"
+    assert rows[0].extra["workspace"] == ""
+
+
+class _RealManagerHost(_ScheduleHost):
+    """Use the real manager for command-env and prepared-target selection."""
+
+    def __init__(
+        self, manager: ProjectChatManager, events: list[dict[str, object]]
+    ) -> None:
+        super().__init__(manager._config.workspace_root, events)
+        self.manager = manager
+        self._config = manager._config
+        self._chats = manager._chats
+        self._projects = manager._projects
+
+    def schedule_command_env(self, entry: ScheduleEntry) -> tuple[Path, dict[str, str]]:
+        return self.manager.schedule_command_env(entry)
+
+    def prepare_schedule_chat(
+        self,
+        entry: ScheduleEntry,
+        prompt: str,
+        model: str,
+        mode: BridgeMode,
+        provider: str = "",
+    ) -> str | None:
+        return self.manager.prepare_schedule_chat(
+            entry, prompt, model, mode, provider
+        )
+
+
+def _workspace_pair_manager(tmp_path: Path) -> ProjectChatManager:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            name: WorkspaceConfig(name=name, vault_root=f"memory-vault/{name}")
+            for name in ("personal", "work")
+        },
+    )
+    return ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+
+
+def _both_targets(tmp_path: Path):
+    manager = _workspace_pair_manager(tmp_path)
+    personal_project = manager.create_project("Personal target", workspace="personal")
+    work_project = manager.create_project("Work target", workspace="work")
+    personal_chat = manager.create_chat(
+        personal_project.project_id, title="Personal chat", provider="claude"
+    )
+    entry = _entry()
+    entry.web_chat_id = personal_chat.chat_id
+    entry.web_project_id = work_project.project_id
+    entry.workspace = "personal"
+    return manager, entry, personal_chat, work_project
+
+
+@pytest.mark.asyncio
+async def test_real_manager_quiet_command_records_command_env_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, entry, _personal_chat, _work_project = _both_targets(tmp_path)
+    host = _RealManagerHost(
+        manager, [{"type": "result", "text": "unused", "is_error": False}]
+    )
+    rows = _capture_run_records(monkeypatch)
+    entry.command = "probe"
+    seen: dict[str, object] = {}
+
+    async def _command(command: str, cwd: Path, env: dict[str, str]) -> CommandRun:
+        seen["cwd"] = cwd
+        seen["env"] = dict(env)
+        return CommandRun(
+            command=command,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.run_schedule_command", _command
+    )
+
+    def _refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("quiet command must not prepare or resolve a target")
+
+    monkeypatch.setattr(manager, "prepare_schedule_chat", _refuse)
+    monkeypatch.setattr(manager, "create_chat", _refuse)
+    monkeypatch.setattr(manager, "_resolve_schedule_project", _refuse)
+    monkeypatch.setattr(manager, "_rehome_interval_chat", _refuse)
+    chats_before = set(manager._chats)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    command_env = cast(dict[str, str], seen["env"])
+    assert command_env["CIAO_ACTIVE_WORKSPACE"] == "personal"
+    assert Path(cast(Path, seen["cwd"])) == manager._config.agent_root("personal")
+    assert rows[0].extra["workspace"] == "personal"
+    assert host.started == []
+    assert set(manager._chats) == chats_before
+
+
+@pytest.mark.asyncio
+async def test_real_manager_command_to_project_turn_mixed_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, entry, _personal_chat, work_project = _both_targets(tmp_path)
+    host = _RealManagerHost(
+        manager, [{"type": "result", "text": "done", "is_error": False}]
+    )
+    rows = _capture_run_records(monkeypatch)
+    entry.command = "probe"
+    seen: dict[str, object] = {}
+
+    async def _command(command: str, cwd: Path, env: dict[str, str]) -> CommandRun:
+        seen["cwd"] = cwd
+        seen["env"] = dict(env)
+        return CommandRun(
+            command=command,
+            exit_code=0,
+            stdout="command output\n",
+            stderr="",
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.run_schedule_command", _command
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, "Run the routine.", "opus", "auto", "claude"
+    )
+
+    target_id = host.started[0][0]
+    target_chat = manager._chats[target_id]
+    command_env = cast(dict[str, str], seen["env"])
+    assert target_chat.project_id == work_project.project_id
+    assert manager._projects[target_chat.project_id].workspace == "work"
+    assert command_env["CIAO_ACTIVE_WORKSPACE"] == "personal"
+    assert Path(cast(Path, seen["cwd"])) == manager._config.agent_root("personal")
+    assert rows[0].extra["workspace"] == ""
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_prompt_owner_change_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(
+        tmp_path, [{"type": "result", "text": "done", "is_error": False}]
+    )
+    rows = _capture_run_records(monkeypatch)
+    entry = _entry()
+    entry.prompt = "{{ERROR_LOG}}"
+
+    def _error_log(*args: object, **kwargs: object) -> str:
+        del args, kwargs
+        host._projects["project-1"].workspace = "work"
+        return ""
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.tail_error_log", _error_log
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, entry.prompt, "opus", "auto", "claude"
+    )
+
+    assert host._projects["project-1"].workspace == "work"
+    assert rows[0].extra["workspace"] == ""
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_error_log_placeholder_is_unscoped_on_model_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "SYNTH-BETA-GLOBAL-ERROR"
+    host = _ScheduleHost(tmp_path, [{"type": "error"}])
+    rows = _capture_run_records(monkeypatch)
+    entry = _entry()
+    entry.prompt = "{{ERROR_LOG}}"
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.tail_error_log",
+        lambda *args, **kwargs: marker,
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, entry.prompt, "opus", "auto", "claude"
+    )
+
+    assert marker in host.started[0][1]
+    assert rows[0].status == "error"
+    assert rows[0].extra["workspace"] == ""
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_issue_report_placeholder_is_unscoped_on_model_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "SYNTH-BETA-GLOBAL-REPORT"
+    host = _ScheduleHost(tmp_path, [{"type": "error"}])
+    rows = _capture_run_records(monkeypatch)
+    entry = _entry()
+    entry.prompt = "{{ISSUE_REPORT}}"
+    monkeypatch.setattr(
+        "ciao.debug_report.build_issue_report",
+        lambda *args, **kwargs: {"report_text": marker},
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, entry.prompt, "opus", "auto", "claude"
+    )
+
+    assert marker in host.started[0][1]
+    assert rows[0].status == "error"
+    assert rows[0].extra["workspace"] == ""
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_command_turn_with_global_placeholder_is_unscoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "SYNTH-BETA-COMMAND-GLOBAL-ERROR"
+    host = _ScheduleHost(tmp_path, [{"type": "error"}])
+    rows = _capture_run_records(monkeypatch)
+    entry = _entry()
+    entry.command = "probe"
+    entry.prompt = "{{ERROR_LOG}}"
+
+    async def _command(*args: object, **kwargs: object) -> CommandRun:
+        del args, kwargs
+        return CommandRun(
+            command="probe",
+            exit_code=0,
+            stdout="command output\n",
+            stderr="",
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.run_schedule_command", _command
+    )
+    monkeypatch.setattr(
+        "ciao.web.schedule_dispatch.tail_error_log",
+        lambda *args, **kwargs: marker,
+    )
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        entry, entry.prompt, "opus", "auto", "claude"
+    )
+
+    assert marker in host.started[0][1]
+    assert rows[0].status == "error"
+    assert rows[0].extra["workspace"] == ""
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_no_placeholder_error_run_keeps_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _ScheduleHost(tmp_path, [{"type": "error"}])
+    rows = _capture_run_records(monkeypatch)
+    dispatcher = ScheduleDispatcher(cast(ScheduleDispatchHost, host))
+
+    await dispatcher.dispatch_schedule(
+        _entry(), "Run the routine.", "opus", "auto", "claude"
+    )
+
+    assert rows[0].status == "error"
+    assert rows[0].extra["workspace"] == "personal"

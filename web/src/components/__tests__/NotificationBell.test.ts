@@ -7,7 +7,6 @@ import type { VueWrapper } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import NotificationBell from '../NotificationBell.vue'
-import { requestInboxOpen } from '../../composables/useInboxPopover'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import { useHousekeepingStore } from '../../stores/housekeeping'
@@ -254,18 +253,11 @@ describe('NotificationBell', () => {
     expect(dialog()).toBeNull()
   })
 
-  it('opens_on_request_only_when_visible', async () => {
-    await mountBell({ chats: 1 })
-    const rect = (r: Partial<DOMRect>) => ({ x: 0, y: 0, toJSON: () => ({}), ...r }) as DOMRect
-    const spy = vi.spyOn(bellButton(), 'getBoundingClientRect')
-    // Laid out but translated off screen (the drawer's rail bell on a phone).
-    spy.mockReturnValue(rect({ left: -50, right: -10, top: 10, bottom: 40, width: 40, height: 30 }))
-    requestInboxOpen()
-    await flushPromises()
-    expect(dialog()).toBeNull()
-    spy.mockReturnValue(rect({ left: 10, right: 50, top: 10, bottom: 40, width: 40, height: 30 }))
-    requestInboxOpen()
-    await flushPromises()
-    expect(dialog()).not.toBeNull()
+  it('badge_and_ring_sit_inside_the_icon_wrapper', async () => {
+    await mountBell({ chats: 2, health: stale })
+    const icon = document.body.querySelector('.notif-bell .notif-bell-icon')!
+    expect(icon.querySelector('svg')).not.toBeNull()
+    expect(icon.querySelector('.notif-bell-count')?.textContent).toBe('2')
+    expect(icon.querySelector('.notif-bell-ring')).not.toBeNull()
   })
 })

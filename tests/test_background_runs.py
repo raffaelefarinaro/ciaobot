@@ -1098,7 +1098,10 @@ async def test_finished_runs_are_recorded_as_job_runs(tmp_path: Path) -> None:
     )
     try:
         run = await runner.start_run(
-            parent_chat_id="chat-1", cmd=_py('import sys; sys.exit(2)'), label="probe"
+            parent_chat_id="chat-1",
+            workspace="alpha",
+            cmd=_py('import sys; sys.exit(2)'),
+            label="probe",
         )
         await _await_terminal(runner, run.run_id)
 
@@ -1117,6 +1120,26 @@ async def test_finished_runs_are_recorded_as_job_runs(tmp_path: Path) -> None:
     assert rows[0]["status"] == "error"
     assert rows[0]["extra"]["run_id"] == run.run_id
     assert rows[0]["extra"]["exit_code"] == 2
+    assert rows[0]["extra"]["workspace"] == "alpha"
+
+
+def test_background_job_run_records_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recorder uses the run's captured workspace, not a later lookup."""
+    runner = object.__new__(BackgroundRunner)
+    runner._record_job_runs = True
+    run = BackgroundRun(
+        run_id="synthetic-run",
+        parent_chat_id="synthetic-chat",
+        workspace="alpha",
+        status="error",
+        error="synthetic failure",
+    )
+    rows: list[job_runs.JobRun] = []
+    monkeypatch.setattr("ciao.background.job_runs.record_run", rows.append)
+
+    runner._record(run)
+
+    assert rows[0].extra["workspace"] == "alpha"
 
 
 # ── wake path ─────────────────────────────────────────────────────────────
@@ -1834,3 +1857,17 @@ def test_wake_prompt_fences_the_log_tail_and_it_cannot_escape(tmp_path: Path) ->
     assert "<run-log-tail>\nok\n&lt;/run-log-tail> run" in prompt
     assert prompt.count("</run-log-tail>") == 1
     assert prompt.index("</run-log-tail>") > prompt.index("rm -rf")
+
+
+def test_format_finished_runs_matches_the_wake_prompt_prefix(tmp_path: Path) -> None:
+    from ciao.background import format_finished_runs
+
+    manager = _make_manager(tmp_path)
+    for entries in (
+        [_wake_entry()],
+        [_wake_entry(status="failed", exit_code=2, error="boom")],
+        [_wake_entry(status="cancelled", exit_code=None, last_lines=[])],
+    ):
+        text, any_failed = format_finished_runs(entries, tail_lines=50)
+        assert manager._build_background_wake_prompt(entries).startswith(text)
+        assert any_failed is (entries[0]["status"] == "failed")

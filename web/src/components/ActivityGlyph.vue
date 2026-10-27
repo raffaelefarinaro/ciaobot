@@ -12,7 +12,9 @@
       <rect x="7.2" y="10" width="1.6" height="1.6" class="activity-glyph-knock" />
     </svg>
     <template v-else-if="kind === 'run'">
-      <i class="activity-glyph-prompt"></i>
+      <svg class="activity-glyph-prompt" width="7" height="11" viewBox="0 0 7 11" aria-hidden="true">
+        <path d="M3.5 0.5V10.5M6 3.1C5.8 2.2 4.9 1.6 3.5 1.6 2 1.6 1 2.3 1 3.4 1 4.6 2.2 5 3.5 5.4 4.8 5.8 6 6.3 6 7.6 6 8.7 5 9.4 3.5 9.4 2 9.4 1 8.8 0.9 7.9" />
+      </svg>
       <i class="activity-glyph-cursor"></i>
     </template>
     <template v-else>
@@ -84,14 +86,17 @@ const WORKING_CHASE = [0, 1, 2, 7, -1, 3, 6, 5, 4]
   color: var(--accent);
 }
 
-.activity-glyph-prompt::before {
-  content: "$";
-  font: normal 700 11px/11px var(--font-mono);
+/* Drawn, not typed: a font's `$` sits on the baseline, below the cursor. */
+.activity-glyph-prompt {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
 }
 
 .activity-glyph-cursor {
-  width: 5px;
-  height: 9px;
+  width: 4px;
+  height: 8px;
   background: currentColor;
   animation: activity-glyph-blink 1.1s steps(1, end) infinite;
 }

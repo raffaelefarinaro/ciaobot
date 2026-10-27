@@ -20,8 +20,6 @@ import { useHousekeepingStore } from './housekeeping'
 import { useTaskStore } from './tasks'
 import { useProposalsStore } from './proposals'
 import { useVaultReviewStore } from './vaultReview'
-import { reviewPath } from './memoryMap'
-import { notificationPath } from '../lib/notificationInbox'
 import projectsSrc from './projects.ts?raw'
 import taskSignalsSrc from './taskSignals.ts?raw'
 import housekeepingSrc from './housekeeping.ts?raw'
@@ -658,84 +656,31 @@ describe('notification inbox store', () => {
       expect(inbox.rows.find((r) => r.key === 'chat:c-del')!.section).toBe('needsYou')
     })
 
-    it('proposals_queue_row_and_scope', () => {
+    it('memory_suggestions_and_revisit_are_not_inbox_content', async () => {
       const { projects, signals, inbox } = setup()
       markHealthy(projects, signals)
       const proposals = useProposalsStore()
-      expect(keysOf(inbox)).toEqual([])
-      proposals.rows = [
-        { id: 'a', workspace: 'personal' }, { id: 'b', workspace: 'personal' }, { id: 'c', workspace: 'work' },
-      ] as never
-      expect(keysOf(inbox)).toEqual(['proposals:personal'])
-      expect(inbox.rows[0].reason).toContain('2 suggested')
-      expect(inbox.rows[0].destination).toEqual({ kind: 'review', filter: 'suggested' })
-    })
-
-    it('revisit_row_only_for_loaded_workspace', () => {
-      const { projects, signals, inbox } = setup()
-      markHealthy(projects, signals)
       const review = useVaultReviewStore()
-      review.loadedWorkspace = 'work'
-      review.candidates = [{ path: 'a.md' }, { path: 'b.md' }] as never
-      expect(keysOf(inbox)).toEqual([])
-      expect(inbox.sources.find((s) => s.source === 'revisit')!.status).toBe('checking')
+      proposals.rows = [{ id: 'a', workspace: 'personal' }, { id: 'b', workspace: 'personal' }] as never
       review.loadedWorkspace = 'personal'
-      expect(keysOf(inbox)).toEqual(['revisit:personal'])
-      expect(inbox.rows[0].reason).toContain('2 notes need')
-    })
-
-    it('proposals_and_revisit_source_status', () => {
-      const { projects, signals, inbox } = setup()
-      const proposals = useProposalsStore()
-      const review = useVaultReviewStore()
-      const status = (k: string) => inbox.sources.find((s) => s.source === k)!.status
-      expect(status('proposals')).toBe('checking')
-      expect(status('revisit')).toBe('checking')
+      review.candidates = [{ path: 'a.md' }] as never
+      expect(keysOf(inbox)).toEqual([])
+      expect(inbox.count).toBe(0)
+      expect(inbox.sources.map((s) => s.source)).toEqual(['chats', 'operator', 'automations', 'updateTasks'])
+      // Their loads failing is not an inbox concern either.
       proposals.loadError = 'x'
       review.loadError = 'x'
-      expect(status('proposals')).toBe('unavailable')
-      expect(status('revisit')).toBe('unavailable')
-      proposals.loadError = ''
-      review.loadError = ''
-      markHealthy(projects, signals)
-      expect(status('proposals')).toBe('ready')
-      expect(status('revisit')).toBe('ready')
+      expect(inbox.overall).toBe('ready')
       expect(inbox.allClear).toBe(true)
-      proposals.rows = [{ id: 'a', workspace: 'personal' }] as never
-      proposals.loadError = 'x'
-      review.loadError = 'x'
-      expect(status('proposals')).toBe('stale')
-      expect(status('revisit')).toBe('stale')
-      expect(keysOf(inbox)).toEqual(['proposals:personal'])
-      expect(inbox.rows[0].freshness).toBe('stale')
-      expect(inbox.allClear).toBe(false)
-    })
-
-    it('review_refreshers_are_noops_when_healthy', async () => {
-      const { projects, signals, inbox } = setup()
-      markHealthy(projects, signals)
       vi.spyOn(projects, 'syncLatest').mockResolvedValue()
       vi.spyOn(signals, 'reload').mockResolvedValue()
       vi.spyOn(useHousekeepingStore(), 'refresh').mockResolvedValue()
       vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
-      const pf = vi.spyOn(useProposalsStore(), 'fetch').mockResolvedValue()
-      const vf = vi.spyOn(useVaultReviewStore(), 'fetch').mockResolvedValue()
+      const pf = vi.spyOn(proposals, 'fetch').mockResolvedValue()
+      const vf = vi.spyOn(review, 'fetch').mockResolvedValue()
       await inbox.refresh()
       expect(pf).not.toHaveBeenCalled()
       expect(vf).not.toHaveBeenCalled()
-      useProposalsStore().loadError = 'x'
-      useVaultReviewStore().loadedWorkspace = 'work'
-      await inbox.refresh()
-      expect(pf).toHaveBeenCalledTimes(1)
-      expect(vf).toHaveBeenCalledTimes(1)
-      expect(vf).toHaveBeenCalledWith('personal')
-      await inbox.retry('proposals')
-      expect(pf).toHaveBeenCalledTimes(2)
-    })
-
-    it('review_path_parity', () => {
-      expect(notificationPath({ kind: 'review', filter: 'suggested' })).toBe(reviewPath('suggested'))
-      expect(notificationPath({ kind: 'review', filter: 'revisit' })).toBe(reviewPath('revisit'))
     })
 
     it('memory_insight_rows_attention_only', () => {

@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { useNotificationInboxStore } from '../stores/notificationInbox'
 import NotificationInboxList from './NotificationInboxList.vue'
-import { useInboxOpenRequests } from '../composables/useInboxPopover'
 
 defineOptions({ inheritAttrs: false })
 
@@ -106,23 +105,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', place)
 })
 
-// `offsetParent` is not enough: the collapsed rail's bell inside the phone drawer
-// is laid out but translated off screen.
-function onScreen(el: HTMLElement | null): boolean {
-  if (!el) return false
-  const r = el.getBoundingClientRect()
-  return r.width > 0 && r.height > 0
-    && r.right > 0 && r.left < window.innerWidth && r.bottom > 0 && r.top < window.innerHeight
-    && getComputedStyle(el).visibility !== 'hidden'
-}
-
-// Home's narrow summary asks for the inbox; only the bell that is on screen
-// answers (the pane-header one on phones, the sidebar one otherwise).
-const openRequests = useInboxOpenRequests()
-watch(openRequests, () => {
-  if (onScreen(buttonEl.value)) open()
-})
-
 defineExpose({ open, close })
 </script>
 
@@ -138,14 +120,18 @@ defineExpose({ open, close })
     :aria-label="inbox.accessibleName"
     @click="toggle"
   >
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-         stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
-      <path d="M6 17V10a6 6 0 0 1 12 0v7" />
-      <line x1="4" y1="17" x2="20" y2="17" />
-      <line x1="10" y1="21" x2="14" y2="21" />
-    </svg>
-    <span v-if="inbox.count > 0" class="notif-bell-count" aria-hidden="true">{{ inbox.badgeText }}</span>
-    <span v-if="partial" class="notif-bell-ring" aria-hidden="true"></span>
+    <!-- The count and ring hang off the icon, not the button: on coarse pointers
+         the button grows to 44px and a button-anchored badge floated off the bell. -->
+    <span class="notif-bell-icon">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
+        <path d="M6 17V10a6 6 0 0 1 12 0v7" />
+        <line x1="4" y1="17" x2="20" y2="17" />
+        <line x1="10" y1="21" x2="14" y2="21" />
+      </svg>
+      <span v-if="inbox.count > 0" class="notif-bell-count" aria-hidden="true">{{ inbox.badgeText }}</span>
+      <span v-if="partial" class="notif-bell-ring" aria-hidden="true"></span>
+    </span>
   </button>
   <Teleport to="body">
     <div v-if="isOpen && variant === 'sheet'" class="notif-backdrop" @click="close(true)"></div>
@@ -210,16 +196,22 @@ defineExpose({ open, close })
   outline-offset: -2px;
 }
 
+.notif-bell-icon {
+  position: relative;
+  display: inline-flex;
+}
+
 .notif-bell-count {
   position: absolute;
-  top: 2px;
-  right: 4px;
+  top: -5px;
+  right: -7px;
   min-width: 14px;
   padding: 1px 3px;
+  box-sizing: border-box;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-xs);
   background: var(--bg2);
-  color: var(--fg2);
+  color: var(--fg);
   font: 700 9px/1 var(--font-mono);
   font-variant-numeric: tabular-nums;
   text-align: center;
@@ -229,8 +221,8 @@ defineExpose({ open, close })
    whole story. Hollow, never filled, so it cannot read as "needs you". */
 .notif-bell-ring {
   position: absolute;
-  top: 2px;
-  left: 2px;
+  top: -3px;
+  left: -4px;
   box-sizing: border-box;
   width: 8px;
   height: 8px;
