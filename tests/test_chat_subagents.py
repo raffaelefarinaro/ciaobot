@@ -780,6 +780,138 @@ async def test_drain_between_turns_publishes_and_pushes_for_real_reply(
     assert reloaded.last_snippet == chat.last_snippet
 
 
+def _drain_chat(pcm: ProjectChatManager, name: str):
+    project = pcm.create_project(name, workspace="personal")
+    chat = pcm.create_chat(project.project_id, title=name)
+    chat.session_id = f"sess-{name}"
+    pcm._save()
+    return project, chat
+
+
+async def test_drain_announces_only_the_follow_up_final_segment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A follow-up execution previews its last text block, not the joined turn.
+
+    OpenCode's wake result joins every part of the execution; the unread card
+    and push must excerpt the block the chat ends on, while the durable
+    handover keeps the whole execution text (#2139).
+    """
+    from ciao.models import AssistantTextDelta, ResultEvent, ToolUseEvent
+
+    pcm = _make_manager(tmp_path)
+    project, chat = _drain_chat(pcm, "drain-segment")
+    interim = "Interim working narration."
+    final = "Final answer in file.md."
+    whole = f"{interim}\n\n{final}"
+
+    class _FakeProvider:
+        can_drain = True
+        background_work_outstanding = False
+
+        async def drain_events(self):
+            yield AssistantTextDelta(type="text", text=interim)
+            yield ToolUseEvent(type="assistant", tool_name="Bash", tool_input="ls")
+            yield AssistantTextDelta(type="text", text=final)
+            yield ResultEvent(
+                type="result",
+                result=whole,
+                session_id=chat.session_id,
+                is_error=False,
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+    published: list[dict] = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: None)
+
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    ready = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert len(ready) == 1
+    assert ready[0]["snippet"] == "Final answer in file.md."
+    assert chat.last_snippet == "Final answer in file.md."
+    # The complete execution text still reaches the handover and the schedule
+    # classifier, which judges the finished synthesis rather than a preview.
+    assert chat.last_response == whole
+    assert pcm._last_drain_result[chat.chat_id] == (whole, False)
+
+
+async def test_drain_uses_provider_final_text_without_text_events(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A wake attached after the text frames still names its final block."""
+    from ciao.models import ResultEvent
+
+    pcm = _make_manager(tmp_path)
+    project, chat = _drain_chat(pcm, "drain-metadata")
+    whole = "Interim working narration.\n\nFinal answer in file.md."
+
+    class _FakeProvider:
+        can_drain = True
+        background_work_outstanding = False
+
+        async def drain_events(self):
+            yield ResultEvent(
+                type="result",
+                result=whole,
+                session_id=chat.session_id,
+                is_error=False,
+                final_text="Final answer in file.md.",
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+    published: list[dict] = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: None)
+
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    ready = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert [ev["snippet"] for ev in ready] == ["Final answer in file.md."]
+    assert pcm._last_drain_result[chat.chat_id] == (whole, False)
+
+
+async def test_drain_resets_the_final_segment_for_each_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A second wake's answer is its own block, not the previous one plus it."""
+    from ciao.models import AssistantTextDelta, ResultEvent
+
+    pcm = _make_manager(tmp_path)
+    project, chat = _drain_chat(pcm, "drain-reset")
+
+    class _FakeProvider:
+        can_drain = True
+        background_work_outstanding = False
+
+        async def drain_events(self):
+            yield AssistantTextDelta(type="text", text="First answer.")
+            yield ResultEvent(
+                type="result",
+                result="First answer.",
+                session_id=chat.session_id,
+                is_error=False,
+            )
+            yield AssistantTextDelta(type="text", text="Second answer.")
+            yield ResultEvent(
+                type="result",
+                result="Second answer.",
+                session_id=chat.session_id,
+                is_error=False,
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+    published: list[dict] = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: None)
+
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    ready = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert [ev["snippet"] for ev in ready] == ["First answer.", "Second answer."]
+
+
 def _monitor_task_records() -> list[dict]:
     return [
         {"type": "user", "message": {"role": "user", "content": "watch the report"}},

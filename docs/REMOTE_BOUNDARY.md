@@ -142,6 +142,31 @@ carried by the session.
   between a signed-in tab and a shell on the engine; it is gone, so a
   signed-in browser is now enough. Anything that relied on that prompt as
   a second barrier has to rely on the session instead.
+- **Workspace diagnostics stop at the workspace.** `ciao context logs` and a
+  user schedule's `{{ISSUE_REPORT}}` see only failed background-job runs
+  whose recorded `extra.workspace` is exactly the caller's/target's
+  workspace. That value is the execution ownership captured at run time, not
+  a chat's or project's current owner, so retargeting or moving a chat cannot
+  relabel an older failure. The engine-wide `server_errors.log`,
+  `server_debug.log` and service stderr log carry no immutable workspace
+  provenance, so they are omitted from both surfaces even on an install with
+  one workspace: there is no content, path, count or "only one workspace"
+  heuristic, and no fallback to current ownership or archived folders.
+  `context logs` keeps `version`, `lines` and the three log fields for API
+  compatibility, but each field is always an empty string and `scope` /
+  `omitted` state the reason; `failed_jobs` keeps only exact matches, and each
+  returned job error is redacted, capped and fenced as untrusted data. A user
+  schedule's `{{ISSUE_REPORT}}` is redacted and bounded to 64,000 characters
+  with an explicit truncation marker before its fence is computed, and it is
+  inserted only when prompt-preparation and execution ownership agree; a
+  retarget during the report build withholds it rather than hand workspace A's
+  failures to workspace B. A user schedule's `{{ERROR_LOG}}` becomes an
+  omission notice, and a clean user run never clears the engine error log.
+  The trusted exceptions are the operator debug report (`GET /api/debug/issues`), startup
+  triage, and packaged `scope=system` routines: they may read engine-wide
+  evidence and clear the consumed error log after a clean run. An
+  agent-created schedule is always `scope=user`; the control plane exposes no
+  field that creates a system one.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails

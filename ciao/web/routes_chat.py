@@ -610,13 +610,6 @@ async def ws_events(websocket: WebSocket) -> None:
             # client can paint the "N agents running" indicator immediately
             # (and clear a count left stale by a missed event during a gap).
             "background_agents": pcm.background_agent_counts,
-            # Same idea for tracked background command runs. These outlive the
-            # turn that started them, so a client that connects (or reconnects
-            # after a gap) must be told about them or the chat reads as
-            # finished. A restart does not carry them over — the runner
-            # resolves non-terminal runs as orphans on start — so this only
-            # ever reports runs the live process is actually supervising.
-            "background_runs": pcm.background_runs,
             # Late connectors that missed `server_restarting` still get the
             # overlay instead of a chat-level turn rejection.
             "restarting": bool(getattr(pcm, "_restart_draining", False)),

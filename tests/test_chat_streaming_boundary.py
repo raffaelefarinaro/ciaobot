@@ -217,7 +217,7 @@ class _DriveHost:
 
     @staticmethod
     def _result_snippet(text: str, limit: int = 280) -> str:
-        return text[:limit]
+        return ProjectChatManager._result_snippet(text, limit)
 
     @staticmethod
     def _is_worth_announcing_follow_up(text: str) -> bool:
@@ -266,6 +266,33 @@ class _DriveHost:
 
     def _start_between_turns_drain(self, chat_id: str, project_id: str) -> None:
         del chat_id, project_id
+
+    def _native_question_request_id(self, pending_question: str) -> str:
+        del pending_question
+        return ""
+
+
+class _TurnScriptHost(_DriveHost):
+    """Serve one scripted event list per turn of a multi-turn drive."""
+
+    def __init__(
+        self, scripts: list[list[StreamEvent]], workspace_root: Path
+    ) -> None:
+        super().__init__(scripts[0], workspace_root)
+        self._scripts = list(scripts)
+
+    async def stream_chat(
+        self,
+        chat_id: str,
+        prompt: str,
+        images: list[ImageAttachment] | None = None,
+        *,
+        unattended: bool = False,
+        compact: bool = False,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        del chat_id, prompt, images, unattended, compact
+        for event in self._scripts.pop(0):
+            yield event
 
 
 @pytest.mark.asyncio
@@ -334,6 +361,181 @@ async def test_drive_keeps_websocket_payloads_and_lifecycle_events(
     assert host._broker.get("chat-1") is None
     assert host.chat.last_response == "done"
     assert host.chat.last_response_status == "success"
+
+
+_INTERIM = "Interim **working** narration."
+_FINAL = "Final **answer** in `file.md`."
+_WHOLE_TURN = f"{_INTERIM}\n\n{_FINAL}"
+
+
+async def _drive_with(host: _DriveHost, stream: ChatStream) -> None:
+    host._broker.register("chat-1", stream)
+    await ChatStreaming(cast(ChatStreamingHost, host)).drive(
+        chat_id="chat-1",
+        project_id="project-1",
+        prompt=stream.prompt_text,
+        images=None,
+        turn_index=None,
+        chat_meta=host.chat,
+        stream=stream,
+        is_retry=False,
+        unattended=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_end_announces_only_the_final_text_segment(tmp_path: Path) -> None:
+    """A multi-step turn ends on its last text block, not the joined turn.
+
+    OpenCode's terminal result is every text part of the turn joined, which is
+    what the durable transcript needs; the preview and push must excerpt only
+    the block the chat shows as the answer (#2139).
+    """
+    host = _DriveHost(
+        [
+            AssistantTextDelta(type="text", text=_INTERIM),
+            ToolUseEvent(type="assistant", tool_name="Bash", tool_input="ls"),
+            AssistantTextDelta(type="text", text=_FINAL),
+            # A call's completion frame does not end the answer bubble.
+            ToolUseEvent(
+                type="tool_result",
+                tool_name="Bash",
+                tool_use_id="tool-1",
+            ),
+            ResultEvent(type="result", result=_WHOLE_TURN, session_id="session-1"),
+        ],
+        tmp_path,
+    )
+    stream = ChatStream(prompt_text="practice")
+
+    await _drive_with(host, stream)
+
+    assert host.announcements == [
+        ("chat-1", "project-1", "Contract", "Final answer in file.md.")
+    ]
+    assert host.chat.last_snippet == "Final answer in file.md."
+    # The durable reply and the handover keep the complete turn.
+    assert host.chat.last_response == _WHOLE_TURN
+    assert host.chat.last_response_status == "success"
+
+
+@pytest.mark.asyncio
+async def test_turn_end_prefers_the_streamed_answer_over_a_first_block_result(
+    tmp_path: Path,
+) -> None:
+    """A terminal result that names only the first block does not win.
+
+    The client keeps a defensive merge for exactly this Claude-shaped result,
+    so the block streamed after the last tool call is what the user reads.
+    """
+    host = _DriveHost(
+        [
+            AssistantTextDelta(type="text", text=_INTERIM),
+            ToolUseEvent(type="assistant", tool_name="Bash", tool_input="ls"),
+            AssistantTextDelta(type="text", text=_FINAL),
+            ResultEvent(type="result", result=_INTERIM, session_id="session-1"),
+        ],
+        tmp_path,
+    )
+    stream = ChatStream(prompt_text="practice")
+
+    await _drive_with(host, stream)
+
+    assert host.announcements == [
+        ("chat-1", "project-1", "Contract", "Final answer in file.md.")
+    ]
+    assert host.chat.last_response == _INTERIM
+
+
+@pytest.mark.asyncio
+async def test_turn_end_ignores_subagent_text_in_the_answer(tmp_path: Path) -> None:
+    host = _DriveHost(
+        [
+            AssistantTextDelta(type="text", text=_INTERIM),
+            ToolUseEvent(type="assistant", tool_name="Bash", tool_input="ls"),
+            AssistantTextDelta(
+                type="text",
+                text="subagent chatter",
+                parent_tool_use_id="tool-1",
+            ),
+            AssistantTextDelta(type="text", text=_FINAL),
+            ResultEvent(type="result", result=_WHOLE_TURN, session_id="session-1"),
+        ],
+        tmp_path,
+    )
+    stream = ChatStream(prompt_text="practice")
+
+    await _drive_with(host, stream)
+
+    assert host.announcements == [
+        ("chat-1", "project-1", "Contract", "Final answer in file.md.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_turn_end_does_not_reannounce_a_prior_answer_after_stop(
+    tmp_path: Path,
+) -> None:
+    """A stopped follow-up cannot inherit and announce the earlier turn's text."""
+    host = _TurnScriptHost(
+        [
+            [
+                AssistantTextDelta(type="text", text="First answer."),
+                ResultEvent(type="result", result="First answer."),
+            ],
+            [ResultEvent(type="result", result="", stopped=True)],
+        ],
+        tmp_path,
+    )
+    host.chat.last_snippet = "Earlier drive answer."
+    stream = ChatStream(prompt_text="hello")
+    stream.enqueue("one more thing")
+
+    await _drive_with(host, stream)
+
+    assert host.announcements == []
+    # The persisted preview from the previous drive is not overwritten by a stop.
+    assert host.chat.last_snippet == "Earlier drive answer."
+    assert host.chat.last_response_status == "empty"
+
+
+@pytest.mark.asyncio
+async def test_turn_end_explicit_empty_answer_does_not_reannounce(
+    tmp_path: Path,
+) -> None:
+    """A later successful turn with no answer block must clear the earlier one.
+
+    OpenCode can finish with text but name an explicitly empty final segment
+    (``final_text=""``). The selected answer for that turn is empty, so the
+    drive may not fall back to the previous turn's answer and re-announce it.
+    """
+    host = _TurnScriptHost(
+        [
+            [
+                AssistantTextDelta(type="text", text="First answer."),
+                ResultEvent(type="result", result="First answer."),
+            ],
+            [
+                AssistantTextDelta(type="text", text="Second narration."),
+                ResultEvent(
+                    type="result",
+                    result="Second narration.",
+                    final_text="",
+                ),
+            ],
+        ],
+        tmp_path,
+    )
+    host.chat.last_snippet = "Earlier drive answer."
+    stream = ChatStream(prompt_text="hello")
+    stream.enqueue("again")
+
+    await _drive_with(host, stream)
+
+    assert host.announcements == []
+    assert host.chat.last_snippet == "Earlier drive answer."
+    # The full terminal text is still what the handover keeps.
+    assert host.chat.last_response == "Second narration."
 
 
 @pytest.mark.asyncio

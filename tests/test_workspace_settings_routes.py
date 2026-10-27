@@ -1581,7 +1581,6 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path):
     from starlette.routing import Route
     from starlette.testclient import TestClient
 
-    from ciao.background import BackgroundRun, BackgroundRunStore
     from ciao.config import CiaoConfig, WorkspaceConfig
     from ciao.import_store import ImportStore, engine_store_path
     from ciao.schedules import ScheduleStore
@@ -1623,21 +1622,6 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path):
         workspace="alpha",
         sources=[{"provider": "claude_code", "source_id": "sess-1"}],
     )
-    runs = BackgroundRunStore(runtime)
-    runs.replace(
-        BackgroundRun(
-            run_id="run-1",
-            parent_chat_id="chat-1",
-            project_id="proj-1",
-            workspace="alpha",
-            label="job",
-            cmd=["echo", "hi"],
-            cwd="",
-            status="ok",
-            started_at="2026-01-01T00:00:00Z",
-        )
-    )
-
     pcm = _RenamePCM()
     app = Starlette(
         routes=[
@@ -1673,9 +1657,6 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path):
     assert schedules.get(user.schedule_id).workspace == "beta"  # type: ignore[union-attr]
     assert webhooks.get(trigger.trigger_id).workspace == "beta"
     assert imports.get(batch.batch_id).workspace == "beta"
-    stored_run = runs.get("run-1")
-    assert stored_run is not None
-    assert stored_run.workspace == "beta"
 
 
 def test_patch_rename_without_the_key_keeps_provider_overrides(tmp_path):
@@ -1737,7 +1718,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     from starlette.routing import Route
     from starlette.testclient import TestClient
 
-    from ciao.background import BackgroundRun, BackgroundRunStore
     from ciao.config import CiaoConfig, WorkspaceConfig
     from ciao.import_store import ImportStore, engine_store_path
     from ciao.schedules import ScheduleStore
@@ -1782,21 +1762,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
         workspace="alpha",
         sources=[{"provider": "claude_code", "source_id": "sess-1"}],
     )
-    runs = BackgroundRunStore(runtime)
-    runs.replace(
-        BackgroundRun(
-            run_id="run-1",
-            parent_chat_id="chat-1",
-            project_id="proj-1",
-            workspace="alpha",
-            label="job",
-            cmd=["echo", "hi"],
-            cwd="",
-            status="ok",
-            started_at="2026-01-01T00:00:00Z",
-        )
-    )
-
     pcm = _RenamePCM()
     app = Starlette(
         routes=[
@@ -1818,7 +1783,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
             runtime / "schedules.json",
             runtime / "webhooks.json",
             engine_store_path(config),
-            runtime / "background" / "state.json",
         )
     }
 
@@ -1832,7 +1796,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
         runtime / "schedules.json",
         runtime / "webhooks.json",
         engine_store_path(config),
-        runtime / "background" / "state.json",
     ):
         assert path.read_bytes() == before[path.name]
     assert pcm.events.published == []
@@ -1841,9 +1804,6 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     assert webhooks.get(trigger.trigger_id).workspace == "alpha"
     assert webhooks.authenticate(trigger.trigger_id, secret) is not None
     assert imports.get(batch.batch_id).workspace == "alpha"
-    stored_run = runs.get("run-1")
-    assert stored_run is not None
-    assert stored_run.workspace == "alpha"
     assert not (tmp_path / "beta").exists()
 
 

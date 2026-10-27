@@ -178,8 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     context = _verbs(nouns.add_parser("context", help="Workspace, project and chat context."))
     context.add_parser("get", help="Return the active workspace, project, chat and server status.")
-    logs = context.add_parser("logs", help="Return Ciaobot's version and recent error, debug and service log tails.")
-    logs.add_argument("--lines", type=int, default=200, help="Lines per log, 1-1000.")
+    logs = context.add_parser("logs", help="Return Ciaobot's version and recent workspace-scoped failed job runs.")
+    logs.add_argument("--lines", type=int, default=200, help="Retained compatibility count, 1-1000; no log tail is read.")
 
     memory = _verbs(nouns.add_parser("memory", help="Bounded native-guide memory."))
     memory.add_parser("status", help="Memory usage and diagnostics.")

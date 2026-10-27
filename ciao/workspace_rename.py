@@ -2,7 +2,7 @@
 
 The name is the identity key: the registry entry, the agent root directory on
 a re-rooted install, and the ``workspace`` field in projects, schedules,
-webhooks, import batches and background runs. There is no display label, so
+webhooks and import batches. There is no display label, so
 renaming rewrites the key itself rather than adding a second string.
 
 Order matters. Everything refused is refused before anything is written. The
@@ -27,8 +27,6 @@ from typing import Any
 from ciao.workspaces import WORKSPACE_NAME_RE
 
 logger = logging.getLogger(__name__)
-
-_BUSY_RUN_STATUSES = frozenset({"queued", "running"})
 
 
 class WorkspaceRenameBusy(ValueError):
@@ -73,13 +71,12 @@ def rename_workspace(
     schedules: Any,
     webhooks: Any,
     imports: Any,
-    runs: Any,
 ) -> dict[str, str]:
     """Rename workspace ``old`` to ``new`` and return ``{"from": old, "to": new}``.
 
     ``projects`` is the project/chat manager, ``schedules`` its schedule
     store, ``webhooks`` the webhook trigger store, ``imports`` the import
-    batch store, and ``runs`` the background-run store. ``projects`` may be
+    batch store. ``projects`` may be
     ``None`` when the caller has no chat registry; every other store is
     required. The caller holds the workspace archive lock: the registry is
     mutated here, on the event loop.
@@ -111,20 +108,8 @@ def rename_workspace(
                 f"a chat in '{old}' is still working; "
                 "let it finish or stop it, then rename the workspace"
             )
-    live_runs = [
-        run
-        for run in runs.list()
-        if getattr(run, "workspace", "") == old
-        and getattr(run, "status", "") in _BUSY_RUN_STATUSES
-    ]
-    if live_runs:
-        raise WorkspaceRenameBusy(
-            f"a background run in '{old}' is still queued or running; "
-            "let it finish or stop it, then rename the workspace"
-        )
 
     move: tuple[Path, Path] | None = None
-    old_root: Path | None = None
     if config._rerooted():
         source = Path(config.agent_root(old))
         if source != Path(config.workspace_root):
@@ -153,7 +138,6 @@ def rename_workspace(
                         "a move there cannot be atomic, so rename it by hand"
                     )
                 move = (source, dest)
-                old_root = source
 
     search_prefix: str | None = None
     if config._rerooted():
@@ -166,7 +150,7 @@ def rename_workspace(
     updated = preview_renamed_config(existing, old=old, new=new)
 
     snapshot = _take_snapshot(
-        config, projects, schedules, webhooks, imports, runs
+        config, projects, schedules, webhooks, imports
     )
     if projects is not None:
         # Cached providers were built with the old agent root and workspace
@@ -229,23 +213,6 @@ def rename_workspace(
         schedules.rename_workspace(old, new)
         webhooks.rename_workspace(old, new)
         imports.rename_workspace(old, new)
-        new_root = move[1] if move is not None else None
-        for run in runs.list():
-            if getattr(run, "workspace", "") != old:
-                continue
-            cwd = str(getattr(run, "cwd", "") or "")
-            if new_root is not None and old_root is not None and cwd:
-                try:
-                    relative = Path(cwd).relative_to(old_root)
-                except ValueError:
-                    relative = None
-                if relative is not None:
-                    cwd = (
-                        str(new_root)
-                        if str(relative) == "."
-                        else (new_root / relative).as_posix()
-                    )
-            runs.replace(dataclasses.replace(run, workspace=new, cwd=cwd))
     except Exception:
         _roll_back(config, projects, snapshot, move)
         raise
@@ -307,7 +274,6 @@ def _take_snapshot(
     schedules: Any,
     webhooks: Any,
     imports: Any,
-    runs: Any,
 ) -> dict[str, Any]:
     """Record every piece of rename-mutated state, before anything is written."""
     project_workspaces: dict[Any, str] | None = None
@@ -323,7 +289,6 @@ def _take_snapshot(
     system_state_path = _store_path(schedules, "_system_state_path")
     webhook_path = _store_path(webhooks, "_path")
     import_path = _store_path(imports, "_path")
-    run_path = _store_path(runs, "_path")
     return {
         "workspaces": dict(config.workspaces),
         "onboarding_path": Path(config.state_path).parent / "onboarding.json",
@@ -347,8 +312,6 @@ def _take_snapshot(
         "webhook_bytes": _read_bytes_if_present(webhook_path),
         "import_path": import_path,
         "import_bytes": _read_bytes_if_present(import_path),
-        "run_path": run_path,
-        "run_bytes": _read_bytes_if_present(run_path),
     }
 
 
@@ -448,7 +411,7 @@ def _roll_back(
                 logger.exception(
                     "Could not restore the project registry file after a failed rename"
                 )
-    # File restores below run reverse to the forward writes (runs first,
+    # File restores below run reverse to the forward writes (imports first,
     # schedules last); each is independent, so one failing still leaves the
     # others restored.
     _restore_snapshot_files(snapshot)
@@ -457,7 +420,6 @@ def _roll_back(
 def _restore_snapshot_files(snapshot: dict[str, Any]) -> None:
     """Write every snapshotted store file back, logging rather than raising."""
     _restore_onboarding_receipt(snapshot)
-    _restore_logged("background runs", snapshot.get("run_bytes"), snapshot)
     _restore_logged("import batches", snapshot.get("import_bytes"), snapshot)
     _restore_logged("webhook triggers", snapshot.get("webhook_bytes"), snapshot)
     _restore_logged("schedules", snapshot.get("schedule_bytes"), snapshot)
@@ -504,7 +466,6 @@ def _restore_logged(label: str, raw: Any, snapshot: dict[str, Any]) -> None:
     if not isinstance(raw, bytes):
         return
     key = {
-        "background runs": "run_path",
         "import batches": "import_path",
         "webhook triggers": "webhook_path",
         "schedules": "schedule_path",
