@@ -1643,11 +1643,6 @@ async function commitProjectOrder(commit: DragCommit): Promise<boolean> {
   if (result.ok) return true
   projectSortMessage.value = `Could not save the project order. ${result.message}`
   store.pushErrorToast('Could not save the project order', result.message)
-  void nextTick(() => {
-    projectListRoot.value
-      ?.querySelector<HTMLElement>(`[data-drag-handle="${CSS.escape(commit.id)}"]`)
-      ?.focus()
-  })
   return false
 }
 

@@ -3526,10 +3526,203 @@ describe('TaskBoardView', () => {
       wrapper.unmount()
     })
 
+    it('a deferred save failure does not take focus back from the card the user moved to', async () => {
+      const wrapper = await mountPlaced()
+      let fail!: (error: Error) => void
+      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+      const handle = grip(wrapper, 'Alpha')
+      ;(handle.element as HTMLElement).focus()
+      await handle.trigger('keydown', key(' '))
+      await nextTick()
+      await grip(wrapper, 'Alpha').trigger('keydown', key('ArrowDown'))
+      await nextTick()
+      await grip(wrapper, 'Alpha').trigger('keydown', key('Enter'))
+
+      // While the write is in flight the user moves to another card.
+      const other = card(wrapper, 'Bravo').get('.task-open').element as HTMLElement
+      other.focus()
+      expect(document.activeElement).toBe(other)
+
+      fail(new Error('disk full'))
+      await flushPromises()
+      await nextTick()
+
+      expect(liveText(wrapper)).toBe('Could not save the new order.')
+      expect(document.activeElement).toBe(other)
+      wrapper.unmount()
+    })
+
+    it('a cancelled deferred failure does not restore focus to its card', async () => {
+      const { createMemoryHistory, createRouter } = await import('vue-router')
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/:pathMatch(.*)*', component: { template: '<div />' } }],
+      })
+      await router.push('/tasks')
+      await router.isReady()
+      apiGet.mockImplementation((url: string) =>
+        Promise.resolve(
+          url.includes('/api/tasks?')
+            ? { workspace: 'personal', tasks: PLACED, order: orderPayload() }
+            : {},
+        ),
+      )
+      const wrapper = mount(TaskBoardView, { attachTo: document.body, global: { plugins: [router] } })
+      await flushPromises()
+      await nextTick()
+      layOutBoard()
+
+      let fail!: (error: Error) => void
+      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+      const handle = grip(wrapper, 'Alpha')
+      ;(handle.element as HTMLElement).focus()
+      await handle.trigger('keydown', key(' '))
+      await nextTick()
+      await grip(wrapper, 'Alpha').trigger('keydown', key('ArrowDown'))
+      await nextTick()
+      await grip(wrapper, 'Alpha').trigger('keydown', key('Enter'))
+
+      // Navigation cancels the drag while the write is still in flight.
+      await router.push('/elsewhere')
+      await nextTick()
+      expect(wrapper.find('.drag-lifted').exists()).toBe(false)
+      ;(document.activeElement as HTMLElement).blur()
+      expect(document.activeElement).toBe(document.body)
+
+      fail(new Error('disk full'))
+      await flushPromises()
+      await nextTick()
+      expect(document.activeElement).toBe(document.body)
+      wrapper.unmount()
+    })
+
+    it('a deferred pointer failure restores the grip after its focused row remounts', async () => {
+      const wrapper = await mountPlaced()
+      let fail!: (error: Error) => void
+      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+
+      const handle = grip(wrapper, 'Alpha').element as HTMLElement
+      handle.focus()
+      await pickUp(wrapper, 'Alpha')
+      const at = dropPoint(0, 1)
+      await dragTo(at.x, at.y)
+      expect(wrapper.findAll('.drag-placeholder')).toHaveLength(1)
+      expect(document.activeElement).toBe(handle)
+
+      // The placeholder re-render replaces the focused grip and focus falls to
+      // the document.
+      const fresh = handle.cloneNode(true) as HTMLElement
+      handle.replaceWith(fresh)
+      expect(handle.isConnected).toBe(false)
+      expect(document.activeElement).toBe(document.body)
+
+      boardRoot().dispatchEvent(pointer('pointerup', at.x, at.y))
+      await flushPromises()
+      fail(new Error('disk full'))
+      await flushPromises()
+      await nextTick()
+
+      expect(document.activeElement).toBe(grip(wrapper, 'Alpha').element)
+      expect(document.activeElement).toBe(fresh)
+      wrapper.unmount()
+    })
+
+    it('a deferred pointer failure does not restore the grip after navigation', async () => {
+      const { createMemoryHistory, createRouter } = await import('vue-router')
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/:pathMatch(.*)*', component: { template: '<div />' } }],
+      })
+      await router.push('/tasks')
+      await router.isReady()
+      apiGet.mockImplementation((url: string) =>
+        Promise.resolve(
+          url.includes('/api/tasks?')
+            ? { workspace: 'personal', tasks: PLACED, order: orderPayload() }
+            : {},
+        ),
+      )
+      const wrapper = mount(TaskBoardView, { attachTo: document.body, global: { plugins: [router] } })
+      await flushPromises()
+      await nextTick()
+      layOutBoard()
+
+      let fail!: (error: Error) => void
+      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+      const handle = grip(wrapper, 'Alpha').element as HTMLElement
+      handle.focus()
+      await pickUp(wrapper, 'Alpha')
+      const at = dropPoint(0, 1)
+      await dragTo(at.x, at.y)
+      expect(wrapper.findAll('.drag-placeholder')).toHaveLength(1)
+      const fresh = handle.cloneNode(true) as HTMLElement
+      handle.replaceWith(fresh)
+      expect(handle.isConnected).toBe(false)
+      expect(document.activeElement).toBe(document.body)
+
+      boardRoot().dispatchEvent(pointer('pointerup', at.x, at.y))
+      await flushPromises()
+      await router.push('/elsewhere')
+      await nextTick()
+
+      fail(new Error('disk full'))
+      await flushPromises()
+      await nextTick()
+      expect(document.activeElement).toBe(document.body)
+      expect(document.activeElement).not.toBe(fresh)
+      wrapper.unmount()
+    })
+
+    it('a deferred pointer failure does not restore the grip after focus moved away', async () => {
+      const wrapper = await mountPlaced()
+      let fail!: (error: Error) => void
+      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+
+      await pickUp(wrapper, 'Charlie')
+      const at = dropPoint(0, 0)
+      await dragTo(at.x, at.y)
+      boardRoot().dispatchEvent(pointer('pointerup', at.x, at.y))
+      await flushPromises()
+      ;(document.activeElement as HTMLElement).blur()
+      expect(document.activeElement).toBe(document.body)
+
+      fail(new Error('disk full'))
+      await flushPromises()
+      await nextTick()
+      expect(document.activeElement).toBe(document.body)
+      wrapper.unmount()
+    })
+
+    it('a deferred menu failure does not restore the grip after focus moved away', async () => {
+      const wrapper = await mountPlaced()
+      let fail!: (error: Error) => void
+      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+
+      const items = await openMenu(wrapper, 'Bravo')
+      byLabel(items, 'Move up').click()
+      await flushPromises()
+      // Menu close owns restoration to its trigger; the engine must not move
+      // that focus to the grip when the deferred write fails.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const trigger = card(wrapper, 'Bravo').get('.task-more').element as HTMLElement
+      expect(document.activeElement).toBe(trigger)
+
+      fail(new Error('disk full'))
+      await flushPromises()
+      await nextTick()
+      expect(liveText(wrapper)).toBe('Could not save the new order.')
+      expect(document.activeElement).toBe(trigger)
+      expect(document.activeElement).not.toBe(grip(wrapper, 'Bravo').element)
+      wrapper.unmount()
+    })
+
     it('save failure shows the error, reloads and keeps focus on the handle', async () => {
       const wrapper = await mountPlaced()
       apiPost.mockRejectedValueOnce(new Error('disk full'))
       const reads = boardReads()
+      // A real pointer press focuses the grip; the failed write must leave that
+      // focus where it is.
+      ;(grip(wrapper, 'Charlie').element as HTMLElement).focus()
 
       await dragCardTo(wrapper, 'Charlie', 0, 0)
       await nextTick()

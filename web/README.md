@@ -111,7 +111,8 @@ web/
                           out of oversized panes (useHoverPinPopover, useChatComposer,
                           useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices,
                           useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer and keyboard drag-sort
-                          engine for the task lanes and the sidebar's project list; it persists nothing and calls `onCommit`)
+                          engine for the task lanes and the sidebar's project list; it persists nothing and calls `onCommit`,
+                          and its deferred keyboard focus restoration never takes focus from where the user moved it)
     lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, notificationInbox, sourceHealth,
                           updateTasks, etc.) — no Vue imports; `taskOrder.ts` (the server order, lane derivation,
                           placement anchors and the preview mirror of the server's insertion) and `dragSort.ts`
