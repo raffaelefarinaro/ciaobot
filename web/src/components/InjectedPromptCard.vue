@@ -46,7 +46,9 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
 
 const summary = computed(() => summarizeInjectedPrompt(props.prompt, props.chatTitle))
 const icon = computed(() => ICONS[props.prompt.kind])
+// A notice the engine did not write (a provider's own shell) has no prompt to show.
 const hasRawToggle = computed(() =>
+  props.raw.length > 0 &&
   ['background_run', 'cli_task_wake', 'schedule', 'webhook'].includes(props.prompt.kind),
 )
 const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
@@ -100,7 +102,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
               role="region"
               :aria-label="`Last ${run.tail.length} lines of ${run.label}`"
             >{{ run.tail.join('\n') }}</pre>
-            <p v-else class="injected-card-muted">No output.</p>
+            <p v-else-if="run.logPath" class="injected-card-muted">No output.</p>
           </li>
         </ul>
       </template>
