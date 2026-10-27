@@ -823,6 +823,7 @@ class ClaudeProvider(BaseSDKProvider):
         sandbox: SandboxSettings | None = None
         add_dirs: list[str | Path] = []
         file_tool_hooks: list[HookMatcher] = []
+        cli_env = dict(request.extra_env or {})
         if request.agent_fs_scope == "workspace":
             if sys.platform == "win32":
                 raise FsSandboxUnavailable(
@@ -847,7 +848,12 @@ class ClaudeProvider(BaseSDKProvider):
             # confined to the same roots by this hook.
             file_tool_hooks = [HookMatcher(
                 matcher="|".join(CLAUDE_FILE_TOOL_PATH_KEYS),
-                hooks=[claude_file_tool_guard(cwd=Path(self.workspace_root), roots=roots)],
+                hooks=[claude_file_tool_guard(
+                    cwd=Path(self.workspace_root),
+                    roots=roots,
+                    cli_tmp_base=cli_env.get("CLAUDE_CODE_TMPDIR")
+                    or os.environ.get("CLAUDE_CODE_TMPDIR"),
+                )],
             )]
         # The linked repository is added in every scope: it is what loads the
         # repo's .claude/skills and .claude/commands. Workspace scope may already
@@ -862,7 +868,6 @@ class ClaudeProvider(BaseSDKProvider):
         # the client, so it has to be set before ClaudeSDKClient() below.
         # setdefault: an operator value for the same SDK knob wins.
         os.environ.setdefault(_STREAM_CLOSE_TIMEOUT_ENV, str(_INITIALIZE_TIMEOUT_MS))
-        cli_env = dict(request.extra_env or {})
         # A startup the CLI refuses should arrive as a result message naming
         # the reason, not as stderr-only silence that the SDK reports as a
         # control-request timeout with no cause.
