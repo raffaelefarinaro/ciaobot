@@ -200,6 +200,9 @@ describe('safe markdown rendering', () => {
     // live (no element, no handler, no link).
     const div = parse(html)
     expect(div.querySelector('img, a')).toBeNull()
+    for (const el of div.querySelectorAll('*')) {
+      expect(el.getAttributeNames().filter((n) => n.startsWith('on') || n === 'href' || n === 'src')).toEqual([])
+    }
     const quote = div.querySelector('quoted-text')
     expect(quote?.textContent).toContain('<img src=x onerror=alert(1)>')
     expect(quote?.textContent).toContain('<a href="https://example.com/guide">safe</a>')
