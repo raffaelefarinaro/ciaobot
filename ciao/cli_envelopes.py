@@ -19,6 +19,7 @@ were copies (see issue #500), which is the reason this module exists.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 # CLI-internal user-message envelopes. The Claude Code CLI synthesizes
 # user-role messages wrapped in these XML tags to feed the parent agent
@@ -306,3 +307,62 @@ def envelope_notification_fields(content: str) -> dict[str, str] | None:
     """Fields of the first leading notification ``content`` is, else None."""
     notifications = envelope_notifications(content)
     return notifications[0][0] if notifications else None
+
+
+_NATIVE_SUMMARY_RE = re.compile(
+    r'^(?:Background command|Monitor) "(?P<label>.*)" '
+    r"(?P<rest>completed \(exit code (?P<c1>-?\d+)\)"
+    r"|failed with exit code (?P<c2>-?\d+)"
+    r"|stream ended"
+    r"|script failed \(exit (?P<c3>-?\d+)\)"
+    r"|(?P<other>.+))$",
+    re.S,
+)
+_NATIVE_LABEL_CAP = 120
+_RUN_ID_RE = re.compile(r"[^,()]+")
+
+
+@dataclass(frozen=True)
+class NativeTaskRun:
+    """A provider-native background shell that finished (Bash, Monitor)."""
+
+    label: str
+    run_id: str
+    status: str  # ok | cancelled | failed
+    exit_code: int | None
+    error: str
+
+
+def native_task_run(fields: dict[str, str]) -> NativeTaskRun | None:
+    """Parse a task-notification's fields into a native shell completion.
+
+    None for subagent completions (``Agent "X" ...``) and mid-stream
+    ``Monitor event`` lines. The notice carries only a summary: the
+    ``output-file`` sits outside the file sandbox, so there is deliberately no
+    log path and no output tail.
+    """
+    match = _NATIVE_SUMMARY_RE.match(fields.get("summary", "").strip())
+    if match is None:
+        return None
+    label = " ".join(match.group("label").split())[:_NATIVE_LABEL_CAP]
+    task_id = fields.get("task-id", "")
+    run_id = task_id if _RUN_ID_RE.fullmatch(task_id) else "task"
+    raw_status = fields.get("status", "")
+    if raw_status == "completed":
+        status = "ok"
+    elif raw_status in ("killed", "stopped"):
+        status = "cancelled"
+    else:
+        status = "failed"
+    code = next(
+        (match.group(key) for key in ("c1", "c2", "c3") if match.group(key) is not None),
+        None,
+    )
+    exit_code = int(code) if code is not None else None
+    if exit_code:
+        status = "failed"
+    # One line: the frontend parser reads the notice line by line.
+    error = " ".join((match.group("other") or "").split())
+    return NativeTaskRun(
+        label=label, run_id=run_id, status=status, exit_code=exit_code, error=error
+    )

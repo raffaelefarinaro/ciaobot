@@ -3295,6 +3295,7 @@ async function confirmDeleteChat(chatId: string) {
     pointer-events: none;
   }
   .sidebar.collapsed .sidebar-header,
+  .sidebar.collapsed .sidebar-history-rail,
   .sidebar.collapsed .project-list {
     visibility: hidden;
   }

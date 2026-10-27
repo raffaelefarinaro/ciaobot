@@ -406,6 +406,7 @@ class TranscriptStore:
         tool_events: list[dict[str, Any]] | None = None,
         is_error: bool = False,
         is_partial: bool = False,
+        origin: str = "",
     ) -> None:
         transcript = self._load_current(ctx, provider)
         if not transcript:
@@ -445,6 +446,7 @@ class TranscriptStore:
                 # A force-stopped turn is durable but incomplete; renderers
                 # already treat this flag as "the reply was cut short".
                 **({"is_partial": True} if is_partial else {}),
+                **({"origin": origin} if origin else {}),
             }
         )
         self._save_current(ctx, transcript, provider)
@@ -663,14 +665,29 @@ class TranscriptStore:
         if not isinstance(turns, list):
             return []
         rows: list[dict[str, Any]] = []
-        for index, turn in enumerate(turns):
+        user_index = 0
+        for turn in turns:
             if not isinstance(turn, dict):
                 continue
             timestamp = str(turn.get("timestamp") or "")
             raw_prompt = str(turn.get("prompt") or "")
             prompt = _INJECTED_CONTEXT_RE.sub("", raw_prompt).strip()
             response = str(turn.get("response") or "").strip()
-            if prompt:
+            origin = str(turn.get("origin") or "")
+            index = user_index
+            if not origin:
+                user_index += 1
+            if prompt and origin:
+                # A turn the engine ran on its own (a background wake): its
+                # prompt is a notice, not something the person sent, and it
+                # does not take a user turn index.
+                rows.append({
+                    "role": "system",
+                    "content": prompt,
+                    "origin": origin,
+                    "sent_at": timestamp,
+                })
+            elif prompt:
                 user_row: dict[str, Any] = {
                     "role": "user",
                     "content": prompt,
@@ -684,6 +701,8 @@ class TranscriptStore:
                     "content": response,
                     "sent_at": timestamp,
                 }
+                if origin:
+                    row["origin"] = origin
                 if turn.get("is_error"):
                     row["is_error"] = True
                 if turn.get("is_partial"):
@@ -858,7 +877,10 @@ class TranscriptStore:
                     "",
                     *meta,
                     "",
-                    "### User",
+                    # A turn the engine ran on its own (a background wake) holds
+                    # a notice, not something the person typed: a distinct
+                    # heading keeps it out of the user rows an archive reads back.
+                    "### Notice" if turn.get("origin") else "### User",
                     "",
                     *_text_block(str(turn.get("prompt", ""))),
                     "",
@@ -1116,9 +1138,9 @@ _ARCHIVE_FENCE_RUN_RE = re.compile(r"^ {0,3}(`{3,})\s*$")
 #: Lines that end a legacy (three-backtick) message body: the next turn, or a
 #: sub-heading the renderer writes after a message.
 _ARCHIVE_BOUNDARY_RE = re.compile(
-    r"^(?:## Turn \d+|### (?:User|Assistant|Tools|Usage|Quota))\s*$"
+    r"^(?:## Turn \d+|### (?:User|Notice|Assistant|Tools|Usage|Quota))\s*$"
 )
-_ARCHIVE_MESSAGE_HEADING_RE = re.compile(r"^### (?:User|Assistant)\s*$")
+_ARCHIVE_MESSAGE_HEADING_RE = re.compile(r"^### (?:User|Notice|Assistant)\s*$")
 _ARCHIVE_TURN_LINE_RE = re.compile(r"^## Turn \d+\s*$")
 _ARCHIVE_TIME_RE = re.compile(r"^- Time:\s*(.+)$")
 _ARCHIVE_EFFECTIVE_MODEL_RE = re.compile(r"^- Effective model:\s*(.*)$")
@@ -1227,15 +1249,24 @@ def _section_at(lines: list[str], start: int, heading: str) -> tuple[str | None,
     from, which is past the body so a ``## Turn`` line inside it is never read
     as a turn.
     """
+    _found, body, index = _section_at_any(lines, start, (heading,))
+    return body, index
+
+
+def _section_at_any(
+    lines: list[str], start: int, headings: tuple[str, ...]
+) -> tuple[str | None, str | None, int]:
+    """:func:`_section_at` for the first of ``headings`` met: (heading, body, next)."""
     index = start
     while index < len(lines) and not _ARCHIVE_TURN_LINE_RE.match(lines[index]):
-        if lines[index].rstrip() == heading:
+        found = lines[index].rstrip()
+        if found in headings:
             block = _read_text_block(lines, index + 1)
             if block is None:
-                return None, index + 1
-            return block
+                return found, None, index + 1
+            return found, block[0], block[1]
         index += 1
-    return None, index
+    return None, None, index
 
 
 def parse_archive_turns(text: str) -> list[dict[str, Any]]:
@@ -1259,11 +1290,16 @@ def parse_archive_turns(text: str) -> list[dict[str, Any]]:
             continue
         index += 1
         meta_start = index
-        user, index = _section_at(lines, index, "### User")
+        heading, user, index = _section_at_any(
+            lines, index, ("### User", "### Notice")
+        )
+        notice = user if heading == "### Notice" else None
+        if notice is not None:
+            user = None
         timestamp = ""
         effective_model = ""
         for row in lines[meta_start:index]:
-            if row.rstrip() == "### User" or _ARCHIVE_TURN_LINE_RE.match(row):
+            if row.rstrip() in ("### User", "### Notice") or _ARCHIVE_TURN_LINE_RE.match(row):
                 break
             match = _ARCHIVE_TIME_RE.match(row)
             if match is not None and not timestamp:
@@ -1281,6 +1317,7 @@ def parse_archive_turns(text: str) -> list[dict[str, Any]]:
             "timestamp": timestamp,
             "effective_model": effective_model,
             "user": user,
+            "notice": notice,
             "assistant": assistant,
             "trailer": "\n".join(lines[trailer_start:index]),
         })
@@ -1304,6 +1341,8 @@ def transcript_has_human_turn(path: Path | str) -> bool:
     if not turns:
         return True
     for turn in turns:
+        if turn["notice"] is not None:
+            continue
         user = turn["user"]
         if user is None or not is_unattended_turn(user):
             return True

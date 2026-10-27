@@ -423,6 +423,9 @@ class ResultEvent(StreamEvent):
     # segment; an empty string is an explicit "no answer block" (#2139).
     # Internal normalized metadata: ``event_to_json`` does not publish it.
     final_text: str | None = None
+    # OpenCode only: the "background runs finished" notice for the shells that
+    # woke this execution. Recorded with the wake turn; never serialised.
+    wake_notice: str = ""
 
 
 @dataclass(slots=True)

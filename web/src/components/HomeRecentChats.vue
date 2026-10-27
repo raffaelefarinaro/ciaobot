@@ -195,6 +195,7 @@ import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
+import { formatTime } from '../lib/time'
 import { classifyError } from '../lib/errorAttribution'
 import { DEFAULT_WORKSPACE_COLOR, colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -493,6 +494,12 @@ function statusPhrase(tier: HomeTierKey, chat: ChatInfo): string {
   if (tier === 'needsYou' && store.chatFailed(chat.chat_id)) {
     const next = chat.retry?.status === 'pending' ? 'will retry' : 'switch model or retry'
     return `${classifyError(chat.last_error || '').label.toLowerCase()} · ${next}`
+  }
+  // A retry the agent or engine scheduled without a failed turn (a network
+  // retry set from inside a reply). The sidebar marks it; the card says when.
+  if (chat.retry?.status === 'pending') {
+    const at = formatTime(chat.retry.next_at)
+    return at ? `retry scheduled ${at}` : 'retry scheduled'
   }
   const task = taskSignals.taskForChat(chat)
   // A chat from an earlier attempt does not speak for the newer one.

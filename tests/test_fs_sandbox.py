@@ -22,6 +22,7 @@ from ciao.fs_sandbox import (
     _seatbelt_profile,
     claude_file_tool_guard,
     claude_sandbox_settings,
+    claude_task_output_path_allowed,
     engine_read_roots,
     node_tool_read_roots,
     path_outside_roots,
@@ -285,8 +286,11 @@ def test_tool_paths_outside_the_roots_are_detected(tmp_path):
         assert out("escape/secret.txt")
 
 
-def _guard_decision(guard, tool_name: str, tool_input: dict) -> str:
-    result = asyncio.run(guard({"tool_name": tool_name, "tool_input": tool_input}, None, None))
+def _guard_decision(guard, tool_name: str, tool_input: dict, session_id: str | None = None) -> str:
+    hook_input: dict = {"tool_name": tool_name, "tool_input": tool_input}
+    if session_id is not None:
+        hook_input["session_id"] = session_id
+    result = asyncio.run(guard(hook_input, None, None))
     return result.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
 
 
@@ -312,6 +316,191 @@ def test_claude_file_tool_guard_denies_paths_outside_the_roots(tmp_path):
 
     with pytest.raises(ValueError):
         claude_file_tool_guard(cwd=root, roots=[])
+
+
+def test_claude_file_tool_guard_denies_a_path_it_cannot_resolve(tmp_path):
+    # A NUL byte makes Path.resolve raise; the hook must deny, not raise (#2208).
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    guard = claude_file_tool_guard(cwd=root, roots=[root])
+    assert _guard_decision(guard, "Read", {"file_path": str(root / "a\x00.md")}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": "/etc/hosts\x00"}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": "~no_such_user_2208/a.md"}) == "deny"
+    assert path_outside_roots("~no_such_user_2208/a.md", cwd=root, roots=[root]) is True
+    assert claude_task_output_path_allowed(
+        "~no_such_user_2208/x.output", session_id="abcdefgh", cwd=root, tmp_base=str(tmp_path), uid=0
+    ) is False
+
+
+_TASK_SESSION = "0a1b2c3d-4e5f-6789-abcd-ef0123456789"
+
+
+def _task_guard_setup(tmp_path):
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    tmp_base = (tmp_path / "clitmp").resolve()
+    tasks = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / _TASK_SESSION / "tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "abc.output").write_text("HELLO", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], cli_tmp_base=str(tmp_base))
+    return root, tmp_base, tasks, guard
+
+
+def _read_task(guard, path, session_id=_TASK_SESSION) -> str:
+    return _guard_decision(guard, "Read", {"file_path": str(path)}, session_id)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_path_allowed_own_session(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    assert _read_task(guard, tasks / "abc.output") == "allow"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_other_session_or_workspace(tmp_path):
+    _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
+    other = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / "ffffffff-0000-1111" / "tasks"
+    other.mkdir(parents=True)
+    (other / "x.output").write_text("secret", encoding="utf-8")
+    assert _read_task(guard, other / "x.output") == "deny"
+    # Same session id under another workspace's directory is still this
+    # session's shape, but a different session id never matches.
+    assert _read_task(guard, tasks / "abc.output", "ffffffff-0000-1111") == "deny"
+    other_uid = tmp_base / f"claude-{os.getuid() + 1}" / "-munged-cwd" / _TASK_SESSION / "tasks"
+    other_uid.mkdir(parents=True)
+    (other_uid / "x.output").write_text("secret", encoding="utf-8")
+    assert _read_task(guard, other_uid / "x.output") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_non_read_tools(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    path = str(tasks / "abc.output")
+    for tool, tool_input in (
+        ("Write", {"file_path": path, "content": "x"}),
+        ("Edit", {"file_path": path}),
+        ("Glob", {"pattern": "*.output", "path": str(tasks)}),
+        ("Grep", {"pattern": "x", "path": str(tasks)}),
+    ):
+        assert _guard_decision(guard, tool, tool_input, _TASK_SESSION) == "deny", tool
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_without_session_id(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    path = tasks / "abc.output"
+    assert _guard_decision(guard, "Read", {"file_path": str(path)}) == "deny"
+    assert _read_task(guard, path, "") == "deny"
+    assert _read_task(guard, path, "short") == "deny"
+    assert _read_task(guard, path, "bad/../id/12345678") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_symlink_escape(tmp_path):
+    _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
+    secret = tmp_path / "secret.output"
+    secret.write_text("secret", encoding="utf-8")
+    (tasks / "link.output").symlink_to(secret)
+    assert _read_task(guard, tasks / "link.output") == "deny"
+    # A symlinked tasks directory pointing at another session is refused too.
+    other = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / "ffffffff-0000-1111" / "tasks"
+    other.mkdir(parents=True)
+    (other / "x.output").write_text("secret", encoding="utf-8")
+    session_dir = tasks.parent.parent / "0a1b2c3d-9999-9999"
+    session_dir.symlink_to(other.parent)
+    assert _read_task(guard, session_dir / "tasks" / "x.output", "0a1b2c3d-9999-9999") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_wrong_shape(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    (tasks / "abc.txt").write_text("x", encoding="utf-8")
+    (tasks / "sub").mkdir()
+    (tasks / "sub" / "n.output").write_text("x", encoding="utf-8")
+    (tasks.parent / "extra.output").write_text("x", encoding="utf-8")
+    assert _read_task(guard, tasks / "abc.txt") == "deny"
+    assert _read_task(guard, tasks / "sub" / "n.output") == "deny"
+    assert _read_task(guard, tasks.parent / "extra.output") == "deny"
+    assert _read_task(guard, f"{tasks}/../tasks/abc.output") == "allow"  # collapses to the file
+    assert _read_task(guard, f"{tasks}/../../abc.output") == "deny"
+    assert _read_task(guard, f"{tasks}/*.output") == "deny"
+    assert _read_task(guard, f"{tasks}/a?c.output") == "deny"
+    assert _read_task(guard, f"{tasks}/[a]bc.output") == "deny"
+    assert _read_task(guard, f"{tasks}/{{abc}}.output") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_respects_cli_tmp_base(tmp_path):
+    root, tmp_base, tasks, _ = _task_guard_setup(tmp_path)
+    elsewhere = (tmp_path / "elsewhere").resolve()
+    elsewhere.mkdir()
+    guard = claude_file_tool_guard(cwd=root, roots=[root], cli_tmp_base=str(elsewhere))
+    assert _read_task(guard, tasks / "abc.output") == "deny"
+    no_base = claude_file_tool_guard(cwd=root, roots=[root])
+    assert _read_task(no_base, tasks / "abc.output") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_untrimmed_paths(tmp_path):
+    _, _, tasks, guard = _task_guard_setup(tmp_path)
+    path = str(tasks / "abc.output")
+    for value in (f"{path} ", f" {path}", f"{path}\n", f"{path}/"):
+        assert _read_task(guard, value) == "deny", repr(value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_denied_for_links_inside_the_tasks_dir(tmp_path):
+    _, tmp_base, tasks, guard = _task_guard_setup(tmp_path)
+    other = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / "ffffffff-0000-1111" / "tasks"
+    other.mkdir(parents=True)
+    (other / "x.output").write_text("secret", encoding="utf-8")
+    (tasks / "sym.output").symlink_to(other / "x.output")
+    assert _read_task(guard, tasks / "sym.output") == "deny"
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("x", encoding="utf-8")
+    os.link(elsewhere, tasks / "hard.output")
+    assert _read_task(guard, tasks / "hard.output") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_session_id_boundaries(tmp_path):
+    root, tmp_base, _, guard = _task_guard_setup(tmp_path)
+
+    def read_as(session_id: str) -> str:
+        tasks = tmp_base / f"claude-{os.getuid()}" / "-munged-cwd" / session_id / "tasks"
+        tasks.mkdir(parents=True, exist_ok=True)
+        (tasks / "a.output").write_text("x", encoding="utf-8")
+        return _read_task(guard, tasks / "a.output", session_id)
+
+    assert read_as("a" * 7) == "deny"
+    assert read_as("a" * 8) == "allow"
+    assert read_as("a" * 64) == "allow"
+    assert read_as("a" * 65) == "deny"
+    assert read_as("abcd_efgh") == "deny"
+    assert read_as("abcd efgh") == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_claude_task_output_symlinked_tmp_base_and_case_variants(tmp_path):
+    root, _, _, _ = _task_guard_setup(tmp_path)
+    real = (tmp_path / "real").resolve()
+    tasks = real / f"claude-{os.getuid()}" / "seg" / _TASK_SESSION / "tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "abc.output").write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    guard = claude_file_tool_guard(cwd=root, roots=[root], cli_tmp_base=str(link))
+    assert _read_task(guard, tasks / "abc.output") == "allow"
+    via_link = link / f"claude-{os.getuid()}" / "seg" / _TASK_SESSION / "tasks" / "abc.output"
+    assert _read_task(guard, via_link) == "allow"
+    # On a case-insensitive filesystem the variants name the files above, so
+    # nothing is created; the match is on the spelling either way.
+    if not (tasks.parent / "TASKS").exists():
+        (tasks.parent / "TASKS").mkdir()
+        (tasks.parent / "TASKS" / "abc.output").write_text("x", encoding="utf-8")
+        (tasks / "abc.OUTPUT").write_text("x", encoding="utf-8")
+    assert _read_task(guard, tasks.parent / "TASKS" / "abc.output") == "deny"
+    assert _read_task(guard, tasks / "abc.OUTPUT") == "deny"
 
 
 def test_seatbelt_lists_the_ancestors_of_granted_paths_only(tmp_path):

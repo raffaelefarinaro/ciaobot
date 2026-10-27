@@ -1930,6 +1930,51 @@ class ChatStreaming:
         task = asyncio.create_task(self._host._drain_between_turns(chat_id, project_id))
         self._between_turn_drains[chat_id] = task
 
+    def _record_opencode_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
+        """File the execution OpenCode ran after a background shell finished.
+
+        OpenCode's own session store holds the wake, but the durable transcript
+        is the fallback copy a reload reads when that store is unreadable. The
+        notice is the turn's prompt; ``origin`` keeps it a system row. A wake
+        whose shell item was missed has no notice and records nothing, by design.
+        """
+        chat = self._host._chats.get(chat_id)
+        if (
+            chat is None
+            or chat.provider != "opencode"
+            or event.origin != "task-notification"
+            or not event.wake_notice
+            or not (event.result or "").strip()
+        ):
+            return
+        try:
+            # `record_turn` reads only the model, prompt and mode, so a bare
+            # request is enough; the full builder mints tokens and mutates chat.
+            request = AgentRequest(
+                prompt=event.wake_notice,
+                display_prompt=event.wake_notice,
+                model=chat.model,
+                mode=chat.mode,
+                provider=chat.provider,
+                resume_session=chat.session_id or None,
+            )
+            self._host._transcripts.record_turn(
+                request,
+                ctx=ChatContext.for_web(chat_id),
+                response_text=event.result,
+                effective_model=event.effective_model,
+                session_id=chat.session_id or None,
+                usage=event.usage,
+                quota=event.quota,
+                input_kind="task-notification",
+                context_label=chat.title,
+                provider=chat.provider,
+                is_error=bool(event.is_error),
+                origin="background_run",
+            )
+        except Exception:
+            logger.exception("Failed to record the wake turn for chat %s", chat_id)
+
     async def drain_between_turns(self, chat_id: str, project_id: str) -> None:
         """Publish provider events that arrive while no user turn is active."""
         provider_service = self._host._providers.get(chat_id)
@@ -2002,6 +2047,7 @@ class ChatStreaming:
                     )
                     drain_segment = FinalAnswerTracker()
                     is_error = bool(event.is_error)
+                    self._record_opencode_wake_turn(chat_id, event)
                     settled = self._host._background_count_now(chat_id) == 0
                     if settled:
                         self._last_drain_result[chat_id] = (text, is_error)
