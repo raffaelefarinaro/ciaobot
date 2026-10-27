@@ -317,6 +317,79 @@ function neutralizeDeadAnchors(html: string): string {
 // panes that have no chat list of their own.
 const NO_KNOWN_CHATS: ReadonlyMap<string, string> = new Map()
 
+// User-typed text is shown as typed: raw HTML is escaped to text instead of
+// being parsed (issue #867). The one exception is the four comment tags the
+// app writes itself (lib/commentContext.ts), which render as quote cards.
+const COMMENT_TAG_NAMES = COMMENT_TAGS.join('|')
+const NON_COMMENT_LT = new RegExp(`<(?!/?(?:${COMMENT_TAG_NAMES})>)`, 'gi')
+const COMMENT_TAG_ANY = new RegExp(`</?(?:${COMMENT_TAG_NAMES})>`, 'i')
+
+const COMMENT_REFERENCE_SPAN = /<user-comment-reference>[\s\S]*?<\/user-comment-reference>/g
+const COMMENT_TAG_SPLIT = new RegExp(`(</?(?:${COMMENT_TAG_NAMES})>)`, 'i')
+
+function escapeText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+}
+
+/**
+ * One comment-reference block as HTML. The contents are plain text: a quoted
+ * selection is what the reader selected, not markdown to render. Whitespace
+ * between the child tags is dropped and the newlines at the edges of a quote
+ * or note are trimmed, so `pre-wrap` shows no phantom blank lines.
+ */
+function commentReferenceHtml(block: string): string {
+  const parts = block.split(COMMENT_TAG_SPLIT)
+  let out = ''
+  let open = ''
+  for (const part of parts) {
+    const tag = COMMENT_TAG_SPLIT.test(part) ? part.toLowerCase() : ''
+    if (tag) {
+      open = tag.startsWith('</') ? '' : tag.slice(1, -1)
+      out += tag
+      continue
+    }
+    if (!part.trim()) continue
+    const text = escapeText(part.replace(/^\n+|\n+$/g, ''))
+    // Lines after the note (the attachment lines) keep their line breaks.
+    out += open ? text : text.replace(/\n/g, '<br>')
+  }
+  return out
+}
+
+let liftCounter = 0
+
+/**
+ * Take every complete comment-reference block out of the text before markdown
+ * sees it: a blank line inside a quoted selection would otherwise end the
+ * HTML block and let the rest, and every later block, be parsed as markdown.
+ * `restore` puts each block back, as HTML, where its placeholder paragraph
+ * ended up. An unclosed block is left in the text untouched.
+ */
+function liftCommentReferences(text: string): { text: string; restore: (html: string) => string } {
+  const blocks: string[] = []
+  const nonce = `${(liftCounter++).toString(36)}${Math.random().toString(36).slice(2, 8)}`
+  const token = (i: number) => `CIAOCOMMENTREF${nonce}X${i}X`
+  const lifted = text.replace(COMMENT_REFERENCE_SPAN, (block) => {
+    blocks.push(block)
+    return `\n\n${token(blocks.length - 1)}\n\n`
+  })
+  if (!blocks.length) return { text, restore: (html) => html }
+  return {
+    text: lifted,
+    restore(html) {
+      let result = html
+      blocks.forEach((block, i) => {
+        const t = token(i)
+        const paragraph = `<p>${t}</p>`
+        result = result.includes(paragraph)
+          ? result.replace(paragraph, () => commentReferenceHtml(block))
+          : result.replace(t, () => escapeText(block))
+      })
+      return result
+    },
+  }
+}
+
 /**
  * Render a message for the transcript.
  *
@@ -339,7 +412,8 @@ export function renderMarkdown(
 ): string {
   openLocalFiles = !!opts.openLocal
   try {
-    const html = chatMarkdownParser.parse(text) as string
+    const lifted = liftCommentReferences(text)
+    const html = lifted.restore(chatMarkdownParser.parse(lifted.text) as string)
     const linked = linkifyChatIds(html, knownChats)
     return neutralizeDeadAnchors(
       linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths),
@@ -350,13 +424,6 @@ export function renderMarkdown(
     openLocalFiles = false
   }
 }
-
-// User-typed text is shown as typed: raw HTML is escaped to text instead of
-// being parsed (issue #867). The one exception is the four comment tags the
-// app writes itself (lib/commentContext.ts), which render as quote cards.
-const COMMENT_TAG_NAMES = COMMENT_TAGS.join('|')
-const NON_COMMENT_LT = new RegExp(`<(?!/?(?:${COMMENT_TAG_NAMES})>)`, 'gi')
-const COMMENT_TAG_ANY = new RegExp(`</?(?:${COMMENT_TAG_NAMES})>`, 'i')
 
 const userMarkdownRenderer = new Renderer()
 Object.assign(userMarkdownRenderer, {
@@ -390,7 +457,8 @@ export function renderUserMarkdown(
 ): string {
   openLocalFiles = !!opts.openLocal
   try {
-    const html = userMarkdownParser.parse(text) as string
+    const lifted = liftCommentReferences(text)
+    const html = lifted.restore(userMarkdownParser.parse(lifted.text) as string)
     const linked = linkifyChatIds(html, knownChats)
     return neutralizeDeadAnchors(
       linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths),

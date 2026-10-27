@@ -223,7 +223,7 @@ they travel as a file (`--instructions-file`) rather than as a shell argument.
 
 ### Background runs
 
-For a long command, prefer the provider's native background shell (Bash `run_in_background`, `Monitor`, OpenCode's background shell): it wakes the chat when it finishes and Ciaobot keeps the provider alive meanwhile. `ciao run start` is for a command that must not depend on the chat's provider process.
+For a long command, prefer the provider's native background shell (Bash `run_in_background`, `Monitor`, OpenCode's background shell): it wakes the chat when it finishes and Ciaobot keeps the provider alive meanwhile. On Claude, a background Bash stops at its `timeout` (30 minutes by default): pass a `timeout` that covers the run, up to 24 hours. `ciao run start` is for a command that must not depend on the chat's provider process.
 
 | Command | Purpose | Guard |
 |---|---|---|

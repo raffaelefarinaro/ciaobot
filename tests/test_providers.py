@@ -3300,6 +3300,39 @@ async def test_claude_cli_gets_the_initialize_budget_and_startup_failure_results
 
 
 @pytest.mark.asyncio
+async def test_claude_cli_background_bash_may_run_for_the_background_work_horizon(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The CLI stops a background Bash at its timeout (default 30 min, capped at
+    # max(2 h, BASH_MAX_TIMEOUT_MS)); a 70-minute native shell was killed at
+    # 30 min before this (#2216).
+    constructed: list[object] = []
+
+    class FakeClient:
+        def __init__(self, options):
+            constructed.append(options)
+
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    monkeypatch.delenv("BASH_MAX_TIMEOUT_MS", raising=False)
+    await ClaudeProvider(tmp_path)._ensure_connected(
+        AgentRequest(prompt="test", model="sonnet", mode="auto")
+    )
+    assert constructed[0].env["BASH_MAX_TIMEOUT_MS"] == str(24 * 3600 * 1000)
+
+    # An operator value wins, from the request env or the engine's own.
+    await ClaudeProvider(tmp_path)._ensure_connected(
+        AgentRequest(prompt="test", model="sonnet", mode="auto", extra_env={"BASH_MAX_TIMEOUT_MS": "5000"})
+    )
+    assert constructed[1].env["BASH_MAX_TIMEOUT_MS"] == "5000"
+    monkeypatch.setenv("BASH_MAX_TIMEOUT_MS", "7000")
+    await ClaudeProvider(tmp_path)._ensure_connected(
+        AgentRequest(prompt="test", model="sonnet", mode="auto")
+    )
+    assert "BASH_MAX_TIMEOUT_MS" not in constructed[2].env
+
+
+@pytest.mark.asyncio
 async def test_caller_startup_failure_results_value_wins(
     tmp_path: Path, monkeypatch
 ) -> None:
