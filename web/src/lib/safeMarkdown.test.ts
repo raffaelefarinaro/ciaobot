@@ -2,6 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 
+import { formatChatComments } from './commentContext'
 import * as loopback from './loopback'
 import { renderFileMarkdown, renderMarkdown, renderUserMarkdown } from './safeMarkdown'
 
@@ -98,11 +99,84 @@ describe('safe markdown rendering', () => {
       '<user-comment-reference><quoted-text>\npara one\n\npara two\n</quoted-text>' +
       '<user-comment>\nnote\n</user-comment></user-comment-reference>',
     )
-    expect(html).toContain('<user-comment-reference>')
-    expect(html).toContain('</user-comment-reference>')
-    expect(html).toContain('para one')
-    expect(html).toContain('para two')
-    expect(html).toContain('note')
+    const div = parse(html)
+    const cards = div.querySelectorAll('user-comment-reference')
+    expect(cards).toHaveLength(1)
+    const quotes = cards[0].querySelectorAll('quoted-text')
+    expect(quotes).toHaveLength(1)
+    expect(quotes[0].textContent).toContain('para one')
+    expect(quotes[0].textContent).toContain('para two')
+    expect(cards[0].querySelector('user-comment')?.textContent).toBe('note')
+  })
+
+  const twoComments = (selection: string) =>
+    formatChatComments([
+      { messageRole: 'assistant', paragraphIndex: 1, selection, comment: 'c1' },
+      { messageRole: 'assistant', paragraphIndex: 2, selection: 'Luca', comment: 'c2' },
+    ])
+
+  function parse(html: string): HTMLDivElement {
+    const div = document.createElement('div')
+    div.innerHTML = html
+    return div
+  }
+
+  function expectFlatCards(div: HTMLElement, firstQuote: string) {
+    const cards = Array.from(div.children).filter((e) => e.tagName.toLowerCase() === 'user-comment-reference')
+    expect(div.querySelectorAll('user-comment-reference')).toHaveLength(2)
+    expect(cards).toHaveLength(2)
+    for (const q of Array.from(div.querySelectorAll('quoted-text'))) {
+      expect(q.querySelector('reference-source, quoted-text, user-comment')).toBeNull()
+    }
+    expect(div.querySelector('quoted-text')?.textContent).toBe(firstQuote)
+    for (const tag of ['user-comment-reference', 'reference-source', 'quoted-text', 'user-comment']) {
+      for (const el of Array.from(div.querySelectorAll(tag))) {
+        expect(el.querySelector('p, br, ul')).toBeNull()
+      }
+    }
+  }
+
+  it.each([
+    ['para one\n\npara two'],
+    ['Intro:\n\n- one\n- two\n\nOutro'],
+  ])('renders every comment as its own card when a quote spans blank lines (%j)', (selection) => {
+    expectFlatCards(parse(renderUserMarkdown(twoComments(selection))), selection)
+  })
+
+  it('renders every comment as its own card with renderMarkdown too', () => {
+    const selection = 'para one\n\npara two'
+    expectFlatCards(parse(renderMarkdown(twoComments(selection))), selection)
+  })
+
+  it('shows markdown and HTML inside a quote as literal text', () => {
+    const selection = '**bold** <b>x</b>'
+    const div = parse(renderUserMarkdown(twoComments(selection)))
+    expect(div.querySelector('quoted-text')?.textContent).toBe(selection)
+    expect(div.querySelector('strong, b')).toBeNull()
+  })
+
+  it('leaves no whitespace-only text between comment tags', () => {
+    const div = parse(renderUserMarkdown(twoComments('para one\n\npara two')))
+    for (const card of Array.from(div.querySelectorAll('user-comment-reference'))) {
+      for (const node of Array.from(card.childNodes)) {
+        if (node.nodeType === 3) expect((node.textContent || '').trim()).not.toBe('')
+      }
+    }
+    for (const q of Array.from(div.querySelectorAll('quoted-text'))) {
+      const text = q.textContent || ''
+      expect(text.startsWith('\n')).toBe(false)
+      expect(text.endsWith('\n')).toBe(false)
+    }
+  })
+
+  it('still renders markdown around a comment block', () => {
+    const block = twoComments('x\n\ny')
+    const div = parse(renderUserMarkdown(`intro **b**\n\n${block}\n\nafter`))
+    expect(div.querySelector('strong')?.textContent).toBe('b')
+    expect(div.querySelectorAll('user-comment-reference')).toHaveLength(2)
+    const after = Array.from(div.querySelectorAll('p')).find((p) => p.textContent === 'after')
+    expect(after).toBeTruthy()
+    expect(after?.closest('user-comment-reference')).toBeNull()
   })
 
   it('still strips dangerous tags even with comment tags allowed', () => {
@@ -122,21 +196,19 @@ describe('safe markdown rendering', () => {
       '</user-comment-reference>',
     )
 
-    // Unsafe event handlers and javascript: URLs nested inside the allowed
-    // quote card are still removed.
-    expect(html).not.toContain('onerror')
-    expect(html).not.toContain('javascript:')
-    expect(html).not.toContain('alert(1)')
-    expect(html).not.toContain('alert(2)')
+    // A quote is plain text: nested HTML shows literally and none of it is
+    // live (no element, no handler, no link).
+    const div = parse(html)
+    expect(div.querySelector('img, a')).toBeNull()
+    const quote = div.querySelector('quoted-text')
+    expect(quote?.textContent).toContain('<img src=x onerror=alert(1)>')
+    expect(quote?.textContent).toContain('<a href="https://example.com/guide">safe</a>')
     // The app-owned quote-card tags survive so they can be styled.
     expect(html).toContain('<user-comment-reference>')
     expect(html).toContain('<reference-source>')
     expect(html).toContain('<quoted-text>')
     expect(html).toContain('<user-comment>')
     expect(html).toContain('please check this')
-    // A safe https link keeps its href and gains the external-link attrs.
-    expect(html).toContain('href="https://example.com/guide"')
-    expect(html).toContain('rel="noopener noreferrer"')
   })
 
   it('wraps tables in a keyboard-scrollable region', () => {
