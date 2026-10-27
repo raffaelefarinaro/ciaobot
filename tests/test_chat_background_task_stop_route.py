@@ -23,10 +23,13 @@ _URL = "/api/chats/chat-1/background-tasks/{}/stop"
 
 
 class _ClaudeClient:
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         self.stopped: list[str] = []
+        self._error = error
 
     async def stop_task(self, task_id: str) -> None:
+        if self._error is not None:
+            raise self._error
         self.stopped.append(task_id)
 
 
@@ -54,6 +57,12 @@ def _claude_provider(tmp_path: Path, client: _ClaudeClient) -> ClaudeProvider:
     provider._native_tasks["t1"] = {
         "command": "sleep 600",
         "task_type": "local_bash",
+        "started_at": 1.0,
+        "started_mono": 1e18,
+    }
+    provider._native_tasks["ag1"] = {
+        "command": "research",
+        "task_type": "local_agent",
         "started_at": 1.0,
         "started_mono": 1e18,
     }
@@ -201,3 +210,31 @@ def test_opencode_shell_rows_carry_a_first_seen_started_at(tmp_path: Path) -> No
         {"type": "shell.exited", "data": {"id": "sh_1"}}, "ses_1"
     )
     assert "sh_1" not in provider._shell_started
+
+
+def test_stop_refuses_a_background_agent_task(tmp_path: Path) -> None:
+    sdk = _ClaudeClient()
+    client, cookies = _client(_claude_provider(tmp_path, sdk))
+
+    assert _post(client, cookies, "ag1").status_code == 404
+    assert sdk.stopped == []
+
+
+def test_a_failing_claude_stop_answers_502(tmp_path: Path) -> None:
+    client, cookies = _client(
+        _claude_provider(tmp_path, _ClaudeClient(error=RuntimeError("cli gone")))
+    )
+
+    resp = _post(client, cookies, "t1")
+
+    assert resp.status_code == 502
+    assert resp.json() == {"error": "the provider could not be reached or refused"}
+
+
+def test_opencode_stop_percent_encodes_the_shell_id(tmp_path: Path) -> None:
+    sdk = _OpencodeClient()
+    provider = _opencode_provider(tmp_path, sdk)
+    provider._background_shells = {"a/b?c"}
+
+    assert asyncio.run(provider.stop_background_shell("a/b?c")) is True
+    assert sdk.deleted == ["/api/shell/a%2Fb%3Fc"]

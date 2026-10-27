@@ -33,7 +33,6 @@ from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-import httpx
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
@@ -86,7 +85,7 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
-from ciao.providers.claude import ClaudeProvider
+from ciao.providers.claude import ClaudeProvider, is_process_task
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_child_status,
@@ -2938,9 +2937,11 @@ async def chat_background_task_stop(request: Request) -> JSONResponse:
             stopped = await provider.stop_background_task(task_id)
         elif isinstance(provider, OpencodeProvider):
             stopped = await provider.stop_background_shell(task_id)
-    except httpx.HTTPError:
-        logger.warning("stopping background shell %s failed", task_id, exc_info=True)
-        return JSONResponse({"error": "OpenCode did not accept the request"}, status_code=502)
+    except Exception:  # noqa: BLE001 - a provider failure must answer, not 500
+        logger.warning("stopping background task %s failed", task_id, exc_info=True)
+        return JSONResponse(
+            {"error": "the provider could not be reached or refused"}, status_code=502
+        )
     if not stopped:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True})
@@ -3446,7 +3447,9 @@ async def running_subagents(request: Request) -> JSONResponse:
     config = request.app.state.config
     out: dict[str, list[dict]] = {}
     scanned: list[tuple[str, Any]] = []
-    for chat_id in pcm.active_chat_ids():
+    # A provider holding only a native shell has no stream, count or watcher,
+    # so it is absent from `active_chat_ids`; the feed lists it anyway.
+    for chat_id in sorted({*pcm.active_chat_ids(), *pcm.background_work_chat_ids()}):
         chat = pcm.get_chat(chat_id)
         if chat is None or chat.archived or not chat.session_id:
             continue
@@ -3593,7 +3596,7 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
     if live_claude is not None:
         for task in live_claude.background_shell_rows():
             task_type = str(task["task_type"])
-            if "agent" in task_type:
+            if not is_process_task(task):
                 # Background agents already have their own rows above.
                 continue
             claude_rows.append({

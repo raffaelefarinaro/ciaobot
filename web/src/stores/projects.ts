@@ -48,7 +48,7 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
-import { bareAgentId, sameAgent } from '../lib/subagentIds'
+import { bareAgentId, isShellRow, sameAgent } from '../lib/subagentIds'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
@@ -1240,17 +1240,28 @@ export const useProjectStore = defineStore('projects', () => {
     }
     runningPollLive.value = false
   }
-  // Poll until the rows clear or the drain budget is spent. Used for the
+  // Poll until the rows clear or the drain budget is spent (shell rows never
+  // spend it). Used for the
   // falling edge of work and for rows discovered while nothing is working.
   function startRunningSubagentDrain(): void {
     let drainTicksLeft = RUNNING_SUBAGENT_DRAIN_TICKS
     runningPollLive.value = true
     runningSubagentTimer = setInterval(() => {
-      if (Object.keys(runningSubagents.value).length === 0 || drainTicksLeft <= 0) {
+      if (Object.keys(runningSubagents.value).length === 0) {
         stopRunningSubagentPoll()
         return
       }
-      drainTicksLeft -= 1
+      // A listed shell or Monitor is retired by the server from provider
+      // state (24 h cap), so it keeps the poll alive without spending the
+      // budget; agent rows stay bounded.
+      const holdsShell = Object.values(runningSubagents.value).some(rows => rows.some(isShellRow))
+      if (!holdsShell) {
+        if (drainTicksLeft <= 0) {
+          stopRunningSubagentPoll()
+          return
+        }
+        drainTicksLeft -= 1
+      }
       void refreshRunningSubagents()
     }, RUNNING_SUBAGENT_POLL_MS)
   }

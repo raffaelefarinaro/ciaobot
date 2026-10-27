@@ -107,7 +107,8 @@
               type="button"
               class="composer-activity-pop-stop"
               :aria-label="`Stop ${subagentLabel(shell)}`"
-              :disabled="stopping.has(shell.agent_id)"
+              :data-stop-id="shell.agent_id"
+              :aria-disabled="stopping.has(shell.agent_id) ? 'true' : undefined"
               @click="stop(shell)"
             >{{ stopping.has(shell.agent_id) ? 'Stopping…' : 'Stop' }}</button>
           </div>
@@ -140,7 +141,7 @@
 
 <script setup lang="ts">
 import { PopoverAnchor, PopoverContent, PopoverRoot } from 'reka-ui'
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import { backgroundRunLabel, backgroundRunMinutes, backgroundRunOutcome, minutesSince } from '../lib/backgroundRuns'
 import { isShellRow, shellTaskId, subagentLabel, subagentPath } from '../lib/subagentIds'
@@ -191,6 +192,7 @@ const outcome = computed(() => {
 const hasActivity = computed(() => props.agentCount > 0 || processCount.value > 0 || outcome.value !== null)
 const announcement = computed(() => {
   if (outcome.value) return `Background run: ${outcome.value.text}`
+  if (stopNotice.value) return stopNotice.value
   if (!processCount.value) return ''
   const first = props.runs.length ? backgroundRunLabel(props.runs[0]) : subagentLabel(shellRows.value[0])
   const more = processCount.value > 1 ? ` and ${processCount.value - 1} more` : ''
@@ -201,24 +203,53 @@ const announcement = computed(() => {
 // answers before the provider has reported the task ended.
 const stopping = reactive(new Set<string>())
 const stopErrors = reactive<Record<string, string>>({})
+const stopNotice = ref('')
+const stopTimers = new Map<string, ReturnType<typeof setTimeout>>()
+// A task the provider never reports ended must not leave Stop locked for good.
+const STOP_LOCK_MS = 15_000
 
+function releaseStop(id: string) {
+  const timer = stopTimers.get(id)
+  if (timer) clearTimeout(timer)
+  stopTimers.delete(id)
+  stopping.delete(id)
+}
+
+// `aria-disabled`, not `disabled`: a disabled button drops focus to the body,
+// outside the popover.
 async function stop(shell: RunningSubagent) {
-  if (!props.stopTask) return
-  stopping.add(shell.agent_id)
-  delete stopErrors[shell.agent_id]
+  const id = shell.agent_id
+  if (!props.stopTask || stopping.has(id)) return
+  stopping.add(id)
+  stopNotice.value = `Stopping ${subagentLabel(shell)}`
+  delete stopErrors[id]
+  stopTimers.set(id, setTimeout(() => releaseStop(id), STOP_LOCK_MS))
   try {
-    await props.stopTask(shellTaskId(shell.agent_id))
+    await props.stopTask(shellTaskId(id))
   } catch {
-    stopping.delete(shell.agent_id)
-    stopErrors[shell.agent_id] = 'Could not stop this process. Try again.'
+    releaseStop(id)
+    stopNotice.value = ''
+    stopErrors[id] = 'Could not stop this process. Try again.'
   }
 }
 
-watch(() => shellRows.value.map(r => r.agent_id), (ids) => {
+// Runs before the DOM drops a row: if the focused Stop belongs to the row that
+// is leaving, hand focus to the next row's Stop, else back to the opener.
+watch(() => shellRows.value.map(r => r.agent_id), (ids, oldIds) => {
   const live = new Set(ids)
-  for (const id of [...stopping]) if (!live.has(id)) stopping.delete(id)
+  for (const id of [...stopping]) if (!live.has(id)) releaseStop(id)
   for (const id of Object.keys(stopErrors)) if (!live.has(id)) delete stopErrors[id]
-})
+  if (!stopping.size) stopNotice.value = ''
+  const focusedId = document.activeElement?.getAttribute('data-stop-id')
+  if (!focusedId || live.has(focusedId) || openedBy.value === null) return
+  const index = (oldIds ?? []).indexOf(focusedId)
+  void nextTick(() => {
+    const stops = Array.from(document.querySelectorAll<HTMLElement>(`#${CSS.escape(popoverId.value)} [data-stop-id]`))
+    const next = stops[Math.min(Math.max(index, 0), stops.length - 1)]
+    if (next) next.focus()
+    else trigger?.focus()
+  })
+}, { flush: 'pre' })
 
 function toggle(key: string, event: MouseEvent) {
   if (openedBy.value === key) {
@@ -286,7 +317,11 @@ onMounted(() => {
   })
   observer.observe(bar)
 })
-onBeforeUnmount(() => { observer?.disconnect() })
+onBeforeUnmount(() => {
+  observer?.disconnect()
+  for (const timer of stopTimers.values()) clearTimeout(timer)
+  stopTimers.clear()
+})
 </script>
 
 <style scoped>
@@ -431,7 +466,7 @@ onBeforeUnmount(() => { observer?.disconnect() })
 .composer-activity-pop-stop:hover,
 .composer-activity-pop-stop:focus-visible { background: var(--bg3); color: var(--fg); }
 .composer-activity-pop-stop:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.composer-activity-pop-stop:disabled { color: var(--fg3); cursor: default; background: none; }
+.composer-activity-pop-stop[aria-disabled="true"] { color: var(--fg3); cursor: default; background: none; }
 
 .composer-activity-pop-item:hover,
 .composer-activity-pop-foot:hover { background: var(--bg3); }

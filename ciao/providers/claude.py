@@ -36,6 +36,7 @@ from dataclasses import dataclass, field, replace
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, cast
 
 from claude_agent_sdk import (
@@ -604,6 +605,11 @@ async def _receive_round(
                 pass
 
 
+def is_process_task(info: Mapping[str, Any]) -> bool:
+    """True for a shell or Monitor task; background agents have their own rows."""
+    return "agent" not in str(info.get("task_type") or "")
+
+
 class ClaudeProvider(BaseSDKProvider):
     """Claude provider backed by the Agent SDK."""
 
@@ -720,13 +726,14 @@ class ClaudeProvider(BaseSDKProvider):
         ]
 
     async def stop_background_task(self, task_id: str) -> bool:
-        """Ask the CLI to stop one tracked background task; False if not tracked.
+        """Ask the CLI to stop one tracked process task; False if not tracked or an agent.
 
         The row is not dropped here: the CLI reports the terminal status in the
         message stream and ``_observe_message`` clears it then.
         """
         client = self._client
-        if task_id not in self._native_tasks or client is None:
+        info = self._native_tasks.get(task_id)
+        if info is None or client is None or not is_process_task(info):
             return False
         await client.stop_task(task_id)
         return True

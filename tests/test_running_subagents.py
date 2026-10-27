@@ -76,10 +76,16 @@ def _write(path: Path, records: list[dict]) -> None:
     )
 
 
-def _client(tmp_path: Path, chats: dict[str, object], active: list[str]) -> TestClient:
+def _client(
+    tmp_path: Path,
+    chats: dict[str, object],
+    active: list[str],
+    background: list[str] | None = None,
+) -> TestClient:
     pcm = SimpleNamespace(
         get_chat=lambda chat_id: chats.get(chat_id),
         active_chat_ids=lambda: active,
+        background_work_chat_ids=lambda: background or [],
         _providers={},
         _agent_root_for_chat=lambda chat_id: None,
     )
@@ -161,6 +167,7 @@ def test_running_rows_do_not_read_transcripts(tmp_path: Path) -> None:
     pcm = SimpleNamespace(
         get_chat=lambda chat_id: chat if chat_id == "chat-1" else None,
         active_chat_ids=lambda: ["chat-1"],
+        background_work_chat_ids=lambda: [],
         _providers={"chat-1": SimpleNamespace(provider=provider)},
         _agent_root_for_chat=lambda chat_id: None,
     )
@@ -402,6 +409,7 @@ def _opencode_app(tmp_path: Path, provider: OpencodeProvider | None) -> TestClie
     pcm = SimpleNamespace(
         get_chat=lambda chat_id: chat if chat_id == "chat-1" else None,
         active_chat_ids=lambda: ["chat-1"],
+        background_work_chat_ids=lambda: [],
         _providers={"chat-1": SimpleNamespace(provider=provider)} if provider else {},
         _agent_root_for_chat=lambda chat_id: None,
     )
@@ -591,3 +599,21 @@ def test_loaded_claude_provider_rows_replace_the_jsonl_tasks(tmp_path: Path, mon
         ("task:mon1", "monitor", True),
     ]
     assert rows[0]["started_at"] == "2027-01-15T08:00:00+00:00"
+
+
+def test_a_chat_with_only_provider_background_work_is_scanned(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No stream, no watcher: the loaded provider's shell alone earns a row."""
+    _pin_session(monkeypatch, tmp_path / "sess-bg.jsonl")
+    provider = ClaudeProvider(tmp_path)
+    provider._native_tasks = {
+        "bsh1": {"command": "sleep 600", "task_type": "local_bash", "started_at": 1_800_000_000.0, "started_mono": time.monotonic()},
+    }
+    # Listed by both sets: scanned once.
+    client = _client(tmp_path, {"c1": _chat("c1", "sess-bg")}, [], background=["c1", "c1"])
+    client.app.state.project_chat_manager._providers["c1"] = SimpleNamespace(provider=provider)
+
+    rows = client.get("/api/subagents/running").json()["chats"]["c1"]
+
+    assert [r["agent_id"] for r in rows] == ["task:bsh1"]

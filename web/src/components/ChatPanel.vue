@@ -1660,20 +1660,11 @@ const {
 } = composer
 const isContinuing = ref(false)
 
-// Ticks once a second while streaming or while a background run is going, so
-// the live elapsed-time labels (the "Working..." trace meta, a run's age)
-// advance.
+// Ticks once a second while streaming, a background run is going or a native
+// shell is listed (see the watch below `runningRows`), so the live
+// elapsed-time labels advance.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
-watch(() => store.isStreaming || store.activeBackgroundRuns.length > 0, (streaming) => {
-  if (streaming && !clockTimer) {
-    nowTs.value = Date.now()
-    clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
-  } else if (!streaming && clockTimer) {
-    clearInterval(clockTimer)
-    clockTimer = null
-  }
-}, { immediate: true })
 
 const canSend = computed(() =>
   !!(inputText.value.trim()
@@ -2231,6 +2222,19 @@ function compactContext() {
 // composer lists those as processes, everything else counts as an agent.
 const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
 const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
+watch(
+  () => store.isStreaming || store.activeBackgroundRuns.length > 0 || runningRows.value.some(isShellRow),
+  (ticking) => {
+    if (ticking && !clockTimer) {
+      nowTs.value = Date.now()
+      clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
+    } else if (!ticking && clockTimer) {
+      clearInterval(clockTimer)
+      clockTimer = null
+    }
+  },
+  { immediate: true },
+)
 const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))
 // Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
 // the running-subagent poll tick on different clocks, so take the larger.

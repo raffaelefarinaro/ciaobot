@@ -321,4 +321,58 @@ describe('ComposerActivity', () => {
     expect(document.querySelector<HTMLButtonElement>('.composer-activity-pop-stop')?.disabled).toBe(false)
     wrapper.unmount()
   })
+
+  it('releases the Stopping lock after 15 s so Stop can be retried, and announces it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const shell: RunningSubagent = {
+        agent_id: 'task:b1', description: 'sleep 600', subagent_type: 'shell',
+        started_at: new Date(NOW).toISOString(), stoppable: true,
+      }
+      const stopTask = vi.fn().mockResolvedValue(undefined)
+      const wrapper = mountBar({ agents: [shell], stopTask })
+      await wrapper.get('.composer-activity-seg--runs').trigger('click')
+      await flushPromises()
+      const stop = () => document.querySelector<HTMLButtonElement>('.composer-activity-pop-stop')!
+      stop().click()
+      await flushPromises()
+      expect(stop().getAttribute('aria-disabled')).toBe('true')
+      expect(stop().disabled).toBe(false)
+      expect(wrapper.get('[role="status"]').text()).toBe('Stopping sleep 600')
+      stop().click()
+      await flushPromises()
+      expect(stopTask).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(15_000)
+      await flushPromises()
+      expect(stop().textContent?.trim()).toBe('Stop')
+      stop().click()
+      await flushPromises()
+      expect(stopTask).toHaveBeenCalledTimes(2)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('moves focus to the next Stop when the focused row leaves, else to the opener', async () => {
+    const row = (id: string): RunningSubagent => ({
+      agent_id: `task:${id}`, description: id, subagent_type: 'shell',
+      started_at: new Date(NOW).toISOString(), stoppable: true,
+    })
+    const wrapper = mountBar({ runs: [run('r1', 'clone', 60_000)], agents: [row('a'), row('b')], stopTask: vi.fn().mockResolvedValue(undefined) })
+    const opener = wrapper.get('.composer-activity-seg--runs')
+    await opener.trigger('click')
+    await flushPromises()
+    const stops = () => Array.from(document.querySelectorAll<HTMLButtonElement>('.composer-activity-pop-stop'))
+    stops()[0].focus()
+    await wrapper.setProps({ agents: [row('b')] })
+    await flushPromises()
+    expect(document.activeElement).toBe(stops()[0])
+    expect(stops()[0].getAttribute('data-stop-id')).toBe('task:b')
+    stops()[0].focus()
+    await wrapper.setProps({ agents: [] })
+    await flushPromises()
+    expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
+  })
 })

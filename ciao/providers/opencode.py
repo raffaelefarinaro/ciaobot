@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -1916,7 +1916,7 @@ class OpencodeProvider(BaseSDKProvider):
             {
                 "id": shell_id,
                 "command": self._shell_commands.get(shell_id, ""),
-                "started_at": self._shell_started.get(shell_id, time.time()),
+                "started_at": self._shell_started.setdefault(shell_id, time.time()),
             }
             for shell_id in sorted(self._background_shells)
         ]
@@ -1931,7 +1931,7 @@ class OpencodeProvider(BaseSDKProvider):
         client = self._client
         if client is None or shell_id not in self._background_shells:
             return False
-        response = await client.delete(f"/api/shell/{shell_id}")
+        response = await client.delete(f"/api/shell/{quote(shell_id, safe='')}")
         return bool(response.status_code < 400)
 
     @property
