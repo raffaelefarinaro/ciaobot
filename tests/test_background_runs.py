@@ -946,7 +946,10 @@ async def test_finished_runs_are_recorded_as_job_runs(tmp_path: Path) -> None:
     )
     try:
         run = await runner.start_run(
-            parent_chat_id="chat-1", cmd=_py('import sys; sys.exit(2)'), label="probe"
+            parent_chat_id="chat-1",
+            workspace="alpha",
+            cmd=_py('import sys; sys.exit(2)'),
+            label="probe",
         )
         await _await_terminal(runner, run.run_id)
 
@@ -965,6 +968,26 @@ async def test_finished_runs_are_recorded_as_job_runs(tmp_path: Path) -> None:
     assert rows[0]["status"] == "error"
     assert rows[0]["extra"]["run_id"] == run.run_id
     assert rows[0]["extra"]["exit_code"] == 2
+    assert rows[0]["extra"]["workspace"] == "alpha"
+
+
+def test_background_job_run_records_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recorder uses the run's captured workspace, not a later lookup."""
+    runner = object.__new__(BackgroundRunner)
+    runner._record_job_runs = True
+    run = BackgroundRun(
+        run_id="synthetic-run",
+        parent_chat_id="synthetic-chat",
+        workspace="alpha",
+        status="error",
+        error="synthetic failure",
+    )
+    rows: list[job_runs.JobRun] = []
+    monkeypatch.setattr("ciao.background.job_runs.record_run", rows.append)
+
+    runner._record(run)
+
+    assert rows[0].extra["workspace"] == "alpha"
 
 
 # ── wake path ─────────────────────────────────────────────────────────────
