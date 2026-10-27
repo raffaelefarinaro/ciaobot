@@ -70,6 +70,20 @@ test.describe('workbench layout', () => {
     expect(box).toEqual({ left: 0, over: 0 })
   })
 
+  test('transcript and composer share a reading column at wide and narrow widths', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-2', COMPOSER)
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 900 })
+      const transcript = await page.locator('.messages-content').boundingBox()
+      const composer = await page.locator('.composer-surface').boundingBox()
+      expect(transcript).not.toBeNull()
+      expect(composer).not.toBeNull()
+      expect(Math.abs(transcript!.x - composer!.x)).toBeLessThanOrEqual(1)
+      // A non-overlay scrollbar reserves space inside the transcript.
+      expect(Math.abs(transcript!.x + transcript!.width - composer!.x - composer!.width)).toBeLessThanOrEqual(12)
+    }
+  })
+
   test('Home separates its sections by one gap, whatever is open', async ({ page }) => {
     // Every section root on Home used to carry its own top margin, so the space
     // between the composer and whatever came next depended on which notices

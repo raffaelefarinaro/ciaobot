@@ -163,7 +163,7 @@
             :class="{ 'nav-item--active': mode === 'chat' || mode === 'project' }"
             title="Home"
             :data-count="todayCount || undefined"
-            :aria-label="todayCount > 0 ? `Home — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : (isAnyChatWorking ? 'Home (assistant is working)' : 'Home')"
+            :aria-label="(todayCount > 0 ? `Home — ${todayCount} chat${todayCount === 1 ? '' : 's'} need${todayCount === 1 ? 's' : ''} attention` : 'Home') + (isAnyChatWorking ? ' (assistant is working)' : '')"
           >
             <span class="nav-item-icon" aria-hidden="true">
               <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
@@ -177,7 +177,7 @@
 
             </span>
             <span class="nav-item-label" aria-hidden="true">Home</span>
-            <span v-if="isAnyChatWorking" class="spinner-dot" aria-hidden="true"></span>
+            <ActivityGlyph v-if="isAnyChatWorking" kind="working" />
           </router-link>
           <router-link
             to="/schedules"
@@ -379,9 +379,8 @@
                 <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="spinner-dot"
                   title="This automation is working"
-                />
+                ><ActivityGlyph kind="working" /></span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
               </router-link>
             </div>
@@ -403,9 +402,8 @@
                 <span class="schedule-time">{{ cadenceBadge(s) }}</span>
                 <span
                   v-if="s.enabled && s.web_chat_id && store.isChatStreaming(s.web_chat_id)"
-                  class="spinner-dot"
                   title="This automation is working"
-                />
+                ><ActivityGlyph kind="working" /></span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"><ActivityGlyph kind="alert" /></span>
               </router-link>
             </div>
@@ -679,7 +677,7 @@
                   <!-- Only a collapsed project summarises its chats: expanded,
                        each chat row already carries its own signal. One static
                        dot when a chat wants the user (accent if it waits for an
-                       answer), else the working ring - never a count. A chat's
+                       answer), else the working grid - never a count. A chat's
                        background run adds the static run glyph beside either. -->
                   <template v-if="!expandedProjects.has(project.project_id)">
                     <span
@@ -691,11 +689,12 @@
                       :aria-label="projectAttentionLabel(project.project_id)"
                     />
                     <span
-                      v-else-if="store.projectIsStreaming(project.project_id)"
-                      class="rollup-ring"
+                      v-else-if="store.projectChats(project.project_id).some(chat => store.chatIsWorking(chat.chat_id))"
+                      class="project-working"
                       title="A chat in this project is working"
                       aria-label="A chat in this project is working"
-                    ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                      role="img"
+                    ><ActivityGlyph kind="working" /></span>
                   </template>
                 </button>
                 <input
@@ -1441,9 +1440,11 @@ const moveSubmenu = ref(false)
 const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
 const renameValue = ref('')
-// One definition, in the store: this used to OR the sources by hand and so
-// missed background runs entirely when they were added.
-const isAnyChatWorking = computed(() => store.anyChatBusy)
+// Match Home's visible chats and selected workspace; the store owns the
+// definition of working, including background agents and shells.
+const isAnyChatWorking = computed(() => store.activeChatsAll.some(
+  chat => store.projectFor(chat.chat_id)?.workspace === store.activeWorkspace && store.chatIsWorking(chat.chat_id),
+))
 
 const hasAutomationWarning = computed(() => {
   // Scoped like `missedCountFor`, so the colour and the count describe the
@@ -2086,30 +2087,6 @@ async function confirmDeleteChat(chatId: string) {
 .toggle-btn:active { transform: scale(0.94); }
 .toggle-btn--collapsed svg { transform: scaleX(-1); }
 
-/* Pulsing dot used inline next to project / chat names to signal activity.
-   A breathing scale+opacity pulse reads as "alive" at a glance, unlike a
-   thin two-tone ring spin which is too subtle at this size to notice. */
-.spinner-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  margin-left: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: ciao-pulse 1.1s ease-in-out infinite;
-  vertical-align: middle;
-  flex-shrink: 0;
-}
-
-@keyframes ciao-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .spinner-dot { animation-duration: 2.2s; }
-}
-
 .workspace-status-dot,
 .rollup-needs-dot {
   width: 8px;
@@ -2117,46 +2094,6 @@ async function confirmDeleteChat(chatId: string) {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--accent);
-}
-
-/* Working, at rollup level. Same treatment as the chat transcript's own
-   activity pulse and ChatSignals: a solid accent dot with a halo plus an
-   expanding ring. The outlined ring this replaced was nearly invisible at this
-   size against the sidebar ground. */
-.rollup-ring,
-.workspace-status-ring {
-  position: relative;
-  display: inline-flex;
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 4px var(--accent);
-  animation: ciao-pulse 1.1s ease-in-out infinite;
-}
-
-.rollup-ring::before,
-.workspace-status-ring::before {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border-radius: 50%;
-  background: var(--accent);
-  opacity: 0.45;
-  animation: ciao-ring 1.1s ease-out infinite;
-  pointer-events: none;
-}
-
-/* The inner core is now the dot itself, so the nested span is decorative. */
-.workspace-status-core,
-.rollup-ring-core {
-  display: none;
-}
-
-@keyframes ciao-ring {
-  0% { transform: scale(0.6); opacity: 0.45; }
-  100% { transform: scale(1.6); opacity: 0; }
 }
 
 /* Scrollable area for chats and projects */
@@ -2350,7 +2287,7 @@ async function confirmDeleteChat(chatId: string) {
    a data attribute so they stay out of the link's text (its aria-label
    carries the full sentence). One colour role per signal: every count is
    the same muted numeral, a failure is the accent alert glyph (.nav-item-alert),
-   live work is the spinner dot, and the accent marks only the current row.
+   live work is the pixel grid, and the accent marks only the current row.
    Icons never change colour. */
 .nav-item[data-count]::after,
 .nav-item[data-note]::after {
@@ -2367,7 +2304,6 @@ async function confirmDeleteChat(chatId: string) {
   flex: 0 0 auto;
 }
 
-.nav-item .spinner-dot { margin-left: 0; }
 
 /* Coarse pointers get the full 44px target on every rail row. */
 @media (pointer: coarse) {
@@ -2463,8 +2399,7 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Keep workspace status markers visually separate from the workspace name,
    matching the spacing used by project-level state dots. */
-.workspace-toggle button .workspace-status-dot,
-.workspace-toggle button .workspace-status-ring {
+.workspace-toggle button .workspace-status-dot {
   margin-left: var(--space-2);
 }
 
@@ -2697,7 +2632,7 @@ async function confirmDeleteChat(chatId: string) {
    pill puts the same marks in a flex row with a gap, where a margin would
    double up. */
 .project-name .rollup-needs-dot,
-.project-name .rollup-ring {
+.project-name .project-working {
   margin-left: var(--space-2);
   vertical-align: middle;
 }
@@ -3011,13 +2946,6 @@ async function confirmDeleteChat(chatId: string) {
   box-shadow: inset 0 0 0 1px var(--border-strong);
   color: var(--fg2);
   font-size: var(--text-base);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .rollup-ring,
-  .workspace-status-ring { animation: none; }
-  .rollup-ring::before,
-  .workspace-status-ring::before { animation: none; opacity: 0.3; }
 }
 
 /* Three-dot chat actions. Hidden by default on desktop, fade in on row

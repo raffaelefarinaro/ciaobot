@@ -534,7 +534,7 @@
           @click="toggleLiveTrace"
         >
           <svg class="trace-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
-          <span class="activity-spinner"></span>
+          <ActivityGlyph kind="working" />
           <span class="trace-label">Working</span>
           <span class="live-preview" aria-live="polite" aria-atomic="true">
             <Transition name="live-step" mode="out-in">
@@ -5674,7 +5674,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
      column on each side and pads it back, so the text stays aligned while
      focus rings are not clipped by the horizontal overflow guard below. */
   margin-inline: -22px;
-  padding: 28px 26px 24px;
+  padding: 28px 22px 24px;
   min-height: 0;
   position: relative;
 }
@@ -6236,26 +6236,6 @@ details[open] > .activity-summary::before {
 }
 
 .activity-icon { font-size: var(--text-base); }
-
-/* The live turn's spinner: a small ring, the one moving thing on the line. */
-.activity-spinner {
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-  box-sizing: border-box;
-  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: activity-spin 0.8s linear infinite;
-}
-
-@keyframes activity-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .activity-spinner { animation-duration: 2.4s; }
-}
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -7957,14 +7937,14 @@ details[open] > .activity-summary::before {
    bubbles stay readable without extra scroll. */
 @container chat-split (max-width: 560px) {
   .messages {
-    padding: 8px 6px 16px 6px;
+    padding: 8px 22px 16px;
   }
   .message-wrap { width: 96%; max-width: 96%; }
   .message-wrap.assistant { width: 100%; max-width: 100%; }
 }
 @container chat-split (max-width: 400px) {
   .messages {
-    padding: 6px 4px 12px 4px;
+    padding: 6px 22px 12px;
   }
   .message-wrap,
   .message-wrap.assistant { width: 100%; max-width: 100%; }

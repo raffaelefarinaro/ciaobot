@@ -133,6 +133,26 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
+  it('shows the working grid only for visible chats in the selected workspace', async () => {
+    const store = useProjectStore()
+    store.chats[0].last_activity_at = '2026-08-12T10:00:00Z'
+    store.chats[0].last_read_at = '2026-08-12T10:00:00Z'
+    store.projects.push({ ...store.projects[0], project_id: 'other', workspace: 'other' })
+    store.chats.push({ ...store.chats[0], chat_id: 'other-chat', project_id: 'other' })
+    store.projectStreaming['other-chat'] = true
+    const wrapper = await mountSidebar()
+    const home = wrapper.get('a[href="/"]')
+    expect(home.find('.activity-glyph--working').exists()).toBe(false)
+    store.projectStreaming[chatId] = true
+    await nextTick()
+    expect(home.find('.activity-glyph--working').exists()).toBe(true)
+    expect(home.attributes('aria-label')).toContain('working')
+    store.chats[0].archived = true
+    await nextTick()
+    expect(home.find('.activity-glyph--working').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('counts tasks waiting for review on the Tasks item, quietly, and hides zero', async () => {
     const signals = useTaskSignalsStore()
     signals.tasks = [
