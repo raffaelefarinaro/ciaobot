@@ -3945,6 +3945,31 @@ export const useProjectStore = defineStore('projects', () => {
     // the turn is over whatever the last row is.
     if (!projectStreaming.value[chatId]) clearStreamingState(chatId)
     void loadSubagents(chatId)
+    // But a missing reply is not proof there is none: a fetch that failed
+    // while a resumed phone was still waking its network reads the same as an
+    // empty answer here. Keep checking, more slowly, so the user's own bubble
+    // is never left last until they reload.
+    if (!hasSettledHistory(chatId)) awaitLateReply(chatId)
+  }
+
+  // Follow-up checks for a finished turn whose reply history has not shown:
+  // about two minutes in all, then the turn really ended without one (a stop).
+  const LATE_REPLY_DELAYS_MS = [5000, 10000, 15000, 30000, 60000]
+  const lateReplyTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+
+  function awaitLateReply(chatId: string, attempt = 0) {
+    cancelTimer(lateReplyTimers[chatId])
+    delete lateReplyTimers[chatId]
+    if (attempt >= LATE_REPLY_DELAYS_MS.length) return
+    if (attempt === 0) console.warn(`chat ${chatId}: turn ended but history has no reply yet; checking again`)
+    lateReplyTimers[chatId] = scheduleTimer(async () => {
+      delete lateReplyTimers[chatId]
+      // Another chat is open, or a new turn owns the timeline: its own result
+      // reconciles it, and the next open of this chat fetches afresh.
+      if (activeChatId.value !== chatId || streaming.value[chatId] || projectStreaming.value[chatId]) return
+      await loadMessages(chatId, { background: true })
+      if (!hasSettledHistory(chatId)) awaitLateReply(chatId, attempt + 1)
+    }, LATE_REPLY_DELAYS_MS[attempt])
   }
 
   // ── Subagents ───────────────────────────────────────────────────────
@@ -4457,6 +4482,12 @@ export const useProjectStore = defineStore('projects', () => {
     })
     listen(window, 'blur', () => {
       if (activeChatId.value) sendFocus(activeChatId.value)
+    })
+
+    // A phone resumed from a push can wake before its network does, so the
+    // resume fetches fail. Retry the moment the network is back.
+    listen(window, 'online', () => {
+      void resumeActiveChat()
     })
 
     listen(document, 'visibilitychange', () => {
