@@ -516,9 +516,8 @@ class SubagentWatchers:
         the sweep shipped must not wake every chat that ever left a Monitor
         running months ago. An unparseable or empty ``last_activity_at`` never
         skips a chat — the wake is worth more than the risk of missing one.
-        Delivery goes through the same deferred path as
-        ``queue_background_wake`` — a bounded coalescing sleep, then
-        ``_deliver_wake`` — so the sweep does not fire mid-startup and never
+        Delivery goes through a deferred path — a bounded
+        coalescing sleep, then ``_deliver_wake`` — so the sweep does not fire mid-startup and never
         raises into the caller. Tasks already woken this process
         (``_cli_task_wakes_sent``) are skipped; across a restart the JSONL
         "lost" marker from a persisted wake is the durable guard, so a wake

@@ -118,7 +118,7 @@ def test_terminate_does_not_raise_and_close_leaves_the_tree_running(tmp_path: Pa
     finally:
         # Once SIGTERM has ended the leader its group holds only a zombie,
         # and macOS killpg answers EPERM for that, as callers already
-        # expect (background.py, git_proc._reap). Under load the leader
+        # expect (git_proc._reap). Under load the leader
         # can be gone before this cleanup runs (#1098).
         with contextlib.suppress(ProcessLookupError, PermissionError):
             second.kill()

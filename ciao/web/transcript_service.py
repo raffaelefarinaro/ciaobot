@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ciao import cli_envelopes, subagent_tracking
-from ciao.background import format_finished_runs
+from ciao.background_notice import format_finished_runs
 from ciao.models import ChatContext
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (

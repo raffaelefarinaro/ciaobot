@@ -106,6 +106,7 @@ DETECTORS: frozenset[str] = frozenset(
         "learnings-cleanup-review-needed",
         "unrehomed-people-review-needed",
         "vault-relocate-review-needed",
+        "legacy-background-state-present",
     }
 )
 
@@ -118,6 +119,7 @@ COMPLETION_CHECKS: frozenset[str] = frozenset(
         "learnings-cleanup-review-recorded",
         "unrehomed-people-rehome-recorded",
         "vault-relocate-recorded",
+        "legacy-background-state-removed",
     }
 )
 

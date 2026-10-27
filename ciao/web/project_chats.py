@@ -110,7 +110,6 @@ from markdown_it.token import Token
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
-from ciao.background import format_finished_runs
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -309,12 +308,6 @@ _QUOTA_RESET_BUCKETS = {
 }
 
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
-# Coalescing window for background command runs (ciao/background.py): a
-# batch of scripts that finishes together should produce one wake turn, not N.
-_BACKGROUND_WAKE_WINDOW_SECONDS = 5.0
-# Log-tail budget per finished run in the wake prompt. The full log path is
-# always included, so this only has to be enough to decide whether to read it.
-_BACKGROUND_WAKE_TAIL_LINES = 50
 # ── Idle provider reaping ────────────────────────────────────────────────
 # `self._providers` is keyed by chat id and, before this, was only ever
 # emptied by a lifecycle event (session reset, handover, archive, delete).
@@ -1178,15 +1171,6 @@ class ProjectChatManager:
         # Result announce held for the chat's follow-up turn (see
         # `_park_result_announce`). chat_id -> (project_id, title, snippet).
         self._parked_result_announce: dict[str, tuple[str, str, str]] = {}
-        # Finished background command runs waiting to wake the chat that
-        # started them, keyed by chat id. Held for
-        # _BACKGROUND_WAKE_WINDOW_SECONDS so a batch of scripts that finishes
-        # together produces one wake turn, not four.
-        self._background_wake_pending: dict[str, list[dict[str, Any]]] = {}
-        self._background_wake_tasks: dict[str, asyncio.Task] = {}
-        # Bound by main.py so a wake dropped by the restart drain can mark its
-        # runs for replay on the next start instead of vanishing.
-        self._background_runner: Any = None
         # Bound by main.py right after the manager and store exist. dispatch_schedule
         # stamps a failed run's last_status on the stored row so the Automations
         # sidebar flags it for attention (issue #407) — without a store there is
@@ -4982,10 +4966,9 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is not None and self._native_question_request_id(chat.pending_question):
             return True
-        for tasks in (self._retry_tasks, self._background_wake_tasks):
-            task = tasks.get(chat_id)
-            if task is not None and not task.done():
-                return True
+        task = self._retry_tasks.get(chat_id)
+        if task is not None and not task.done():
+            return True
         return False
 
     async def reload_provider(self, chat_id: str) -> bool:
@@ -5058,11 +5041,8 @@ class ProjectChatManager:
         # reports its own outstanding work.
         if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
             return True
-        for tasks in (self._retry_tasks, self._background_wake_tasks):
-            task = tasks.get(chat_id)
-            if task is not None and not task.done():
-                return True
-        if self._background_wake_pending.get(chat_id):
+        task = self._retry_tasks.get(chat_id)
+        if task is not None and not task.done():
             return True
         # A parked question or approval card is held by the provider session
         # (for opencode, by the server process itself), and the reply routes
@@ -6401,8 +6381,6 @@ class ProjectChatManager:
         if service is not None and project is not None:
             # Every chat is CLI since S6: the token+URL reach the foreground
             # shell so ``ciao <noun> <verb>`` can call the control plane.
-            # Background runs strip the token (ciao/background.py), which is
-            # the "outlives the turn" protection.
             _url, token = service.credentials_for_chat(chat, project)
             extra_env[AGENT_URL_ENV] = agent_url
             extra_env[AGENT_TOKEN_ENV] = token
@@ -7333,10 +7311,8 @@ class ProjectChatManager:
     def resume_after_cancelled_drain(self) -> None:
         """Replay the wakes a cancelled drain deferred "to the next start".
 
-        A draining server defers two kinds of wake, both of which assume a
-        restart follows: a background command run is marked ``wake_pending``
-        by the wake flusher, and a chat's CLI-task watcher leaves its loop
-        because a restart is coming (``sweep_orphaned_cli_tasks`` picks it up
+        A draining server defers a chat's CLI-task wake: the watcher leaves its
+        loop because a restart is coming (``sweep_orphaned_cli_tasks`` picks it up
         after one). A drain that is cancelled has no restart, so without this
         the owning chat silently never learns its command finished.
 
@@ -7344,20 +7320,6 @@ class ProjectChatManager:
         every other wake. Total by design: a failed replay must not keep the
         engine refusing turns, which is the one thing the cancel guarantees.
         """
-        # ``_background_runner`` is typed Any (wired after construction), so
-        # the annotation is what keeps the replayed list typed.
-        runner: Any = self._background_runner
-        if runner is not None:
-            try:
-                replayed: list[Any] = runner.replay_pending_wakes()
-            except Exception:  # noqa: BLE001 — a replay failure must not break the cancel
-                logger.exception("Deferred background wake replay failed")
-            else:
-                if replayed:
-                    logger.info(
-                        "Cancelled drain replayed %s deferred background wake(s)",
-                        len(replayed),
-                    )
         try:
             for chat in list(self._chats.values()):
                 self._replay_deferred_cli_task_wakes(chat)
@@ -7402,70 +7364,6 @@ class ProjectChatManager:
     def background_agent_counts(self) -> dict[str, int]:
         """Last announced running-background-subagent count per chat (>0 only)."""
         return self._subagents.running_counts()
-
-    @property
-    def background_runs(self) -> dict[str, list[dict[str, Any]]]:
-        """Live ``background_run_start`` runs per chat, as PWA summaries.
-
-        Read from the runner's registry, not a cached tally, so a client
-        reconnecting mid-run gets the real rows rather than whatever it had
-        when its socket dropped. (A restart does not carry runs over:
-        ``BackgroundRunner.start`` resolves every non-terminal run as an
-        orphan before the server serves, so the registry is already honest by
-        the time any client can read this.)
-        """
-        runner = self._background_runner
-        if runner is None:
-            return {}
-        try:
-            # ``_background_runner`` is typed Any (wired after construction),
-            # so the annotation is what keeps this typed.
-            active: dict[str, list[Any]] = runner.active_runs()
-        except Exception:  # noqa: BLE001 — an indicator must not break /ws/events
-            logger.exception("Background runs unavailable")
-            return {}
-        return {
-            chat_id: [run.summary() for run in runs]
-            for chat_id, runs in active.items()
-        }
-
-    def _background_run_summaries(self, chat_id: str) -> list[dict[str, Any]]:
-        """One chat's live run summaries, without summarising every chat's."""
-        runner = self._background_runner
-        if runner is None:
-            return []
-        try:
-            active: dict[str, list[Any]] = runner.active_runs()
-        except Exception:  # noqa: BLE001 — an indicator must not break the edge
-            logger.exception("Background runs unavailable")
-            return []
-        return [run.summary() for run in active.get(chat_id, [])]
-
-    def announce_background_runs(
-        self, chat_id: str, *, finished: Any | None = None
-    ) -> None:
-        """Publish this chat's live background runs to connected clients.
-
-        Called on both edges (a run starting, a run finishing). A background
-        run is deliberately non-blocking, so the chat's turn ends while the
-        command is still going; this event is the only thing that keeps the
-        chat from looking finished. Distinct from ``chat_subagents_ready``:
-        these runs have no transcript and no agent to open, only a command
-        and a log. ``finished`` is the run that just ended, so the client can
-        say how it ended instead of the row silently vanishing.
-        """
-        if not chat_id:
-            return
-        chat = self._chats.get(chat_id)
-        event: dict[str, Any] = {
-            "type": "chat_background_runs",
-            "chat_id": chat_id,
-            "project_id": chat.project_id if chat is not None else "",
-            "runs": self._background_run_summaries(chat_id),
-        }
-        if finished is not None:
-            event["finished"] = finished.summary()
-        self._events.publish(event)
 
     def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
         """Move queued follow-ups off the (about-to-be-torn-down) stream onto
@@ -8596,7 +8494,7 @@ class ProjectChatManager:
 
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int, origin: str) -> str:
-        """Deliver one background-run wake turn into *parent* and announce it.
+        """Deliver one wake turn into *parent* and announce it.
 
         queue_message covers the two live cases in one call: it appends to the
         in-flight stream when the chat is mid-turn (so we never interrupt the
@@ -8624,129 +8522,6 @@ class ProjectChatManager:
             "delivery": delivery,
         })
         return delivery
-
-    # ── background command runs ──────────────────────────────────────────
-
-    def queue_background_wake(
-        self,
-        parent_chat_id: str,
-        *,
-        run_id: str,
-        label: str,
-        status: str,
-        exit_code: int | None,
-        last_lines: list[str],
-        log_path: str,
-        error: str = "",
-    ) -> None:
-        """Record a finished background run and arm the coalescing window.
-
-        Called from ``BackgroundRunner``'s supervisor task (and from its
-        restart-orphan sweep), so it must stay cheap and never raise: the run
-        is already over and a failure here would surface as an unrelated error
-        in the wrong place.
-        """
-        parent = self._chats.get(parent_chat_id)
-        if parent is None or parent.archived:
-            # Owning chat is gone or read-only. The log file still holds the
-            # full output, so nothing is lost by not waking.
-            logger.info(
-                "Background run %s finished but chat %s is missing or archived; no wake",
-                run_id,
-                parent_chat_id,
-            )
-            return
-        self._background_wake_pending.setdefault(parent_chat_id, []).append({
-            "run_id": run_id,
-            "label": label or "",
-            "status": status,
-            "exit_code": exit_code,
-            "last_lines": list(last_lines or []),
-            "log_path": log_path,
-            "error": error or "",
-        })
-        existing = self._background_wake_tasks.get(parent_chat_id)
-        if existing is not None and not existing.done():
-            return
-        try:
-            self._background_wake_tasks[parent_chat_id] = asyncio.create_task(
-                self._flush_background_wake(parent_chat_id)
-            )
-        except RuntimeError:
-            # No running loop (a sync context, e.g. a CLI-side prune). The
-            # entry stays pending and the next completion inside a loop drains
-            # it; dropping the wake beats raising into the runner.
-            logger.debug("No event loop for background wake of %s", parent_chat_id)
-
-    async def _flush_background_wake(self, parent_chat_id: str) -> None:
-        """Wait out the coalescing window, then deliver one wake turn."""
-        try:
-            await asyncio.sleep(_BACKGROUND_WAKE_WINDOW_SECONDS)
-            finished = self._background_wake_pending.pop(parent_chat_id, [])
-            if not finished:
-                return
-            parent = self._chats.get(parent_chat_id)
-            if parent is None or parent.archived:
-                return
-            prompt = self._build_background_wake_prompt(finished)
-            self._deliver_wake(parent, prompt, count=len(finished), origin="background_run")
-        except RestartDrainingError:
-            # The server is draining for restart and providers are already
-            # gone, so this wake can never be delivered. Mark its runs so the
-            # next BackgroundRunner.start() replays them — the owning chat
-            # must learn its command was terminated rather than losing the
-            # wake forever.
-            runner = self._background_runner
-            for entry in finished:
-                run_id = str(entry.get("run_id") or "")
-                if not run_id or runner is None:
-                    continue
-                try:
-                    runner.mark_wake_pending(run_id)
-                except Exception:  # noqa: BLE001 — deferral must not raise
-                    logger.debug(
-                        "Failed to defer background wake for %s", run_id, exc_info=True
-                    )
-            logger.info(
-                "Background wake for %s deferred: server is draining for restart",
-                parent_chat_id,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
-            logger.exception("Background wake failed for chat %s", parent_chat_id)
-        finally:
-            current = self._background_wake_tasks.get(parent_chat_id)
-            if current is asyncio.current_task():
-                self._background_wake_tasks.pop(parent_chat_id, None)
-
-    @staticmethod
-    def _build_background_wake_prompt(finished: list[dict[str, Any]]) -> str:
-        """Compose the wake turn from finished background runs.
-
-        Every entry names its log path: the tail is truncated by construction
-        and the interesting line is often above it, so the prompt has to point
-        at the file rather than imply the excerpt is the whole story.
-        """
-        text, any_failed = format_finished_runs(
-            finished, tail_lines=_BACKGROUND_WAKE_TAIL_LINES
-        )
-        lines = [text]
-        lines.append("")
-        if any_failed:
-            lines.append(
-                "A FAILED run means the command exited non-zero, timed out, or "
-                "could not be tracked across an engine restart. Read the log "
-                "before deciding what happened; the tail above may not contain "
-                "the real error."
-            )
-            lines.append("")
-        lines.append(
-            "Continue the work this run was part of, and report to the user "
-            "only once you have checked the log rather than assuming the tail "
-            "tells the whole story."
-        )
-        return "\n".join(lines)
 
     # ── Between-turns SDK drain ──────────────────────────────────────────
 

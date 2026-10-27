@@ -95,7 +95,7 @@ def test_stale_failures_are_dropped(tmp_path: Path) -> None:
         status="error", error="OneShotError: Model not found",
     ))
     job_runs.record_run(JobRun(
-        job="background_run", label="Background command run",
+        job="vault_index", label="Vault index refresh",
         started_at=_ago(hours=4), ended_at=_ago(hours=4),
         status="error", error="timed out",
     ))
@@ -125,7 +125,7 @@ def test_failures_before_since_floor_are_dropped(tmp_path: Path) -> None:
         status="error", error="already triaged",
     ))
     job_runs.record_run(JobRun(
-        job="background_run", label="Background command run",
+        job="vault_index", label="Vault index refresh",
         started_at=_ago(hours=2), ended_at=_ago(hours=2),
         status="error", error="fresh failure",
     ))
@@ -314,7 +314,7 @@ def test_workspace_report_omits_engine_logs_and_states_it(tmp_path: Path) -> Non
         extra={"workspace": "alpha", "schedule_id": "sched-a"},
     ))
     job_runs.record_run(JobRun(
-        job="background_run", label="Background command run",
+        job="vault_index", label="Vault index refresh",
         started_at=_ago(hours=2), ended_at=_ago(hours=2),
         status="error", error="beta stream exploded",
         extra={"workspace": "beta"},

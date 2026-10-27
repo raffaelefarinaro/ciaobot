@@ -972,6 +972,7 @@ def test_the_shipped_catalog_ships_its_tasks_and_both_probes_exist(
         "learnings-cleanup",
         "unrehomed-people",
         "vault-relocate",
+        "remove-background-run-state",
     ]
     assert update_task_catalog.DETECTORS == set(update_tasks.DETECTOR_FUNCTIONS)
     assert update_task_catalog.COMPLETION_CHECKS == set(
