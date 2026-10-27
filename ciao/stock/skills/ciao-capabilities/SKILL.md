@@ -44,7 +44,7 @@ Each area has a reference file next to this one. Open only the file the question
 
 | Area | What it covers | Read |
 |---|---|---|
-| Workspaces, projects, chats | hierarchy, file access, archiving a workspace, `ciao project`, linked repos, code mode, forks, subagents, background runs (the provider's own background shell, `ciao run` for commands that must outlive the provider), plan mode, turn resilience | `references/workspaces-and-chats.md` |
+| Workspaces, projects, chats | hierarchy, file access, archiving a workspace, `ciao project`, linked repos, code mode, forks, subagents, background shells (the provider's own `run_in_background` / `Monitor`), plan mode, turn resilience | `references/workspaces-and-chats.md` |
 | Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, the optional reason on every decision, Memory Map, Vault Review, retirement candidates, conversation import, memory backup | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
 | Files | viewer and pinned panel, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |

@@ -590,9 +590,9 @@ class SubagentWatchers:
     def build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
         """Compose the wake turn for CLI tasks orphaned by a dead CLI.
 
-        Mirrors the background-run wake: name the log/output the command was
-        writing and tell the chat to verify rather than assume. The first line
-        carries ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the parser can
+        Name the log/output the command was writing and tell the chat to
+        verify rather than assume. The first line carries
+        ``subagent_tracking.CLI_TASK_WAKE_PREFIX`` so the parser can
         recognise this prompt in the JSONL later and mark the tasks lost —
         the wake must never be sent twice.
         """
@@ -614,7 +614,7 @@ class SubagentWatchers:
             "the command was writing, and inspect the process (pgrep/ps) "
             "rather than assuming it finished or that the last lines tell the "
             "whole story. For future long-running commands use the "
-            "`ciao run start -- <cmd>` command, which survives CLI restarts "
-            "and wakes this chat with the exit code, log tail and log path."
+            "Bash tool's `run_in_background` and read its output file when it "
+            "finishes."
         )
         return "\n".join(lines)
