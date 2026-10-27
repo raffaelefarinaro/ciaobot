@@ -1073,6 +1073,7 @@ class BackgroundRunner:
                     "cmd": run.cmd,
                     "exit_code": run.exit_code,
                     "chat_id": run.parent_chat_id,
+                    "workspace": run.workspace,
                 },
             ))
         except Exception:  # noqa: BLE001 — telemetry must never break a run
