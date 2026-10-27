@@ -358,14 +358,16 @@ describe('ChatPanel action dock', () => {
     const { wrapper, store } = await mountPanel(s => {
       s.runningSubagents = { 'chat-1': [SHELL] } as unknown as typeof s.runningSubagents
     })
-    const stop = vi.spyOn(store, 'stopBackgroundTask').mockResolvedValue(undefined)
+    const post = vi.spyOn(api, 'post').mockResolvedValue({} as never)
     wrapper.getComponent({ name: 'ComposerActivity' }).vm.$emit('open-details')
     await flushPromises()
     const rail = wrapper.get('#chat-work-rail .chat-rail-running')
     const button = rail.get('.shell-row-stop')
     expect(button.attributes('aria-label')).toBe('Stop npm run dev')
     await button.trigger('click')
-    expect(stop).toHaveBeenCalledWith('chat-1', 'b1')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/chats/chat-1/background-tasks/b1/stop', {})
+    expect(store.stoppingTasks['chat-1']).toEqual({ b1: true })
     expect(button.text()).toBe('Stopping…')
     wrapper.unmount()
   })

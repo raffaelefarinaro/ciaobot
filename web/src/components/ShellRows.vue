@@ -22,17 +22,16 @@
           class="shell-row-stop"
           :aria-label="`Stop ${subagentLabel(shell)}`"
           :data-stop-id="shell.agent_id"
-          :aria-disabled="stopping.has(shell.agent_id) ? 'true' : undefined"
+          :aria-disabled="isStopping(shell) ? 'true' : undefined"
           @click="stop(shell)"
-        >{{ stopping.has(shell.agent_id) ? 'Stopping…' : 'Stop' }}</button>
+        >{{ isStopping(shell) ? 'Stopping…' : 'Stop' }}</button>
       </div>
-      <p v-if="stopErrors[shell.agent_id]" class="shell-row-note" role="alert">{{ stopErrors[shell.agent_id] }}</p>
+      <p v-if="errorFor(shell)" class="shell-row-note" role="alert">{{ errorFor(shell) }}</p>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, reactive, watch } from 'vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import { shellTaskId, subagentLabel } from '../lib/subagentIds'
 import { minutesSince } from '../lib/time'
@@ -44,60 +43,23 @@ const props = defineProps<{
   now: number
   /** Where the rows are drawn: the composer popover or the Chat details rail. */
   variant: 'popover' | 'rail'
-  /** Stops a process row by its bare id; omitted, no row offers Stop. */
-  stopTask?: (taskId: string) => Promise<void>
+  /** Asks the engine to stop a process row by its bare id; omitted, no row offers Stop. */
+  stopTask?: (taskId: string) => unknown
+  /** Bare task ids with a stop pending. The state lives in the store: this view unmounts and has a twin. */
+  stopping?: Record<string, true>
+  /** Bare task id to the message for a stop that failed. */
+  errors?: Record<string, string>
 }>()
-const emit = defineEmits<{
-  open: []
-  /** Text for the owner's live region: "Stopping x", or '' once it is settled. */
-  notice: [text: string]
-}>()
+const emit = defineEmits<{ open: [] }>()
 
-// Stop keeps its "Stopping…" state until the row leaves the poll: the engine
-// answers before the provider has reported the task ended.
-const stopping = reactive(new Set<string>())
-const stopErrors = reactive<Record<string, string>>({})
-const stopTimers = new Map<string, ReturnType<typeof setTimeout>>()
-// A task the provider never reports ended must not leave Stop locked for good.
-const STOP_LOCK_MS = 15_000
-
-function releaseStop(id: string) {
-  const timer = stopTimers.get(id)
-  if (timer) clearTimeout(timer)
-  stopTimers.delete(id)
-  stopping.delete(id)
-}
+const isStopping = (shell: RunningSubagent) => Boolean(props.stopping?.[shellTaskId(shell.agent_id)])
+const errorFor = (shell: RunningSubagent) => props.errors?.[shellTaskId(shell.agent_id)]
 
 // `aria-disabled`, not `disabled`: a disabled button drops focus to the body.
-async function stop(shell: RunningSubagent) {
-  const id = shell.agent_id
-  if (!props.stopTask || stopping.has(id)) return
-  stopping.add(id)
-  emit('notice', `Stopping ${subagentLabel(shell)}`)
-  delete stopErrors[id]
-  stopTimers.set(id, setTimeout(() => releaseStop(id), STOP_LOCK_MS))
-  try {
-    await props.stopTask(shellTaskId(id))
-  } catch {
-    releaseStop(id)
-    emit('notice', '')
-    stopErrors[id] = 'Could not stop this process. Try again.'
-  }
+function stop(shell: RunningSubagent) {
+  if (!props.stopTask || isStopping(shell)) return
+  void props.stopTask(shellTaskId(shell.agent_id))
 }
-
-// Pre-flush: runs before the DOM drops a row, so the owner's focus handoff
-// (which reads the focused Stop) still sees it.
-watch(() => props.rows.map(r => r.agent_id), (ids) => {
-  const live = new Set(ids)
-  for (const id of [...stopping]) if (!live.has(id)) releaseStop(id)
-  for (const id of Object.keys(stopErrors)) if (!live.has(id)) delete stopErrors[id]
-  if (!stopping.size) emit('notice', '')
-}, { flush: 'pre' })
-
-onBeforeUnmount(() => {
-  for (const timer of stopTimers.values()) clearTimeout(timer)
-  stopTimers.clear()
-})
 </script>
 
 <style scoped>

@@ -81,8 +81,9 @@
           :now="now"
           variant="popover"
           :stop-task="stopTask"
+          :stopping="stopping"
+          :errors="stopErrors"
           @open="openDetails"
-          @notice="stopNotice = $event"
         />
       </template>
       <button type="button" class="composer-activity-pop-foot" @click="openDetails">Open Chat details →</button>
@@ -102,7 +103,7 @@ import { PopoverAnchor, PopoverContent, PopoverRoot } from 'reka-ui'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import ShellRows from './ShellRows.vue'
-import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
+import { isShellRow, shellTaskId, subagentLabel, subagentPath } from '../lib/subagentIds'
 import type { RunningSubagent } from '../lib/types'
 
 const props = defineProps<{
@@ -113,7 +114,10 @@ const props = defineProps<{
   agents: RunningSubagent[]
   now: number
   /** Stops a process row by its bare id; omitted, no row offers Stop. */
-  stopTask?: (taskId: string) => Promise<void>
+  stopTask?: (taskId: string) => unknown
+  /** Bare task ids with a stop pending, and failed-stop messages, from the store. */
+  stopping?: Record<string, true>
+  stopErrors?: Record<string, string>
 }>()
 const emit = defineEmits<{ 'open-details': [] }>()
 
@@ -140,8 +144,12 @@ const runsTitle = computed(() =>
     : `${processCount.value} background runs`,
 )
 const hasActivity = computed(() => props.agentCount > 0 || processCount.value > 0)
-// Set by ShellRows: "Stopping x" while a Stop is pending.
-const stopNotice = ref('')
+// "Stopping x" for as long as the store holds a pending stop, so it clears
+// itself when the row leaves.
+const stopNotice = computed(() => {
+  const pending = shellRows.value.find(r => props.stopping?.[shellTaskId(r.agent_id)])
+  return pending ? `Stopping ${subagentLabel(pending)}` : ''
+})
 const announcement = computed(() => {
   if (stopNotice.value) return stopNotice.value
   if (!processCount.value) return ''
@@ -293,7 +301,6 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 .composer-activity-seg--agents .composer-activity-count { color: var(--accent); }
-
 
 .composer-activity-popover {
   /* Popper supplies the fixed placement; this is only the surface. */

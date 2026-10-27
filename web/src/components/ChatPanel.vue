@@ -1236,7 +1236,9 @@
               :agent-count="composerAgentCount"
               :agents="runningRows"
               :now="nowTs"
-              :stop-task="(taskId: string) => store.stopBackgroundTask(chat.chat_id, taskId)"
+              :stop-task="stopShell"
+              :stopping="store.stoppingTasks[chat.chat_id]"
+              :stop-errors="store.stopTaskErrors[chat.chat_id]"
               @open-details="openRunDetails"
             />
             <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
@@ -1375,7 +1377,9 @@
             variant="rail"
             :rows="runningShells"
             :now="nowTs"
-            :stop-task="(taskId: string) => store.stopBackgroundTask(chat.chat_id, taskId)"
+            :stop-task="stopShell"
+            :stopping="store.stoppingTasks[chat.chat_id]"
+            :errors="store.stopTaskErrors[chat.chat_id]"
           />
         </template>
       </section>
@@ -2225,6 +2229,9 @@ function compactContext() {
 // composer lists those as processes, everything else counts as an agent.
 const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
 const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
+function stopShell(taskId: string) {
+  if (chat.value) void store.stopBackgroundTask(chat.value.chat_id, taskId)
+}
 const runningShells = computed(() => runningRows.value.filter(isShellRow))
 watch(
   () => store.isStreaming || runningShells.value.length > 0,

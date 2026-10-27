@@ -48,7 +48,7 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
-import { bareAgentId, isShellRow, sameAgent } from '../lib/subagentIds'
+import { bareAgentId, isShellRow, sameAgent, shellTaskId } from '../lib/subagentIds'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
@@ -1368,14 +1368,68 @@ export const useProjectStore = defineStore('projects', () => {
     )
   }
 
-  // Stops one native shell or Monitor from the Processes list. The row leaves
-  // with the next running-subagent poll, once the provider reports it ended.
-  async function stopBackgroundTask(chatId: string, taskId: string): Promise<void> {
-    await api.post(
-      `/api/chats/${encodeURIComponent(chatId)}/background-tasks/${encodeURIComponent(taskId)}/stop`,
-      {},
-    )
+  // Per-task stop state, keyed chat id then bare task id. It lives here, not in
+  // the rows: the composer popover unmounts on close and the Chat details rail
+  // is a second view of the same rows, and both must show a stop still pending.
+  const stoppingTasks = ref<Record<string, Record<string, true>>>({})
+  const stopTaskErrors = ref<Record<string, Record<string, string>>>({})
+  const stopTaskTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  // A task the provider never reports ended must not leave Stop locked for good.
+  const STOP_LOCK_MS = 15_000
+
+  function dropTaskEntry(map: Record<string, Record<string, unknown>>, chatId: string, taskId: string) {
+    const rows = map[chatId]
+    if (!rows || !(taskId in rows)) return
+    delete rows[taskId]
+    if (!Object.keys(rows).length) delete map[chatId]
   }
+
+  function releaseStoppingTask(chatId: string, taskId: string) {
+    const key = `${chatId}\u0000${taskId}`
+    cancelTimer(stopTaskTimers.get(key))
+    stopTaskTimers.delete(key)
+    dropTaskEntry(stoppingTasks.value, chatId, taskId)
+  }
+
+  // Stops one native shell or Monitor from the Processes list. It stays
+  // "stopping" until the row leaves the running list: the engine answers
+  // before the provider has reported the task ended. A failure is recorded
+  // for the row, not thrown.
+  async function stopBackgroundTask(chatId: string, taskId: string): Promise<void> {
+    if (stoppingTasks.value[chatId]?.[taskId]) return
+    dropTaskEntry(stopTaskErrors.value, chatId, taskId)
+    stoppingTasks.value[chatId] = { ...stoppingTasks.value[chatId], [taskId]: true }
+    stopTaskTimers.set(
+      `${chatId}\u0000${taskId}`,
+      scheduleTimer(() => releaseStoppingTask(chatId, taskId), STOP_LOCK_MS),
+    )
+    try {
+      await api.post(
+        `/api/chats/${encodeURIComponent(chatId)}/background-tasks/${encodeURIComponent(taskId)}/stop`,
+        {},
+      )
+    } catch {
+      releaseStoppingTask(chatId, taskId)
+      stopTaskErrors.value[chatId] = {
+        ...stopTaskErrors.value[chatId],
+        [taskId]: 'Could not stop this process. Try again.',
+      }
+    }
+  }
+
+  // A row that left the poll has ended: its stopping state and error go too.
+  watch(runningSubagents, (all) => {
+    for (const map of [stoppingTasks.value, stopTaskErrors.value]) {
+      for (const chatId of Object.keys(map)) {
+        const live = new Set((all[chatId] || []).filter(isShellRow).map(r => shellTaskId(r.agent_id)))
+        for (const taskId of Object.keys(map[chatId])) {
+          if (live.has(taskId)) continue
+          if (map === stoppingTasks.value) releaseStoppingTask(chatId, taskId)
+          else dropTaskEntry(map, chatId, taskId)
+        }
+      }
+    }
+  }, { deep: false })
 
   // Subagents this chat has working right now, from /api/subagents/running.
   // Sidebar rows and the per-row "working" signal read this; it is deliberately
@@ -7026,7 +7080,7 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
-    projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     terminalOffers,
     serverRestarting, serverRestartMessage,
     // Computed

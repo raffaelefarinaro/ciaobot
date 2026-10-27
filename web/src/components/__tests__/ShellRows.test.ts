@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { mount } from '@vue/test-utils'
 import type { RunningSubagent } from '../../lib/types'
 import ShellRows from '../ShellRows.vue'
 
@@ -22,7 +22,6 @@ function mountRows(props: Record<string, unknown> = {}) {
 }
 
 afterEach(() => {
-  vi.useRealTimers()
   document.body.innerHTML = ''
 })
 
@@ -47,21 +46,27 @@ describe('ShellRows', () => {
     pop.unmount()
   })
 
-  it('stops by bare task id, shows Stopping and ignores a second press', async () => {
+  it('asks for a stop by bare task id and holds no stop state of its own', async () => {
     const stopTask = vi.fn().mockResolvedValue(undefined)
     const wrapper = mountRows({ stopTask })
     const stop = wrapper.get('.shell-row-stop')
     expect(stop.text()).toBe('Stop')
     expect(stop.attributes('aria-label')).toBe('Stop cmd b1')
     await stop.trigger('click')
-    await flushPromises()
     expect(stopTask).toHaveBeenCalledWith('b1')
+    expect(stop.text()).toBe('Stop')
+    wrapper.unmount()
+  })
+
+  it('shows Stopping from its stopping prop, keeps focusable (aria-disabled) and ignores presses', async () => {
+    const stopTask = vi.fn()
+    const wrapper = mountRows({ stopTask, stopping: { b1: true } })
+    const stop = wrapper.get('.shell-row-stop')
     expect(stop.text()).toBe('Stopping…')
     expect(stop.attributes('aria-disabled')).toBe('true')
     expect(stop.attributes('disabled')).toBeUndefined()
     await stop.trigger('click')
-    expect(stopTask).toHaveBeenCalledTimes(1)
-    expect(wrapper.emitted('notice')?.[0]).toEqual(['Stopping cmd b1'])
+    expect(stopTask).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -75,38 +80,10 @@ describe('ShellRows', () => {
     fixed.unmount()
   })
 
-  it('shows an error and re-enables Stop when stopping fails', async () => {
-    const wrapper = mountRows({ stopTask: vi.fn().mockRejectedValue(new Error('x')) })
-    await wrapper.get('.shell-row-stop').trigger('click')
-    await flushPromises()
+  it('shows a row error from its errors prop', () => {
+    const wrapper = mountRows({ errors: { b1: 'Could not stop this process. Try again.' } })
     expect(wrapper.get('[role="alert"]').text()).toContain('Could not stop')
     expect(wrapper.get('.shell-row-stop').text()).toBe('Stop')
-    expect(wrapper.get('.shell-row-stop').attributes('aria-disabled')).toBeUndefined()
-    expect(wrapper.emitted('notice')?.at(-1)).toEqual([''])
-    wrapper.unmount()
-  })
-
-  it('releases the Stopping lock after 15 s so Stop can be retried', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    const stopTask = vi.fn().mockResolvedValue(undefined)
-    const wrapper = mountRows({ stopTask })
-    await wrapper.get('.shell-row-stop').trigger('click')
-    await flushPromises()
-    vi.advanceTimersByTime(15_000)
-    await flushPromises()
-    expect(wrapper.get('.shell-row-stop').text()).toBe('Stop')
-    await wrapper.get('.shell-row-stop').trigger('click')
-    expect(stopTask).toHaveBeenCalledTimes(2)
-    wrapper.unmount()
-  })
-
-  it('drops the Stopping state and its notice when the row leaves the poll', async () => {
-    const wrapper = mountRows()
-    await wrapper.get('.shell-row-stop').trigger('click')
-    await flushPromises()
-    await wrapper.setProps({ rows: [] })
-    expect(wrapper.find('.shell-row').exists()).toBe(false)
-    expect(wrapper.emitted('notice')?.at(-1)).toEqual([''])
     wrapper.unmount()
   })
 

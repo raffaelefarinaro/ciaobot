@@ -227,7 +227,7 @@ describe('ComposerActivity', () => {
       agent_id: 'task:m1', description: 'tail -f app.log', subagent_type: 'monitor',
       started_at: new Date(NOW - 125_000).toISOString(), stoppable: true,
     }
-    const stopTask = vi.fn().mockResolvedValue(undefined)
+    const stopTask = vi.fn()
     const wrapper = mountBar({ agents: [monitor], stopTask })
     expect(wrapper.get('.composer-activity-seg--runs').text()).toBe('1 shell')
     await wrapper.get('.composer-activity-seg--runs').trigger('click')
@@ -239,8 +239,8 @@ describe('ComposerActivity', () => {
     expect(stop?.textContent?.trim()).toBe('Stop')
     expect(stop?.getAttribute('aria-label')).toBe('Stop tail -f app.log')
     stop?.click()
-    await flushPromises()
     expect(stopTask).toHaveBeenCalledWith('m1')
+    await wrapper.setProps({ stopping: { m1: true } })
     expect(document.querySelector('.shell-row-stop')?.textContent?.trim()).toBe('Stopping…')
     wrapper.unmount()
   })
@@ -258,51 +258,29 @@ describe('ComposerActivity', () => {
     wrapper.unmount()
   })
 
-  it('shows an error and re-enables Stop when stopping fails', async () => {
+  it('shows a failed stop from its errors prop', async () => {
     const shell: RunningSubagent = {
       agent_id: 'task:b1', description: 'sleep 600', subagent_type: 'shell',
       started_at: new Date(NOW).toISOString(), stoppable: true,
     }
-    const wrapper = mountBar({ agents: [shell], stopTask: vi.fn().mockRejectedValue(new Error('x')) })
+    const wrapper = mountBar({ agents: [shell], stopTask: vi.fn(), stopErrors: { b1: 'Could not stop this process. Try again.' } })
     await wrapper.get('.composer-activity-seg--runs').trigger('click')
     await flushPromises()
-    document.querySelector<HTMLButtonElement>('.shell-row-stop')?.click()
-    await flushPromises()
     expect(document.querySelector('[role="alert"]')?.textContent).toContain('Could not stop')
-    expect(document.querySelector<HTMLButtonElement>('.shell-row-stop')?.disabled).toBe(false)
+    expect(document.querySelector('.shell-row-stop')?.getAttribute('aria-disabled')).toBeNull()
     wrapper.unmount()
   })
 
-  it('releases the Stopping lock after 15 s so Stop can be retried, and announces it', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    try {
-      const shell: RunningSubagent = {
-        agent_id: 'task:b1', description: 'sleep 600', subagent_type: 'shell',
-        started_at: new Date(NOW).toISOString(), stoppable: true,
-      }
-      const stopTask = vi.fn().mockResolvedValue(undefined)
-      const wrapper = mountBar({ agents: [shell], stopTask })
-      await wrapper.get('.composer-activity-seg--runs').trigger('click')
-      await flushPromises()
-      const stop = () => document.querySelector<HTMLButtonElement>('.shell-row-stop')!
-      stop().click()
-      await flushPromises()
-      expect(stop().getAttribute('aria-disabled')).toBe('true')
-      expect(stop().disabled).toBe(false)
-      expect(wrapper.get('[role="status"]').text()).toBe('Stopping sleep 600')
-      stop().click()
-      await flushPromises()
-      expect(stopTask).toHaveBeenCalledTimes(1)
-      vi.advanceTimersByTime(15_000)
-      await flushPromises()
-      expect(stop().textContent?.trim()).toBe('Stop')
-      stop().click()
-      await flushPromises()
-      expect(stopTask).toHaveBeenCalledTimes(2)
-      wrapper.unmount()
-    } finally {
-      vi.useRealTimers()
+  it('announces a pending stop while the store holds it, then falls back to the running line', async () => {
+    const shell: RunningSubagent = {
+      agent_id: 'task:b1', description: 'sleep 600', subagent_type: 'shell',
+      started_at: new Date(NOW).toISOString(), stoppable: true,
     }
+    const wrapper = mountBar({ agents: [shell], stopTask: vi.fn(), stopping: { b1: true } })
+    expect(wrapper.get('[role="status"]').text()).toBe('Stopping sleep 600')
+    await wrapper.setProps({ stopping: {} })
+    expect(wrapper.get('[role="status"]').text()).toBe('Running in the background: sleep 600')
+    wrapper.unmount()
   })
 
   it('moves focus to the next Stop when the focused row leaves, else to the opener', async () => {

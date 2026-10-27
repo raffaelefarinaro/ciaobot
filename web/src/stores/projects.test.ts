@@ -9680,3 +9680,77 @@ describe('chatsHealth', () => {
     expect(store.chatsHealth.error).toBe('')
   })
 })
+
+describe('stopBackgroundTask', () => {
+  const shellRow = (id: string) => ({ agent_id: `task:${id}`, description: id, subagent_type: 'shell', stoppable: true })
+
+  beforeEach(() => {
+    setActivePinia(newPinia())
+    apiPost.mockReset()
+    apiPost.mockResolvedValue({ ok: true })
+    vi.useFakeTimers()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('posts to the stop route and marks the task stopping, per chat', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/background-tasks/b1/stop', {})
+    expect(store.stoppingTasks).toEqual({ c1: { b1: true } })
+    expect(store.stopTaskErrors).toEqual({})
+  })
+
+  it('ignores a second stop while one is pending', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets go of the lock after 15 s so Stop can be retried', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    vi.advanceTimersByTime(14_999)
+    expect(store.stoppingTasks.c1?.b1).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledTimes(2)
+  })
+
+  it('records an error and releases the lock when the stop is rejected, clearing it on retry', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(new Error('boom'))
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    expect(store.stopTaskErrors.c1?.b1).toBe('Could not stop this process. Try again.')
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(store.stopTaskErrors.c1?.b1).toBeUndefined()
+    expect(store.stoppingTasks.c1?.b1).toBe(true)
+  })
+
+  it('releases a task, and its error, once its row leaves the running list', async () => {
+    const store = useProjectStore()
+    store.runningSubagents = { c1: [shellRow('b1'), shellRow('b2')] } as unknown as typeof store.runningSubagents
+    await store.stopBackgroundTask('c1', 'b1')
+    await store.stopBackgroundTask('c1', 'b2')
+    store.stopTaskErrors = { c1: { b2: 'Could not stop this process. Try again.' } }
+    store.runningSubagents = { c1: [shellRow('b2')] } as unknown as typeof store.runningSubagents
+    await nextTick()
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    expect(store.stoppingTasks.c1?.b2).toBe(true)
+    store.runningSubagents = {}
+    await nextTick()
+    expect(store.stoppingTasks).toEqual({})
+    expect(store.stopTaskErrors).toEqual({})
+  })
+
+  it('stops its timers when the store is disposed', async () => {
+    const store = useProjectStore()
+    const before = vi.getTimerCount()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(vi.getTimerCount()).toBe(before + 1)
+    store.$dispose()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
