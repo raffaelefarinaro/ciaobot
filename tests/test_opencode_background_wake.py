@@ -566,6 +566,21 @@ async def test_wake_result_carries_the_shell_notice(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_replayed_shell_enqueue_does_not_double_the_run(tmp_path, monkeypatch):
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    enqueued = next(line for line in rest if "session.inbox.enqueued" in line)
+    provider = _drain_provider(
+        tmp_path, monkeypatch, SHELL_SESSION, [enqueued, *rest]
+    )
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
+
+    results = [e for e in await _drain(provider) if isinstance(e, ResultEvent)]
+
+    assert results[0].wake_notice.startswith("[Ciaobot] 1 background run finished.")
+
+
+@pytest.mark.asyncio
 async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
     _, rest = _split(_fixture_lines("background_subagent_wake.jsonl"), SUB_SESSION)
     provider = _drain_provider(tmp_path, monkeypatch, SUB_SESSION, rest)

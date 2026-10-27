@@ -312,6 +312,35 @@ async def test_drain_between_turns_records_the_opencode_wake_turn(tmp_path, monk
     assert transcript["turns"][0]["input_kind"] == "task-notification"
 
 
+@pytest.mark.asyncio
+async def test_recording_a_wake_turn_does_not_build_a_full_agent_request(tmp_path, monkeypatch):
+    pcm, project, chat = _opencode_chat(tmp_path)
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
+    pcm._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
+        provider=provider,
+        can_drain=True,
+        drain_events=provider.drain_events,
+        background_work_outstanding=False,
+    )
+    chat.instructions_inline_pending = True
+    built: list[bool] = []
+    monkeypatch.setattr(
+        pcm, "build_agent_request", lambda *a, **k: built.append(True)
+    )
+
+    await asyncio.wait_for(
+        pcm._drain_between_turns(chat.chat_id, project.project_id), 5
+    )
+
+    assert built == []
+    assert chat.instructions_inline_pending is True
+    ctx = ChatContext.for_web(chat.chat_id)
+    assert len(pcm._transcripts._load_current(ctx, "opencode")["turns"]) == 1
+
+
 async def _watch(pcm, project, chat, provider, monkeypatch, shells):
     pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
     provider._session_id = chat.session_id

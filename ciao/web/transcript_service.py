@@ -1237,9 +1237,13 @@ def _align_user_turns(
 def _overlay_transcript_metadata(
     entries: list[dict], transcript_rows: list[dict]
 ) -> None:
+    # A wake reply (origin turn) belongs to no user segment: it follows the
+    # notice card, in the same segment as the reply before it. Skipping those
+    # rows keeps one metadata entry per user segment, so every real reply keeps
+    # its own footer (the wake reply's own usage is not shown).
     metadata = [
         row for row in transcript_rows
-        if row.get("role") == "assistant"
+        if row.get("role") == "assistant" and not row.get("origin")
     ]
     targets: list[int] = []
     last: int | None = None

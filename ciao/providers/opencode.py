@@ -2308,7 +2308,11 @@ class OpencodeProvider(BaseSDKProvider):
                             payload.get("description"),
                             payload.get("metadata"),
                         )
-                        if run is not None:
+                        if run is not None and not any(
+                            seen["run_id"] == run["run_id"]
+                            for seen in self._wake_runs
+                        ):
+                            # A replayed enqueue must not double a run.
                             self._wake_runs.append(run)
                     continue
                 if kind == "session.inbox.delivered":

@@ -1886,7 +1886,8 @@ class ChatStreaming:
 
         OpenCode's own session store holds the wake, but the durable transcript
         is the fallback copy a reload reads when that store is unreadable. The
-        notice is the turn's prompt; ``origin`` keeps it a system row.
+        notice is the turn's prompt; ``origin`` keeps it a system row. A wake
+        whose shell item was missed has no notice and records nothing, by design.
         """
         chat = self._host._chats.get(chat_id)
         if (
@@ -1898,13 +1899,15 @@ class ChatStreaming:
         ):
             return
         try:
-            request = self._host.build_agent_request(
-                chat,
+            # `record_turn` reads only the model, prompt and mode, so a bare
+            # request is enough; the full builder mints tokens and mutates chat.
+            request = AgentRequest(
                 prompt=event.wake_notice,
                 display_prompt=event.wake_notice,
-                images=None,
+                model=chat.model,
+                mode=chat.mode,
+                provider=chat.provider,
                 resume_session=chat.session_id or None,
-                require_mcp=False,
             )
             self._host._transcripts.record_turn(
                 request,
