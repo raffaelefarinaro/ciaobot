@@ -48,7 +48,7 @@ import type {
   WorkspaceProviderOption,
   WorkspacesResponse,
 } from '../lib/types'
-import { bareAgentId, sameAgent } from '../lib/subagentIds'
+import { bareAgentId, isShellRow, sameAgent } from '../lib/subagentIds'
 import { checkingHealth, failedHealth, readyHealth, type SourceHealth } from '../lib/sourceHealth'
 
 /** Model/provider a new chat should start on instead of the workspace default. */
@@ -1240,17 +1240,28 @@ export const useProjectStore = defineStore('projects', () => {
     }
     runningPollLive.value = false
   }
-  // Poll until the rows clear or the drain budget is spent. Used for the
+  // Poll until the rows clear or the drain budget is spent (shell rows never
+  // spend it). Used for the
   // falling edge of work and for rows discovered while nothing is working.
   function startRunningSubagentDrain(): void {
     let drainTicksLeft = RUNNING_SUBAGENT_DRAIN_TICKS
     runningPollLive.value = true
     runningSubagentTimer = setInterval(() => {
-      if (Object.keys(runningSubagents.value).length === 0 || drainTicksLeft <= 0) {
+      if (Object.keys(runningSubagents.value).length === 0) {
         stopRunningSubagentPoll()
         return
       }
-      drainTicksLeft -= 1
+      // A listed shell or Monitor is retired by the server from provider
+      // state (24 h cap), so it keeps the poll alive without spending the
+      // budget; agent rows stay bounded.
+      const holdsShell = Object.values(runningSubagents.value).some(rows => rows.some(isShellRow))
+      if (!holdsShell) {
+        if (drainTicksLeft <= 0) {
+          stopRunningSubagentPoll()
+          return
+        }
+        drainTicksLeft -= 1
+      }
       void refreshRunningSubagents()
     }, RUNNING_SUBAGENT_POLL_MS)
   }
@@ -1353,6 +1364,15 @@ export const useProjectStore = defineStore('projects', () => {
   async function cancelBackgroundRun(chatId: string, runId: string): Promise<void> {
     await api.post(
       `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/cancel`,
+      {},
+    )
+  }
+
+  // Stops one native shell or Monitor from the Processes list. The row leaves
+  // with the next running-subagent poll, once the provider reports it ended.
+  async function stopBackgroundTask(chatId: string, taskId: string): Promise<void> {
+    await api.post(
+      `/api/chats/${encodeURIComponent(chatId)}/background-tasks/${encodeURIComponent(taskId)}/stop`,
       {},
     )
   }
@@ -6982,7 +7002,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, stopBackgroundTask, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,

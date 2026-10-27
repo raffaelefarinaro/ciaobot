@@ -654,3 +654,22 @@ def test_cli_task_wake_marks_tasks_lost_with_context_prefix(tmp_path: Path) -> N
     assert info.raw_status == "lost"
     assert running_tasks(state) == []
 
+
+
+def test_task_started_at_is_parsed(tmp_path: Path) -> None:
+    """A task row carries the launch receipt's record timestamp."""
+    receipt = _bash_result("toolu_b", "task_b")
+    receipt["timestamp"] = "2026-10-27T08:15:30.000Z"
+    bare = _bash_result("toolu_c", "task_c")
+    session = _write_session(tmp_path, [
+        _user_text("go"),
+        _bash_dispatch("toolu_b", "build"),
+        receipt,
+        _bash_dispatch("toolu_c", "lint"),
+        bare,
+    ])
+
+    state = parse_session_subagents(session)
+
+    assert state.subagents["task_b"].started_at == "2026-10-27T08:15:30.000Z"
+    assert state.subagents["task_c"].started_at == ""

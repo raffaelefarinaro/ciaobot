@@ -9,6 +9,7 @@ import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
+import ComposerActivity from '../ComposerActivity.vue'
 import InjectedPromptCard from '../InjectedPromptCard.vue'
 
 const PaneHeaderStub = defineComponent({
@@ -196,5 +197,23 @@ describe('ChatPanel native background notice', () => {
     await flushPromises()
     expect(wrapper.findAll('.injected-card')).toHaveLength(0)
     expect(wrapper.findAll('.message.system')).toHaveLength(1)
+  })
+
+  it('keeps the shell age ticking in an idle chat that holds a native shell', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
+    try {
+      const { wrapper, store } = await mountPanel()
+      store.runningSubagents = {
+        'chat-1': [{ agent_id: 'task:b1', description: 'sleep 600', subagent_type: 'shell', started_at: new Date().toISOString(), stoppable: true }],
+      }
+      await flushPromises()
+      const bar = () => wrapper.findComponent(ComposerActivity)
+      const before = bar().props('now')
+      vi.advanceTimersByTime(61_000)
+      await flushPromises()
+      expect(bar().props('now')).toBeGreaterThanOrEqual(before + 61_000)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

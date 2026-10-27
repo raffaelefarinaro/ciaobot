@@ -136,6 +136,9 @@ class SubagentInfo:
     # First 200 chars of the dispatch command (Monitor / background Bash), so
     # a wake prompt can name the log or output file to check.
     command: str = ""
+    # Timestamp of the launch receipt record (ISO 8601 as the CLI wrote it) for
+    # a CLI-owned task; "" when the record carried none.
+    started_at: str = ""
 
 
 @dataclass
@@ -570,6 +573,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     turn_index=user_idx - 1 if user_idx > 0 else None,
                     kind="task",
                     command=str(dispatched.get("command") or ""),
+                    started_at=str(record.get("timestamp") or ""),
                 )
                 continue
 

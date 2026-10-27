@@ -270,4 +270,109 @@ describe('ComposerActivity', () => {
     expect(shellItem?.tagName).toBe('BUTTON')
     wrapper.unmount()
   })
+
+  it('lists a monitor row under Processes with its elapsed time and a Stop button', async () => {
+    const monitor: RunningSubagent = {
+      agent_id: 'task:m1', description: 'tail -f app.log', subagent_type: 'monitor',
+      started_at: new Date(NOW - 125_000).toISOString(), stoppable: true,
+    }
+    const stopTask = vi.fn().mockResolvedValue(undefined)
+    const wrapper = mountBar({ agents: [monitor], stopTask })
+    expect(wrapper.get('.composer-activity-seg--runs').text()).toBe('1 shell')
+    await wrapper.get('.composer-activity-seg--runs').trigger('click')
+    await flushPromises()
+    expect(texts('.composer-activity-pop-head')).toEqual(['Processes'])
+    expect(texts('.composer-activity-pop-label')).toEqual(['tail -f app.log'])
+    expect(texts('.composer-activity-pop-item small')).toEqual(['2m'])
+    const stop = document.querySelector<HTMLButtonElement>('.composer-activity-pop-stop')
+    expect(stop?.textContent?.trim()).toBe('Stop')
+    expect(stop?.getAttribute('aria-label')).toBe('Stop tail -f app.log')
+    stop?.click()
+    await flushPromises()
+    expect(stopTask).toHaveBeenCalledWith('m1')
+    expect(document.querySelector('.composer-activity-pop-stop')?.textContent?.trim()).toBe('Stopping…')
+    wrapper.unmount()
+  })
+
+  it('offers no Stop for a row that is not stoppable, and still shows its age', async () => {
+    const shell: RunningSubagent = {
+      agent_id: 'task:b1', description: 'sleep 600', subagent_type: 'shell',
+      started_at: new Date(NOW - 3_725_000).toISOString(), stoppable: false,
+    }
+    const wrapper = mountBar({ agents: [shell], stopTask: vi.fn() })
+    await wrapper.get('.composer-activity-seg--runs').trigger('click')
+    await flushPromises()
+    expect(document.querySelector('.composer-activity-pop-stop')).toBeNull()
+    expect(texts('.composer-activity-pop-item small')).toEqual(['1h 2m'])
+    wrapper.unmount()
+  })
+
+  it('shows an error and re-enables Stop when stopping fails', async () => {
+    const shell: RunningSubagent = {
+      agent_id: 'task:b1', description: 'sleep 600', subagent_type: 'shell',
+      started_at: new Date(NOW).toISOString(), stoppable: true,
+    }
+    const wrapper = mountBar({ agents: [shell], stopTask: vi.fn().mockRejectedValue(new Error('x')) })
+    await wrapper.get('.composer-activity-seg--runs').trigger('click')
+    await flushPromises()
+    document.querySelector<HTMLButtonElement>('.composer-activity-pop-stop')?.click()
+    await flushPromises()
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('Could not stop')
+    expect(document.querySelector<HTMLButtonElement>('.composer-activity-pop-stop')?.disabled).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('releases the Stopping lock after 15 s so Stop can be retried, and announces it', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const shell: RunningSubagent = {
+        agent_id: 'task:b1', description: 'sleep 600', subagent_type: 'shell',
+        started_at: new Date(NOW).toISOString(), stoppable: true,
+      }
+      const stopTask = vi.fn().mockResolvedValue(undefined)
+      const wrapper = mountBar({ agents: [shell], stopTask })
+      await wrapper.get('.composer-activity-seg--runs').trigger('click')
+      await flushPromises()
+      const stop = () => document.querySelector<HTMLButtonElement>('.composer-activity-pop-stop')!
+      stop().click()
+      await flushPromises()
+      expect(stop().getAttribute('aria-disabled')).toBe('true')
+      expect(stop().disabled).toBe(false)
+      expect(wrapper.get('[role="status"]').text()).toBe('Stopping sleep 600')
+      stop().click()
+      await flushPromises()
+      expect(stopTask).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(15_000)
+      await flushPromises()
+      expect(stop().textContent?.trim()).toBe('Stop')
+      stop().click()
+      await flushPromises()
+      expect(stopTask).toHaveBeenCalledTimes(2)
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('moves focus to the next Stop when the focused row leaves, else to the opener', async () => {
+    const row = (id: string): RunningSubagent => ({
+      agent_id: `task:${id}`, description: id, subagent_type: 'shell',
+      started_at: new Date(NOW).toISOString(), stoppable: true,
+    })
+    const wrapper = mountBar({ runs: [run('r1', 'clone', 60_000)], agents: [row('a'), row('b')], stopTask: vi.fn().mockResolvedValue(undefined) })
+    const opener = wrapper.get('.composer-activity-seg--runs')
+    await opener.trigger('click')
+    await flushPromises()
+    const stops = () => Array.from(document.querySelectorAll<HTMLButtonElement>('.composer-activity-pop-stop'))
+    stops()[0].focus()
+    await wrapper.setProps({ agents: [row('b')] })
+    await flushPromises()
+    expect(document.activeElement).toBe(stops()[0])
+    expect(stops()[0].getAttribute('data-stop-id')).toBe('task:b')
+    stops()[0].focus()
+    await wrapper.setProps({ agents: [] })
+    await flushPromises()
+    expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
+  })
 })

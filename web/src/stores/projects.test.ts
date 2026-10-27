@@ -2225,6 +2225,15 @@ describe('move to background', () => {
   })
 })
 
+describe('stop a background task', () => {
+  test('stopBackgroundTask posts to the chat-scoped route with the id escaped', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ ok: true })
+    await store.stopBackgroundTask('c1', 'task/1')
+    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c1/background-tasks/task%2F1/stop', {})
+  })
+})
+
 describe('ephemeral status events', () => {
   test('does not render Claude requesting status as a system message', () => {
     apiGet.mockResolvedValue([])
@@ -8267,6 +8276,56 @@ describe('running subagent poll', () => {
       await vi.advanceTimersByTimeAsync(60_000)
       const pollsAfterDeadline = apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
       expect(pollsAfterDeadline).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a shell row keeps the poll alive past the drain budget until the server omits it', async () => {
+    const store = useProjectStore()
+    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null, stoppable: true }]
+    let rows: unknown[] = shell
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows.length ? { c1: rows } : {} })
+      return Promise.resolve([])
+    })
+    const polls = () => apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
+
+    vi.useFakeTimers()
+    try {
+      store.streaming = { c1: true }
+      await vi.advanceTimersByTimeAsync(0)
+      store.streaming = { c1: false }
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(95_000)
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(polls()).toBeGreaterThan(10)
+
+      rows = []
+      await vi.advanceTimersByTimeAsync(8_000)
+      expect(store.runningSubagentsFor('c1')).toEqual([])
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(polls()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a shell row discovered while nothing is working starts the poll', async () => {
+    const store = useProjectStore()
+    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null }]
+    mockRunning({ c1: shell })
+
+    vi.useFakeTimers()
+    try {
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(10)
     } finally {
       vi.useRealTimers()
     }

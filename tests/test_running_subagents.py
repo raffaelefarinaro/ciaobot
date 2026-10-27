@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao import subagent_tracking
+from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import OpencodeProvider
 from ciao.web.routes_api import running_subagents
 
@@ -74,10 +76,16 @@ def _write(path: Path, records: list[dict]) -> None:
     )
 
 
-def _client(tmp_path: Path, chats: dict[str, object], active: list[str]) -> TestClient:
+def _client(
+    tmp_path: Path,
+    chats: dict[str, object],
+    active: list[str],
+    background: list[str] | None = None,
+) -> TestClient:
     pcm = SimpleNamespace(
         get_chat=lambda chat_id: chats.get(chat_id),
         active_chat_ids=lambda: active,
+        background_work_chat_ids=lambda: background or [],
         _providers={},
         _agent_root_for_chat=lambda chat_id: None,
     )
@@ -159,6 +167,7 @@ def test_running_rows_do_not_read_transcripts(tmp_path: Path) -> None:
     pcm = SimpleNamespace(
         get_chat=lambda chat_id: chat if chat_id == "chat-1" else None,
         active_chat_ids=lambda: ["chat-1"],
+        background_work_chat_ids=lambda: [],
         _providers={"chat-1": SimpleNamespace(provider=provider)},
         _agent_root_for_chat=lambda chat_id: None,
     )
@@ -400,6 +409,7 @@ def _opencode_app(tmp_path: Path, provider: OpencodeProvider | None) -> TestClie
     pcm = SimpleNamespace(
         get_chat=lambda chat_id: chat if chat_id == "chat-1" else None,
         active_chat_ids=lambda: ["chat-1"],
+        background_work_chat_ids=lambda: [],
         _providers={"chat-1": SimpleNamespace(provider=provider)} if provider else {},
         _agent_root_for_chat=lambda chat_id: None,
     )
@@ -438,6 +448,9 @@ def test_opencode_running_rows_include_background_shells(
         "shell:sh_b": "Background command",
     }
     assert all(row["turn_index"] is None and row["status"] == "running" for row in shells)
+    assert all(row["stoppable"] is True for row in shells)
+    started = [datetime.fromisoformat(row["started_at"]) for row in shells]
+    assert all(abs(time.time() - dt.timestamp()) < 60 for dt in started)
 
 
 def test_opencode_child_predicate_shared(tmp_path: Path, monkeypatch) -> None:
@@ -460,3 +473,147 @@ def test_opencode_child_predicate_shared(tmp_path: Path, monkeypatch) -> None:
         ].get("chat-1", [])
         assert len(rows) == expected, name
         assert opencode_collab_tree_counts([item])[0] == expected, name
+
+
+def _pin_session(monkeypatch, session: Path) -> None:
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session,
+    )
+
+
+def _task_launch(
+    tool_name: str, tool_use_id: str, task_id: str, *, command: str, timestamp: str
+) -> list[dict]:
+    tool_input: dict = {"command": command, "description": f"{tool_name} job"}
+    if tool_name == "Bash":
+        tool_input["run_in_background"] = True
+    return [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": tool_input}
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": timestamp,
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": tool_use_id, "content": "started"}
+                ],
+            },
+            "toolUseResult": {"taskId": task_id, "isAsync": True},
+        },
+    ]
+
+
+def test_claude_background_task_rows_are_listed(tmp_path: Path, monkeypatch) -> None:
+    _pin_session(monkeypatch, tmp_path / "sess-t.jsonl")
+    _write(tmp_path / "sess-t.jsonl", [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        *_task_launch(
+            "Bash", "toolu_b", "bsh1", command="sleep 600", timestamp="2026-10-27T08:00:00.000Z"
+        ),
+    ])
+
+    rows = _client(tmp_path, {"c1": _chat("c1", "sess-t")}, ["c1"]).get(
+        "/api/subagents/running"
+    ).json()["chats"]["c1"]
+
+    assert rows == [{
+        "agent_id": "task:bsh1",
+        "description": "sleep 600",
+        "subagent_type": "shell",
+        "is_async": True,
+        "status": "running",
+        "turn_index": None,
+        "started_at": "2026-10-27T08:00:00.000Z",
+        "stoppable": False,
+    }]
+
+
+def test_finished_claude_task_leaves_no_row(tmp_path: Path, monkeypatch) -> None:
+    _pin_session(monkeypatch, tmp_path / "sess-d.jsonl")
+    _write(tmp_path / "sess-d.jsonl", [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        *_task_launch(
+            "Bash", "toolu_b", "bsh1", command="sleep 1", timestamp="2026-10-27T08:00:00.000Z"
+        ),
+        _completion("bsh1"),
+    ])
+
+    body = _client(tmp_path, {"c1": _chat("c1", "sess-d")}, ["c1"]).get(
+        "/api/subagents/running"
+    ).json()
+
+    assert body["chats"] == {}
+
+
+def test_monitor_task_row_type(tmp_path: Path, monkeypatch) -> None:
+    _pin_session(monkeypatch, tmp_path / "sess-m.jsonl")
+    _write(tmp_path / "sess-m.jsonl", [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        *_task_launch(
+            "Monitor", "toolu_m", "mon1", command="tail -f app.log", timestamp="2026-10-27T08:00:00.000Z"
+        ),
+    ])
+
+    rows = _client(tmp_path, {"c1": _chat("c1", "sess-m")}, ["c1"]).get(
+        "/api/subagents/running"
+    ).json()["chats"]["c1"]
+
+    assert [(r["agent_id"], r["subagent_type"], r["description"]) for r in rows] == [
+        ("task:mon1", "monitor", "tail -f app.log")
+    ]
+
+
+def test_loaded_claude_provider_rows_replace_the_jsonl_tasks(tmp_path: Path, monkeypatch) -> None:
+    """The SDK-tracked set is listed (stoppable) and the JSONL copy is not."""
+    _pin_session(monkeypatch, tmp_path / "sess-l.jsonl")
+    _write(tmp_path / "sess-l.jsonl", [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        *_task_launch(
+            "Bash", "toolu_b", "bsh1", command="sleep 600", timestamp="2026-10-27T08:00:00.000Z"
+        ),
+    ])
+    provider = ClaudeProvider(tmp_path)
+    now = time.monotonic()
+    provider._native_tasks = {
+        "bsh1": {"command": "sleep 600", "task_type": "local_bash", "started_at": 1_800_000_000.0, "started_mono": now},
+        "mon1": {"command": "tail -f app.log", "task_type": "monitor_mcp", "started_at": 1_800_000_100.0, "started_mono": now},
+        "ag1": {"command": "research", "task_type": "local_agent", "started_at": 1_800_000_200.0, "started_mono": now},
+    }
+    client = _client(tmp_path, {"c1": _chat("c1", "sess-l")}, ["c1"])
+    client.app.state.project_chat_manager._providers["c1"] = SimpleNamespace(provider=provider)
+
+    rows = client.get("/api/subagents/running").json()["chats"]["c1"]
+
+    assert [(r["agent_id"], r["subagent_type"], r["stoppable"]) for r in rows] == [
+        ("task:bsh1", "shell", True),
+        ("task:mon1", "monitor", True),
+    ]
+    assert rows[0]["started_at"] == "2027-01-15T08:00:00+00:00"
+
+
+def test_a_chat_with_only_provider_background_work_is_scanned(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No stream, no watcher: the loaded provider's shell alone earns a row."""
+    _pin_session(monkeypatch, tmp_path / "sess-bg.jsonl")
+    provider = ClaudeProvider(tmp_path)
+    provider._native_tasks = {
+        "bsh1": {"command": "sleep 600", "task_type": "local_bash", "started_at": 1_800_000_000.0, "started_mono": time.monotonic()},
+    }
+    # Listed by both sets: scanned once.
+    client = _client(tmp_path, {"c1": _chat("c1", "sess-bg")}, [], background=["c1", "c1"])
+    client.app.state.project_chat_manager._providers["c1"] = SimpleNamespace(provider=provider)
+
+    rows = client.get("/api/subagents/running").json()["chats"]["c1"]
+
+    assert [r["agent_id"] for r in rows] == ["task:bsh1"]

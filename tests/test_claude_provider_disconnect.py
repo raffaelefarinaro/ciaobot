@@ -322,3 +322,28 @@ def test_a_stale_task_no_longer_defers_the_spawn_options_reconnect(
     asyncio.run(provider._ensure_connected(changed))
 
     assert stopped == [True]
+
+
+def test_stop_background_task_calls_client_stop_task(tmp_path: Path) -> None:
+    stopped: list[str] = []
+
+    class _Client(_SdkLikeClient):
+        async def stop_task(self, task_id: str) -> None:
+            stopped.append(task_id)
+
+    provider = _provider_with(_Client(), tmp_path)
+    provider._connected = True
+    provider._observe_message(_task_started("t1"))
+
+    assert asyncio.run(provider.stop_background_task("t1")) is True
+    assert asyncio.run(provider.stop_background_task("nope")) is False
+    assert stopped == ["t1"]
+    # The row stays until the CLI reports the terminal status.
+    assert [r["id"] for r in provider.background_shell_rows()] == ["t1"]
+
+
+def test_stop_background_task_without_a_client_is_false(tmp_path: Path) -> None:
+    provider = ClaudeProvider(tmp_path)
+    provider._observe_message(_task_started("t1"))
+
+    assert asyncio.run(provider.stop_background_task("t1")) is False

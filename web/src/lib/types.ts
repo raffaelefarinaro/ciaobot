@@ -474,6 +474,10 @@ export interface RunningSubagent {
   is_async?: boolean
   status?: 'running' | 'completed' | 'failed' | ''
   turn_index?: number | null
+  /** Process rows (`shell` / `monitor`): ISO start time, empty when unknown. */
+  started_at?: string
+  /** Process rows: the engine can stop it from the Processes list. */
+  stoppable?: boolean
 }
 
 /**

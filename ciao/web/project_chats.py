@@ -7219,6 +7219,18 @@ class ProjectChatManager:
         ids.update(self._subagents.watching_chat_ids())
         return sorted(ids)
 
+    def background_work_chat_ids(self) -> list[str]:
+        """Chats whose provider still reports background work (native shells, subagents).
+
+        Separate from ``active_chat_ids`` on purpose: that set drives restart
+        drains, this one only decides which chats the running-work feed lists.
+        """
+        return sorted(
+            chat_id
+            for chat_id, service in self._providers.items()
+            if self._provider_background_busy(chat_id, service)
+        )
+
     def restart_blockers(self) -> list[dict[str, Any]]:
         """Chats a restart or stop would break, each with the reasons why. Superset of active_chat_ids()."""
         reasons: dict[str, list[str]] = {}
