@@ -154,6 +154,11 @@ _CONNECT_TIMEOUT_S = _INITIALIZE_TIMEOUT_MS / 1000 + 30
 # control-request timeout instead of an error that says what went wrong.
 # Claude Code >= 2.1.274 reads it.
 _STARTUP_FAILURE_RESULTS_ENV = "CLAUDE_CODE_STARTUP_FAILURE_RESULTS"
+# The CLI stops a background Bash at its `timeout`, which defaults to 30 min
+# and is capped at max(2 h, BASH_MAX_TIMEOUT_MS). Raising the cap to the
+# background-work horizon lets a long native shell ask for up to 24 h (the
+# tool description shows the model the new maximum), like a terminal.
+_BASH_MAX_TIMEOUT_ENV = "BASH_MAX_TIMEOUT_MS"
 # Every control-request failure is a bare ``Exception``, so the message is the
 # only thing that identifies an initialize handshake that missed its deadline.
 _INITIALIZE_TIMEOUT_MESSAGE = "Control request timeout: initialize"
@@ -987,6 +992,9 @@ class ClaudeProvider(BaseSDKProvider):
         # the reason, not as stderr-only silence that the SDK reports as a
         # control-request timeout with no cause.
         cli_env.setdefault(_STARTUP_FAILURE_RESULTS_ENV, "1")
+        # An operator value for the same knob, in either environment, wins.
+        if _BASH_MAX_TIMEOUT_ENV not in cli_env and _BASH_MAX_TIMEOUT_ENV not in os.environ:
+            cli_env[_BASH_MAX_TIMEOUT_ENV] = str(BACKGROUND_WORK_MAX_S * 1000)
 
         options = ClaudeAgentOptions(
             model=requested_model,
