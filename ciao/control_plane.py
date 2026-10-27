@@ -2885,8 +2885,8 @@ class CiaoControlPlane:
         if self.pcm.provider_reload_blocked(chat_id):
             raise ControlPlaneError(
                 "chat_busy",
-                "Background agents or a pending question still use this chat's provider; "
-                "reload after they finish.",
+                "Background agents, background shells or a pending question still use this "
+                "chat's provider; reload after they finish.",
             )
         if chat_id == principal.chat_id:
             if self.pcm.arm_reload_continuation(chat_id):

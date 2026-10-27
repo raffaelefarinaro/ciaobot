@@ -122,15 +122,11 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     assert settings["skillOverrides"] == harness_skill_overrides()
     assert settings["skillOverrides"]["schedule"] == "off"
     assert settings["skillOverrides"]["loop"] == "off"
-    # A background Bash process dies when the SDK turn ends and Claude only
-    # reports that stop after the next user message. The managed provider
-    # must install the hook that forces those calls to stay in the turn,
-    # plus the hook that denies the CLI's Monitor watcher (same lifetime
-    # problem): both long-running paths must route through
-    # `ciao run start -- …` instead.
+    # Native background Bash and Monitor run unchanged; the one Bash hook only
+    # denies detached launches (nohup, &, setsid, disown).
     bash_hooks = options.hooks["PreToolUse"]
     matchers = {hook.matcher for hook in bash_hooks}
-    assert matchers == {"Bash", "Monitor"}
+    assert matchers == {"Bash"}
 
 
 @pytest.mark.asyncio
@@ -1477,7 +1473,7 @@ async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -
     options = captured["options"]
     assert options.sandbox is None
     assert options.add_dirs == []
-    assert [m.matcher for m in options.hooks["PreToolUse"]] == ["Bash", "Monitor"]
+    assert [m.matcher for m in options.hooks["PreToolUse"]] == ["Bash"]
     assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
 
 

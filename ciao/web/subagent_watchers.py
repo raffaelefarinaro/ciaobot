@@ -70,6 +70,11 @@ _ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # startup, and they are free to diverge.
 _STARTUP_WAKE_COALESCE_SECONDS = 5.0
 
+# One cap for background work (agents, shells, monitors): a watcher keeps
+# polling, and a provider with outstanding background work stays protected
+# from the idle reap, reload and restart gate, for up to this long.
+BACKGROUND_WORK_MAX_S = 24 * 3600
+
 
 class SubagentWatcherHost(Protocol):
     """What :class:`SubagentWatchers` needs from the chat manager.
@@ -281,8 +286,8 @@ class SubagentWatchers:
         cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
-        # per tick, a re-parse only when the file grew) with a wide horizon.
-        deadline = time.perf_counter() + 3600
+        # per tick, a re-parse only when the file grew) up to the shared cap.
+        deadline = time.perf_counter() + BACKGROUND_WORK_MAX_S
         try:
             while time.perf_counter() < deadline:
                 try:
@@ -367,7 +372,7 @@ class SubagentWatchers:
         """Poll the opencode session tree and its background shells while background work runs."""
         last_count = -1
         last_work = -1
-        deadline = time.perf_counter() + 3600
+        deadline = time.perf_counter() + BACKGROUND_WORK_MAX_S
         try:
             while time.perf_counter() < deadline:
                 chat = self._host._chats.get(chat_id)
