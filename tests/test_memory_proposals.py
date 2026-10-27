@@ -867,6 +867,39 @@ def test_entity_note_refuses_an_unusable_name(tmp_path: Path) -> None:
     assert unusable is None
 
 
+@pytest.mark.parametrize("name", ["Con", "NUL", "Aux", "com1", "LPT9.txt"])
+def test_entity_note_path_refuses_windows_reserved_names(tmp_path: Path, name: str) -> None:
+    vault = _entity_vault(tmp_path)
+
+    assert mp.entity_note_path(vault, mp.PERSON_TYPE_ID, name, registry_root=vault) is None
+    outcome = mp.write_entity_note(vault, mp.PERSON_TYPE_ID, name, "A fact.", registry_root=vault)
+    assert outcome == "refused"
+    assert not list(vault.rglob("*.md"))
+
+    ok = mp.entity_note_path(vault, mp.PERSON_TYPE_ID, "Sofia Rossi", registry_root=vault)
+    assert ok == vault / "People" / "Sofia Rossi.md"
+
+
+def test_portable_name_problem() -> None:
+    assert mp.portable_name_problem("Sofia Rossi") is None
+    assert mp.portable_name_problem("People") is None
+    for bad in ("a:b", "x?", "trail.", "trail ", "CON", "con.md"):
+        assert isinstance(mp.portable_name_problem(bad), str), bad
+
+
+def test_every_note_stem_writer_checks_portable_names() -> None:
+    import ciao
+
+    offenders: list[str] = []
+    for path in Path(ciao.__file__).parent.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "safe_note_stem(" in text and "portable_name_problem(" not in text:
+            offenders.append(path.as_posix())
+    assert offenders == []
+
+
 def test_entity_note_never_overwrites_an_existing_note(tmp_path: Path) -> None:
     """`exists` is not a boolean failure: the caller merges, so nothing is lost."""
     vault = _entity_vault(tmp_path)

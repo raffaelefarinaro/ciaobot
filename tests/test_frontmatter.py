@@ -30,11 +30,33 @@ def test_split_returns_none_without_opening_fence(text):
     assert split_frontmatter(text) is None
 
 
-@pytest.mark.parametrize("value", ["a: b", "'quoted", "* star", "#hash", "line\nbreak", "", "Café", 5, True])
+@pytest.mark.parametrize("value", ["a: b", "'quoted", "* star", "#hash", "line\nbreak", "", "Café", 5, True, "a\x05b", "a\x85b", "del\x7f", "\x9f"])
 def test_yaml_scalar_round_trips(value):
     out = yaml_scalar(value)
     assert "\n" not in out
     assert yaml.safe_load(f"k: {out}") == {"k": value}
+
+
+def test_yaml_scalar_round_trips_every_codepoint():
+    codepoints = [
+        *range(0, 0x250),
+        *range(0x2000, 0x2070),
+        0xFEFF, 0xFFFD, 0xFFFE, 0xD7FF, 0xE000, 0x1F600,
+    ]
+    failures: list[str] = []
+    for cp in codepoints:
+        ch = chr(cp)
+        for s in (ch, f"a{ch}b", f"{ch}x", f"x{ch}"):
+            try:
+                out = yaml_scalar(s)
+                assert "\n" not in out
+                assert yaml.safe_load(f"k: {out}\n") == {"k": s}
+                parts = split_frontmatter(f"---\nk: {out}\ntype: note\n---\n\nbody\n")
+                assert parts is not None
+                assert yaml.safe_load(parts[0]) == {"k": s, "type": "note"}
+            except Exception:
+                failures.append(f"U+{cp:04X} {s!r}")
+    assert failures == []
 
 
 @pytest.mark.parametrize(

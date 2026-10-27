@@ -21,7 +21,7 @@ from pathlib import Path
 from ciao import note_receipts
 from ciao.entity_types import EntityType, EntityTypeRegistry, load_entity_types
 from ciao.frontmatter import yaml_scalar
-from ciao.memory_proposals import safe_note_stem
+from ciao.memory_proposals import portable_name_problem, safe_note_stem
 from ciao.vault_index import is_reserved_bookkeeping
 
 MAX_NOTE_FILE_BYTES = 256 * 1024
@@ -32,11 +32,6 @@ _TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9/_-]*")
 _CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 MAX_FOLDER_PART_CHARS = 80
 MAX_FOLDER_DEPTH = 8
-_WINDOWS_RESERVED = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
-    | {f"COM{n}" for n in range(1, 10)}
-    | {f"LPT{n}" for n in range(1, 10)}
-)
 
 
 class NoteCreateError(ValueError):
@@ -137,12 +132,9 @@ def _check_name_part(part: str, *, code: str, what: str) -> None:
     A vault is synced between machines, and ``NUL.md`` or ``a:b`` would be
     silently discarded or rejected where the note lands next.
     """
-    if (
-        any(ch in '<>:"|?*' for ch in part)
-        or part.endswith((".", " "))
-        or part.split(".")[0].strip().upper() in _WINDOWS_RESERVED
-    ):
-        raise NoteCreateError(code, f"{what} {part!r} is not a valid file name on every platform.")
+    problem = portable_name_problem(part)
+    if problem is not None:
+        raise NoteCreateError(code, f"{what} {part!r} {problem}.")
 
 
 def _folder_parts(raw: str) -> list[str]:
