@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ciao import subagent_tracking
+from ciao.providers.base import BACKGROUND_WORK_MAX_S as _BACKGROUND_WORK_MAX_S
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_collab_tree_counts,
@@ -69,6 +70,10 @@ _ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # batches a burst of finished scripts into one turn, this one waits out
 # startup, and they are free to diverge.
 _STARTUP_WAKE_COALESCE_SECONDS = 5.0
+
+# The cap lives in providers.base (the providers enforce it too); re-exported
+# here as the watcher horizon.
+BACKGROUND_WORK_MAX_S = _BACKGROUND_WORK_MAX_S
 
 
 class SubagentWatcherHost(Protocol):
@@ -281,8 +286,8 @@ class SubagentWatchers:
         cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
-        # per tick, a re-parse only when the file grew) with a wide horizon.
-        deadline = time.perf_counter() + 3600
+        # per tick, a re-parse only when the file grew) up to the shared cap.
+        deadline = time.perf_counter() + BACKGROUND_WORK_MAX_S
         try:
             while time.perf_counter() < deadline:
                 try:
@@ -367,7 +372,7 @@ class SubagentWatchers:
         """Poll the opencode session tree and its background shells while background work runs."""
         last_count = -1
         last_work = -1
-        deadline = time.perf_counter() + 3600
+        deadline = time.perf_counter() + BACKGROUND_WORK_MAX_S
         try:
             while time.perf_counter() < deadline:
                 chat = self._host._chats.get(chat_id)

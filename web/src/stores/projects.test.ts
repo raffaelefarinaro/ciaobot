@@ -1709,6 +1709,132 @@ describe('stopped turns', () => {
     }
   })
 
+  // A finished turn whose reply the history fetches did not show inside the
+  // retry ladder (a fetch that failed while a resumed phone was still waking
+  // its network, a slow read): the spinner comes down, but the client keeps
+  // looking instead of leaving the user's own bubble last until they reload.
+  function finishTurn(store: ReturnType<typeof useProjectStore>, chatId: string) {
+    store.connectEventsWs()
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({ type: 'chat_streaming_done', chat_id: chatId, project_id: 'p1', is_error: false }),
+    })
+  }
+  const ASK = { role: 'user' as const, content: 'fix the migration', timestamp: '' }
+  const ANSWER = { role: 'assistant' as const, content: 'The grants are already correct.', timestamp: '2026-10-27T00:38:52Z' }
+
+  test('keeps looking for a reply the retry ladder missed', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-late-reply'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return calls <= 7 ? [ASK] : [ASK, ANSWER]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+      expect(store.streaming[chatId]).toBe(false)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ASK.content)
+
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a history fetch that fails is retried, not read as no reply', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-offline-wake'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        if (calls <= 6) throw new TypeError('Load failed')
+        return [ASK, ANSWER]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(40000)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('stops looking once the user leaves the chat', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-left'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return [ASK]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+      store.activeChatId = 'c-elsewhere'
+      const before = calls
+      await vi.advanceTimersByTimeAsync(180000)
+      expect(calls).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('gives up after about two minutes when the turn really has no reply', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-no-reply'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return [ASK]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(180000)
+      const settled = calls
+      await vi.advanceTimersByTimeAsync(600000)
+      expect(calls).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('coming back online refetches a chat still waiting on its reply', async () => {
+    const store = useProjectStore()
+    const chatId = 'c-online'
+    store.activeChatId = chatId
+    store.messages[chatId] = [{ ...ASK }]
+    apiGet.mockImplementation(async (url: string) => (url.includes('/messages') ? [ASK, ANSWER] : []))
+
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content))
+  })
+
   test('keeps the spinner while the server still reports the chat streaming', async () => {
     // The backstop must not fire on a slow turn: the server is the authority
     // on whether work is still running.
@@ -2222,6 +2348,15 @@ describe('move to background', () => {
     apiPost.mockRejectedValueOnce(new Error('offline'))
     expect(await store.moveChatToBackground('c')).toBe(false)
     expect(store.toasts.at(-1)?.title).toBe('Could not move to background')
+  })
+})
+
+describe('stop a background task', () => {
+  test('stopBackgroundTask posts to the chat-scoped route with the id escaped', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ ok: true })
+    await store.stopBackgroundTask('c1', 'task/1')
+    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c1/background-tasks/task%2F1/stop', {})
   })
 })
 
@@ -5124,58 +5259,6 @@ describe('background agents indicator', () => {
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
     expect(store.backgroundAgents['c-live']).toBe(2)
-  })
-
-  test('tracked background runs carry their rows, cleared when none are left', () => {
-    vi.useFakeTimers()
-    const store = useProjectStore()
-    const chatId = 'c-run'
-    store.activeChatId = chatId
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const row = (runId: string, over: Record<string, unknown> = {}) => ({
-      run_id: runId, label: 'clone', cmd: ['git', 'clone'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null, ...over,
-    })
-    const fire = (runs: unknown[], finished?: unknown) =>
-      sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_background_runs', chat_id: chatId, project_id: 'p1', runs, finished }),
-      })
-
-    fire([row('r1')])
-    expect(store.activeBackgroundRuns.map(r => r.run_id)).toEqual(['r1'])
-    expect(store.chatHasBackgroundRuns(chatId)).toBe(true)
-    fire([row('r1'), row('r2')])
-    expect(store.activeBackgroundRuns).toHaveLength(2)
-    fire([], row('r2', { status: 'error', exit_code: 1 }))
-    expect(store.backgroundRuns[chatId]).toBeUndefined()
-    expect(store.chatHasBackgroundRuns(chatId)).toBe(false)
-    // How the last run ended is held briefly for the composer, then dropped.
-    expect(store.finishedBackgroundRuns[chatId]?.exit_code).toBe(1)
-    vi.advanceTimersByTime(6000)
-    expect(store.finishedBackgroundRuns[chatId]).toBeUndefined()
-    // Background agents are a separate signal; a run must not light that pill.
-    expect(store.activeBackgroundAgents).toBe(0)
-    vi.useRealTimers()
-  })
-
-  test('the snapshot re-seeds runs for a client that missed the start', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    store.backgroundRuns['c-stale'] = []
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-    const live = { run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '', status: 'running', exit_code: null }
-    sock.onmessage?.({
-      data: JSON.stringify({
-        type: 'snapshot',
-        active_streams: [],
-        background_runs: { 'c-live': [live] },
-        chat_pins: {},
-        chat_terminal_offers: {},
-      }),
-    })
-    expect(store.backgroundRuns['c-stale']).toBeUndefined()
-    expect(store.backgroundRuns['c-live']).toEqual([live])
   })
 })
 
@@ -8271,6 +8354,56 @@ describe('running subagent poll', () => {
       vi.useRealTimers()
     }
   })
+
+  test('a shell row keeps the poll alive past the drain budget until the server omits it', async () => {
+    const store = useProjectStore()
+    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null, stoppable: true }]
+    let rows: unknown[] = shell
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/subagents/running') return Promise.resolve({ chats: rows.length ? { c1: rows } : {} })
+      return Promise.resolve([])
+    })
+    const polls = () => apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length
+
+    vi.useFakeTimers()
+    try {
+      store.streaming = { c1: true }
+      await vi.advanceTimersByTimeAsync(0)
+      store.streaming = { c1: false }
+      await vi.advanceTimersByTimeAsync(0)
+
+      await vi.advanceTimersByTimeAsync(95_000)
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(polls()).toBeGreaterThan(10)
+
+      rows = []
+      await vi.advanceTimersByTimeAsync(8_000)
+      expect(store.runningSubagentsFor('c1')).toEqual([])
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(polls()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a shell row discovered while nothing is working starts the poll', async () => {
+    const store = useProjectStore()
+    const shell = [{ agent_id: 'task:b1', description: 'sleep 3600', subagent_type: 'shell', status: 'running', is_async: true, turn_index: null }]
+    mockRunning({ c1: shell })
+
+    vi.useFakeTimers()
+    try {
+      await store.refreshRunningSubagents()
+      await vi.advanceTimersByTimeAsync(0)
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/subagents/running').length).toBeGreaterThan(10)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('running-row reconciliation while the engine count is zero', () => {
@@ -9493,5 +9626,87 @@ describe('chatsHealth', () => {
     await store.syncLatest()
     expect(store.chatsHealth.status).toBe('ready')
     expect(store.chatsHealth.error).toBe('')
+  })
+})
+
+describe('stopBackgroundTask', () => {
+  const shellRow = (id: string) => ({ agent_id: `task:${id}`, description: id, subagent_type: 'shell', stoppable: true })
+
+  beforeEach(() => {
+    setActivePinia(newPinia())
+    apiPost.mockReset()
+    apiPost.mockResolvedValue({ ok: true })
+    vi.useFakeTimers()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('counts a chat holding only a native shell as busy', () => {
+    const store = useProjectStore()
+    expect(store.anyChatBusy).toBe(false)
+    store.runningSubagents = { c1: [shellRow('b1')] } as never
+    expect(store.anyChatBusy).toBe(true)
+    expect(store.chatIsWorking('c1')).toBe(true)
+  })
+
+  it('posts to the stop route and marks the task stopping, per chat', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c1/background-tasks/b1/stop', {})
+    expect(store.stoppingTasks).toEqual({ c1: { b1: true } })
+    expect(store.stopTaskErrors).toEqual({})
+  })
+
+  it('ignores a second stop while one is pending', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets go of the lock after 15 s so Stop can be retried', async () => {
+    const store = useProjectStore()
+    await store.stopBackgroundTask('c1', 'b1')
+    vi.advanceTimersByTime(14_999)
+    expect(store.stoppingTasks.c1?.b1).toBe(true)
+    vi.advanceTimersByTime(1)
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(apiPost).toHaveBeenCalledTimes(2)
+  })
+
+  it('records an error and releases the lock when the stop is rejected, clearing it on retry', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValueOnce(new Error('boom'))
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    expect(store.stopTaskErrors.c1?.b1).toBe('Could not stop this process. Try again.')
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(store.stopTaskErrors.c1?.b1).toBeUndefined()
+    expect(store.stoppingTasks.c1?.b1).toBe(true)
+  })
+
+  it('releases a task, and its error, once its row leaves the running list', async () => {
+    const store = useProjectStore()
+    store.runningSubagents = { c1: [shellRow('b1'), shellRow('b2')] } as unknown as typeof store.runningSubagents
+    await store.stopBackgroundTask('c1', 'b1')
+    await store.stopBackgroundTask('c1', 'b2')
+    store.stopTaskErrors = { c1: { b2: 'Could not stop this process. Try again.' } }
+    store.runningSubagents = { c1: [shellRow('b2')] } as unknown as typeof store.runningSubagents
+    await nextTick()
+    expect(store.stoppingTasks.c1?.b1).toBeUndefined()
+    expect(store.stoppingTasks.c1?.b2).toBe(true)
+    store.runningSubagents = {}
+    await nextTick()
+    expect(store.stoppingTasks).toEqual({})
+    expect(store.stopTaskErrors).toEqual({})
+  })
+
+  it('stops its timers when the store is disposed', async () => {
+    const store = useProjectStore()
+    const before = vi.getTimerCount()
+    await store.stopBackgroundTask('c1', 'b1')
+    expect(vi.getTimerCount()).toBe(before + 1)
+    store.$dispose()
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

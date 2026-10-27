@@ -147,7 +147,6 @@ from ciao.provider_service import ProviderService, capabilities_for, supported_p
 from ciao.providers.base import MoveToBackgroundOutcome
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import (
-    _OPENCODE_DRAIN_MAX_S,
     OpencodeProvider,
     QuestionResponseResult,
 )
@@ -203,7 +202,7 @@ from ciao.web.document_conversion import (
     is_natively_readable,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao.web.subagent_watchers import SubagentWatchers
+from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S, SubagentWatchers
 
 logger = logging.getLogger(__name__)
 
@@ -5036,12 +5035,12 @@ class ProjectChatManager:
         """Whether a provider still has background work a teardown would cut off."""
         if service is None or not service.background_work_outstanding:
             return False
-        # Same horizon as the drain: a server whose drain ended with work
-        # still outstanding stays up while its events are recent, then
-        # falls back to the idle timeout.
+        # A provider whose drain ended with work still outstanding stays up
+        # while its events are recent (up to the shared background-work cap),
+        # then falls back to the idle timeout.
         return bool(
             self._streaming.has_live_drain(chat_id)
-            or service.background_activity_age < _OPENCODE_DRAIN_MAX_S
+            or service.background_activity_age < BACKGROUND_WORK_MAX_S
         )
 
     def _provider_is_busy(self, chat_id: str, active: set[str]) -> bool:
@@ -7265,6 +7264,18 @@ class ProjectChatManager:
         ids.update(self.background_agent_counts)
         ids.update(self._subagents.watching_chat_ids())
         return sorted(ids)
+
+    def background_work_chat_ids(self) -> list[str]:
+        """Chats whose provider still reports background work (native shells, subagents).
+
+        Separate from ``active_chat_ids`` on purpose: that set drives restart
+        drains, this one only decides which chats the running-work feed lists.
+        """
+        return sorted(
+            chat_id
+            for chat_id, service in self._providers.items()
+            if self._provider_background_busy(chat_id, service)
+        )
 
     def restart_blockers(self) -> list[dict[str, Any]]:
         """Chats a restart or stop would break, each with the reasons why. Superset of active_chat_ids()."""

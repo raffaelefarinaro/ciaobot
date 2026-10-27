@@ -1,13 +1,11 @@
 """Regression tests for Claude background shell commands.
 
-Claude Code kills a ``Bash(run_in_background=true)`` process when its SDK
-turn ends, then reports the stopped task only when the session is resumed.
-Ciaobot keeps Bash commands in the foreground so the turn owns the process
-until a real tool result exists. Detached launches (``nohup … &``, a bare
-trailing ``&``, ``setsid``/``disown``) and the CLI's built-in ``Monitor``
-tool are denied outright: they die with the CLI subprocess and never deliver
-a completion to the chat. Both denials point at the managed
-``ciao run start -- …`` command.
+Native ``Bash(run_in_background=true)`` and ``Monitor`` calls are tracked and
+woken by the CLI, and Ciaobot keeps the provider alive while they run, so the
+hook leaves them alone. Detached launches (``nohup … &``, a bare trailing
+``&``, ``setsid``/``disown``) escape the CLI's tracking and are denied; the
+denial points at ``run_in_background`` and, for a command that must outlive
+the provider, ``ciao run start -- …``.
 """
 
 from __future__ import annotations
@@ -16,35 +14,27 @@ import pytest
 
 from ciao.observability.hooks import (
     BACKGROUND_RUN_GUIDANCE,
-    build_foreground_bash_hook,
-    build_monitor_deny_hook,
+    build_detached_shell_deny_hook,
 )
 
 
 @pytest.mark.asyncio
-async def test_background_bash_is_rewritten_to_foreground() -> None:
-    hook = build_foreground_bash_hook()
-    original = {
-        "command": "python -m ciao.cli vault-index --write",
-        "description": "Refresh the vault index",
-        "run_in_background": True,
-        "timeout": 600_000,
-    }
+async def test_native_background_bash_is_allowed() -> None:
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
-        {"tool_name": "Bash", "tool_input": original},
+        {
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "python -m ciao.cli vault-index --write",
+                "run_in_background": True,
+            },
+        },
         "tool-use-1",
         None,
     )
 
-    specific = out["hookSpecificOutput"]
-    assert specific["hookEventName"] == "PreToolUse"
-    assert specific["updatedInput"] == {
-        **original,
-        "run_in_background": False,
-    }
-    assert "foreground" in specific["additionalContext"].lower()
-    assert original["run_in_background"] is True
+    assert out == {}
 
 
 @pytest.mark.asyncio
@@ -59,7 +49,7 @@ async def test_background_bash_is_rewritten_to_foreground() -> None:
 async def test_hook_leaves_supported_tool_calls_unchanged(
     tool_name: str, tool_input: dict[str, object]
 ) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": tool_name, "tool_input": tool_input},
@@ -72,7 +62,7 @@ async def test_hook_leaves_supported_tool_calls_unchanged(
 
 @pytest.mark.asyncio
 async def test_nohup_bash_is_denied_with_background_run_guidance() -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {
@@ -90,12 +80,14 @@ async def test_nohup_bash_is_denied_with_background_run_guidance() -> None:
 
     specific = out["hookSpecificOutput"]
     assert specific["permissionDecision"] == "deny"
+    assert "run_in_background" in specific["permissionDecisionReason"]
     assert "ciao run start" in specific["permissionDecisionReason"]
+    assert BACKGROUND_RUN_GUIDANCE in specific["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
 async def test_trailing_ampersand_is_denied() -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": "python x.py &"}},
@@ -118,7 +110,7 @@ async def test_trailing_ampersand_is_denied() -> None:
     ],
 )
 async def test_command_substitution_detached_launches_are_denied(command: str) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -141,7 +133,7 @@ async def test_command_substitution_detached_launches_are_denied(command: str) -
     ],
 )
 async def test_benign_command_substitutions_are_not_denied(command: str) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -163,7 +155,7 @@ async def test_benign_command_substitutions_are_not_denied(command: str) -> None
     ],
 )
 async def test_literal_ampersands_in_text_are_not_denied(command: str) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -184,7 +176,7 @@ async def test_literal_ampersands_in_text_are_not_denied(command: str) -> None:
     ],
 )
 async def test_midline_ampersand_jobs_are_denied(command: str) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -211,7 +203,7 @@ async def test_midline_ampersand_jobs_are_denied(command: str) -> None:
     ],
 )
 async def test_ordinary_shell_operators_are_not_denied(command: str) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -224,7 +216,7 @@ async def test_ordinary_shell_operators_are_not_denied(command: str) -> None:
 
 @pytest.mark.asyncio
 async def test_detached_command_with_run_in_background_is_denied() -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {
@@ -254,7 +246,7 @@ async def test_detached_command_with_run_in_background_is_denied() -> None:
     ],
 )
 async def test_nested_shell_detached_commands_are_denied(command: str) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -278,7 +270,7 @@ async def test_nested_shell_detached_commands_are_denied(command: str) -> None:
     ],
 )
 async def test_nested_shell_ordinary_commands_are_not_denied(command: str) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -299,7 +291,7 @@ async def test_nested_shell_ordinary_commands_are_not_denied(command: str) -> No
     ],
 )
 async def test_detached_jobs_are_denied(command: str) -> None:
-    hook = build_foreground_bash_hook()
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
         {"tool_name": "Bash", "tool_input": {"command": command}},
@@ -313,31 +305,12 @@ async def test_detached_jobs_are_denied(command: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_monitor_tool_is_denied() -> None:
-    hook = build_monitor_deny_hook()
+async def test_monitor_tool_is_allowed() -> None:
+    hook = build_detached_shell_deny_hook()
 
     out = await hook(
-        {
-            "tool_name": "Monitor",
-            "tool_input": {"command": "tail -f /tmp/x.log"},
-        },
+        {"tool_name": "Monitor", "tool_input": {"command": "tail -f /tmp/x.log"}},
         "tool-use-6",
-        None,
-    )
-
-    specific = out["hookSpecificOutput"]
-    assert specific["hookEventName"] == "PreToolUse"
-    assert specific["permissionDecision"] == "deny"
-    assert specific["permissionDecisionReason"] == BACKGROUND_RUN_GUIDANCE
-
-
-@pytest.mark.asyncio
-async def test_monitor_hook_ignores_other_tools() -> None:
-    hook = build_monitor_deny_hook()
-
-    out = await hook(
-        {"tool_name": "Bash", "tool_input": {"command": "tail -f /tmp/x.log"}},
-        "tool-use-7",
         None,
     )
 

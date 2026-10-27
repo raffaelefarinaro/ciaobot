@@ -20,6 +20,13 @@ from ciao.models import (
 )
 
 
+# One cap for background work (agents, shells, monitors): a watcher keeps
+# polling, and a provider with outstanding background work stays protected
+# from the idle reap, reload and restart gate, for up to this long. A task
+# that never reports a terminal state is forgotten after it.
+BACKGROUND_WORK_MAX_S = 24 * 3600
+
+
 def _legacy_workspace_context(raw: str | None) -> str:
     value = (raw or "").strip()
     return value if value in {"personal", "work"} else ""

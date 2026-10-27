@@ -919,5 +919,7 @@ async def test_refresh_background_shells_drops_commands_of_vanished_shells(tmp_p
     _script(monkeypatch, provider, shells=[{"sh_live"}])
 
     assert await provider.refresh_background_shells() == 1
-    assert provider.background_shell_rows() == [{"id": "sh_live", "command": "npm run dev"}]
+    rows = provider.background_shell_rows()
+    assert [(row["id"], row["command"]) for row in rows] == [("sh_live", "npm run dev")]
+    assert isinstance(rows[0]["started_at"], float)
     assert provider._shell_commands == {"sh_live": "npm run dev"}

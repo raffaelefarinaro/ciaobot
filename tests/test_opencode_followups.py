@@ -19,6 +19,7 @@ from ciao.providers.opencode import OpencodeProvider
 from ciao.web.chat_broker import ChatStream
 from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.project_chats import ProjectChatManager
+from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S
 from tests.test_chat_streaming_boundary import _DriveHost
 from tests.test_chat_subagents import _make_manager
 from tests.test_opencode_background_wake import (
@@ -574,8 +575,8 @@ async def test_reaper_keeps_a_server_with_outstanding_work_until_the_horizon(tmp
     assert await pcm.reap_idle_providers(force=True) == []
     assert disconnected == []
 
-    # Past the 1 h horizon with no provider activity the server is reclaimed.
-    provider._last_activity = time.monotonic() - opencode_module._OPENCODE_DRAIN_MAX_S - 1
+    # Past the background-work cap with no provider activity the server is reclaimed.
+    provider._last_activity = time.monotonic() - BACKGROUND_WORK_MAX_S - 1
     pcm._provider_last_used[chat.chat_id] = time.monotonic() - 10**6
     assert await pcm.reap_idle_providers(force=True) == [chat.chat_id]
     assert disconnected == [True]

@@ -122,15 +122,11 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     assert settings["skillOverrides"] == harness_skill_overrides()
     assert settings["skillOverrides"]["schedule"] == "off"
     assert settings["skillOverrides"]["loop"] == "off"
-    # A background Bash process dies when the SDK turn ends and Claude only
-    # reports that stop after the next user message. The managed provider
-    # must install the hook that forces those calls to stay in the turn,
-    # plus the hook that denies the CLI's Monitor watcher (same lifetime
-    # problem): both long-running paths must route through
-    # `ciao run start -- …` instead.
+    # Native background Bash and Monitor run unchanged; the one Bash hook only
+    # denies detached launches (nohup, &, setsid, disown).
     bash_hooks = options.hooks["PreToolUse"]
     matchers = {hook.matcher for hook in bash_hooks}
-    assert matchers == {"Bash", "Monitor"}
+    assert matchers == {"Bash"}
 
 
 @pytest.mark.asyncio
@@ -1527,7 +1523,7 @@ async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -
     options = captured["options"]
     assert options.sandbox is None
     assert options.add_dirs == []
-    assert [m.matcher for m in options.hooks["PreToolUse"]] == ["Bash", "Monitor"]
+    assert [m.matcher for m in options.hooks["PreToolUse"]] == ["Bash"]
     assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
 
 
@@ -3301,6 +3297,39 @@ async def test_claude_cli_gets_the_initialize_budget_and_startup_failure_results
     assert options.env["CIAO_CHAT_ID"] == "chat-1"
     # The SDK reads this from the process environment, not from options.
     assert os.environ["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] == "180000"
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_background_bash_may_run_for_the_background_work_horizon(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The CLI stops a background Bash at its timeout (default 30 min, capped at
+    # max(2 h, BASH_MAX_TIMEOUT_MS)); a 70-minute native shell was killed at
+    # 30 min before this (#2216).
+    constructed: list[object] = []
+
+    class FakeClient:
+        def __init__(self, options):
+            constructed.append(options)
+
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    monkeypatch.delenv("BASH_MAX_TIMEOUT_MS", raising=False)
+    await ClaudeProvider(tmp_path)._ensure_connected(
+        AgentRequest(prompt="test", model="sonnet", mode="auto")
+    )
+    assert constructed[0].env["BASH_MAX_TIMEOUT_MS"] == str(24 * 3600 * 1000)
+
+    # An operator value wins, from the request env or the engine's own.
+    await ClaudeProvider(tmp_path)._ensure_connected(
+        AgentRequest(prompt="test", model="sonnet", mode="auto", extra_env={"BASH_MAX_TIMEOUT_MS": "5000"})
+    )
+    assert constructed[1].env["BASH_MAX_TIMEOUT_MS"] == "5000"
+    monkeypatch.setenv("BASH_MAX_TIMEOUT_MS", "7000")
+    await ClaudeProvider(tmp_path)._ensure_connected(
+        AgentRequest(prompt="test", model="sonnet", mode="auto")
+    )
+    assert "BASH_MAX_TIMEOUT_MS" not in constructed[2].env
 
 
 @pytest.mark.asyncio

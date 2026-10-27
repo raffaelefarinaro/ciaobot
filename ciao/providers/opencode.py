@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -1751,6 +1751,9 @@ class OpencodeProvider(BaseSDKProvider):
         # Command of each shell seen in `shell.created`, for the composer's
         # process list. A shell found only by `GET /api/shell` has no entry.
         self._shell_commands: dict[str, str] = {}
+        # Epoch seconds at which each running shell was first seen here, for
+        # the composer's elapsed time; cleared with the shell.
+        self._shell_started: dict[str, float] = {}
         self._background_children: set[str] = set()
         # Task/subagent sessions spawned under a parent session (any depth),
         # child id -> parent session. Only their permission/form requests are
@@ -1914,12 +1917,29 @@ class OpencodeProvider(BaseSDKProvider):
         """Background shells plus subagents tracked for this chat's session."""
         return len(self._background_shells) + len(self._background_children)
 
-    def background_shell_rows(self) -> list[dict[str, str]]:
-        """``{id, command}`` for each live background shell, in id order."""
+    def background_shell_rows(self) -> list[dict[str, Any]]:
+        """``{id, command, started_at}`` for each live background shell, in id order."""
         return [
-            {"id": shell_id, "command": self._shell_commands.get(shell_id, "")}
+            {
+                "id": shell_id,
+                "command": self._shell_commands.get(shell_id, ""),
+                "started_at": self._shell_started.setdefault(shell_id, time.time()),
+            }
             for shell_id in sorted(self._background_shells)
         ]
+
+    async def stop_background_shell(self, shell_id: str) -> bool:
+        """Terminate one tracked background shell (``DELETE /api/shell/:id``).
+
+        False when the shell is not tracked here or the server refused. The
+        shell leaves the tracked set on its ``shell.exited`` event or the next
+        reconcile, not here. A transport failure propagates as ``httpx.HTTPError``.
+        """
+        client = self._client
+        if client is None or shell_id not in self._background_shells:
+            return False
+        response = await client.delete(f"/api/shell/{quote(shell_id, safe='')}")
+        return bool(response.status_code < 400)
 
     @property
     def seconds_since_activity(self) -> float:
@@ -1950,10 +1970,12 @@ class OpencodeProvider(BaseSDKProvider):
             ):
                 self._background_shells.add(str(info["id"]))
                 self._shell_commands[str(info["id"])] = str(info.get("command") or "")
+                self._shell_started[str(info["id"])] = time.time()
                 changed = True
         elif kind == "shell.exited":
             shell_id = str(props.get("id") or "")
             self._shell_commands.pop(shell_id, None)
+            self._shell_started.pop(shell_id, None)
             if shell_id in self._background_shells:
                 self._background_shells.discard(shell_id)
                 changed = True
@@ -2021,6 +2043,8 @@ class OpencodeProvider(BaseSDKProvider):
         """Take the server's running shells, dropping commands of shells that are gone."""
         self._background_shells = shells
         self._shell_commands = {k: v for k, v in self._shell_commands.items() if k in shells}
+        now = time.time()
+        self._shell_started = {k: self._shell_started.get(k, now) for k in shells}
 
     def _set_background_children(self, active: set[str], session_id: str) -> None:
         """Replace ``_background_children`` with what the server reports running.
@@ -2667,6 +2691,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._settled_tool_ids.clear()
         self._background_shells.clear()
         self._shell_commands.clear()
+        self._shell_started.clear()
         self._background_children.clear()
         self._child_sessions.clear()
         self._background_changed.set()

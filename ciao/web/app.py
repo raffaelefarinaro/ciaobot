@@ -81,6 +81,7 @@ from ciao.web.routes_api import (
     chat_stop,
     chat_move_to_background,
     chat_background_run_cancel,
+    chat_background_task_stop,
     chat_background_run_log,
     chat_new_session,
     chat_subagents,
@@ -475,6 +476,11 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
         Route(
             "/api/chats/{chat_id}/background-runs/{run_id}/cancel",
             chat_background_run_cancel,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/chats/{chat_id}/background-tasks/{task_id}/stop",
+            chat_background_task_stop,
             methods=["POST"],
         ),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
