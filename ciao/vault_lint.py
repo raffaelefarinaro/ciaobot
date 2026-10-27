@@ -417,8 +417,6 @@ def _inline_markdown_destinations(text: str):
             index += 1
             continue
         after_label = label_close + 1
-        while after_label < len(text) and text[after_label].isspace():
-            after_label += 1
         if after_label >= len(text) or text[after_label] != "(":
             index = label_close + 1
             continue

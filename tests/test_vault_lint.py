@@ -317,6 +317,34 @@ def test_balanced_destinations_and_nested_labels_are_parsed(tmp_path: Path) -> N
     ]
 
 
+def test_whitespace_after_label_is_not_a_link(tmp_path: Path) -> None:
+    vault = _single_page_vault(
+        tmp_path,
+        "- [k] [2026-10-26 \u2192 2026-10-26] (x1) About\n"
+        "[space] (missing-space.md)\n"
+        "[tab]\t(missing-tab.md)\n"
+        "[newline]\n(missing-newline.md)\n",
+    )
+
+    assert vault_lint.run_validation(vault)["broken_markdown_links"] == []
+
+
+def test_link_after_non_link_label_is_still_checked(tmp_path: Path) -> None:
+    vault = _single_page_vault(
+        tmp_path,
+        "foo [no src link] ([task](missing.md))\n"
+        "![image](missing-image.png)\n"
+        "[valid](Page.md)\n",
+    )
+
+    broken = vault_lint.run_validation(vault)["broken_markdown_links"]
+
+    assert [(item["target"], item["kind"]) for item in broken] == [
+        ("missing.md", "missing_target"),
+        ("missing-image.png", "missing_target"),
+    ]
+
+
 def test_nested_markdown_targets_and_directories_resolve(tmp_path: Path) -> None:
     vault = tmp_path / "memory-vault"
     source = vault / "section" / "Page.md"
