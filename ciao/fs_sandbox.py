@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import site
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -500,25 +501,36 @@ def claude_task_output_path_allowed(
 
     Exactly ``<tmp base>/claude-<uid>/<one segment>/<session_id>/tasks/<name>.output``
     after resolving symlinks and ``..``; anything else, or a missing or
-    malformed *session_id*, is refused.
+    malformed *session_id*, is refused. The target must be a regular file with
+    one link, reached without a final symlink, and *value* is not trimmed.
     """
     if not _TASK_SESSION_ID.fullmatch(session_id):
         return False
-    if any(char in value for char in "*?[{"):
+    if value != value.strip() or value.endswith("/"):
+        return False
+    if any(char in value for char in "*?[{\x00\n\r"):
         return False
     base = Path(tmp_base or "/tmp").expanduser().resolve() / f"claude-{uid}"
-    candidate = Path(value.strip()).expanduser()
+    candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         candidate = cwd / candidate
+    if os.path.islink(candidate):
+        return False
     resolved = candidate.resolve()
     depth = len(base.parts)
-    return (
+    if not (
         resolved.is_relative_to(base)
         and len(resolved.parts) == depth + 4
         and resolved.parts[depth + 1] == session_id
         and resolved.parts[depth + 2] == "tasks"
         and resolved.name.endswith(".output")
-    )
+    ):
+        return False
+    try:
+        info = resolved.stat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
 
 
 def claude_file_tool_guard(*, cwd: Path, roots: list[Path], cli_tmp_base: str | None = None) -> Any:
