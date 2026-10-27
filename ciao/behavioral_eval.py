@@ -2688,7 +2688,7 @@ def _opencode_bash_rules() -> set[str]:
     except Exception:  # noqa: BLE001
         return set()
     shell_rules = [r for r in rules if r.get("action") == "shell"]
-    samples = {"ciao memory status", "ciao chat delete", "ciao run start"}
+    samples = {"ciao memory status", "ciao chat delete", "ciao project delete"}
 
     def effective(cmd: str) -> str | None:
         for rule in reversed(shell_rules):

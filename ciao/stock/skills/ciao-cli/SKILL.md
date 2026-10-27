@@ -1,6 +1,6 @@
 ---
 name: ciao-cli
-description: "Exact syntax, flags, guards and error codes for the `ciao <noun> <verb>` commands that read or change Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, background runs, surfacing a file in the pinned panel, and filing into the review queues. Use when a chat needs the exact form of one of those commands. What to write to memory or the vault, and when, is the `ciao-memory` skill's policy, not this one's."
+description: "Exact syntax, flags, guards and error codes for the `ciao <noun> <verb>` commands that read or change Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, surfacing a file in the pinned panel, and filing into the review queues. Use when a chat needs the exact form of one of those commands. What to write to memory or the vault, and when, is the `ciao-memory` skill's policy, not this one's."
 ---
 
 # ciao CLI
@@ -10,7 +10,7 @@ One `ciao <noun> <verb>` command per Ciaobot operation, callable from the shell.
 ## When to use / when not to
 
 Use it for:
-- Reading or changing Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, background runs, and the memory, vault and review-queue commands (syntax only; their write policy is `ciao-memory`).
+- Reading or changing Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, and the memory, vault and review-queue commands (syntax only; their write policy is `ciao-memory`).
 - Surfacing a file you produced in the user's pinned preview panel.
 - Suggesting a terminal command the user can review and run themselves.
 
@@ -28,13 +28,17 @@ Not for:
 - `--chat ID` is optional on every chat-scoped command and defaults to the calling chat. Pointing it at another chat in the same workspace is allowed; pointing it at a chat in a different workspace returns `workspace_forbidden`. The one exception is `chat terminal-offer`, which has no `--chat` at all: the suggestion belongs to the chat that asked for it.
 - Ids are not the only accepted form. `--project` (and a positional project argument) takes a project **name**, and `--chat` takes a chat **title**, matched case-insensitively and exactly, inside the calling chat's workspace only. A title has to name exactly one non-archived chat: two matches, none, or a match in another workspace all return `chat_not_found`, an unknown project returns `project_not_found`, and a name two projects in the workspace share returns `project_ambiguous` (pass the id). Resolution never widens scope, so a name can only ever reach something the id would have reached.
 - A plan-mode chat gets `plan_mode_read_only` back from any mutating command — plan mode is read-only by design, not a permission you can flag past.
-- Destructive commands (`chat delete`, `chat stop`, `project complete`, `project delete`, `schedule pause|resume|run|delete`, `webhook delete`, `run start`, `run cancel`, and every `vault review` mutation) can return `approval_required` outside auto/bypass mode. That is not a failure to retry — it means a human has to approve the action first.
+- Destructive commands (`chat delete`, `chat stop`, `project complete`, `project delete`, `schedule pause|resume|run|delete`, `webhook delete`, and every `vault review` mutation) can return `approval_required` outside auto/bypass mode. That is not a failure to retry — it means a human has to approve the action first.
 - `schedule create|update --command` sets a shell command that later runs with no permission prompt. Outside bypass mode it returns `command_requires_operator`: create the schedule without it and ask the user to add the command in the schedule's Prompt card. Do not retry.
-- Structured input is the exception, not the rule: only `chat handover --messages @file.json`, `chat terminal-offer --command-file FILE` and `run start -- <cmd> [args...]` take it. Everywhere else, arguments are scalar flags or a constrained enum value. For `run start`, everything after `--` is the literal argv passed to the subprocess — no shell, so `run start -- bash -lc "a && b"` is how you get shell features, and you own that choice.
+- Structured input is the exception, not the rule: only `chat handover --messages @file.json` and `chat terminal-offer --command-file FILE` take it. Everywhere else, arguments are scalar flags or a constrained enum value.
 
 ### Reloading tools
 
 `/mcp`, `/reload-plugins` and the other Claude Code / opencode terminal slash commands do not exist in Ciaobot. When an MCP server, plugin or skill was added or changed, run `ciao chat reload`.
+
+### Long-running commands
+
+For a long command use the provider's native background shell (Bash `run_in_background`, `Monitor`, OpenCode's background shell): it wakes the chat when it finishes and Ciaobot keeps the provider alive meanwhile. On Claude, a background Bash stops at its `timeout` (30 minutes by default): pass a `timeout` that covers the run, up to 24 hours.
 
 ## Commands
 
@@ -220,16 +224,6 @@ then tell them the sender needs the secret as a bearer token.
 
 Instructions are operator prose that the launched turn reads as its own, so
 they travel as a file (`--instructions-file`) rather than as a shell argument.
-
-### Background runs
-
-For a long command, prefer the provider's native background shell (Bash `run_in_background`, `Monitor`, OpenCode's background shell): it wakes the chat when it finishes and Ciaobot keeps the provider alive meanwhile. On Claude, a background Bash stops at its `timeout` (30 minutes by default): pass a `timeout` that covers the run, up to 24 hours. `ciao run start` is for a command that must not depend on the chat's provider process.
-
-| Command | Purpose | Guard |
-|---|---|---|
-| `run start [--cwd DIR] [--env K=V]... [--timeout-s N] [--label L] -- CMD [ARGS...]` | Run one command in a tracked background subprocess; the chat is woken with status, exit code, log tail, and log path when it exits. | Destructive (approval-gated). Does not block — end the turn after starting it, don't poll `run status` for the common case. `--cwd` must stay under the chat's workspace root; loader-hook env vars are rejected. For a dev or preview server, start it once in its own reload/watch mode (`npm run dev`, `uvicorn --reload`) and leave that run alive across edits; cancel it only when you are done. A cancel you make yourself does not wake the chat; every other exit does. |
-| `run status RUN_ID [--lines N]` | Status, exit code, and log tail for a run this chat started. | A run started by another chat reports as not found. |
-| `run cancel RUN_ID` | SIGTERM the run's process group, then SIGKILL after a grace period. | Destructive; idempotent — cancelling an already-finished run returns its final state unchanged. Your own cancel does not wake the chat (the reply is the final state); a cancel by the user from the PWA does. |
 
 ### Workspace and status
 

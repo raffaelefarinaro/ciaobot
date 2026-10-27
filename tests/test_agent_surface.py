@@ -169,12 +169,10 @@ def test_a_plan_mode_chat_cannot_verify_a_note(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "plan_mode_read_only"
 
 
-def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
-    """S4 removed the background-run and schedule groups from the MCP catalog
-    but the dispatcher must still run them as `ciao run …` / `ciao schedule …`
-    commands."""
+def test_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
+    """S4 removed the schedule group from the MCP catalog but the dispatcher
+    must still run it as `ciao schedule …` commands."""
     group = {
-        "background_run_start", "background_run_status", "background_run_cancel",
         "schedules_list", "schedule", "schedule_action",
     }
     service, _ = _service(tmp_path)
@@ -726,12 +724,6 @@ def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
             ["task", "link-chat", "a" * 32, "--revision", "r", "--chat", "c", "--remove"],
             ("task_link_chat", {"task_id": "a" * 32, "expected_revision": "r", "chat_id": "c", "remove": True}),
         ),
-        (
-            ["run", "start", "--label", "report", "--timeout-s", "900", "--env", "A=1", "--", "bash", "-lc", "a && b"],
-            ("background_run_start", {"cmd": ["bash", "-lc", "a && b"], "env": {"A": "1"}, "timeout_s": 900, "label": "report"}),
-        ),
-        (["run", "status", "run-1", "--lines", "20"], ("background_run_status", {"run_id": "run-1", "lines": 20})),
-        (["run", "cancel", "run-1"], ("background_run_cancel", {"run_id": "run-1"})),
         (["gws", "status"], ("gws_status", {})),
         (["workspace", "list"], ("workspaces_list", {})),
         (["repo", "candidates"], ("repo_candidates", {})),
@@ -828,7 +820,6 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "webhook create": ["--name", "n"], "webhook update": ["a" * 32, "--revision", "1"],
         "webhook rotate": ["a" * 32, "--revision", "1"],
         "webhook delete": ["a" * 32, "--revision", "1"],
-        "run start": ["--", "true"], "run status": ["r"], "run cancel": ["r"],
     }
     for command, operation in table.items():
         argv = command.split() + required.get(command, [])
@@ -875,8 +866,6 @@ def test_every_agent_command_is_in_the_telemetry_table() -> None:
 
 
 def test_shared_nouns_route_only_their_agent_verbs() -> None:
-    assert agent_cli.is_agent_invocation(["run", "start", "--", "true"])
-    assert agent_cli.is_agent_invocation(["run", "status", "r1"])
     assert agent_cli.is_agent_invocation(["gws", "status"])
     # `ciao run` is the operator's server launcher; `ciao gws <profile> …` the passthrough.
     assert not agent_cli.is_agent_invocation(["run"])
@@ -892,10 +881,6 @@ def test_cli_usage_errors_exit_2_before_any_request(capsys: pytest.CaptureFixtur
         agent_cli.main(["vault", "review"])
     assert excinfo.value.code == 2
     assert "<action>" in capsys.readouterr().err
-    assert agent_cli.main(["run", "start", "--label", "x"]) == 2
-    assert "needs a command" in capsys.readouterr().err
-    assert agent_cli.main(["run", "start", "--env", "NOEQUALS", "--", "true"]) == 2
-    assert "K=V" in capsys.readouterr().err
     assert agent_cli.main(["chat", "handover", "--messages", "{not json"]) == 2
     assert "--messages" in capsys.readouterr().err
 
@@ -969,7 +954,7 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     # is the CLI wording for every surface.
     append = system_prompt_payload("")["append"]
     assert "ciao help" in append and "ciao memory update" in append and "ciao vault search" in append
-    for name in ("memory_update", "vault_search", "vault_expand", "file_surface", "background_run_start", "MCP tools", "CLAUDE.md`, with"):
+    for name in ("memory_update", "vault_search", "vault_expand", "file_surface", "run start", "background_run_start", "MCP tools", "CLAUDE.md`, with"):
         assert name not in append, name
     assert "`AGENTS.md`" in append
     assert "ciao chat reload" in append
@@ -1044,16 +1029,17 @@ def test_provider_reuse_key_is_the_agent_token() -> None:
     assert provider_reuse_key(without) == ""
 
 
-def test_json_flag_is_not_stripped_from_the_run_command_payload() -> None:
+def test_json_flag_is_dropped_wherever_it_appears() -> None:
     from ciao.agent_cli import _strip_json_flag
 
     assert _strip_json_flag(["--json", "vault", "search", "x", "--json"]) == ["vault", "search", "x"]
-    payload = ["run", "start", "--json", "--", "python", "report.py", "--json"]
-    assert _strip_json_flag(payload) == ["run", "start", "--", "python", "report.py", "--json"]
-    parser = agent_cli.build_parser()
-    op, arguments = agent_cli.resolve(parser.parse_args(_strip_json_flag(payload)))
-    assert op == "background_run_start"
-    assert arguments["cmd"] == ["python", "report.py", "--json"]
+
+
+def test_run_start_is_not_an_agent_invocation() -> None:
+    assert not agent_cli.is_agent_invocation(["run", "start", "--", "true"])
+    assert not agent_cli.is_agent_invocation(["run", "status", "r"])
+    assert not agent_cli.is_agent_invocation(["run", "cancel", "r"])
+    assert not agent_cli.is_agent_invocation(["run"])
 
 
 def test_leading_json_flag_still_routes_to_the_agent_parser(

@@ -66,15 +66,6 @@ ciao webhook create --name "CI failure" --instructions-file @webhook.md --projec
 {"ok": true, "data": {"trigger": {"trigger_id": "5b1f…", "enabled": false, "revision": 1}, "secret": "kQ8…(shown once)"}}
 ```
 
-Background runs:
-```bash
-ciao run start --label "adoption report" --timeout-s 900 -- ./scripts/report.sh --full
-ciao run start --label "preview" -- npm run dev
-```
-```json
-{"ok": true, "data": {"run_id": "run_20b7", "label": "adoption report", "status": "started"}}
-```
-
 Workspace and status:
 ```bash
 ciao context get
