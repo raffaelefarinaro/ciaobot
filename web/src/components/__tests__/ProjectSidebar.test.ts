@@ -1094,39 +1094,6 @@ describe('ProjectSidebar accessible context menus', () => {
     expect(wrapper.get('.chat-repo-tag').classes()).toContain('chat-repo-tag--code-off')
     wrapper.unmount()
   })
-
-  it('rolls background runs up onto a collapsed project header', async () => {
-    const store = useProjectStore()
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: '/', component: { template: '<div />' } }],
-    })
-    await router.push('/')
-    await router.isReady()
-    const wrapper = mount(ProjectSidebar, {
-      attachTo: document.body,
-      props: { collapsed: false, mode: 'chat' },
-      global: { plugins: [router] },
-    })
-    await nextTick()
-    const projectId = store.chats[0].project_id
-    const group = () => wrapper.findAll('.project-group').find(g => g.find('.project-name').text().includes(
-      store.projects.find(p => p.project_id === projectId)!.name,
-    ))!
-    const chevron = () => group().get('.project-icon')
-    store.backgroundRuns = {
-      [store.chats[0].chat_id]: [{ run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null }],
-    }
-    if (chevron().attributes('aria-expanded') !== 'true') await chevron().trigger('click')
-    expect(group().find('.project-run-rollup').exists()).toBe(false)
-    await chevron().trigger('click')
-    const rollup = group().get('.project-run-rollup')
-    expect(rollup.attributes('aria-label')).toBe('1 background run in this project')
-    expect(rollup.find('.activity-glyph--run').exists()).toBe(true)
-    // Only the name truncates; a long name must not push the mark out of view.
-    expect(group().get('.project-name-text').find('.project-run-rollup').exists()).toBe(false)
-    wrapper.unmount()
-  })
 })
 
 describe('ProjectSidebar project ordering', () => {

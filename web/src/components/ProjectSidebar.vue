@@ -696,13 +696,6 @@
                       title="A chat in this project is working"
                       aria-label="A chat in this project is working"
                     ><span class="rollup-ring-core" aria-hidden="true" /></span>
-                    <span
-                      v-if="projectRunCount(project.project_id) > 0"
-                      class="project-run-rollup"
-                      role="img"
-                      :title="projectRunsLabel(project.project_id)"
-                      :aria-label="projectRunsLabel(project.project_id)"
-                    ><ActivityGlyph kind="run" /></span>
                   </template>
                 </button>
                 <input
@@ -1240,18 +1233,6 @@ function chatRowTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string {
   const facts = codeBadgeTitle(chat, repo)
   if (facts) lines.push(facts)
   return lines.join('\n')
-}
-
-// Background command runs across this project's visible chats. A run can sit
-// in a chat for hours (a dev server), so a collapsed project says it has one.
-function projectRunCount(projectId: string): number {
-  return store.projectChats(projectId)
-    .reduce((n, chat) => n + (store.backgroundRuns[chat.chat_id]?.length || 0), 0)
-}
-
-function projectRunsLabel(projectId: string): string {
-  const n = projectRunCount(projectId)
-  return n === 1 ? '1 background run in this project' : `${n} background runs in this project`
 }
 
 function workspaceInitial(workspace: string): string {
@@ -2715,11 +2696,6 @@ async function confirmDeleteChat(chatId: string) {
    double up. */
 .project-name .rollup-needs-dot,
 .project-name .rollup-ring {
-  margin-left: var(--space-2);
-  vertical-align: middle;
-}
-.project-name .project-run-rollup {
-  display: inline-flex;
   margin-left: var(--space-2);
   vertical-align: middle;
 }

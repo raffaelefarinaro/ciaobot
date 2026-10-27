@@ -145,6 +145,8 @@ async function mountPanel(
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: RouterLinkStub,
+        // Real: the rail's shell rows are the unit under test here.
+        ShellRows: false,
       },
     },
   })
@@ -222,9 +224,9 @@ describe('ChatPanel automation origin', () => {
       store.runningSubagents = {
         'chat-1': [{ agent_id: 'a1', description: 'Explore repo layout', subagent_type: 'Explore', status: 'running' }],
       } as unknown as typeof store.runningSubagents
-      store.backgroundRuns = {
-        'chat-1': [{ run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null }],
-      }
+      store.runningSubagents['chat-1'].push(
+        { agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell', status: 'running', started_at: new Date(Date.now() - 125_000).toISOString(), stoppable: true },
+      )
     })
     observers.forEach(fire => fire())
     await nextTick()
@@ -236,9 +238,12 @@ describe('ChatPanel automation origin', () => {
     expect(agent.text()).toContain('Explore repo layout')
     expect(agent.text()).toContain('Explore')
     expect(agent.findComponent({ name: 'ActivityGlyph' }).props('kind')).toBe('working')
-    const runs = rail.findComponent({ name: 'BackgroundRunRows' })
-    expect(runs.exists()).toBe(true)
-    expect(agent.element.compareDocumentPosition(runs.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const shells = rail.getComponent({ name: 'ShellRows' })
+    expect(shells.props('variant')).toBe('rail')
+    expect(shells.text()).toContain('npm run dev')
+    expect(shells.get('.shell-row-age').text()).toBe('2m')
+    expect(shells.find('a').exists()).toBe(false)
+    expect(agent.element.compareDocumentPosition(shells.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     vi.unstubAllGlobals()
     wrapper.unmount()
   })
@@ -310,50 +315,60 @@ describe('ChatPanel action dock', () => {
     wrapper.unmount()
   })
 
-  // A background run is not the user's move, so it is not a dock pill and no
-  // longer a line above the composer: the composer bar's activity cluster draws
-  // it, and keeps drawing it while a turn streams.
-  it('hands live runs and a finished outcome to the composer bar', async () => {
+  // A background shell is not the user's move, so it is not a dock pill and not
+  // a line above the composer: the composer bar's activity cluster draws it, and
+  // keeps drawing it while a turn streams.
+  const SHELL = {
+    agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell', status: 'running',
+    started_at: new Date(Date.now() - 125_000).toISOString(), stoppable: true,
+  }
+
+  it('hands live shells to the composer bar, which no longer takes engine runs', async () => {
     const { wrapper, store } = await mountPanel(s => {
-      s.backgroundRuns = {
-        'chat-1': [
-          { run_id: 'r1', label: 'Clone rizzo-flow', cmd: ['git', 'clone'], started_at: new Date(Date.now() - 125_000).toISOString(), status: 'running', exit_code: null },
-          { run_id: 'r2', label: '', cmd: ['uv', 'sync'], started_at: new Date().toISOString(), status: 'running', exit_code: null },
-        ],
-      }
+      s.runningSubagents = { 'chat-1': [SHELL] } as unknown as typeof s.runningSubagents
     })
     expect(wrapper.find('.dock-strip').exists()).toBe(false)
     expect(wrapper.find('.run-status').exists()).toBe(false)
     const bar = () => wrapper.getComponent({ name: 'ComposerActivity' })
-    expect(bar().props('runs')).toHaveLength(2)
-    expect(bar().props('finished')).toBeNull()
+    expect(bar().props('agents')).toHaveLength(1)
+    expect(bar().props()).not.toHaveProperty('runs')
+    expect(bar().props()).not.toHaveProperty('finished')
 
     store.projectStreaming = { 'chat-1': true }
     await nextTick()
-    expect(bar().props('runs')).toHaveLength(2)
-
-    store.projectStreaming = {}
-    store.backgroundRuns = {}
-    store.finishedBackgroundRuns = {
-      'chat-1': { run_id: 'r1', label: 'Clone rizzo-flow', cmd: [], started_at: '', status: 'error', exit_code: 128 },
-    }
-    await nextTick()
-    expect(bar().props('finished')?.exit_code).toBe(128)
+    expect(bar().props('agents')).toHaveLength(1)
     wrapper.unmount()
   })
 
   it('opens Chat details at its Running section from the composer bar on a narrow pane', async () => {
     const { wrapper } = await mountPanel(s => {
-      s.backgroundRuns = {
-        'chat-1': [{ run_id: 'r1', label: 'Clone rizzo-flow', cmd: [], started_at: new Date().toISOString(), status: 'running', exit_code: null }],
-      }
+      s.runningSubagents = { 'chat-1': [SHELL] } as unknown as typeof s.runningSubagents
     })
     wrapper.getComponent({ name: 'ComposerActivity' }).vm.$emit('open-details')
     await flushPromises()
     const panel = wrapper.get('#chat-work-rail .chat-rail-running')
     expect(panel.text()).toContain('Running')
     expect(document.activeElement).toBe(panel.element)
-    expect(panel.findComponent({ name: 'BackgroundRunRows' }).exists()).toBe(true)
+    expect(panel.text()).toContain('npm run dev')
+    expect(panel.findComponent({ name: 'ShellRows' }).exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('stops a native shell from its Chat details row through the background-tasks route', async () => {
+    const { wrapper, store } = await mountPanel(s => {
+      s.runningSubagents = { 'chat-1': [SHELL] } as unknown as typeof s.runningSubagents
+    })
+    const post = vi.spyOn(api, 'post').mockResolvedValue({} as never)
+    wrapper.getComponent({ name: 'ComposerActivity' }).vm.$emit('open-details')
+    await flushPromises()
+    const rail = wrapper.get('#chat-work-rail .chat-rail-running')
+    const button = rail.get('.shell-row-stop')
+    expect(button.attributes('aria-label')).toBe('Stop npm run dev')
+    await button.trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/chats/chat-1/background-tasks/b1/stop', {})
+    expect(store.stoppingTasks['chat-1']).toEqual({ b1: true })
+    expect(button.text()).toBe('Stopping…')
     wrapper.unmount()
   })
 

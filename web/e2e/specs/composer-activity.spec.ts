@@ -85,14 +85,57 @@ test.describe('native shell row', () => {
     const seg = page.locator('.composer-activity-seg--runs')
     await expect(seg).toBeVisible({ timeout: 8_000 })
     await seg.click()
-    const row = page.locator('.composer-activity-pop-row').first()
+    const row = page.locator('.shell-row').first()
     await expect(row).toContainText('1h 5m')
-    const stop = row.locator('.composer-activity-pop-stop')
+    const stop = row.locator('.shell-row-stop')
     const pop = (await page.locator('.composer-activity-popover').boundingBox())!
     const box = (await stop.boundingBox())!
     expect(box.height).toBeGreaterThanOrEqual(44)
     expect(box.x + box.width).toBeLessThanOrEqual(pop.x + pop.width)
     await page.screenshot({ path: test.info().outputPath('native-shell-row.png') })
+
+    await stop.click()
+    await expect(stop).toHaveText('Stopping…')
+    expect(stopped).toContain('/background-tasks/by55qns1w/stop')
+  })
+
+  test('lists the native shell in the Chat details rail with its age and a 44px Stop', async ({ page }) => {
+    const startedAt = new Date(Date.now() - 65 * 60_000).toISOString()
+    let stopped = ''
+    await page.route('**/api/subagents/running', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        chats: {
+          [CHAT_ID]: [{
+            agent_id: 'task:by55qns1w', description: 'npm run dev', subagent_type: 'shell',
+            is_async: true, status: 'running', turn_index: null, started_at: startedAt, stoppable: true,
+          }],
+        },
+      }),
+    }))
+    await page.route('**/api/chats/*/background-tasks/*/stop', route => {
+      stopped = route.request().url()
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+    })
+    await boot(page, CHAT_PATH, COMPOSER)
+
+    await page.locator('.composer-activity-seg--runs').click()
+    await page.locator('.composer-activity-pop-foot').click()
+    const rail = page.locator('.chat-rail-running')
+    await expect(rail).toBeVisible()
+    await expect(rail.locator('.chat-rail-subhead')).toHaveText('Processes')
+    const row = rail.locator('.shell-row')
+    await expect(row).toContainText('npm run dev')
+    await expect(row).toContainText('1h 5m')
+    const stop = row.locator('.shell-row-stop')
+    const box = (await stop.boundingBox())!
+    expect(box.height).toBeGreaterThanOrEqual(44)
+    const railBox = (await rail.boundingBox())!
+    expect(box.x + box.width).toBeLessThanOrEqual(railBox.x + railBox.width)
+    // The capture is for a person to look at: let the sheet finish sliding in.
+    await page.waitForTimeout(600)
+    await page.screenshot({ path: test.info().outputPath('rail-shell-row.png') })
 
     await stop.click()
     await expect(stop).toHaveText('Stopping…')
