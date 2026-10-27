@@ -29,7 +29,14 @@ MAX_DESCRIPTION_CHARS = 500
 MAX_TITLE_CHARS = 200
 
 _TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9/_-]*")
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+MAX_FOLDER_PART_CHARS = 80
+MAX_FOLDER_DEPTH = 8
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
 
 
 class NoteCreateError(ValueError):
@@ -124,8 +131,22 @@ def render_note(
     return text
 
 
+def _check_name_part(part: str, *, code: str, what: str) -> None:
+    """Refuse a name Windows cannot hold, on every platform.
+
+    A vault is synced between machines, and ``NUL.md`` or ``a:b`` would be
+    silently discarded or rejected where the note lands next.
+    """
+    if (
+        any(ch in '<>:"|?*' for ch in part)
+        or part.endswith((".", " "))
+        or part.split(".")[0].strip().upper() in _WINDOWS_RESERVED
+    ):
+        raise NoteCreateError(code, f"{what} {part!r} is not a valid file name on every platform.")
+
+
 def _folder_parts(raw: str) -> list[str]:
-    folder = str(raw or "").strip()
+    folder = str(raw or "")
     if (
         not folder
         or folder.startswith("/")
@@ -146,6 +167,16 @@ def _folder_parts(raw: str) -> list[str]:
             raise NoteCreateError(
                 "note_path_invalid", f"A folder part may not be {part!r}: {raw!r}."
             )
+        if len(part) > MAX_FOLDER_PART_CHARS:
+            raise NoteCreateError(
+                "note_path_invalid",
+                f"A folder part is over {MAX_FOLDER_PART_CHARS} characters: {raw!r}.",
+            )
+        _check_name_part(part, code="note_path_invalid", what="The folder")
+    if len(parts) > MAX_FOLDER_DEPTH:
+        raise NoteCreateError(
+            "note_path_invalid", f"A folder is at most {MAX_FOLDER_DEPTH} levels deep: {raw!r}."
+        )
     return parts
 
 
@@ -164,6 +195,7 @@ def _check_title(title: str) -> str:
         raise NoteCreateError(
             "note_title_invalid", f"The title {title!r} cannot be a file name."
         )
+    _check_name_part(stem, code="note_title_invalid", what="The title")
     return stem
 
 
@@ -171,24 +203,27 @@ def plan_destination(notes_root: Path, folder: str, title: str) -> tuple[Path, s
     """Where the note goes and its vault-relative path; creates nothing."""
     parts = _folder_parts(folder)
     stem = _check_title(title)
-    root = note_receipts.canonical_vault(notes_root)
-    current = root
-    for part in parts:
-        # Private on purpose: the vault's real spelling of a name decides the
-        # path, the same walk resolve_note_path does for an existing note.
-        current = note_receipts._on_disk_name(current, part)
-        if current.is_symlink():
-            raise NoteCreateError("note_path_invalid", f"{part!r} is a symlink.")
-        if current.exists() and not current.is_dir():
-            raise NoteCreateError("note_path_invalid", f"{part!r} is not a folder.")
-    target = current / f"{stem}.md"
-    rel = target.relative_to(root)
-    if is_reserved_bookkeeping(rel):
-        raise NoteCreateError(
-            "note_path_invalid", f"{rel.as_posix()} is the app's own bookkeeping."
-        )
-    if target.exists() or target.is_symlink():
-        raise NoteCreateError("note_exists", f"{rel.as_posix()} already exists.")
+    try:
+        root = note_receipts.canonical_vault(notes_root)
+        current = root
+        for part in parts:
+            # Private on purpose: the vault's real spelling of a name decides the
+            # path, the same walk resolve_note_path does for an existing note.
+            current = note_receipts._on_disk_name(current, part)
+            if current.is_symlink():
+                raise NoteCreateError("note_path_invalid", f"{part!r} is a symlink.")
+            if current.exists() and not current.is_dir():
+                raise NoteCreateError("note_path_invalid", f"{part!r} is not a folder.")
+        target = current / f"{stem}.md"
+        rel = target.relative_to(root)
+        if is_reserved_bookkeeping(rel):
+            raise NoteCreateError(
+                "note_path_invalid", f"{rel.as_posix()} is the app's own bookkeeping."
+            )
+        if target.exists() or target.is_symlink():
+            raise NoteCreateError("note_exists", f"{rel.as_posix()} already exists.")
+    except OSError as exc:
+        raise NoteCreateError("note_path_invalid", f"Cannot use that folder: {exc}") from exc
     return target, rel.as_posix()
 
 
@@ -206,7 +241,7 @@ def create_note(
 ) -> CreatedNote:
     """Write one new note and return where it landed."""
     entry = resolve_type(load_entity_types(registry_root), note_type)
-    folder = (path or "").strip() or entry.folder
+    folder = path if (path or "").strip() else entry.folder
     if not folder:
         raise NoteCreateError(
             "note_folder_required",

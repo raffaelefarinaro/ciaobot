@@ -204,9 +204,53 @@ def test_it_never_overwrites(tmp_path: Path) -> None:
     assert Path(first.path).read_bytes() == before
 
 
+@pytest.mark.parametrize("folder", ["../escape", "/abs", "a\\b"])
+def test_a_hand_edited_category_folder_cannot_escape(tmp_path: Path, folder: str) -> None:
+    vault = _vault(tmp_path)
+    _write_types(
+        vault,
+        f"- id: customer\n  label: Customer\n  kind: entity\n  folder: '{folder}'\n",
+    )
+
+    assert _code(vault, note_type="customer", title="Acme") == "note_path_invalid"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["memory-vault"]
+    assert [p for p in vault.rglob("*.md")] == []
+
+
+@pytest.mark.parametrize("bad", ["a:b", "Notes/CON", "x?", "trail.", "trail "])
+def test_windows_invalid_folder_parts_are_refused(tmp_path: Path, bad: str) -> None:
+    vault = _vault(tmp_path)
+
+    assert _code(vault, path=bad) == "note_path_invalid"
+    assert [p for p in vault.rglob("*.md")] == []
+    assert sorted(p.name for p in vault.iterdir()) == ["Workspace"]
+
+
+@pytest.mark.parametrize("bad", ["CON", "nul", "Com1", "LPT9.txt"])
+def test_windows_reserved_titles_are_refused(tmp_path: Path, bad: str) -> None:
+    vault = _vault(tmp_path)
+
+    assert _code(vault, title=bad) == "note_title_invalid"
+    assert sorted(p.name for p in vault.iterdir()) == ["Workspace"]
+
+
+def test_an_over_long_folder_part_is_refused(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+
+    assert _code(vault, path="a" * 81) == "note_path_invalid"
+    assert sorted(p.name for p in vault.iterdir()) == ["Workspace"]
+
+
+def test_a_too_deep_folder_is_refused(tmp_path: Path) -> None:
+    vault = _vault(tmp_path)
+
+    assert _code(vault, path="/".join(["x"] * 9)) == "note_path_invalid"
+    assert sorted(p.name for p in vault.iterdir()) == ["Workspace"]
+
+
 def test_title_rules(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    for bad in ["", "\n", "x" * 201, "???", ".env"]:
+    for bad in ["", "\n", "x" * 201, "???", ".env", "a\u0085b", "a\u2028b"]:
         assert _code(vault, title=bad) == "note_title_invalid"
 
 
