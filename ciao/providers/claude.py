@@ -158,6 +158,8 @@ _STARTUP_FAILURE_RESULTS_ENV = "CLAUDE_CODE_STARTUP_FAILURE_RESULTS"
 # and is capped at max(2 h, BASH_MAX_TIMEOUT_MS). Raising the cap to the
 # background-work horizon lets a long native shell ask for up to 24 h (the
 # tool description shows the model the new maximum), like a terminal.
+# The same value is the foreground Bash ceiling, so that rises too; the
+# foreground default (BASH_DEFAULT_TIMEOUT_MS, 2 min) is left alone.
 _BASH_MAX_TIMEOUT_ENV = "BASH_MAX_TIMEOUT_MS"
 # Every control-request failure is a bare ``Exception``, so the message is the
 # only thing that identifies an initialize handshake that missed its deadline.
