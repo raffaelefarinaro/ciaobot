@@ -151,3 +151,34 @@ def test_the_manager_exposes_the_collaborators_state_not_a_copy() -> None:
 
     manager._cli_task_wakes_sent.add(("chat-4", "t1"))
     assert manager._subagents.wakes_sent == {("chat-4", "t1")}
+
+
+@pytest.mark.asyncio
+async def test_watcher_deadline_is_the_background_work_cap(monkeypatch) -> None:
+    from ciao.web import subagent_watchers
+    from ciao.web.subagent_watchers import BACKGROUND_WORK_MAX_S
+
+    assert BACKGROUND_WORK_MAX_S == 24 * 3600
+
+    host = _host()
+    chat = SimpleNamespace(provider="opencode", session_id="ses_1")
+    lookups: list[str] = []
+
+    class _Chats(dict):
+        def get(self, key, default=None):  # type: ignore[override]
+            lookups.append(key)
+            # The first lookup is watch_inner's own; a second means the loop
+            # body ran, i.e. the deadline had not passed.
+            return chat if len(lookups) == 1 else None
+
+    host._chats = _Chats()  # type: ignore[assignment]
+    clock = iter([0.0, BACKGROUND_WORK_MAX_S - 1.0])
+    monkeypatch.setattr(
+        subagent_watchers,
+        "time",
+        SimpleNamespace(perf_counter=lambda: next(clock)),
+    )
+
+    await host.watchers.watch_inner("chat-1", "proj-1", [])  # type: ignore[attr-defined]
+
+    assert len(lookups) == 2

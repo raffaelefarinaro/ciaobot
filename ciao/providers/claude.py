@@ -5,11 +5,10 @@ Three SDK features worth knowing when you touch this file:
 - ``fallback_model``: picked by ``_fallback_model_for(primary)``. Fable →
   Opus → Sonnet → Haiku → none. Keeps schedules alive when the primary tier is
   rate-limited.
-- ``hooks={"PreToolUse": ...}``: keeps Claude Bash jobs in the active turn
-  and denies detached shell invocations (``nohup … &``) and ``Monitor`` so
-  long-running work goes through the managed ``ciao run start -- …``
-  command. Workspace/project/date/entity context is already supplied by the
-  shared request capsule, so Claude does not receive a duplicate
+- ``hooks={"PreToolUse": ...}``: denies detached shell invocations
+  (``nohup … &``) the CLI cannot track; native background Bash and ``Monitor``
+  run unchanged. Workspace/project/date/entity context is already supplied by
+  the shared request capsule, so Claude does not receive a duplicate
   UserPromptSubmit injection.
 - ``setting_sources=["user", "project", "local"]``: makes the CLI auto-discover
   ``.claude/skills/``, ``.claude/agents/``, and ``.claude/commands/`` (including
@@ -27,8 +26,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import sys
+import time
 import uuid
 import warnings
 from dataclasses import dataclass, field, replace
@@ -50,11 +51,14 @@ from claude_agent_sdk import (
     ResultMessage,
     StreamEvent as SDKStreamEvent,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TaskUpdatedMessage,
     ToolUseBlock,
     UserMessage,
     get_session_info,
 )
-from claude_agent_sdk.types import PermissionMode, SandboxSettings, SystemPromptPreset
+from claude_agent_sdk.types import TERMINAL_TASK_STATUSES, PermissionMode, SandboxSettings, SystemPromptPreset
 
 from ciao.fs_sandbox import (
     CLAUDE_FILE_TOOL_PATH_KEYS,
@@ -85,12 +89,10 @@ from ciao.execution_modes import (
     harness_skill_overrides,
 )
 from ciao.core_prompt import system_prompt_payload
-from ciao.observability.hooks import (
-    build_foreground_bash_hook,
-    build_monitor_deny_hook,
-)
+from ciao.observability.hooks import build_detached_shell_deny_hook
 from ciao.providers.permission_gate import PermissionGate
 from ciao.providers.base import (
+    BACKGROUND_WORK_MAX_S,
     ActiveHandle,
     BaseSDKProvider,
     ProviderCapabilities,
@@ -672,6 +674,72 @@ class ClaudeProvider(BaseSDKProvider):
         self._spawn_key: tuple[object, ...] = ()
         # Fire-and-forget closes of dead clients, held so they are not collected.
         self._closing_tasks: set[asyncio.Future[None]] = set()
+        # Background tasks (native ``run_in_background`` Bash, ``Monitor``,
+        # background agents) the live CLI process owns, from the SDK's task
+        # messages: task_id -> {"command", "task_type", "started_at"}. They die
+        # with the CLI, so the provider is busy while any is tracked.
+        self._native_tasks: dict[str, dict[str, Any]] = {}
+        # Monotonic time of the last SDK message; None until one arrives.
+        self._last_activity: float | None = None
+
+    @property
+    def background_work_outstanding(self) -> bool:
+        """True while the CLI process owns a tracked background task."""
+        self._prune_stale_tasks()
+        return bool(self._native_tasks)
+
+    def _prune_stale_tasks(self) -> None:
+        """Forget tasks older than the cap: one that never got a terminal message."""
+        cutoff = time.monotonic() - BACKGROUND_WORK_MAX_S
+        for task_id in [
+            tid for tid, info in self._native_tasks.items() if info["started_mono"] < cutoff
+        ]:
+            logger.warning(
+                "Dropping background task %s: no terminal message within %.0f h",
+                task_id,
+                BACKGROUND_WORK_MAX_S / 3600,
+            )
+            del self._native_tasks[task_id]
+
+    @property
+    def seconds_since_activity(self) -> float:
+        """Seconds since the last SDK message, ``math.inf`` if none arrived."""
+        if self._last_activity is None:
+            return math.inf
+        return time.monotonic() - self._last_activity
+
+    def background_shell_rows(self) -> list[dict[str, Any]]:
+        """``{id, command, task_type, started_at}`` per tracked task, in id order."""
+        self._prune_stale_tasks()
+        return [
+            {
+                "id": task_id,
+                **{k: v for k, v in self._native_tasks[task_id].items() if k != "started_mono"},
+            }
+            for task_id in sorted(self._native_tasks)
+        ]
+
+    def _observe_message(self, msg: Any) -> None:
+        """Record SDK activity and track background tasks from lifecycle messages.
+
+        Called for every message from the turn and drain loops, before any
+        turn filtering: task messages for a shell that started in an earlier
+        turn can arrive before this turn's prompt echo.
+        """
+        self._last_activity = time.monotonic()
+        if isinstance(msg, TaskStartedMessage):
+            self._native_tasks[msg.task_id] = {
+                "command": msg.description,
+                "task_type": msg.task_type or "",
+                "started_at": time.time(),
+                "started_mono": time.monotonic(),
+            }
+        elif isinstance(msg, TaskNotificationMessage):
+            # Any terminal notification status ends the task.
+            self._native_tasks.pop(msg.task_id, None)
+        elif isinstance(msg, TaskUpdatedMessage):
+            if (msg.patch or {}).get("status") in TERMINAL_TASK_STATUSES:
+                self._native_tasks.pop(msg.task_id, None)
 
     def _stderr_handler(self, line: str) -> None:
         _route_cli_stderr(line)
@@ -737,6 +805,20 @@ class ClaudeProvider(BaseSDKProvider):
             linked_repo_of(request),
         )
 
+    def _warn_tasks_stopped(self, reason: str) -> None:
+        """Log the background tasks a reconnect for ``reason`` is about to stop."""
+        if not self._native_tasks:
+            return
+        logger.warning(
+            "Reconnecting the Claude CLI (%s) stops %d background task(s): %s",
+            reason,
+            len(self._native_tasks),
+            "; ".join(
+                f"{task_id}: {str(info.get('command') or '')[:80]}"
+                for task_id, info in sorted(self._native_tasks.items())
+            ),
+        )
+
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
         # Whether a client object existed before this turn. Used to tell a
@@ -747,7 +829,7 @@ class ClaudeProvider(BaseSDKProvider):
         if self._client is not None and self._connected and _cli_process_exited(self._client):
             # The CLI exited between turns; writing to it would fail.
             reconnect_reason = "dead_process"
-            await self.disconnect()
+            await self.disconnect()  # also drops the dead CLI's tracked tasks
         if (
             self._client is not None
             and self._connected
@@ -762,14 +844,25 @@ class ClaudeProvider(BaseSDKProvider):
             # token (on either surface), or its workspace scope changes;
             # model/mode alone can still change in place.
             reconnect_reason = "other"
+            self._warn_tasks_stopped(reconnect_reason)
             await self.disconnect()
         if (
             self._client is not None
             and self._connected
             and self._spawn_key_for(request) != self._spawn_key
         ):
-            reconnect_reason = "spawn_options"
-            await self.disconnect()
+            if self.background_work_outstanding:
+                # A reconnect would kill the background tasks the CLI owns.
+                # ``_spawn_key`` is left stale so the change applies on the
+                # first turn after they end (same as the memory-prune
+                # deferral in ProviderService, #1391).
+                logger.info(
+                    "Deferring spawn_options reconnect: %d background task(s) running",
+                    len(self._native_tasks),
+                )
+            else:
+                reconnect_reason = "spawn_options"
+                await self.disconnect()
         if (
             self._client is not None
             and self._connected
@@ -777,6 +870,7 @@ class ClaudeProvider(BaseSDKProvider):
             and request.resume_session != self._session_id
         ):
             reconnect_reason = "resume"
+            self._warn_tasks_stopped(reconnect_reason)
             await self.disconnect()
 
         if self._client is not None and self._connected:
@@ -787,6 +881,7 @@ class ClaudeProvider(BaseSDKProvider):
                 except (*_CLAUDE_OP_ERRORS, asyncio.TimeoutError) as exc:
                     logger.warning("Claude set_model failed (%s); reconnecting", exc)
                     reconnect_reason = "model_change"
+                    self._warn_tasks_stopped(reconnect_reason)
                     await self.disconnect()
             if self._client is not None and self._connected and request.mode != self._current_mode:
                 try:
@@ -796,6 +891,7 @@ class ClaudeProvider(BaseSDKProvider):
                     logger.warning("Claude set_permission_mode failed (%s); reconnecting", exc)
                     logger.debug("set_permission_mode failure detail", exc_info=True)
                     reconnect_reason = "mode_change"
+                    self._warn_tasks_stopped(reconnect_reason)
                     await self.disconnect()
         if self._client is not None and self._connected:
             self._log_client_turn(request, reused=True, reason="none")
@@ -903,20 +999,13 @@ class ClaudeProvider(BaseSDKProvider):
             # Keep hooks for process behavior only; injecting context here as
             # well would duplicate it and make prompt caching less effective.
             hooks={
-                # Background Bash jobs are owned by the managed CLI process.
-                # Ending the turn kills them, and Claude does not report that
-                # stop until the next turn resumes the session. Keep Bash in
-                # the active turn so the UI receives a real terminal result.
-                # Detached launches (nohup … &, setsid) and the Monitor
-                # watcher are denied outright: they die with the CLI
-                # subprocess and never wake the chat. background_run_start
-                # is the managed path that survives reconnects.
+                # Native run_in_background Bash and Monitor are tracked and
+                # woken by the CLI, and the provider stays alive while they
+                # run. Only detached launches (nohup … &, setsid, disown) are
+                # denied: the CLI cannot track them.
                 "PreToolUse": [HookMatcher(
                     matcher="Bash",
-                    hooks=[build_foreground_bash_hook()],
-                ), HookMatcher(
-                    matcher="Monitor",
-                    hooks=[build_monitor_deny_hook()],
+                    hooks=[build_detached_shell_deny_hook()],
                 ), *file_tool_hooks],
             },
             # Auto mode's classifier handles most tool calls silently, but
@@ -1066,6 +1155,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._pending_quota = {}
         self._mcp_token = ""
         self._spawn_key = ()
+        self._native_tasks.clear()
         self._reset_settings()
 
     def _forget_dead_cli(self, client: object) -> None:
@@ -1092,6 +1182,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._pending_quota = {}
         self._mcp_token = ""
         self._spawn_key = ()
+        self._native_tasks.clear()
         self._reset_settings()
 
     @staticmethod
@@ -1149,6 +1240,7 @@ class ClaudeProvider(BaseSDKProvider):
         async def consume() -> None:
             try:
                 async for msg in client.receive_messages():
+                    self._observe_message(msg)
                     for event in self._convert_message(msg):
                         merged.put_nowait(event)
             except (CLIConnectionError, ProcessError):
@@ -1385,6 +1477,7 @@ class ClaudeProvider(BaseSDKProvider):
                     try:
                         async for msg in _receive_round(client, first_timeout, wake):
                             got_message = True
+                            self._observe_message(msg)
                             if isinstance(msg, UserMessage) and msg.uuid == prompt_uuid:
                                 prompt_echoed.set()
                                 # Output from here on is this turn's: drop whatever
