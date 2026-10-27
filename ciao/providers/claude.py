@@ -92,6 +92,7 @@ from ciao.core_prompt import system_prompt_payload
 from ciao.observability.hooks import build_detached_shell_deny_hook
 from ciao.providers.permission_gate import PermissionGate
 from ciao.providers.base import (
+    BACKGROUND_WORK_MAX_S,
     ActiveHandle,
     BaseSDKProvider,
     ProviderCapabilities,
@@ -684,7 +685,21 @@ class ClaudeProvider(BaseSDKProvider):
     @property
     def background_work_outstanding(self) -> bool:
         """True while the CLI process owns a tracked background task."""
+        self._prune_stale_tasks()
         return bool(self._native_tasks)
+
+    def _prune_stale_tasks(self) -> None:
+        """Forget tasks older than the cap: one that never got a terminal message."""
+        cutoff = time.monotonic() - BACKGROUND_WORK_MAX_S
+        for task_id in [
+            tid for tid, info in self._native_tasks.items() if info["started_mono"] < cutoff
+        ]:
+            logger.warning(
+                "Dropping background task %s: no terminal message within %.0f h",
+                task_id,
+                BACKGROUND_WORK_MAX_S / 3600,
+            )
+            del self._native_tasks[task_id]
 
     @property
     def seconds_since_activity(self) -> float:
@@ -695,8 +710,12 @@ class ClaudeProvider(BaseSDKProvider):
 
     def background_shell_rows(self) -> list[dict[str, Any]]:
         """``{id, command, task_type, started_at}`` per tracked task, in id order."""
+        self._prune_stale_tasks()
         return [
-            {"id": task_id, **self._native_tasks[task_id]}
+            {
+                "id": task_id,
+                **{k: v for k, v in self._native_tasks[task_id].items() if k != "started_mono"},
+            }
             for task_id in sorted(self._native_tasks)
         ]
 
@@ -713,6 +732,7 @@ class ClaudeProvider(BaseSDKProvider):
                 "command": msg.description,
                 "task_type": msg.task_type or "",
                 "started_at": time.time(),
+                "started_mono": time.monotonic(),
             }
         elif isinstance(msg, TaskNotificationMessage):
             # Any terminal notification status ends the task.

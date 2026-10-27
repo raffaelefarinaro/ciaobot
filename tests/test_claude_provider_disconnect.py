@@ -276,3 +276,49 @@ def test_token_change_reconnects_even_with_tasks_and_warns(
     assert stopped == [True]
     assert "sleep 600" in caplog.text
     assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_a_non_terminal_task_update_keeps_the_task_tracked(tmp_path: Path) -> None:
+    provider = ClaudeProvider(tmp_path)
+    provider._observe_message(_task_started("t1"))
+
+    provider._observe_message(_task_updated("t1", "running"))
+    provider._observe_message(_task_updated("t1", "paused"))
+
+    assert provider.background_work_outstanding is True
+
+
+def _age_task(provider: ClaudeProvider, task_id: str, seconds: float) -> None:
+    import time
+
+    provider._native_tasks[task_id]["started_mono"] = time.monotonic() - seconds
+
+
+def test_a_task_older_than_the_cap_is_pruned(tmp_path: Path) -> None:
+    from ciao.providers.base import BACKGROUND_WORK_MAX_S
+
+    provider = ClaudeProvider(tmp_path)
+    provider._observe_message(_task_started("old"))
+    provider._observe_message(_task_started("new"))
+    _age_task(provider, "old", BACKGROUND_WORK_MAX_S + 1)
+
+    assert [r["id"] for r in provider.background_shell_rows()] == ["new"]
+    assert "started_mono" not in provider.background_shell_rows()[0]
+    _age_task(provider, "new", BACKGROUND_WORK_MAX_S + 1)
+    assert provider.background_work_outstanding is False
+
+
+def test_a_stale_task_no_longer_defers_the_spawn_options_reconnect(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.providers.base import BACKGROUND_WORK_MAX_S
+
+    request = AgentRequest(prompt="x", model="sonnet", mode="auto")
+    provider, _live, stopped = _connected_provider(tmp_path, monkeypatch, request)
+    provider._observe_message(_task_started("t1"))
+    _age_task(provider, "t1", BACKGROUND_WORK_MAX_S + 1)
+    changed = AgentRequest(prompt="x", model="sonnet", mode="auto", thinking_level="high")
+
+    asyncio.run(provider._ensure_connected(changed))
+
+    assert stopped == [True]

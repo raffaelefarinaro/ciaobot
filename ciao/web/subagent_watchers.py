@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ciao import subagent_tracking
+from ciao.providers.base import BACKGROUND_WORK_MAX_S as _BACKGROUND_WORK_MAX_S
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_collab_tree_counts,
@@ -70,10 +71,9 @@ _ORPHANED_CLI_TASK_SWEEP_MAX_AGE = timedelta(days=7)
 # startup, and they are free to diverge.
 _STARTUP_WAKE_COALESCE_SECONDS = 5.0
 
-# One cap for background work (agents, shells, monitors): a watcher keeps
-# polling, and a provider with outstanding background work stays protected
-# from the idle reap, reload and restart gate, for up to this long.
-BACKGROUND_WORK_MAX_S = 24 * 3600
+# The cap lives in providers.base (the providers enforce it too); re-exported
+# here as the watcher horizon.
+BACKGROUND_WORK_MAX_S = _BACKGROUND_WORK_MAX_S
 
 
 class SubagentWatcherHost(Protocol):

@@ -626,3 +626,28 @@ async def test_silent_background_work_older_than_one_hour_still_holds_provider(
     manager._provider_last_used[chat_id] = time.monotonic() - 10**6
     assert await manager.reap_idle_providers(force=True) == [chat_id]
     assert disconnected == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_native_task_does_not_pin_the_provider_behind_a_live_drain(
+    tmp_path: Path,
+) -> None:
+    from ciao.providers.base import BACKGROUND_WORK_MAX_S
+
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    service, disconnected = _claude_service(tmp_path, task=True)
+    manager._providers[chat_id] = service  # type: ignore[assignment]
+    manager._streaming.has_live_drain = lambda _cid: True  # type: ignore[method-assign]
+    manager._provider_last_used[chat_id] = time.monotonic() - 10**6
+
+    # A fresh task behind a live drain holds the provider.
+    assert await manager.reap_idle_providers(force=True) == []
+
+    # One that never reported a terminal state is dropped after the cap.
+    service._provider._native_tasks["bash-1"]["started_mono"] = (  # type: ignore[union-attr]
+        time.monotonic() - BACKGROUND_WORK_MAX_S - 1
+    )
+    manager._provider_last_used[chat_id] = time.monotonic() - 10**6
+    assert await manager.reap_idle_providers(force=True) == [chat_id]
+    assert disconnected == [True]
