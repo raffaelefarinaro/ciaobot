@@ -242,16 +242,11 @@ test.describe('touch targets', () => {
     expect(found.bad, `controls under ${TOUCH_MIN}px:\n${found.bad.join('\n')}`).toEqual([])
   })
 
-  test('the code badge and the Repository section are at least 44×44 on touch', async ({ page }) => {
+  test('the Repository section is at least 44×44 on touch', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
-    const badge = page.locator('.chat-code-badge')
-    await expect(badge).toBeVisible()
-    const box = await badge.boundingBox()
-    expect(box).not.toBeNull()
-    expect(box!.width).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
-    expect(box!.height).toBeGreaterThanOrEqual(TOUCH_MIN - 0.5)
-    await badge.click()
-    await expect(page.locator('#chat-work-rail .chat-rail-repo')).toBeFocused()
+    // The code badge is hidden on phones; Chat details opens from the ⓘ button.
+    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await expect(page.locator('#chat-work-rail .chat-repo-section')).toBeVisible()
     const found = await measure(page, '#chat-work-rail .chat-repo-section')
     expect(found.total, 'no controls measured in the Repository section').toBeGreaterThan(0)
     expect(found.bad, `controls under ${TOUCH_MIN}px:\n${found.bad.join('\n')}`).toEqual([])

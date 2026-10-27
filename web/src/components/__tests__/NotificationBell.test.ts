@@ -252,4 +252,12 @@ describe('NotificationBell', () => {
     await flushPromises()
     expect(dialog()).toBeNull()
   })
+
+  it('badge_and_ring_sit_inside_the_icon_wrapper', async () => {
+    await mountBell({ chats: 2, health: stale })
+    const icon = document.body.querySelector('.notif-bell .notif-bell-icon')!
+    expect(icon.querySelector('svg')).not.toBeNull()
+    expect(icon.querySelector('.notif-bell-count')?.textContent).toBe('2')
+    expect(icon.querySelector('.notif-bell-ring')).not.toBeNull()
+  })
 })
