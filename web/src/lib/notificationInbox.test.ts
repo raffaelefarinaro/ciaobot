@@ -38,8 +38,6 @@ const READY: SourceSnapshot[] = [
   { source: 'chats', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
   { source: 'operator', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
   { source: 'automations', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
-  { source: 'proposals', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
-  { source: 'revisit', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
   { source: 'updateTasks', status: 'ready', lastSuccessAt: '2026-10-01T00:00:00+00:00' },
 ]
 
@@ -191,8 +189,6 @@ const READY3: SourceSnapshot[] = [
   { source: 'chats', status: 'ready', lastSuccessAt: 'x' },
   { source: 'operator', status: 'ready', lastSuccessAt: 'x' },
   { source: 'automations', status: 'ready', lastSuccessAt: 'x' },
-  { source: 'proposals', status: 'ready', lastSuccessAt: 'x' },
-  { source: 'revisit', status: 'ready', lastSuccessAt: 'x' },
   { source: 'updateTasks', status: 'ready', lastSuccessAt: 'x' },
 ]
 
@@ -450,14 +446,12 @@ describe('notificationInbox operator and automation sources', () => {
     expect(notificationPath({ kind: 'home-notice', noticeKey: 'action:shared:x' })).toBe('/?notice=action%3Ashared%3Ax')
   })
 
-  it('sources_six_keys_in_order', () => {
+  it('sources_four_keys_in_order', () => {
     const missing = project3({ sources: [{ source: 'chats', status: 'ready', lastSuccessAt: 'x' }] })
     expect(missing.sources.map((s) => [s.source, s.status, s.label])).toEqual([
       ['chats', 'ready', 'Chats'],
       ['operator', 'checking', 'Settings'],
       ['automations', 'checking', 'Automations'],
-      ['proposals', 'checking', 'Memory suggestions'],
-      ['revisit', 'checking', 'Notes to revisit'],
       ['updateTasks', 'checking', 'Update tasks'],
     ])
     expect(missing.allClear).toBe(false)
@@ -468,8 +462,6 @@ describe('notificationInbox operator and automation sources', () => {
 function inboxWith(o: {
   chats?: ChatCandidate[]
   reviewTasks?: TaskReviewCandidate[]
-  proposalCount?: number
-  revisitCount?: number
   memoryInsights?: MemoryInsightCandidate[]
   sources?: SourceSnapshot[]
   workspace?: string
@@ -478,8 +470,6 @@ function inboxWith(o: {
     workspace: o.workspace ?? 'personal',
     chats: o.chats ?? [],
     reviewTasks: o.reviewTasks,
-    proposalCount: o.proposalCount,
-    revisitCount: o.revisitCount,
     memoryInsights: o.memoryInsights,
     sources: o.sources ?? READY,
   })
@@ -520,26 +510,6 @@ describe('notificationInbox review, queue and memory rows', () => {
     expect(chatKeys(chat({ chatId: 'x', ...base, reviewTaskId: 'other' }))).toEqual(['chat:x'])
   })
 
-  it('proposals_and_revisit_are_one_row_each_with_real_count', () => {
-    const inbox = inboxWith({ proposalCount: 3, revisitCount: 1 })
-    const by = (k: string) => inbox.rows.find((r) => r.key === k)!
-    expect(by('proposals:personal').reason).toBe('3 suggested memories are waiting to accept, edit, or reject.')
-    expect(by('proposals:personal').title).toBe('Memory proposals')
-    expect(by('proposals:personal').source).toBe('proposals')
-    expect(by('revisit:personal').reason).toBe('1 note needs a freshness or duplication decision.')
-    expect(by('revisit:personal').title).toBe('Notes to revisit')
-    expect(by('revisit:personal').source).toBe('revisit')
-    const one = inboxWith({ proposalCount: 1, revisitCount: 2 })
-    expect(one.rows.find((r) => r.key === 'proposals:personal')!.reason).toContain('1 suggested memory is')
-    expect(one.rows.find((r) => r.key === 'revisit:personal')!.reason).toContain('2 notes need')
-    expect(inboxWith({ proposalCount: 0, revisitCount: 0 }).rows).toEqual([])
-  })
-
-  it('review_destinations_match_review_path', () => {
-    expect(notificationPath({ kind: 'review', filter: 'suggested' })).toBe('/memory/review?show=suggested')
-    expect(notificationPath({ kind: 'review', filter: 'revisit' })).toBe('/memory/review?show=revisit')
-  })
-
   it('memory_insight_rows', () => {
     const inbox = inboxWith({
       memoryInsights: [
@@ -562,35 +532,19 @@ describe('notificationInbox review, queue and memory rows', () => {
     expect(inbox.rows.some((r) => r.key === 'chat:pass-s1')).toBe(false)
   })
 
-  it('review_rows_follow_their_source_freshness', () => {
-    const sources = READY.map((s) => (s.source === 'proposals' ? { ...s, status: 'stale' as const } : s))
-    const inbox = inboxWith({
-      sources,
-      proposalCount: 2,
-      revisitCount: 2,
-      reviewTasks: [{ taskId: 't', title: 'T' }],
-    })
-    const by = (k: string) => inbox.rows.find((r) => r.key === k)!
-    expect(by('proposals:personal').freshness).toBe('stale')
-    expect(by('revisit:personal').freshness).toBe('fresh')
-    expect(by('task:personal:t').freshness).toBe('fresh')
-  })
-
   it('count_is_distinct_rows_with_new_sources', () => {
     const inbox = inboxWith({
       reviewTasks: [{ taskId: 't', title: 'T' }],
-      proposalCount: 5,
-      revisitCount: 5,
       memoryInsights: [insight({ sourceChatId: 's' })],
       chats: [chat({ chatId: 'u', unread: true })],
     })
-    expect(inbox.count).toBe(5)
-    expect(inbox.rows).toHaveLength(5)
+    expect(inbox.count).toBe(3)
+    expect(inbox.rows).toHaveLength(3)
   })
 
   it('keys_use_shared_for_empty_workspace', () => {
-    const inbox = inboxWith({ workspace: '', proposalCount: 1, reviewTasks: [{ taskId: 't', title: 'T' }] })
-    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['proposals:shared', 'task:shared:t'])
+    const inbox = inboxWith({ workspace: '', reviewTasks: [{ taskId: 't', title: 'T' }] })
+    expect(inbox.rows.map((r) => r.key).sort()).toEqual(['task:shared:t'])
   })
 })
 

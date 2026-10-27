@@ -28,8 +28,6 @@ import { useProjectStore } from './projects'
 import { useTaskSignalsStore } from './taskSignals'
 import { useHousekeepingStore } from './housekeeping'
 import { useTaskStore } from './tasks'
-import { useProposalsStore } from './proposals'
-import { useVaultReviewStore } from './vaultReview'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { isMemoryPassChat } from '../lib/memoryPass'
 import {
@@ -83,8 +81,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
   const taskSignals = useTaskSignalsStore()
   const housekeeping = useHousekeepingStore()
   const tasks = useTaskStore()
-  const proposals = useProposalsStore()
-  const vaultReview = useVaultReviewStore()
 
   const generation = ref(0)
   const initialized = ref(false)
@@ -96,9 +92,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
   // The tasks store keeps no timestamp, so the adapter stamps list replacements.
   // The stamp only advances while initialized (the watcher lives in init()'s scope).
   const schedulesStampedAt = ref('')
-  // Same for the two memory queues. '' until the first load after init().
-  const proposalsStampedAt = ref('')
-  const revisitStampedAt = ref('')
   let lastFocusRefreshAt = 0
   let scope: EffectScope | null = null
   let removeListeners: (() => void) | null = null
@@ -179,12 +172,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     taskSignals.inReview(projects.activeWorkspace).map((t) => ({ taskId: t.id, title: t.title })),
   )
 
-  const proposalCount = computed(() => proposals.scopedRows(projects.activeWorkspace).length)
-
-  const revisitCount = computed(() =>
-    vaultReview.loadedWorkspace === projects.activeWorkspace ? vaultReview.candidates.length : 0,
-  )
-
   const memoryInsightCandidates = computed<MemoryInsightCandidate[]>(() => {
     const workspace = projects.activeWorkspace
     const out: MemoryInsightCandidate[] = []
@@ -252,20 +239,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       else status = 'ready'
       return { source: 'automations', status, lastSuccessAt: schedulesStampedAt.value }
     },
-    proposals: () => {
-      let status: SourceSnapshot['status']
-      if (!proposals.loaded && !proposals.loadError) status = 'checking'
-      else if (proposals.loadError) status = proposals.loaded ? 'stale' : 'unavailable'
-      else status = 'ready'
-      return { source: 'proposals', status, lastSuccessAt: proposalsStampedAt.value }
-    },
-    revisit: () => {
-      const hasCurrent = !!projects.activeWorkspace && vaultReview.loadedWorkspace === projects.activeWorkspace
-      let status: SourceSnapshot['status']
-      if (hasCurrent) status = vaultReview.loadError ? 'stale' : 'ready'
-      else status = vaultReview.loadError ? 'unavailable' : 'checking'
-      return { source: 'revisit', status, lastSuccessAt: revisitStampedAt.value }
-    },
     updateTasks: () => {
       const ws = projects.activeWorkspace
       if (!ws || housekeeping.updateTasksWorkspace !== ws) {
@@ -290,13 +263,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     // Both owners record their own failure; neither throws or needs an interval here.
     operator: () => housekeeping.refresh(),
     automations: () => tasks.fetchSchedules().catch(() => {}),
-    // Cheap by design: GET /api/vault/review regenerates candidates from the
-    // vault, so a healthy source never re-reads on focus. A failure or a scope
-    // that never loaded does, which is what the Retry button needs. Neither
-    // fetch is forced, and both join a read already in flight.
-    proposals: () => ((proposals.loaded && !proposals.loadError) ? undefined : proposals.fetch()),
-    revisit: (ws) =>
-      ((vaultReview.loadedWorkspace === ws && !vaultReview.loadError) ? undefined : vaultReview.fetch(ws)),
     // Healthy means no request: housekeeping's own focus and 60s poll keep it fresh.
     updateTasks: (ws) =>
       ((housekeeping.updateTasksHealth.status === 'ready'
@@ -317,8 +283,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       operators: operatorCandidates.value,
       schedules: scheduleCandidates.value,
       reviewTasks: reviewTaskCandidates.value,
-      proposalCount: proposalCount.value,
-      revisitCount: revisitCount.value,
       memoryInsights: memoryInsightCandidates.value,
       updateTasks: updateTaskCandidates.value,
       sources: snapshots.value,
@@ -402,12 +366,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
       )
       // Shallow on purpose: an in-place push is not a load.
       watch(() => tasks.schedules, () => { schedulesStampedAt.value = new Date().toISOString() }, { flush: 'sync' })
-      watch(() => proposals.rows, () => { proposalsStampedAt.value = new Date().toISOString() }, { flush: 'sync' })
-      watch(
-        () => [vaultReview.candidates, vaultReview.loadedWorkspace],
-        () => { revisitStampedAt.value = new Date().toISOString() },
-        { flush: 'sync' },
-      )
     })
     // housekeeping.init ran before a workspace existed and only the Home strip reacts to switches.
     if (projects.activeWorkspace && housekeeping.updateTasksWorkspace !== projects.activeWorkspace) {
@@ -441,8 +399,6 @@ export const useNotificationInboxStore = defineStore('notificationInbox', () => 
     operatorCandidates,
     scheduleCandidates,
     reviewTaskCandidates,
-    proposalCount,
-    revisitCount,
     memoryInsightCandidates,
     updateTaskCandidates,
     snapshots,

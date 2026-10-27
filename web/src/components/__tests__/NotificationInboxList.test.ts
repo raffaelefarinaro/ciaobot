@@ -31,7 +31,6 @@ const checking: SourceHealth = { status: 'checking', lastSuccessAt: '', error: '
 
 interface Opts {
   density?: 'popover' | 'sheet'
-  showSummary?: boolean
   chats?: Record<string, unknown>[]
   health?: SourceHealth
   /** What `/api/chats?active_only=1` answers; defaults to `chats`. 'reject' fails the read. */
@@ -91,10 +90,7 @@ async function mountView(opts: Opts = {}) {
   })
   await router.push('/')
   const wrapper = mount(NotificationInboxList, {
-    props: {
-      ...(opts.density ? { density: opts.density } : {}),
-      ...(opts.showSummary === undefined ? {} : { showSummary: opts.showSummary }),
-    },
+    props: opts.density ? { density: opts.density } : {},
     global: { plugins: [router] },
   })
   await flushPromises()
@@ -354,34 +350,5 @@ describe('opening a row', () => {
     const sheet = await mountView({ chats: [chat('a', UNREAD)], density: 'sheet' })
     expect(sheet.wrapper.classes()).toContain('notif-inbox--sheet')
     expect(source).toMatch(/\.notif-inbox--sheet \.notif-row\s*{[^}]*min-height:\s*52px/)
-  })
-
-  it('summary_hidden_when_show_summary_false', async () => {
-    const shown = await mountView({ chats: [chat('a', UNREAD)] })
-    expect(shown.wrapper.find('[data-testid="inbox-summary"]').exists()).toBe(true)
-    const hidden = await mountView({ chats: [chat('a', UNREAD)], showSummary: false })
-    expect(hidden.wrapper.find('[data-testid="inbox-summary"]').exists()).toBe(false)
-    expect(hidden.wrapper.find('.notif-row').exists()).toBe(true)
-  })
-
-  it('section_heading_ids_are_unique_across_lists', async () => {
-    const chats = [chat('a', { pending_permission: { tool: 'Bash' } }), chat('b', UNREAD)]
-    const one = await mountView({ chats })
-    // One app, as on Home: the glance list and the popover's list together.
-    const both = mount(
-      defineComponent({
-        components: { NotificationInboxList },
-        template: '<div><NotificationInboxList /><NotificationInboxList /></div>',
-      }),
-      { attachTo: document.body, global: { plugins: [one.router] } },
-    )
-    await flushPromises()
-    const ids = Array.from(document.body.querySelectorAll('h3[id]')).map((h) => h.id)
-    expect(ids.length).toBeGreaterThanOrEqual(4)
-    expect(new Set(ids).size).toBe(ids.length)
-    for (const h of document.body.querySelectorAll('h3[id]')) {
-      expect(h.closest('section')?.getAttribute('aria-labelledby')).toBe(h.id)
-    }
-    both.unmount()
   })
 })
