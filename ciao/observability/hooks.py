@@ -33,9 +33,7 @@ logger = logging.getLogger(__name__)
 BACKGROUND_RUN_GUIDANCE = (
     "Do not detach processes with nohup, &, setsid or disown: Ciaobot cannot "
     "track them or wake this chat. Run the command with the Bash tool's "
-    "`run_in_background: true` instead; the chat is woken when it finishes. "
-    "Use `ciao run start -- <cmd>` only for a command that must survive this "
-    "chat's provider process."
+    "`run_in_background: true` instead; the chat is woken when it finishes."
 )
 
 # Detached-shell shapes we deny. Quoted substrings, heredoc bodies, and
@@ -104,8 +102,7 @@ def build_detached_shell_deny_hook():
     ``nohup … &``, a bare trailing ``&`` and ``setsid``/``disown`` spawn a
     process the CLI does not track: no completion wakes the chat, the UI shows
     no row, and the orphan outlives the CLI subprocess. The deny reason points
-    at the Bash tool's native ``run_in_background`` and, for a command that
-    must survive the provider process, ``ciao run start -- …``.
+    at the Bash tool's native ``run_in_background``.
 
     Native ``run_in_background`` Bash, ``Monitor`` and background ``Agent``
     calls are untouched: the CLI tracks them and delivers their completion.

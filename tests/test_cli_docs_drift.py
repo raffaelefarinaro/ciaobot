@@ -203,7 +203,7 @@ def test_core_prompt_synopsis_matches_the_parsers() -> None:
     assert prompt_problems(lines, surface) == []
     # The recall-critical commands must stay in the prompt (routing eval, #1464).
     text = "\n".join(lines)
-    for command in ("vault search", "memory update", "file surface", "schedule", "task report", "run start"):
+    for command in ("vault search", "memory update", "file surface", "schedule", "task report"):
         assert command in text, command
 
 
