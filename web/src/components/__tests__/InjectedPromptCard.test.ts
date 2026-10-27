@@ -41,6 +41,13 @@ describe('InjectedPromptCard', () => {
     expect(toggle.attributes('aria-controls')).toBe(body.attributes('id'))
   })
 
+  it('shows why a run failed while collapsed, and drops the line once open', async () => {
+    const wrapper = mountCard({ prompt: runPrompt, raw: '=== raw' })
+    expect(wrapper.get('.injected-card-hint').text()).toBe('two')
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.find('.injected-card-hint').exists()).toBe(false)
+  })
+
   it("shows each run's status pill, log link and tail", async () => {
     const wrapper = mountCard({ prompt: runPrompt, raw: '=== raw' })
     await wrapper.get('.injected-card-toggle').trigger('click')

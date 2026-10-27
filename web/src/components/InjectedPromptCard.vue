@@ -75,6 +75,8 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
       <time v-if="timestamp" class="injected-card-time" :datetime="timestamp">{{ formatTime(timestamp) }}</time>
     </div>
 
+    <p v-if="!open && summary.hint" class="injected-card-hint">{{ summary.hint }}</p>
+
     <div v-if="open" :id="bodyId" class="injected-card-body">
       <template v-if="prompt.kind === 'background_run'">
         <ul class="injected-card-runs">
@@ -283,6 +285,17 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 }
 .injected-card-muted { color: var(--fg3); }
 .injected-card-error { margin: 4px 0 0; color: var(--error); }
+.injected-card-hint {
+  margin: 0 0 8px;
+  color: var(--error);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .injected-card-log { margin: 4px 0 0; }
 .injected-card-prose { max-height: 320px; overflow: auto; margin-top: 8px; line-height: 1.5; }
 .injected-card-prose :deep(> :first-child) { margin-top: 0; }
