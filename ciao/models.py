@@ -416,6 +416,9 @@ class ResultEvent(StreamEvent):
     # Ciaobot's own prompt, "task-notification" for a follow-up turn the CLI ran
     # on its own after background work finished (#1394).
     origin: str = ""
+    # OpenCode only: the "background runs finished" notice for the shells that
+    # woke this execution. Recorded with the wake turn; never serialised.
+    wake_notice: str = ""
 
 
 @dataclass(slots=True)

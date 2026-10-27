@@ -535,6 +535,52 @@ async def test_drain_streams_a_background_shell_wake(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_wake_result_carries_the_shell_notice(tmp_path, monkeypatch):
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
+
+    results = [e for e in await _drain(provider) if isinstance(e, ResultEvent)]
+
+    assert len(results) == 1
+    assert results[0].origin == "task-notification"
+    assert results[0].wake_notice.startswith("[Ciaobot] 1 background run finished.")
+    assert "BGDONE" in results[0].wake_notice
+
+    plain = _drain_provider(
+        tmp_path, monkeypatch, SHELL_SESSION,
+        [
+            _event("session.execution.started", sessionID=SHELL_SESSION),
+            _text(SHELL_SESSION, "msg_x", "NOSHELL"),
+            _event("session.execution.succeeded", sessionID=SHELL_SESSION),
+        ],
+    )
+    plain._background_shells = {"sh_other"}
+    _script(monkeypatch, plain, shells=[{"sh_other"}, set()])
+
+    results = [e for e in await _drain(plain) if isinstance(e, ResultEvent)]
+
+    assert [r.result for r in results] == ["NOSHELL"]
+    assert results[0].wake_notice == ""
+
+
+@pytest.mark.asyncio
+async def test_replayed_shell_enqueue_does_not_double_the_run(tmp_path, monkeypatch):
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    enqueued = next(line for line in rest if "session.inbox.enqueued" in line)
+    provider = _drain_provider(
+        tmp_path, monkeypatch, SHELL_SESSION, [enqueued, *rest]
+    )
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
+
+    results = [e for e in await _drain(provider) if isinstance(e, ResultEvent)]
+
+    assert results[0].wake_notice.startswith("[Ciaobot] 1 background run finished.")
+
+
+@pytest.mark.asyncio
 async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
     _, rest = _split(_fixture_lines("background_subagent_wake.jsonl"), SUB_SESSION)
     provider = _drain_provider(tmp_path, monkeypatch, SUB_SESSION, rest)

@@ -4057,6 +4057,14 @@ class ProjectChatManager:
             timestamp = turn["timestamp"]
             usage = self._parse_transcript_usage(turn["trailer"])
 
+            if turn["notice"] is not None and turn["notice"].strip():
+                turns_data.append({
+                    "role": "system",
+                    "content": turn["notice"],
+                    "origin": "background_run",
+                    "timestamp": timestamp,
+                })
+
             if turn["user"] is not None:
                 user_content = turn["user"]
                 user_content = re.sub(r'(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*', '', user_content)
