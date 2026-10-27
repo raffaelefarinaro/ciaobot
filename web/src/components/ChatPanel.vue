@@ -1238,6 +1238,7 @@
               :runs="chatRuns"
               :finished="store.finishedBackgroundRuns[chat.chat_id] ?? null"
               :now="nowTs"
+              :stop-task="(taskId: string) => store.stopBackgroundTask(chat.chat_id, taskId)"
               @open-details="openRunDetails"
             />
             <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>

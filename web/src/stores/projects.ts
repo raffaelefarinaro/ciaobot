@@ -1357,6 +1357,15 @@ export const useProjectStore = defineStore('projects', () => {
     )
   }
 
+  // Stops one native shell or Monitor from the Processes list. The row leaves
+  // with the next running-subagent poll, once the provider reports it ended.
+  async function stopBackgroundTask(chatId: string, taskId: string): Promise<void> {
+    await api.post(
+      `/api/chats/${encodeURIComponent(chatId)}/background-tasks/${encodeURIComponent(taskId)}/stop`,
+      {},
+    )
+  }
+
   // Subagents this chat has working right now, from /api/subagents/running.
   // Sidebar rows and the per-row "working" signal read this; it is deliberately
   // separate from `subagents` (full transcripts, active chat only) because the
@@ -6982,7 +6991,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, stopBackgroundTask, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,

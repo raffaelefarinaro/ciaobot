@@ -88,18 +88,31 @@
       </template>
       <template v-if="processCount > 0">
         <p class="composer-activity-pop-head">Processes</p>
-        <!-- A shell row has no transcript to open, so it is never a link. -->
-        <button
-          v-for="shell in shellRows"
-          :key="shell.agent_id"
-          type="button"
-          class="composer-activity-pop-item"
-          :title="subagentLabel(shell)"
-          @click="openDetails"
-        >
-          <ActivityGlyph kind="run" />
-          <span class="composer-activity-pop-label">{{ subagentLabel(shell) }}</span>
-        </button>
+        <!-- A shell row has no transcript to open, so it is never a link. Stop
+             is a sibling of the row's button: a button cannot hold a button. -->
+        <template v-for="shell in shellRows" :key="shell.agent_id">
+          <div class="composer-activity-pop-row">
+            <button
+              type="button"
+              class="composer-activity-pop-item"
+              :title="subagentLabel(shell)"
+              @click="openDetails"
+            >
+              <ActivityGlyph kind="run" />
+              <span class="composer-activity-pop-label">{{ subagentLabel(shell) }}</span>
+              <small v-if="minutesSince(shell.started_at || '', now)">{{ minutesSince(shell.started_at || '', now) }}</small>
+            </button>
+            <button
+              v-if="stopTask && shell.stoppable"
+              type="button"
+              class="composer-activity-pop-stop"
+              :aria-label="`Stop ${subagentLabel(shell)}`"
+              :disabled="stopping.has(shell.agent_id)"
+              @click="stop(shell)"
+            >{{ stopping.has(shell.agent_id) ? 'Stopping…' : 'Stop' }}</button>
+          </div>
+          <p v-if="stopErrors[shell.agent_id]" class="composer-activity-pop-note" role="alert">{{ stopErrors[shell.agent_id] }}</p>
+        </template>
         <button
           v-for="run in runs"
           :key="run.run_id"
@@ -127,10 +140,10 @@
 
 <script setup lang="ts">
 import { PopoverAnchor, PopoverContent, PopoverRoot } from 'reka-ui'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import ActivityGlyph from './ActivityGlyph.vue'
-import { backgroundRunLabel, backgroundRunMinutes, backgroundRunOutcome } from '../lib/backgroundRuns'
-import { isShellRow, subagentLabel, subagentPath } from '../lib/subagentIds'
+import { backgroundRunLabel, backgroundRunMinutes, backgroundRunOutcome, minutesSince } from '../lib/backgroundRuns'
+import { isShellRow, shellTaskId, subagentLabel, subagentPath } from '../lib/subagentIds'
 import type { BackgroundRunSummary, RunningSubagent } from '../lib/types'
 
 const props = defineProps<{
@@ -143,6 +156,8 @@ const props = defineProps<{
   /** The run that just ended, for the store's few-second notice; else null. */
   finished: BackgroundRunSummary | null
   now: number
+  /** Stops a process row by its bare id; omitted, no row offers Stop. */
+  stopTask?: (taskId: string) => Promise<void>
 }>()
 const emit = defineEmits<{ 'open-details': [] }>()
 
@@ -180,6 +195,29 @@ const announcement = computed(() => {
   const first = props.runs.length ? backgroundRunLabel(props.runs[0]) : subagentLabel(shellRows.value[0])
   const more = processCount.value > 1 ? ` and ${processCount.value - 1} more` : ''
   return `Running in the background: ${first}${more}`
+})
+
+// Stop keeps its "Stopping…" state until the row leaves the poll: the engine
+// answers before the provider has reported the task ended.
+const stopping = reactive(new Set<string>())
+const stopErrors = reactive<Record<string, string>>({})
+
+async function stop(shell: RunningSubagent) {
+  if (!props.stopTask) return
+  stopping.add(shell.agent_id)
+  delete stopErrors[shell.agent_id]
+  try {
+    await props.stopTask(shellTaskId(shell.agent_id))
+  } catch {
+    stopping.delete(shell.agent_id)
+    stopErrors[shell.agent_id] = 'Could not stop this process. Try again.'
+  }
+}
+
+watch(() => shellRows.value.map(r => r.agent_id), (ids) => {
+  const live = new Set(ids)
+  for (const id of [...stopping]) if (!live.has(id)) stopping.delete(id)
+  for (const id of Object.keys(stopErrors)) if (!live.has(id)) delete stopErrors[id]
 })
 
 function toggle(key: string, event: MouseEvent) {
@@ -368,6 +406,33 @@ onBeforeUnmount(() => { observer?.disconnect() })
   cursor: pointer;
 }
 
+.composer-activity-pop-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.composer-activity-pop-row .composer-activity-pop-item { flex: 1 1 0; width: auto; }
+
+/* Text action on the row's own line, in the popover's neutral tones (run
+   outcomes stay off the semantic palette). */
+.composer-activity-pop-stop {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+}
+.composer-activity-pop-stop:hover,
+.composer-activity-pop-stop:focus-visible { background: var(--bg3); color: var(--fg); }
+.composer-activity-pop-stop:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.composer-activity-pop-stop:disabled { color: var(--fg3); cursor: default; background: none; }
+
 .composer-activity-pop-item:hover,
 .composer-activity-pop-foot:hover { background: var(--bg3); }
 .composer-activity-pop-item:focus-visible,
@@ -405,6 +470,8 @@ onBeforeUnmount(() => { observer?.disconnect() })
 @media (pointer: coarse) {
   .composer-activity-seg { height: auto; min-height: var(--touch); min-width: var(--touch); justify-content: center; }
   .composer-activity-pop-item,
-  .composer-activity-pop-foot { min-height: var(--touch); }
+  .composer-activity-pop-foot,
+  .composer-activity-pop-stop { min-height: var(--touch); }
+  .composer-activity-pop-stop { min-width: var(--touch); }
 }
 </style>

@@ -33,6 +33,7 @@ from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+import httpx
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
@@ -85,6 +86,7 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
+from ciao.providers.claude import ClaudeProvider
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_child_status,
@@ -2914,6 +2916,36 @@ async def chat_background_run_cancel(request: Request) -> JSONResponse:
     return JSONResponse(updated.summary())
 
 
+async def chat_background_task_stop(request: Request) -> JSONResponse:
+    """Stop one running native background task (Claude) or shell (OpenCode).
+
+    ``task_id`` is the bare id from the Processes row (``task:<id>`` or
+    ``shell:<id>`` with the prefix removed). 404 when the chat, its live
+    provider or the id is unknown; the row leaves ``/api/subagents/running``
+    once the provider reports the task finished. 502 when OpenCode cannot be
+    reached.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    task_id = request.path_params["task_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    service = pcm._providers.get(chat_id)
+    provider = service.provider if service is not None else None
+    stopped = False
+    try:
+        if isinstance(provider, ClaudeProvider):
+            stopped = await provider.stop_background_task(task_id)
+        elif isinstance(provider, OpencodeProvider):
+            stopped = await provider.stop_background_shell(task_id)
+    except httpx.HTTPError:
+        logger.warning("stopping background shell %s failed", task_id, exc_info=True)
+        return JSONResponse({"error": "OpenCode did not accept the request"}, status_code=502)
+    if not stopped:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
 async def chat_prompt(request: Request) -> JSONResponse:
     """Send a prompt to start a model turn in the chat (background task)."""
     from ciao.models import ImageAttachment
@@ -3495,6 +3527,8 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                     "is_async": True,
                     "status": "running",
                     "turn_index": None,
+                    "started_at": _epoch_to_iso(shell["started_at"]),
+                    "stoppable": True,
                 })
         return rows
 
@@ -3505,18 +3539,33 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
     path = subagent_tracking.find_parent_session_file(
         chat.session_id, Path(config.workspace_root), agent_root=agent_root
     )
-    if path is None:
+    # Native tasks (background Bash, Monitor) come from the loaded provider
+    # when there is one: its SDK-tracked set is the live truth and the only
+    # one that can be stopped. Without a loaded provider the parent JSONL's
+    # unfinished tasks stand in, listed but not stoppable. Never both, so a
+    # task is not listed twice.
+    provider_service = pcm._providers.get(chat.chat_id)
+    live_provider = provider_service.provider if provider_service is not None else None
+    live_claude = live_provider if isinstance(live_provider, ClaudeProvider) else None
+    if path is None and live_claude is None:
         return []
-    def _scan() -> list[subagent_tracking.SubagentInfo]:
+
+    def _scan() -> tuple[
+        list[subagent_tracking.SubagentInfo], list[subagent_tracking.SubagentInfo]
+    ]:
         # Both halves belong off the event loop. running_agents() is not a
         # cheap filter over the parsed state: it stats and tail-reads each
         # running agent's own transcript, and this endpoint is polled by the
         # sidebar for every working chat.
+        if path is None:
+            return [], []
         state = subagent_tracking.parse_session_subagents(path)
-        return subagent_tracking.running_agents(path, state)
+        agents = subagent_tracking.running_agents(path, state)
+        tasks = [] if live_claude is not None else subagent_tracking.running_tasks(state)
+        return agents, tasks
 
-
-    return [
+    agents, tasks = await asyncio.to_thread(_scan)
+    claude_rows: list[dict] = [
         {
             "agent_id": info.agent_id,
             "description": info.description,
@@ -3525,8 +3574,44 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             "status": info.status,
             "turn_index": info.turn_index,
         }
-        for info in await asyncio.to_thread(_scan)
+        for info in agents
     ]
+    # Processes rows reuse the shell row shape; `isShellRow` routes them.
+    claude_rows.extend(
+        {
+            "agent_id": f"task:{info.agent_id}",
+            "description": info.command or info.description or "Background task",
+            "subagent_type": "monitor" if info.subagent_type == "Monitor" else "shell",
+            "is_async": True,
+            "status": "running",
+            "turn_index": None,
+            "started_at": info.started_at,
+            "stoppable": False,
+        }
+        for info in tasks
+    )
+    if live_claude is not None:
+        for task in live_claude.background_shell_rows():
+            task_type = str(task["task_type"])
+            if "agent" in task_type:
+                # Background agents already have their own rows above.
+                continue
+            claude_rows.append({
+                "agent_id": f"task:{task['id']}",
+                "description": task["command"] or "Background task",
+                "subagent_type": "monitor" if "monitor" in task_type else "shell",
+                "is_async": True,
+                "status": "running",
+                "turn_index": None,
+                "started_at": _epoch_to_iso(task["started_at"]),
+                "stoppable": True,
+            })
+    return claude_rows
+
+
+def _epoch_to_iso(seconds: float) -> str:
+    """ISO 8601 UTC for epoch ``seconds``."""
+    return datetime.fromtimestamp(seconds, UTC).isoformat()
 
 
 def _merge_subagent_dispatch_meta(

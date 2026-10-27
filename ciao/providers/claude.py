@@ -719,6 +719,18 @@ class ClaudeProvider(BaseSDKProvider):
             for task_id in sorted(self._native_tasks)
         ]
 
+    async def stop_background_task(self, task_id: str) -> bool:
+        """Ask the CLI to stop one tracked background task; False if not tracked.
+
+        The row is not dropped here: the CLI reports the terminal status in the
+        message stream and ``_observe_message`` clears it then.
+        """
+        client = self._client
+        if task_id not in self._native_tasks or client is None:
+            return False
+        await client.stop_task(task_id)
+        return True
+
     def _observe_message(self, msg: Any) -> None:
         """Record SDK activity and track background tasks from lifecycle messages.
 

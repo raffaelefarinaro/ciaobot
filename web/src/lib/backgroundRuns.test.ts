@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { backgroundRunElapsed, backgroundRunLabel, backgroundRunMinutes, backgroundRunOutcome } from './backgroundRuns'
+import { backgroundRunElapsed, backgroundRunLabel, backgroundRunMinutes, backgroundRunOutcome, minutesSince } from './backgroundRuns'
 import type { BackgroundRunSummary } from './types'
 
 function run(over: Partial<BackgroundRunSummary> = {}): BackgroundRunSummary {
@@ -25,6 +25,12 @@ describe('backgroundRuns', () => {
     expect(backgroundRunMinutes(run(), start + 125_400)).toBe('2m')
     expect(backgroundRunMinutes(run(), start + 3_725_000)).toBe('1h 2m')
     expect(backgroundRunMinutes(run({ started_at: '' }), start)).toBe('')
+  })
+
+  it('formats whole minutes from any start time', () => {
+    const start = Date.parse('2026-10-06T10:00:00Z')
+    expect(minutesSince('2026-10-06T10:00:00Z', start + 125_400)).toBe('2m')
+    expect(minutesSince('', start)).toBe('')
   })
 
   it('says how a run ended', () => {

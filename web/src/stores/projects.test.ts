@@ -2225,6 +2225,15 @@ describe('move to background', () => {
   })
 })
 
+describe('stop a background task', () => {
+  test('stopBackgroundTask posts to the chat-scoped route with the id escaped', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ ok: true })
+    await store.stopBackgroundTask('c1', 'task/1')
+    expect(apiPost).toHaveBeenLastCalledWith('/api/chats/c1/background-tasks/task%2F1/stop', {})
+  })
+})
+
 describe('ephemeral status events', () => {
   test('does not render Claude requesting status as a system message', () => {
     apiGet.mockResolvedValue([])
