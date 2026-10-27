@@ -317,6 +317,15 @@ def test_claude_file_tool_guard_denies_paths_outside_the_roots(tmp_path):
         claude_file_tool_guard(cwd=root, roots=[])
 
 
+def test_claude_file_tool_guard_denies_a_path_it_cannot_resolve(tmp_path):
+    # A NUL byte makes Path.resolve raise; the hook must deny, not raise (#2208).
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    guard = claude_file_tool_guard(cwd=root, roots=[root])
+    assert _guard_decision(guard, "Read", {"file_path": str(root / "a\x00.md")}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": "/etc/hosts\x00"}) == "deny"
+
+
 _TASK_SESSION = "0a1b2c3d-4e5f-6789-abcd-ef0123456789"
 
 

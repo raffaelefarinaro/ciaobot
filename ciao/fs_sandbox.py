@@ -481,13 +481,18 @@ def path_outside_roots(value: str, *, cwd: Path, roots: list[Path]) -> bool:
 
     Relative paths resolve against *cwd*, ``~`` expands, and symlinks resolve,
     so a link inside a root that points outside it counts as outside. Glob
-    characters cut the path at the last literal directory.
+    characters cut the path at the last literal directory. A path that cannot
+    be resolved (a NUL byte, a symlink loop) counts as outside, so the guard
+    denies it rather than raising: a hook that raises is not a deny.
     """
     text = _static_prefix(value.strip())
-    candidate = Path(text).expanduser()
-    if not candidate.is_absolute():
-        candidate = cwd / candidate
-    resolved = candidate.resolve()
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        resolved = candidate.resolve()
+    except (ValueError, OSError, RuntimeError):
+        return True
     return not any(resolved.is_relative_to(root.resolve()) for root in roots)
 
 
@@ -514,9 +519,12 @@ def claude_task_output_path_allowed(
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         candidate = cwd / candidate
-    if os.path.islink(candidate):
+    try:
+        if os.path.islink(candidate):
+            return False
+        resolved = candidate.resolve()
+    except (ValueError, OSError, RuntimeError):
         return False
-    resolved = candidate.resolve()
     depth = len(base.parts)
     if not (
         resolved.is_relative_to(base)
