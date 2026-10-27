@@ -296,9 +296,9 @@ def resolve_executable(argv0: str, cwd: Path, workspace_root: Path) -> str:
     on the user's PATH. The engine-first PATH is still the *server's* choice,
     not the caller's ``env``, so the resolve-before-overrides property holds.
 
-    Three shapes are accepted, and the resolved target must exist and be
-    executable in all three — a failed launch should be a clear validation
-    error at the tool boundary, not a run that dies one line into its log:
+    Three shapes are accepted, and the target must exist and be executable in
+    all three — a failed launch should be a clear validation error at the tool
+    boundary, not a run that dies one line into its log:
 
     * a bare program name (``pytest``), looked up on the engine-first PATH;
     * a relative path (``./build.sh``, ``scripts/x.py``), resolved inside the
@@ -306,6 +306,27 @@ def resolve_executable(argv0: str, cwd: Path, workspace_root: Path) -> str:
     * an absolute path (``/usr/bin/python3``). Not confined, because PATH
       lookup already reaches outside the workspace and pretending otherwise
       would be friction without a boundary.
+
+    Validation and execution name the same file, but not always the same path.
+    A relative path is handed back as its canonical target: resolution runs
+    before the containment check, and returning the caller's spelling would
+    let a leaf symlink retargeted after validation point the launch outside the
+    workspace. An absolute or rooted path keeps the caller's spelling —
+    normalized to absolute first — because the spelling is part of the
+    program's semantics: a virtualenv ``bin/python`` is a symlink to its base
+    interpreter, and Python discovers the venv from the invoked path. Spawning
+    the canonical target made an absolute venv interpreter start the base
+    interpreter instead, so ``sys.prefix`` and every installed dependency
+    disappeared (#2188). Its canonical target is derived from the normalized
+    invocation, not from the raw spelling, so ``/x/link/../tool`` validates the
+    file it will actually run.
+
+    Neither branch is race-free: a writable parent directory can replace any
+    component of the path between the check and the exec. Canonicalizing a
+    relative path removes the leaf-symlink swap, not the parent-directory race;
+    the containment check is a best effort against a caller who can write the
+    workspace, not a sandbox guarantee. Absolute paths are unconfined by
+    design, so that race only redirects what the caller could have named.
 
     A path is relative when it names a directory with either separator the OS
     has (``os.sep``, ``os.altsep``), so ``scripts\\x.py`` is a path on Windows
@@ -318,13 +339,15 @@ def resolve_executable(argv0: str, cwd: Path, workspace_root: Path) -> str:
     candidate = Path(argv0)
     separators = [sep for sep in (os.sep, os.altsep) if sep]
     if candidate.is_absolute() or candidate.root:
-        target = candidate.resolve()
+        invocation = Path(os.path.abspath(argv0))
+        target = invocation.resolve()
     elif any(sep in argv0 for sep in separators):
-        target = (cwd / candidate).resolve()
+        target = (Path(cwd) / candidate).resolve()
         if not target.is_relative_to(root):
             raise BackgroundRunError(
                 "cmd_forbidden", "cmd[0] resolves outside the workspace root."
             )
+        invocation = target
     else:
         found = shutil.which(argv0, path=prepend_engine_path())
         if not found:
@@ -332,7 +355,7 @@ def resolve_executable(argv0: str, cwd: Path, workspace_root: Path) -> str:
         return found
     if not target.is_file() or not os.access(target, os.X_OK):
         raise BackgroundRunError("cmd_not_found", f"'{argv0}' is not an executable file.")
-    return str(target)
+    return str(invocation)
 
 
 def build_env(overrides: Any, *, run_id: str, workspace: str) -> dict[str, str]:
