@@ -1229,14 +1229,12 @@
               <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
-            <!-- Background work the turn left running: agents and command runs, right
+            <!-- Background work the turn left running: agents and shells, right
                  against Send. Fills the bar's free space, so it is also the spacer. -->
             <ComposerActivity
               :chat-id="chat.chat_id"
               :agent-count="composerAgentCount"
               :agents="runningRows"
-              :runs="chatRuns"
-              :finished="store.finishedBackgroundRuns[chat.chat_id] ?? null"
               :now="nowTs"
               :stop-task="(taskId: string) => store.stopBackgroundTask(chat.chat_id, taskId)"
               @open-details="openRunDetails"
@@ -1347,14 +1345,14 @@
         />
       </div>
       <section
-        v-if="runningSubagents.length || chatRuns.length"
+        v-if="runningRows.length"
         ref="railRunningEl"
         class="rail-section chat-rail-running"
         aria-labelledby="chat-rail-running"
         tabindex="-1"
       >
         <p id="chat-rail-running" class="rail-label">Running</p>
-        <!-- Agents first: an agent has a transcript to open, a process only a log. -->
+        <!-- Agents first: an agent has a transcript to open, a shell only a Stop. -->
         <template v-if="runningSubagents.length">
           <p class="chat-rail-subhead">Agents</p>
           <div class="rail-list">
@@ -1371,9 +1369,14 @@
             </router-link>
           </div>
         </template>
-        <template v-if="chatRuns.length">
+        <template v-if="runningShells.length">
           <p class="chat-rail-subhead">Processes</p>
-          <BackgroundRunRows :chat-id="chat.chat_id" :runs="chatRuns" :now="nowTs" />
+          <ShellRows
+            variant="rail"
+            :rows="runningShells"
+            :now="nowTs"
+            :stop-task="(taskId: string) => store.stopBackgroundTask(chat.chat_id, taskId)"
+          />
         </template>
       </section>
       <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
@@ -1493,7 +1496,7 @@ import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
-import BackgroundRunRows from './BackgroundRunRows.vue'
+import ShellRows from './ShellRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
@@ -2222,8 +2225,9 @@ function compactContext() {
 // composer lists those as processes, everything else counts as an agent.
 const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
 const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
+const runningShells = computed(() => runningRows.value.filter(isShellRow))
 watch(
-  () => store.isStreaming || store.activeBackgroundRuns.length > 0 || runningRows.value.some(isShellRow),
+  () => store.isStreaming || runningShells.value.length > 0,
   (ticking) => {
     if (ticking && !clockTimer) {
       nowTs.value = Date.now()
@@ -2235,7 +2239,6 @@ watch(
   },
   { immediate: true },
 )
-const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))
 // Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
 // the running-subagent poll tick on different clocks, so take the larger.
 const composerAgentCount = computed(() => Math.max(store.activeBackgroundAgents, runningSubagents.value.length))
