@@ -880,7 +880,7 @@ def accept_region_fact(
     )
 
 
-def _safe_name(name: str) -> str:
+def safe_note_stem(name: str) -> str:
     """A proposal payload as a filename stem, without path separators."""
     cleaned = re.sub(r"[\\/:*?\"<>|]+", " ", name).strip().rstrip(".")
     return cleaned[:80]
@@ -968,7 +968,7 @@ def entity_note_path(
     rules :func:`write_entity_note` applies.
     """
     folder = _entity_folder(registry_root, type_id)
-    stem = _safe_name(name)
+    stem = safe_note_stem(name)
     if folder is None or not stem:
         return None
     note = vault_root / folder / f"{stem}.md"
@@ -993,7 +993,7 @@ def render_entity_note(type_id: str, name: str, text: str, *, today: str = "") -
         f"type: {type_id}\n"
         f"updated: {today or date.today().isoformat()}\n"
         f"tags: [{type_id}]\n"
-        f"---\n# {_safe_name(name)}\n\n{text}\n"
+        f"---\n# {safe_note_stem(name)}\n\n{text}\n"
     )
 
 

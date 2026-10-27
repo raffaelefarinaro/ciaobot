@@ -36,6 +36,10 @@ def test_new_vault_notes_require_frontmatter() -> None:
     assert "Every vault note you create opens with YAML frontmatter" in text
 
 
+def test_new_vault_notes_come_from_the_create_command() -> None:
+    assert "ciao note create" in _system_instructions()
+
+
 def test_rewrites_preserve_frontmatter() -> None:
     text = _system_instructions()
     assert "`updated:` moves only through a `note verify` still_valid/update verdict or `vault review keep`" in text

@@ -131,8 +131,8 @@ application actions that are safe and meaningful for a scoped agent:
 bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 `ciao vault review …`), projects (`ciao project …`), workspaces
 (`ciao workspace list`), chats (`ciao chat …`), schedules (`ciao schedule …`), the task board
-(`ciao task …`, including `task delegate` and `task report`), note
-verification (`ciao note verify`), webhook triggers (`ciao webhook …`),
+(`ciao task …`, including `task delegate` and `task report`), notes
+(`ciao note create|related|verify`), webhook triggers (`ciao webhook …`),
 Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), file
 surfacing (`ciao file surface`), and the suggested terminal command
 (`ciao chat terminal-offer`). Browser-session administration,

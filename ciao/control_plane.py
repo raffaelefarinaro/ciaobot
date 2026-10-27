@@ -1835,6 +1835,100 @@ class CiaoControlPlane:
         reported: dict[str, Any] = await run_read(f"note_related:{root}:{path}:{limit}", _run)
         return _ok(reported)
 
+    async def note_create(
+        self,
+        principal: AgentPrincipal,
+        *,
+        note_type: str,
+        title: str,
+        description_file: str = "",
+        tags: list[str] | None = None,
+        body_file: str = "",
+        path: str = "",
+    ) -> dict[str, Any]:
+        """Create one vault note with canonical frontmatter in this workspace's vault.
+
+        The description and body arrive as files inside the caller's workspace,
+        never as arguments, because they are arbitrary prose. The type is
+        checked against the vault's category registry, which also names the
+        folder unless ``path`` (a vault-relative folder) overrides it. An
+        existing note is never overwritten.
+        """
+        from ciao import memory_receipts as mr
+        from ciao import note_create as nc
+        from ciao.frontmatter import split_frontmatter
+
+        if not str(title or "").strip():
+            raise ControlPlaneError("note_title_invalid", "A note title is required.")
+        if not str(note_type or "").strip():
+            raise ControlPlaneError("note_type_unknown", "A note type is required.")
+        workspace = self._workspace(principal)
+        notes_root = Path(self.config.workspace_vault_root(workspace))
+        registry_root = Path(self.config.agent_vault_root(workspace))
+        description = ""
+        if description_file.strip():
+            raw_description = self._workspace_text_file(
+                workspace, description_file, flag="--description-file"
+            )
+            try:
+                description = nc.normalize_description(raw_description)
+            except nc.NoteCreateError as exc:
+                raise ControlPlaneError(exc.code, str(exc)) from exc
+        body = ""
+        if body_file.strip():
+            body = self._workspace_text_file(workspace, body_file, flag="--body-file")
+            if split_frontmatter(body) is not None or body.startswith("---\n"):
+                raise ControlPlaneError(
+                    "note_body_invalid",
+                    "The body file must not start with frontmatter; the command writes it.",
+                )
+        today = date.today()
+
+        def _run() -> dict[str, Any]:
+            try:
+                created = nc.create_note(
+                    notes_root,
+                    registry_root,
+                    note_type=note_type,
+                    title=title,
+                    description=description,
+                    tags=tags,
+                    body=body,
+                    path=path,
+                    today=today,
+                )
+            except nc.NoteCreateError as exc:
+                raise ControlPlaneError(exc.code, str(exc)) from exc
+            except mr.MemoryReceiptError as exc:
+                raise ControlPlaneError("note_path_invalid", str(exc)) from exc
+            return created.as_dict()
+
+        reported: dict[str, Any] = await run_read(
+            f"note-create:{notes_root}:{title}", _run, coalesce=False
+        )
+        return _ok(reported)
+
+    def _workspace_text_file(self, workspace: str, relative: str, *, flag: str) -> str:
+        """One UTF-8 prose file confined to the caller's workspace root, or a refusal."""
+        from ciao.note_create import MAX_NOTE_FILE_BYTES
+
+        root = Path(self.config.agent_root(workspace)).resolve()
+        target = self._safe_relative(root, relative, must_exist=True)
+        if not target.is_file():
+            raise ControlPlaneError("note_file_invalid", f"{flag} must name a file.")
+        try:
+            size = target.stat().st_size
+            if size > MAX_NOTE_FILE_BYTES:
+                raise ControlPlaneError(
+                    "note_file_invalid",
+                    f"{flag} is {size} bytes, over the {MAX_NOTE_FILE_BYTES}-byte limit.",
+                )
+            return target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ControlPlaneError(
+                "note_file_invalid", f"{flag} is not readable UTF-8: {exc}"
+            ) from exc
+
     async def verify_note(self, principal: AgentPrincipal, *, payload_file: str = "") -> dict[str, Any]:
         """Record one stale note's verdict through the managed verification service.
 

@@ -1535,6 +1535,21 @@ reaches a person as a proposal. The plan-mode gate is the existing one:
 `tests/test_curation_run.py` for the pass, and `tests/test_agent_surface.py` for
 the CLI mapping.
 
+### Creating a note: `note_create`
+
+`ciao note create --type T --title T` is the one way an agent makes a vault note
+(`ciao/note_create.py`, `control_plane.note_create`, the `note_create` operation,
+`_WRITE` so plan mode refuses it). The type is checked against the vault's
+category registry (`load_entity_types` on the agent vault root); the note lands
+under the workspace vault root in the category's folder, or in `--path`, a
+vault-relative folder, which a category with no folder requires. The description
+and body come from files inside the workspace (`--description-file`,
+`--body-file`), confined by `_safe_relative` and capped at
+`MAX_NOTE_FILE_BYTES`, so prose never travels as an argument. The file is opened
+exclusively: an existing note is `note_exists`, never overwritten. The search
+index is not refreshed; `vault_search` indexes on every query. Tests:
+`tests/test_note_create.py`, `tests/test_agent_surface.py`.
+
 `ciao memory-audit` reads one file and skips the vault scan, so the daily
 `system-memory-curation` schedule can afford to call it and fix what it finds.
 `--with-vault` adds the note-aging pass (still informational, never changes the

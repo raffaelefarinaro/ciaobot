@@ -486,6 +486,45 @@ async def _op_note_related(service: CiaoMcpService, path: str = "", limit: int =
     )
 
 
+async def _op_note_create(
+    service: CiaoMcpService,
+    note_type: str,
+    title: str,
+    description_file: str = "",
+    tags: list[str] | None = None,
+    body_file: str = "",
+    path: str = "",
+) -> dict[str, Any]:
+    """Create one vault note with the canonical frontmatter (`type`, `title`,
+    `description`, `tags`, `created`, `updated`) in its category's folder.
+
+    `note_type` is a category id or alias from `VOCABULARY.md`; an unknown,
+    disabled or hidden type is refused with the valid ids. `path` is a
+    vault-relative FOLDER (not a file) that overrides the category's folder, and
+    is required for a category that has none. `tags` default to the type.
+
+    The description and body are prose: put them in files inside this workspace
+    and pass `description_file` and `body_file`, never the text as arguments.
+    The description is collapsed to one line (500 characters at most), and the
+    body must not start with frontmatter. Returns `relative_path`, `path`,
+    `type`, `title` and `created`. An existing note is never overwritten
+    (`note_exists`); edit that note instead.
+    """
+    return await service._invoke(
+        "note_create",
+        lambda cp, p: cp.note_create(
+            p,
+            note_type=note_type,
+            title=title,
+            description_file=description_file,
+            tags=tags,
+            body_file=body_file,
+            path=path,
+        ),
+        mutating=True,
+    )
+
+
 async def _op_gws_status(service: CiaoMcpService) -> dict[str, Any]:
     """Report whether the active workspace's Google Workspace account is
     connected and its token is valid.
@@ -1460,6 +1499,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
     Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
+    Operation("note_create", _WRITE, _op_note_create.__doc__ or "", _op_note_create),
     Operation("gws_status", _READ, _op_gws_status.__doc__ or "", _op_gws_status),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
