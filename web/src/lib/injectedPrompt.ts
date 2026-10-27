@@ -52,7 +52,7 @@ export function unneutralize(tag: string, text: string): string {
 
 // Run logs keep the colour codes test runners print; drawn as text they are noise.
 // eslint-disable-next-line no-control-regex -- matching ESC is the point
-const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
 function stripAnsi(text: string): string {
   return text.replace(ANSI_RE, '')
 }
@@ -191,7 +191,7 @@ export interface InjectedSummary { label: string; facts: string; tone: RunVerdic
 
 const BARE_EXIT_RE = /^exit -?\d+$/
 
-/** Why a run did not succeed: its error, unless that only repeats the exit code, else its last log line. */
+/** Why a run did not succeed: its error, unless that only repeats the exit code, else its last log line, else nothing. */
 export function runFailureHint(run: BackgroundRunEntry): string {
   if (run.verdict === 'ok') return ''
   if (run.error && !BARE_EXIT_RE.test(run.error)) return run.error
@@ -199,7 +199,7 @@ export function runFailureHint(run: BackgroundRunEntry): string {
     const line = run.tail[i].trim()
     if (line) return line
   }
-  return run.error
+  return ''
 }
 
 const TONE_ORDER: RunVerdict[] = ['failed', 'cancelled', 'ok']
@@ -221,10 +221,15 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
           .join(' · ')
       }
       const tone = TONE_ORDER.find(v => runs.some(r => r.verdict === v)) ?? null
-      const failed = runs.find(r => r.verdict === 'failed') ?? runs.find(r => r.verdict === 'cancelled')
-      const hint = failed ? runFailureHint(failed) : ''
-      if (!failed || !hint) return { label, facts, tone }
-      return { label, facts, tone, hint: runs.length > 1 ? `${failed.label}: ${hint}` : hint }
+      // The first failed run with something to say, else the first cancelled one.
+      for (const verdict of ['failed', 'cancelled'] as const) {
+        for (const run of runs) {
+          if (run.verdict !== verdict) continue
+          const hint = runFailureHint(run)
+          if (hint) return { label, facts, tone, hint: runs.length > 1 ? `${run.label}: ${hint}` : hint }
+        }
+      }
+      return { label, facts, tone }
     }
     case 'cli_task_wake':
       return { label: 'Lost background tasks', facts: String(prompt.count), tone: null }

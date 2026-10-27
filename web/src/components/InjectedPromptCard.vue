@@ -30,6 +30,7 @@ const open = ref(false)
 const rawOpen = ref(false)
 const detailOpen = ref(false)
 const bodyId = useId()
+const hintId = useId()
 const detailId = useId()
 const rawId = useId()
 
@@ -59,6 +60,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
         class="injected-card-toggle"
         :aria-expanded="open ? 'true' : 'false'"
         :aria-controls="bodyId"
+        :aria-describedby="!open && summary.hint ? hintId : undefined"
         @click="open = !open"
       >
         <AppIcon :name="icon" :size="14" />
@@ -75,7 +77,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
       <time v-if="timestamp" class="injected-card-time" :datetime="timestamp">{{ formatTime(timestamp) }}</time>
     </div>
 
-    <p v-if="!open && summary.hint" class="injected-card-hint">{{ summary.hint }}</p>
+    <p v-if="!open && summary.hint" :id="hintId" class="injected-card-hint">{{ summary.hint }}</p>
 
     <div v-if="open" :id="bodyId" class="injected-card-body">
       <template v-if="prompt.kind === 'background_run'">
