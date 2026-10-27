@@ -2011,10 +2011,8 @@ Self-affecting operations must defer until the caller chat drains.
 Since S6 the agent runs every operation as `ciao <noun> <verb>` in the managed
 provider's shell. `ProjectChatManager.build_agent_request` deliberately injects
 `CIAO_AGENT_TOKEN` (and `CIAO_AGENT_URL`) into that **foreground** shell — this
-is the point of the CLI surface (D-01), not a leak. `ciao/background.py` strips
-`CIAO_AGENT_TOKEN` (and `PWA_AUTH_TOKEN`) from every background child so a
-detached command cannot call back with the caller's authority. Keep that split
-when changing token delivery; do not add the token to telemetry arguments.
+is the point of the CLI surface (D-01), not a leak. Do not add the token to
+telemetry arguments.
 
 See `docs/AGENT_CLI.md` for the catalog and provider configuration.
 

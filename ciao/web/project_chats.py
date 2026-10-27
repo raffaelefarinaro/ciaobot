@@ -8500,11 +8500,11 @@ class ProjectChatManager:
         in-flight stream when the chat is mid-turn (so we never interrupt the
         user), and returns False when the chat is idle. start_stream then
         handles the idle case, including a cold chat whose provider session
-        died in a restart, since a script can finish hours after the turn that
-        launched it.
+        died in a restart, since a lost task can surface hours after the turn
+        that launched it.
 
-        ``origin`` tags the turn (``background_run`` / ``cli_task_wake``) so the
-        PWA draws a notice card.
+        ``origin`` tags the turn (``cli_task_wake``) so the PWA draws a notice
+        card.
         """
         if self.queue_message(parent.chat_id, prompt, origin=origin):
             delivery = "queued"

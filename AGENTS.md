@@ -60,9 +60,9 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 - Run every gate CI blocks on before pushing, not just the tests. CI's
   blocking steps are, in order:
   1. `mypy ciao`, which is easy to forget and fails the whole job. Watch for
-     `no-any-return`: several attributes (`ProjectChatManager._background_runner`,
-     for one) are typed `Any` because they are wired after construction, so
-     returning a call on one straight out of a typed function is an error.
+     `no-any-return`: an attribute typed `Any` (for instance one wired after construction)
+     makes any call on it return `Any`, so returning that call straight out
+     of a typed function is an error.
      Annotate the local instead.
   2. `pytest -n auto tests/`, the full suite, before claiming backend work is
      complete. A fake object in an unrelated test can break on a new

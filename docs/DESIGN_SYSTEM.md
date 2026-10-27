@@ -145,7 +145,7 @@ Existing and wanted:
 | Component | Owns | Status |
 |---|---|---|
 | `ChatSignals` | chat state marks (needs-you / working / unread / loop / quiet) | **exists, all 5 call sites** |
-| `ActivityGlyph` | the shape of live work: working pulse, subagent orbit, shell-run prompt `›_` | **exists: ChatSignals, BackgroundRunRows, Chat details rail, sidebar project rollup, composer activity cluster** |
+| `ActivityGlyph` | the shape of live work: working pulse, subagent orbit, shell-run prompt `›_` | **exists: ChatSignals, ShellRows, Chat details rail, sidebar project rollup, composer activity cluster** |
 | `AppIcon` | the SVG icon set (see Rule S4) | **exists** |
 | `TabBar` | a tablist: tab styling, count pills, and the roving-tabindex keyboard contract | **exists, all 3 call sites** |
 | `TierLabel` | a priority tier heading with its hairline rule | wanted |
