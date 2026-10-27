@@ -185,6 +185,31 @@ def _refresh_vault_index(
         return False
 
 
+# The removed `ciao run` runner kept its registry and logs in
+# `<runtime>/background/` (#2225). Nothing reads it any more, so each boot
+# deletes it if it is still there; a missing folder is the normal case.
+LEGACY_BACKGROUND_STATE_DIRNAME = "background"
+
+
+def remove_legacy_background_state(runtime_root: Path) -> bool:
+    """Delete ``<runtime>/background/``; True when something was removed."""
+    import shutil
+
+    path = runtime_root / LEGACY_BACKGROUND_STATE_DIRNAME
+    try:
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        else:
+            return False
+    except OSError:
+        logger.warning("could not remove legacy background state %s", path, exc_info=True)
+        return False
+    logger.info("removed legacy background state %s", path)
+    return True
+
+
 # Fail-closed legacy node-state gate (#636). A Mac that was a client of
 # another host, or whose `node_state.json` cannot be understood, must not come
 # up as a local writer: node mode's own refusal is what kept two writers off
@@ -649,6 +674,7 @@ async def _run_server_locked(
     from ciao import job_runs
 
     job_runs.configure(config.state_path.parent)
+    await asyncio.to_thread(remove_legacy_background_state, config.state_path.parent)
     tracker = StartupTracker(
         on_finish=job_runs.record_startup_phase,
         startup_id=startup_id,
