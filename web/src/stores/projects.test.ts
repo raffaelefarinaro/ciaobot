@@ -1709,6 +1709,132 @@ describe('stopped turns', () => {
     }
   })
 
+  // A finished turn whose reply the history fetches did not show inside the
+  // retry ladder (a fetch that failed while a resumed phone was still waking
+  // its network, a slow read): the spinner comes down, but the client keeps
+  // looking instead of leaving the user's own bubble last until they reload.
+  function finishTurn(store: ReturnType<typeof useProjectStore>, chatId: string) {
+    store.connectEventsWs()
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({ type: 'chat_streaming_done', chat_id: chatId, project_id: 'p1', is_error: false }),
+    })
+  }
+  const ASK = { role: 'user' as const, content: 'fix the migration', timestamp: '' }
+  const ANSWER = { role: 'assistant' as const, content: 'The grants are already correct.', timestamp: '2026-10-27T00:38:52Z' }
+
+  test('keeps looking for a reply the retry ladder missed', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-late-reply'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return calls <= 7 ? [ASK] : [ASK, ANSWER]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+      expect(store.streaming[chatId]).toBe(false)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ASK.content)
+
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a history fetch that fails is retried, not read as no reply', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-offline-wake'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        if (calls <= 6) throw new TypeError('Load failed')
+        return [ASK, ANSWER]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(40000)
+      expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('stops looking once the user leaves the chat', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-left'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return [ASK]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(12000)
+      store.activeChatId = 'c-elsewhere'
+      const before = calls
+      await vi.advanceTimersByTimeAsync(180000)
+      expect(calls).toBe(before)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('gives up after about two minutes when the turn really has no reply', async () => {
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-no-reply'
+      store.activeChatId = chatId
+      store.streaming[chatId] = true
+      store.messages[chatId] = [{ ...ASK }]
+      let calls = 0
+      apiGet.mockImplementation(async (url: string) => {
+        if (!url.includes('/messages')) return []
+        calls += 1
+        return [ASK]
+      })
+
+      finishTurn(store, chatId)
+      await vi.advanceTimersByTimeAsync(180000)
+      const settled = calls
+      await vi.advanceTimersByTimeAsync(600000)
+      expect(calls).toBe(settled)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('coming back online refetches a chat still waiting on its reply', async () => {
+    const store = useProjectStore()
+    const chatId = 'c-online'
+    store.activeChatId = chatId
+    store.messages[chatId] = [{ ...ASK }]
+    apiGet.mockImplementation(async (url: string) => (url.includes('/messages') ? [ASK, ANSWER] : []))
+
+    window.dispatchEvent(new Event('online'))
+    await vi.waitFor(() => expect(store.messages[chatId]?.at(-1)?.content).toBe(ANSWER.content))
+  })
+
   test('keeps the spinner while the server still reports the chat streaming', async () => {
     // The backstop must not fire on a slow turn: the server is the authority
     // on whether work is still running.
