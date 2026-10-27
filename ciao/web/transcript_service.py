@@ -46,6 +46,7 @@ from ciao.models import ChatContext
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (
     OpencodeProvider,
+    native_shell_run,
     _file_touches as _opencode_file_touches,
     _summarize_tool_input as _summarize_opencode_tool_input,
 )
@@ -743,6 +744,7 @@ def _render_opencode_thread(
     result: list[dict] = []
     user_idx = int(start_user_idx) if isinstance(start_user_idx, int) else 0
     pending_tools: list[str] = []
+    pending_runs: list[dict] = []
 
     def flush_tools() -> None:
         if pending_tools:
@@ -753,6 +755,16 @@ def _render_opencode_thread(
             })
             pending_tools.clear()
 
+    def flush_notice() -> None:
+        # Shells that finished together draw one card, ahead of the reply.
+        if pending_runs:
+            result.append({
+                "role": "system",
+                "content": format_finished_runs(pending_runs, tail_lines=50)[0],
+                "origin": "background_run",
+            })
+            pending_runs.clear()
+
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -761,6 +773,17 @@ def _render_opencode_thread(
         role = str(info.get("role") or "")
         parts = message.get("parts")
         parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
+        if role == "synthetic":
+            flush_tools()
+            run = native_shell_run(
+                "\n".join(str(part.get("text") or "") for part in parts),
+                info.get("description"),
+                info.get("metadata"),
+            )
+            if run is not None:
+                pending_runs.append(run)
+            continue
+        flush_notice()
         if role == "user":
             flush_tools()
             # A prompt can span several text parts; synthetic ones are
@@ -859,6 +882,7 @@ def _render_opencode_thread(
                     line += f" {summary}"
                 pending_tools.append(line)
         flush_tools()
+    flush_notice()
     if metadata:
         _overlay_assistant_timings(result, chat.user_turn_timings)
     return result

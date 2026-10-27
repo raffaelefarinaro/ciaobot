@@ -123,6 +123,42 @@ def test_current_messages_hide_the_injected_context_envelope(tmp_path: Path) -> 
     )
 
 
+def test_current_messages_renders_origin_turns_as_system_rows_without_shifting_turn_index(
+    tmp_path: Path,
+) -> None:
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "archives")
+
+    def record(prompt: str, response: str, origin: str = "") -> None:
+        store.record_turn(
+            AgentRequest(
+                prompt=prompt, model="opencode/big-pickle", mode="auto",
+                provider="opencode", display_prompt=prompt,
+            ),
+            ctx=CTX,
+            response_text=response,
+            effective_model="opencode/big-pickle",
+            session_id="ses_1",
+            usage={},
+            quota={},
+            input_kind="task-notification" if origin else "text",
+            provider="opencode",
+            origin=origin,
+        )
+
+    record("first", "one")
+    record("[Ciaobot] 1 background run finished.", "woke", origin="background_run")
+    record("second", "two")
+    rows = store.current_messages(CTX, "opencode")
+
+    assert [row["role"] for row in rows] == [
+        "user", "assistant", "system", "assistant", "user", "assistant",
+    ]
+    assert rows[2]["origin"] == "background_run"
+    assert rows[2]["content"] == "[Ciaobot] 1 background run finished."
+    assert "turn_index" not in rows[2]
+    assert [row["turn_index"] for row in rows if row["role"] == "user"] == [0, 1]
+
+
 # ── Skill evidence in the archive ─────────────────────────────────────────
 #
 # The memory pass reads the archive and files a skill-improvement proposal

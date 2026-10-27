@@ -360,6 +360,7 @@ class TranscriptStore:
         tool_events: list[dict[str, Any]] | None = None,
         is_error: bool = False,
         is_partial: bool = False,
+        origin: str = "",
     ) -> None:
         transcript = self._load_current(ctx, provider)
         if not transcript:
@@ -399,6 +400,7 @@ class TranscriptStore:
                 # A force-stopped turn is durable but incomplete; renderers
                 # already treat this flag as "the reply was cut short".
                 **({"is_partial": True} if is_partial else {}),
+                **({"origin": origin} if origin else {}),
             }
         )
         self._save_current(ctx, transcript, provider)
@@ -617,14 +619,29 @@ class TranscriptStore:
         if not isinstance(turns, list):
             return []
         rows: list[dict[str, Any]] = []
-        for index, turn in enumerate(turns):
+        user_index = 0
+        for turn in turns:
             if not isinstance(turn, dict):
                 continue
             timestamp = str(turn.get("timestamp") or "")
             raw_prompt = str(turn.get("prompt") or "")
             prompt = _INJECTED_CONTEXT_RE.sub("", raw_prompt).strip()
             response = str(turn.get("response") or "").strip()
-            if prompt:
+            origin = str(turn.get("origin") or "")
+            index = user_index
+            if not origin:
+                user_index += 1
+            if prompt and origin:
+                # A turn the engine ran on its own (a background wake): its
+                # prompt is a notice, not something the person sent, and it
+                # does not take a user turn index.
+                rows.append({
+                    "role": "system",
+                    "content": prompt,
+                    "origin": origin,
+                    "sent_at": timestamp,
+                })
+            elif prompt:
                 user_row: dict[str, Any] = {
                     "role": "user",
                     "content": prompt,
