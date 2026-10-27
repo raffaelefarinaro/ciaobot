@@ -56,6 +56,9 @@ async function close(key: string) {
   font-weight: 650;
   line-height: 1.4;
   overflow-wrap: anywhere;
+  /* The header's 52px floor fits one line; a title that wraps in the 280px
+     rail grows the header and needs its own room from the borders. */
+  padding-block: var(--space-3);
 }
 .home-notice-close {
   flex: 0 0 auto;
