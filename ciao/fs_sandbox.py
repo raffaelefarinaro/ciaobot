@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import shutil
 import site
 import subprocess
@@ -489,27 +490,72 @@ def path_outside_roots(value: str, *, cwd: Path, roots: list[Path]) -> bool:
     return not any(resolved.is_relative_to(root.resolve()) for root in roots)
 
 
-def claude_file_tool_guard(*, cwd: Path, roots: list[Path]) -> Any:
+_TASK_SESSION_ID = re.compile(r"[0-9A-Za-z-]{8,64}")
+
+
+def claude_task_output_path_allowed(
+    value: str, *, session_id: str, cwd: Path, tmp_base: str | None, uid: int
+) -> bool:
+    """Whether *value* is this session's own native background-task output file.
+
+    Exactly ``<tmp base>/claude-<uid>/<one segment>/<session_id>/tasks/<name>.output``
+    after resolving symlinks and ``..``; anything else, or a missing or
+    malformed *session_id*, is refused.
+    """
+    if not _TASK_SESSION_ID.fullmatch(session_id):
+        return False
+    if any(char in value for char in "*?[{"):
+        return False
+    base = Path(tmp_base or "/tmp").expanduser().resolve() / f"claude-{uid}"
+    candidate = Path(value.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    resolved = candidate.resolve()
+    depth = len(base.parts)
+    return (
+        resolved.is_relative_to(base)
+        and len(resolved.parts) == depth + 4
+        and resolved.parts[depth + 1] == session_id
+        and resolved.parts[depth + 2] == "tasks"
+        and resolved.name.endswith(".output")
+    )
+
+
+def claude_file_tool_guard(*, cwd: Path, roots: list[Path], cli_tmp_base: str | None = None) -> Any:
     """PreToolUse hook denying Claude's file tools any path outside *roots*.
 
     Claude's plan directory is allowed as well: plan mode writes its plan file
-    there, outside every workspace root.
+    there, outside every workspace root. Read (only) may also open the output
+    files of this chat's own native background tasks under the CLI temp
+    directory *cli_tmp_base*, matched by the session id the CLI puts in the
+    hook input; the CLI's tool result tells the model to Read them.
     """
     if not roots:
         raise ValueError("roots must not be empty")
     allowed = ", ".join(str(root) for root in roots)
     reachable = [*roots, Path.home() / ".claude" / "plans"]
+    uid = getattr(os, "getuid", lambda: 0)()
 
     async def on_pre_tool_use(
         input_data: dict[str, Any], tool_use_id: str | None, context: Any
     ) -> dict[str, Any]:
         del tool_use_id, context  # unused
-        keys = CLAUDE_FILE_TOOL_PATH_KEYS.get(str(input_data.get("tool_name") or ""), ())
+        tool_name = str(input_data.get("tool_name") or "")
+        session_id = str(input_data.get("session_id") or "")
+        keys = CLAUDE_FILE_TOOL_PATH_KEYS.get(tool_name, ())
         tool_input = input_data.get("tool_input") or {}
         for key in keys:
             value = tool_input.get(key)
             if isinstance(value, str) and value.strip():
                 if path_outside_roots(value, cwd=cwd, roots=reachable):
+                    if (
+                        tool_name == "Read"
+                        and key == "file_path"
+                        and claude_task_output_path_allowed(
+                            value, session_id=session_id, cwd=cwd, tmp_base=cli_tmp_base, uid=uid
+                        )
+                    ):
+                        continue
                     return {
                         "hookSpecificOutput": {
                             "hookEventName": "PreToolUse",
