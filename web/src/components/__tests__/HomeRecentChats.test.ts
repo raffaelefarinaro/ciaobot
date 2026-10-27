@@ -878,6 +878,44 @@ it('files a chat whose last turn failed under needs you with the error and next 
   wrapper.unmount()
 })
 
+it('names a scheduled retry on a chat whose turn did not fail', async () => {
+  const store = seedChats()
+  const nextAt = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString()
+  store.chats.push({
+    chat_id: 'retrying', project_id: 'personal-project', title: 'Retrying chat',
+    created_at: timestamp(60 * 60), last_activity_at: timestamp(60 * 60), last_read_at: timestamp(2 * 60 * 60),
+    archived: false, local: true,
+    retry: { status: 'pending', next_at: nextAt, last_error: '', attempts: 0, interval_seconds: 300 },
+  } as unknown as typeof store.chats[number])
+  const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+  const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+  await nextTick()
+
+  const row = wrapper.findAll('.home-tier--unread .home-chat-item')
+    .find(item => item.find('.home-chat-title').text() === 'Retrying chat')!
+  expect(row.text()).toContain('retry scheduled')
+  expect(row.text()).not.toContain('new reply')
+  wrapper.unmount()
+})
+
+it('names a scheduled retry without a time when the retry has none', async () => {
+  const store = seedChats()
+  store.chats.push({
+    chat_id: 'retrying', project_id: 'personal-project', title: 'Retrying chat',
+    created_at: timestamp(60 * 60), last_activity_at: timestamp(60 * 60), last_read_at: timestamp(2 * 60 * 60),
+    archived: false, local: true,
+    retry: { status: 'pending', next_at: '', last_error: '', attempts: 0, interval_seconds: 300 },
+  } as unknown as typeof store.chats[number])
+  const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+  const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+  await nextTick()
+
+  const row = wrapper.findAll('.home-tier--unread .home-chat-item')
+    .find(item => item.find('.home-chat-title').text() === 'Retrying chat')!
+  expect(row.find('.home-chat-status').text()).toBe('retry scheduled')
+  wrapper.unmount()
+})
+
 // The naming placeholder: one bar, one class name, and a name that reaches
 // assistive tech. Home used to carry its own shimmer rule, so the same class
 // name meant two different bars.
