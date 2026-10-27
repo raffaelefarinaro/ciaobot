@@ -424,7 +424,7 @@ def _native_task_notice(content: str) -> str | None:
             "exit_code": run.exit_code,
             "error": run.error,
             "log_path": None,
-            "last_lines": [],
+            "last_lines": None,
         }
         for run in runs
     ]

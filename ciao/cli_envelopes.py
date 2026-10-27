@@ -361,7 +361,8 @@ def native_task_run(fields: dict[str, str]) -> NativeTaskRun | None:
     exit_code = int(code) if code is not None else None
     if exit_code:
         status = "failed"
-    error = (match.group("other") or "").strip()
+    # One line: the frontend parser reads the notice line by line.
+    error = " ".join((match.group("other") or "").split())
     return NativeTaskRun(
         label=label, run_id=run_id, status=status, exit_code=exit_code, error=error
     )

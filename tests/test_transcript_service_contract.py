@@ -1258,6 +1258,8 @@ async def test_claude_native_bash_notification_renders_a_background_run_notice(
     assert notice["content"].startswith("[Ciaobot] 1 background run finished.")
     assert "— Run probe A in background (be0mbj0cr, FAILED, exit 3)" in notice["content"]
     assert "log: None" in notice["content"]
+    # The CLI hands over no output, so the notice must not claim there was none.
+    assert "(no output)" not in notice["content"]
     assert "Subagent" not in notice["content"]
     assert rows[1]["turn_index"] == 0
 

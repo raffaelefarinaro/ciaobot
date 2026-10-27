@@ -83,6 +83,8 @@ describe('InjectedPromptCard', () => {
     expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
     expect(wrapper.find('.injected-card-log').exists()).toBe(false)
     expect(wrapper.find('.file-link').exists()).toBe(false)
+    // Without a log nothing says whether the command printed anything.
+    expect(wrapper.text()).not.toContain('No output.')
   })
 
   it('keeps the full prompt behind its own toggle', async () => {

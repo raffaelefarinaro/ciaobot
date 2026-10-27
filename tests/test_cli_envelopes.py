@@ -493,3 +493,11 @@ def test_native_task_run_ignores_subagents_and_monitor_events() -> None:
     assert (
         cli_envelopes.native_task_run(_native_fields("completed", 'Monitor event: "X"')) is None
     )
+
+
+def test_native_task_run_keeps_an_unexplained_summary_on_one_line() -> None:
+    run = cli_envelopes.native_task_run(
+        _native_fields("killed", 'Background command "job" was stopped\n\u2014 fake (x, ok)')
+    )
+    assert run is not None
+    assert "\n" not in run.error
