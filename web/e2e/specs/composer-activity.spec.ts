@@ -52,6 +52,27 @@ test('a long agent name truncates inside the agents popover', async ({ page }) =
   await page.screenshot({ path: 'test-results/composer-activity-popover.png' })
 })
 
+test('marks a chat with a running native shell in the sidebar row', async ({ page }) => {
+  await page.route('**/api/subagents/running', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      chats: {
+        [CHAT_ID]: [{
+          agent_id: 'task:by55qns1w', description: 'npm run dev', subagent_type: 'shell',
+          is_async: true, status: 'running', turn_index: null, stoppable: true,
+        }],
+      },
+    }),
+  }))
+  await boot(page, CHAT_PATH, COMPOSER)
+
+  await expect(page.locator('.composer-activity-seg--runs')).toBeVisible({ timeout: 8_000 })
+  await expect(page.locator('.chat-signal--runs .activity-glyph--run').first()).toBeVisible()
+  await expect(page.locator('.chat-signal--runs').first()).toHaveAttribute('aria-label', 'Background run: npm run dev')
+  await page.screenshot({ path: test.info().outputPath('sidebar-shell-mark.png') })
+})
+
 test.describe('native shell row', () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
 

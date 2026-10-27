@@ -57,16 +57,47 @@ describe('ChatSignals', () => {
     expect(working.find('.chat-signal--working').attributes('aria-label')).toBe('Working')
   })
 
-  // A native shell is listed in the composer and Chat details, with Stop; the
-  // sidebar row neither marks it nor counts it as an agent.
-  it('draws no run marker for a chat whose only activity is a background shell', () => {
+  // A shell is a process, not the chat's own work: it gets the run mark, never
+  // working, so a dev server left going is visible from the sidebar.
+  it('marks a running background shell in the row without counting it as working', () => {
     const { store } = seed()
     store.runningSubagents = {
       'chat-1': [{ agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell' }],
     } as unknown as typeof store.runningSubagents
-    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(wrapper.find('.chat-signal--runs').exists()).toBe(false)
-    expect(wrapper.find('.chat-signal--working').exists()).toBe(false)
+    const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(one.find('.chat-signal--runs .activity-glyph--run').exists()).toBe(true)
+    expect(one.find('.chat-signal--runs').attributes('aria-label')).toBe('Background run: npm run dev')
+    expect(one.find('.chat-signal-count').exists()).toBe(false)
+    expect(one.find('.chat-signal--working').exists()).toBe(false)
+
+    store.runningSubagents = {
+      'chat-1': [
+        { agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell' },
+        { agent_id: 'task:b2', description: 'tail log', subagent_type: 'monitor' },
+        { agent_id: 'a1', description: 'Explore', subagent_type: 'Explore' },
+      ],
+    } as unknown as typeof store.runningSubagents
+    const many = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
+    expect(many.find('.chat-signal--runs .chat-signal-count').text()).toBe('2')
+    expect(many.find('.chat-signal--runs').attributes('aria-label')).toBe('2 background runs')
+    expect(many.find('.chat-signal--working').attributes('aria-label')).toBe('1 agent running')
+  })
+
+  it('keeps the run mark beside needs-you and working', () => {
+    const { store } = seed()
+    store.runningSubagents = {
+      'chat-1': [{ agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell' }],
+    } as unknown as typeof store.runningSubagents
+    store.chats[0].pending_question = JSON.stringify({ questions: [{ question: 'Which option?' }] })
+    const needs = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(needs.find('.chat-signal--needs').exists()).toBe(true)
+    expect(needs.find('.chat-signal--runs').exists()).toBe(true)
+
+    store.chats[0].pending_question = undefined
+    store.projectStreaming = { 'chat-1': true }
+    const working = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(working.find('.chat-signal--working').exists()).toBe(true)
+    expect(working.find('.chat-signal--runs').exists()).toBe(true)
   })
 
   // Subagents are the chat's work: no mark of their own, just working, with
