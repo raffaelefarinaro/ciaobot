@@ -154,12 +154,21 @@ describe('ChatSignals', () => {
       enabled: false,
     }] as unknown as typeof taskStore.schedules
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
-    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Run failed, retry scheduled')
+    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Retry scheduled')
     expect(wrapper.find('.chat-signal--retry .activity-glyph--alert').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--schedule .schedule-glyph').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--schedule').classes()).toContain('stopped')
     expect(wrapper.find('.chat-signal--schedule').attributes('aria-label')).toBe('An automation attached to this chat (paused)')
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
+  })
+
+  it('says the run failed when a retry follows an error', () => {
+    const { store } = seed()
+    store.chats[0].retry = { status: 'pending' } as never
+    store.chats[0].last_error = 'boom'
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Run failed, retry scheduled')
+    expect(wrapper.find('.chat-signal--retry').attributes('title')).toBe('Run failed, retry scheduled')
   })
 
   it('shows the schedule clock for a chat bound to a daily automation too', () => {
