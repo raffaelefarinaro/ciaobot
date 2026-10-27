@@ -34,10 +34,6 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "sign-in tab on the host, returns no credential"
     ),
     "/api/auth/logout": "browser logout; clears the session cookie",
-    "/api/chats/{chat_id}/background-runs/{run_id}/cancel": (
-        "Chat details Stop button; agents cancel their own runs through "
-        "background_run_cancel on the agent surface"
-    ),
     "/api/chats/{chat_id}/background-tasks/{task_id}/stop": (
         "Processes Stop button for a running native shell or Monitor; the agent that "
         "started the task stops it from its own session"

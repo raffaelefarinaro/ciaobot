@@ -1723,55 +1723,6 @@ def test_cwd_default_is_the_workspace_root(tmp_path: Path) -> None:
     assert os.path.isdir(resolve_cwd(tmp_path, ""))
 
 
-def test_rail_routes_only_reach_the_chats_own_runs(tmp_path: Path) -> None:
-    """The Chat details rail reads a run's log and stops it, for its own chat only."""
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-
-    from ciao.web.routes_api import chat_background_run_cancel, chat_background_run_log
-
-    run = BackgroundRun(run_id="r1", parent_chat_id="chat-1", label="clone", status="running")
-    cancelled: list[str] = []
-
-    async def _cancel(run_id: str) -> BackgroundRun:
-        cancelled.append(run_id)
-        return BackgroundRun(
-            run_id=run_id, parent_chat_id="chat-1", label="clone", status="cancelled"
-        )
-
-    app = Starlette(routes=[
-        Route("/api/chats/{chat_id}/background-runs/{run_id}/log", chat_background_run_log),
-        Route(
-            "/api/chats/{chat_id}/background-runs/{run_id}/cancel",
-            chat_background_run_cancel,
-            methods=["POST"],
-        ),
-    ])
-    app.state.background_runner = SimpleNamespace(
-        get=lambda rid: run if rid == "r1" else None,
-        tail=lambda rid: ["Cloning into 'rizzo-flow'...", "done."],
-        cancel=_cancel,
-    )
-    client = TestClient(app)
-
-    log = client.get("/api/chats/chat-1/background-runs/r1/log")
-    assert log.status_code == 200
-    assert log.json()["last_lines"] == ["Cloning into 'rizzo-flow'...", "done."]
-    assert log.json()["label"] == "clone"
-
-    # Another chat's run reads as missing, not forbidden, and is never touched.
-    assert client.get("/api/chats/chat-2/background-runs/r1/log").status_code == 404
-    assert client.post("/api/chats/chat-2/background-runs/r1/cancel").status_code == 404
-    assert client.get("/api/chats/chat-1/background-runs/nope/log").status_code == 404
-    assert cancelled == []
-
-    stopped = client.post("/api/chats/chat-1/background-runs/r1/cancel")
-    assert stopped.status_code == 200
-    assert stopped.json()["status"] == "cancelled"
-    assert cancelled == ["r1"]
-
-
 async def test_agent_cancel_marks_the_run_as_not_waking_its_owner(
     tmp_path: Path,
 ) -> None:

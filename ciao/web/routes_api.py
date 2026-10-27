@@ -323,22 +323,6 @@ def _rename_import_store(request: Request) -> Any:
     return ImportStore(engine_store_path(request.app.state.config))
 
 
-def _rename_run_store(request: Request) -> Any:
-    """The background-run store a workspace rename rewrites.
-
-    The live runner's store when the app has one, else a store on the same
-    file.
-    """
-    from ciao.background import BackgroundRunStore  # noqa: PLC0415
-
-    runner = getattr(request.app.state, "background_runner", None)
-    if runner is not None:
-        inner = getattr(runner, "_store", None)
-        return inner if inner is not None else runner
-    config = request.app.state.config
-    return BackgroundRunStore(Path(config.state_path).parent)
-
-
 async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -390,7 +374,6 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
                     schedules=_rename_schedule_store(request),
                     webhooks=_rename_webhook_store(request),
                     imports=_rename_import_store(request),
-                    runs=_rename_run_store(request),
                 )
             except WorkspaceRenameBusy as exc:
                 return JSONResponse({"error": str(exc)}, status_code=409)
@@ -2869,50 +2852,6 @@ async def chat_move_to_background(request: Request) -> JSONResponse:
             {"error": "OpenCode did not accept the request"}, status_code=502
         )
     return JSONResponse({"error": outcome}, status_code=409)
-
-
-def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
-    """The runner and the run named in the path, if this chat owns it.
-
-    A run owned by another chat answers 404, like a missing one: the Work
-    details rail only ever asks about its own chat's runs.
-    """
-    runner = getattr(request.app.state, "background_runner", None)
-    if runner is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    run = runner.get(request.path_params["run_id"])
-    if run is None or run.parent_chat_id != request.path_params["chat_id"]:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return runner, run
-
-
-async def chat_background_run_log(request: Request) -> JSONResponse:
-    """The last lines of a background run's log, for the Chat details rail."""
-    resolved = _chat_background_run(request)
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    runner, run = resolved
-    return JSONResponse({**run.summary(), "last_lines": runner.tail(run.run_id)})
-
-
-async def chat_background_run_cancel(request: Request) -> JSONResponse:
-    """Stop a background run from the Chat details rail.
-
-    The finish edge announces itself over /ws/events and wakes the chat, the
-    same as a cancel the agent asked for.
-    """
-    resolved = _chat_background_run(request)
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    runner, run = resolved
-    from ciao.background import BackgroundRunError
-
-    try:
-        updated = await runner.cancel(run.run_id)
-    except BackgroundRunError:
-        # Pruned between the lookup and the cancel.
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse(updated.summary())
 
 
 async def chat_background_task_stop(request: Request) -> JSONResponse:

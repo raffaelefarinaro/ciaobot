@@ -127,7 +127,7 @@ def test_rename_failure_restores_receipt_bytes(tmp_path: Path, monkeypatch: pyte
     stores = _stores(config, tmp_path)
     monkeypatch.setattr(type(stores[0]), "rename_workspace", lambda *_args: (_ for _ in ()).throw(OSError("failed")))
     with pytest.raises(OSError, match="failed"):
-        workspace_rename.rename_workspace(config, old="old", new="new", projects=projects, schedules=stores[0], webhooks=stores[1], imports=stores[2], runs=stores[3])
+        workspace_rename.rename_workspace(config, old="old", new="new", projects=projects, schedules=stores[0], webhooks=stores[1], imports=stores[2])
     assert path.read_bytes() == before
 
 
@@ -149,7 +149,7 @@ def test_rename_rollback_does_not_clobber_newer_receipt_revision(tmp_path: Path,
         raise OSError("failed")
     monkeypatch.setattr(type(stores[0]), "rename_workspace", fail_after_new_revision)
     with pytest.raises(OSError, match="failed"):
-        workspace_rename.rename_workspace(config, old="old", new="new", projects=projects, schedules=stores[0], webhooks=stores[1], imports=stores[2], runs=stores[3])
+        workspace_rename.rename_workspace(config, old="old", new="new", projects=projects, schedules=stores[0], webhooks=stores[1], imports=stores[2])
     resulting = read_receipt(runtime)
     assert resulting is not None and "unrelated" in resulting.workspaces
     assert "old" not in resulting.workspaces and "new" in resulting.workspaces
