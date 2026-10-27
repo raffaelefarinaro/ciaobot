@@ -1285,3 +1285,33 @@ async def test_claude_subagent_notification_still_renders_the_status_line(
     rows = await _render_user_records(monkeypatch, [record])
 
     assert rows == [{"role": "system", "content": '\U0001F916 Agent "Review" completed'}]
+
+
+def test_overlay_pairs_usage_per_user_segment_across_wake_turns() -> None:
+    entries = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "system", "content": "notice", "origin": "background_run"},
+        {"role": "assistant", "content": "w1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "system", "content": "notice", "origin": "background_run"},
+        {"role": "assistant", "content": "w2"},
+    ]
+    durable = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1", "usage": {"n": "1"}},
+        {"role": "system", "content": "notice", "origin": "background_run"},
+        {"role": "assistant", "content": "w1", "usage": {"n": "w1"}, "origin": "background_run"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2", "usage": {"n": "2"}},
+        {"role": "system", "content": "notice", "origin": "background_run"},
+        {"role": "assistant", "content": "w2", "usage": {"n": "w2"}, "origin": "background_run"},
+    ]
+
+    transcript_service._overlay_transcript_metadata(entries, durable)
+
+    # The footer sits on each segment's last reply and carries that turn's usage.
+    assert entries[3]["usage"] == {"n": "1"}
+    assert entries[7]["usage"] == {"n": "2"}
+    assert "usage" not in entries[1] and "usage" not in entries[5]
