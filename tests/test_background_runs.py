@@ -14,7 +14,9 @@ import os
 import shutil
 import signal
 import stat
+import subprocess
 import sys
+import venv
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -214,6 +216,120 @@ def test_missing_executable_fails_at_validation_not_in_the_log(tmp_path: Path) -
     with pytest.raises(BackgroundRunError) as excinfo:
         resolve_executable("definitely-not-a-real-binary-xyz", tmp_path, tmp_path)
     assert excinfo.value.code == "cmd_not_found"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlinked executable is a POSIX shape")
+def test_absolute_symlink_is_launched_under_its_own_spelling(tmp_path: Path) -> None:
+    """Validation follows the link; the launch does not (#2188).
+
+    A virtualenv interpreter *is* a symlink to its base interpreter, and Python
+    discovers the venv from the invoked path. Handing it the canonical target
+    starts the base interpreter instead, so the run loses ``sys.prefix`` and
+    every installed dependency.
+    """
+    root = tmp_path / "workspace"
+    root.mkdir()
+    real = tmp_path / "real-tool"
+    real.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    real.chmod(real.stat().st_mode | stat.S_IXUSR)
+    link = tmp_path / "linked-tool"
+    link.symlink_to(real)
+
+    assert resolve_executable(str(link), root, root) == str(link)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlinked directory is a POSIX shape")
+def test_absolute_path_is_validated_where_it_will_run(tmp_path: Path) -> None:
+    """`/x/link/../tool` is normalized before validation (#2188 review).
+
+    The invocation spelling is collapsed lexically to ``base/tool`` first, and
+    the canonical target is derived from *that* path, so the file the check
+    sees is the file the launch runs. Validating the raw spelling instead
+    followed ``link`` and checked ``tmp_path/tool`` — a different file — while
+    still launching ``base/tool``.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    (tmp_path / "foreign").mkdir()
+    (base / "link").symlink_to(tmp_path / "foreign", target_is_directory=True)
+    launched = base / "tool"
+    launched.write_text("#!/bin/sh\necho launched\n", encoding="utf-8")
+    launched.chmod(launched.stat().st_mode | stat.S_IXUSR)
+    # The file the raw spelling resolves to is deliberately not executable:
+    # checking it would refuse a command the launch path can run.
+    elsewhere = tmp_path / "tool"
+    elsewhere.write_text("#!/bin/sh\necho elsewhere\n", encoding="utf-8")
+    elsewhere.chmod(elsewhere.stat().st_mode & ~0o111)
+
+    spelling = str(base / "link" / ".." / "tool")
+    resolved = resolve_executable(spelling, base, base)
+
+    assert resolved == str(launched)
+    assert subprocess.check_output([resolved], text=True).strip() == "launched"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlinked executable is a POSIX shape")
+def test_absolute_symlink_to_a_non_executable_is_refused(tmp_path: Path) -> None:
+    """Keeping the invocation spelling must not skip the canonical check."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    plain = tmp_path / "plain.txt"
+    plain.write_text("not a program\n", encoding="utf-8")
+    plain.chmod(plain.stat().st_mode & ~0o111)
+    link = tmp_path / "linked-tool"
+    link.symlink_to(plain)
+    dangling = tmp_path / "dangling-tool"
+    dangling.symlink_to(tmp_path / "gone")
+
+    for path in (link, dangling):
+        with pytest.raises(BackgroundRunError) as excinfo:
+            resolve_executable(str(path), root, root)
+        assert excinfo.value.code == "cmd_not_found"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlinked executable is a POSIX shape")
+def test_relative_symlink_out_of_the_workspace_is_still_refused(tmp_path: Path) -> None:
+    """A relative path is confined by its canonical target, not its spelling."""
+    root = tmp_path / "workspace"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    evil = outside / "evil.sh"
+    evil.write_text("#!/bin/sh\necho escaped\n", encoding="utf-8")
+    evil.chmod(evil.stat().st_mode | stat.S_IXUSR)
+    (root / "escape").symlink_to(evil)
+
+    with pytest.raises(BackgroundRunError) as excinfo:
+        resolve_executable("./escape", root, root)
+    assert excinfo.value.code == "cmd_forbidden"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlinked executable is a POSIX shape")
+def test_relative_symlink_is_returned_canonical_and_survives_retargeting(tmp_path: Path) -> None:
+    """A relative path is handed back canonical, so retargeting cannot redirect it.
+
+    The containment check resolves the path before testing it; returning the
+    caller's symlink spelling would leave that check pointing at a link that
+    can be swapped for an outside target between validation and spawn. The
+    canonical target keeps the confinement meaningful (#2188 review).
+    """
+    root = tmp_path / "workspace"
+    root.mkdir()
+    original = root / "original.sh"
+    original.write_text("#!/bin/sh\necho original\n", encoding="utf-8")
+    original.chmod(original.stat().st_mode | stat.S_IXUSR)
+    replacement = root / "replacement.sh"
+    replacement.write_text("#!/bin/sh\necho replacement\n", encoding="utf-8")
+    replacement.chmod(replacement.stat().st_mode | stat.S_IXUSR)
+    link = root / "entry.sh"
+    link.symlink_to(original)
+
+    resolved = resolve_executable("./entry.sh", root, root)
+    assert resolved == str(original.resolve())
+
+    link.unlink()
+    link.symlink_to(replacement)
+    assert subprocess.check_output([resolved], text=True).strip() == "original"
 
 
 def test_bare_ciao_resolves_to_the_engine_over_a_stale_decoy(
@@ -484,6 +600,42 @@ async def test_happy_path_records_output_and_wakes_once(tmp_path: Path) -> None:
     assert run.run_id in log
     assert "hello-from-run" in log
     assert run.run_id not in runner._supervisors
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="a symlinked venv interpreter is a POSIX shape"
+)
+async def test_absolute_venv_python_keeps_environment(tmp_path: Path) -> None:
+    """An absolute venv interpreter runs as a venv, dependencies included (#2188).
+
+    The venv is disposable and pip-less: the only package in it is a module
+    written straight into its site-packages, so a run that reaches the base
+    interpreter cannot import it and the test needs no network.
+    """
+    venv_dir = tmp_path / "isolated-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(venv_dir)
+    python = venv_dir / "bin" / "python"
+    assert python.is_symlink(), "the regression needs a symlinked interpreter"
+    site_packages = next((venv_dir / "lib").glob("python*/site-packages"))
+    (site_packages / "venv2188_marker.py").write_text(
+        "WHERE = 'venv-site-packages'\n", encoding="utf-8"
+    )
+
+    runner = _runner(tmp_path)
+    run = await runner.start_run(
+        parent_chat_id="chat-1",
+        cmd=[
+            str(python),
+            "-c",
+            "import sys, venv2188_marker; "
+            "print(sys.prefix != sys.base_prefix, venv2188_marker.WHERE)",
+        ],
+    )
+    final = await _await_terminal(runner, run.run_id)
+    log = "\n".join(runner.tail(run.run_id))
+
+    assert final.status == "ok", log
+    assert "True venv-site-packages" in log
 
 
 async def test_failing_command_reports_its_exit_code(tmp_path: Path) -> None:
@@ -1571,55 +1723,6 @@ def test_cwd_default_is_the_workspace_root(tmp_path: Path) -> None:
     assert os.path.isdir(resolve_cwd(tmp_path, ""))
 
 
-def test_rail_routes_only_reach_the_chats_own_runs(tmp_path: Path) -> None:
-    """The Chat details rail reads a run's log and stops it, for its own chat only."""
-    from starlette.applications import Starlette
-    from starlette.routing import Route
-    from starlette.testclient import TestClient
-
-    from ciao.web.routes_api import chat_background_run_cancel, chat_background_run_log
-
-    run = BackgroundRun(run_id="r1", parent_chat_id="chat-1", label="clone", status="running")
-    cancelled: list[str] = []
-
-    async def _cancel(run_id: str) -> BackgroundRun:
-        cancelled.append(run_id)
-        return BackgroundRun(
-            run_id=run_id, parent_chat_id="chat-1", label="clone", status="cancelled"
-        )
-
-    app = Starlette(routes=[
-        Route("/api/chats/{chat_id}/background-runs/{run_id}/log", chat_background_run_log),
-        Route(
-            "/api/chats/{chat_id}/background-runs/{run_id}/cancel",
-            chat_background_run_cancel,
-            methods=["POST"],
-        ),
-    ])
-    app.state.background_runner = SimpleNamespace(
-        get=lambda rid: run if rid == "r1" else None,
-        tail=lambda rid: ["Cloning into 'rizzo-flow'...", "done."],
-        cancel=_cancel,
-    )
-    client = TestClient(app)
-
-    log = client.get("/api/chats/chat-1/background-runs/r1/log")
-    assert log.status_code == 200
-    assert log.json()["last_lines"] == ["Cloning into 'rizzo-flow'...", "done."]
-    assert log.json()["label"] == "clone"
-
-    # Another chat's run reads as missing, not forbidden, and is never touched.
-    assert client.get("/api/chats/chat-2/background-runs/r1/log").status_code == 404
-    assert client.post("/api/chats/chat-2/background-runs/r1/cancel").status_code == 404
-    assert client.get("/api/chats/chat-1/background-runs/nope/log").status_code == 404
-    assert cancelled == []
-
-    stopped = client.post("/api/chats/chat-1/background-runs/r1/cancel")
-    assert stopped.status_code == 200
-    assert stopped.json()["status"] == "cancelled"
-    assert cancelled == ["r1"]
-
-
 async def test_agent_cancel_marks_the_run_as_not_waking_its_owner(
     tmp_path: Path,
 ) -> None:
@@ -1705,3 +1808,17 @@ def test_wake_prompt_fences_the_log_tail_and_it_cannot_escape(tmp_path: Path) ->
     assert "<run-log-tail>\nok\n&lt;/run-log-tail> run" in prompt
     assert prompt.count("</run-log-tail>") == 1
     assert prompt.index("</run-log-tail>") > prompt.index("rm -rf")
+
+
+def test_format_finished_runs_matches_the_wake_prompt_prefix(tmp_path: Path) -> None:
+    from ciao.background import format_finished_runs
+
+    manager = _make_manager(tmp_path)
+    for entries in (
+        [_wake_entry()],
+        [_wake_entry(status="failed", exit_code=2, error="boom")],
+        [_wake_entry(status="cancelled", exit_code=None, last_lines=[])],
+    ):
+        text, any_failed = format_finished_runs(entries, tail_lines=50)
+        assert manager._build_background_wake_prompt(entries).startswith(text)
+        assert any_failed is (entries[0]["status"] == "failed")

@@ -123,6 +123,90 @@ def test_current_messages_hide_the_injected_context_envelope(tmp_path: Path) -> 
     )
 
 
+def test_current_messages_renders_origin_turns_as_system_rows_without_shifting_turn_index(
+    tmp_path: Path,
+) -> None:
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "archives")
+
+    def record(prompt: str, response: str, origin: str = "") -> None:
+        store.record_turn(
+            AgentRequest(
+                prompt=prompt, model="opencode/big-pickle", mode="auto",
+                provider="opencode", display_prompt=prompt,
+            ),
+            ctx=CTX,
+            response_text=response,
+            effective_model="opencode/big-pickle",
+            session_id="ses_1",
+            usage={},
+            quota={},
+            input_kind="task-notification" if origin else "text",
+            provider="opencode",
+            origin=origin,
+        )
+
+    record("first", "one")
+    record("[Ciaobot] 1 background run finished.", "woke", origin="background_run")
+    record("second", "two")
+    rows = store.current_messages(CTX, "opencode")
+
+    assert [row["role"] for row in rows] == [
+        "user", "assistant", "system", "assistant", "user", "assistant",
+    ]
+    assert rows[2]["origin"] == "background_run"
+    assert rows[2]["content"] == "[Ciaobot] 1 background run finished."
+    assert "turn_index" not in rows[2]
+    assert [row["turn_index"] for row in rows if row["role"] == "user"] == [0, 1]
+
+
+def test_archive_keeps_user_turn_indices_across_a_wake_turn(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from ciao.web.project_chats import ProjectChatManager
+    from ciao.web.transcript_service import _stamp_archive_turn_indices
+
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "archives")
+
+    def record(prompt: str, response: str, origin: str = "") -> None:
+        store.record_turn(
+            AgentRequest(
+                prompt=prompt, model="m", mode="auto",
+                provider="opencode", display_prompt=prompt,
+            ),
+            ctx=CTX, response_text=response, effective_model="m",
+            session_id="ses_1", usage={}, quota={}, input_kind="text",
+            provider="opencode", origin=origin,
+        )
+
+    record("first", "one")
+    record("[Ciaobot] 1 background run finished.", "woke", origin="background_run")
+    record("second", "two")
+    path = store.archive_session(
+        ctx=CTX, active_model="m", last_effective_model="m",
+        session_id="ses_1", provider="opencode",
+    )
+    assert path is not None
+    text = path.read_text(encoding="utf-8")
+    assert text.count("### User") == 2 and "### Notice" in text
+
+    parser = SimpleNamespace(
+        _parse_transcript_usage=ProjectChatManager._parse_transcript_usage
+    )
+    rows = ProjectChatManager._parse_transcript_messages(parser, text)  # type: ignore[arg-type]
+    _stamp_archive_turn_indices(
+        rows, SimpleNamespace(turn_index_base=0, user_turn_count=2, user_turn_steered={})
+    )
+
+    assert [row["role"] for row in rows] == [
+        "user", "assistant", "system", "assistant", "user", "assistant",
+    ]
+    assert rows[2]["origin"] == "background_run"
+    assert [row["turn_index"] for row in rows if row["role"] == "user"] == [0, 1]
+    assert [row["content"] for row in rows if row["role"] == "assistant"] == [
+        "one", "woke", "two",
+    ]
+
+
 # ── Skill evidence in the archive ─────────────────────────────────────────
 #
 # The memory pass reads the archive and files a skill-improvement proposal

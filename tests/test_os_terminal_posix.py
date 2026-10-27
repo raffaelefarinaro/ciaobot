@@ -187,9 +187,19 @@ def test_resize_updates_stty_size(tmp_path: Path) -> None:
         term.close()
 
 
-def test_ctrl_c_interrupts_foreground_job_not_shell(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "ready_delay",
+    [pytest.param(0, id="immediate"), pytest.param(9, id="delayed")],
+)
+def test_ctrl_c_interrupts_foreground_job_not_shell(
+    tmp_path: Path, ready_delay: int
+) -> None:
     """0x03 goes to the foreground job through the line discipline; the shell
-    survives it and answers the next command."""
+    survives it and answers the next command.
+
+    The answer is allowed to be late: a shell under load can take seconds to
+    reach the ready command, and the marker is the observable it answers with.
+    """
     term = _spawn(tmp_path)
     foreground_pid = tmp_path / f"foreground-{secrets.token_hex(6)}.pid"
     try:
@@ -203,7 +213,9 @@ def test_ctrl_c_interrupts_foreground_job_not_shell(tmp_path: Path) -> None:
         _wait_until_stopped(pid, 15)
         assert term.poll() is None, "Ctrl-C must not kill the shell"
 
-        out = _send_and_drain(term, b"echo READY-$((6*7))\n", 8.0)
+        ready = b"echo READY-$((6*7))\n"
+        term.write(b"sleep 9\n" + ready if ready_delay else ready)
+        out = _wait_for(term, b"READY-42", 15)
         assert b"READY-42" in out, out
     finally:
         term.close()

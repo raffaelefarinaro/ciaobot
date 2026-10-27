@@ -56,3 +56,14 @@ export function formatDuration(ms?: number): string {
   const rs = Math.round(s - m * 60)
   return rs ? `${m}m ${rs}s` : `${m}m`
 }
+
+// Whole minutes for the composer bar, where a per-second tick would make the
+// part's width jitter. Under a minute reads "<1m"; an hour or more "1h 2m".
+export function minutesSince(startedAt: string, now: number): string {
+  const started = Date.parse(startedAt)
+  if (!Number.isFinite(started)) return ''
+  const minutes = Math.floor(Math.max(0, now - started) / 60_000)
+  if (minutes < 1) return '<1m'
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}

@@ -8,11 +8,6 @@ import { join } from 'node:path'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatSignals from '../ChatSignals.vue'
-import type { BackgroundRunSummary } from '../../lib/types'
-
-function run(runId: string, label = ''): BackgroundRunSummary {
-  return { run_id: runId, label, cmd: ['uv', 'sync'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null }
-}
 
 function seed() {
   const store = useProjectStore()
@@ -26,7 +21,6 @@ function seed() {
   }] as unknown as typeof store.chats
   store.projectStreaming = {}
   store.backgroundAgents = {}
-  store.backgroundRuns = {}
   const taskStore = useTaskStore()
   taskStore.schedules = [] as unknown as typeof taskStore.schedules
   return { store, taskStore }
@@ -63,50 +57,16 @@ describe('ChatSignals', () => {
     expect(working.find('.chat-signal--working').attributes('aria-label')).toBe('Working')
   })
 
-  it('signals a tracked background run in the row, not just the dock', () => {
-    // The release that added background runs wired the indicator into the
-    // project header, the home lanes and the ChatPanel dock but not this
-    // component — so the most-seen surface, the sidebar row, showed nothing at
-    // all for a chat whose only activity was a run.
+  // A native shell is listed in the composer and Chat details, with Stop; the
+  // sidebar row neither marks it nor counts it as an agent.
+  it('draws no run marker for a chat whose only activity is a background shell', () => {
     const { store } = seed()
-    store.backgroundRuns = { 'chat-1': [run('r1', 'Clone rizzo-flow')] }
-    const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(one.find('.chat-signal--runs').exists()).toBe(true)
-    expect(one.find('.chat-signal--runs .activity-glyph--run').exists()).toBe(true)
-    expect(one.find('.chat-signal--runs').attributes('aria-label')).toBe('Background run: Clone rizzo-flow')
-    // One run needs no number, the same rule the agents chip follows.
-    expect(one.find('.chat-signal-count').exists()).toBe(false)
-
-    store.backgroundRuns = { 'chat-1': [run('r1'), run('r2'), run('r3')] }
-    const many = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(many.find('.chat-signal-count').text()).toBe('3')
-    expect(many.find('.chat-signal--runs').attributes('aria-label')).toBe('3 background runs')
-  })
-
-  it('shows the run marker beside the working mark of a chat whose agents run', () => {
-    const { store } = seed()
-    store.backgroundAgents = { 'chat-1': 1 }
-    store.backgroundRuns = { 'chat-1': [run('r1'), run('r2')] }
+    store.runningSubagents = {
+      'chat-1': [{ agent_id: 'task:b1', description: 'npm run dev', subagent_type: 'shell' }],
+    } as unknown as typeof store.runningSubagents
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(wrapper.find('.chat-signal--working .activity-glyph--working').exists()).toBe(true)
-    expect(wrapper.find('.chat-signal--runs').exists()).toBe(true)
-    expect(wrapper.find('.chat-signal--runs .chat-signal-count').text()).toBe('2')
-  })
-
-  it('keeps the run marker beside needs-you and working', () => {
-    const { store } = seed()
-    store.backgroundRuns = { 'chat-1': [run('r1', 'Clone rizzo-flow')] }
-    store.chats[0].pending_question = JSON.stringify({ questions: [{ question: 'Which option?' }] })
-    const needs = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
-    expect(needs.find('.chat-signal--needs').exists()).toBe(true)
-    expect(needs.find('.chat-signal--runs').exists()).toBe(true)
-
-    store.chats[0].pending_question = undefined
-    store.projectStreaming = { 'chat-1': true }
-    const working = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
-    expect(working.find('.chat-signal--working').exists()).toBe(true)
-    expect(working.find('.chat-signal--runs').exists()).toBe(true)
-    expect(working.find('.chat-signal--runs').attributes('aria-label')).toBe('Background run: Clone rizzo-flow')
+    expect(wrapper.find('.chat-signal--runs').exists()).toBe(false)
+    expect(wrapper.find('.chat-signal--working').exists()).toBe(false)
   })
 
   // Subagents are the chat's work: no mark of their own, just working, with
@@ -154,12 +114,21 @@ describe('ChatSignals', () => {
       enabled: false,
     }] as unknown as typeof taskStore.schedules
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
-    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Run failed, retry scheduled')
+    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Retry scheduled')
     expect(wrapper.find('.chat-signal--retry .activity-glyph--alert').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--schedule .schedule-glyph').exists()).toBe(true)
     expect(wrapper.find('.chat-signal--schedule').classes()).toContain('stopped')
     expect(wrapper.find('.chat-signal--schedule').attributes('aria-label')).toBe('An automation attached to this chat (paused)')
     expect(wrapper.findAll('.chat-signal')).toHaveLength(2)
+  })
+
+  it('says the run failed when a retry follows an error', () => {
+    const { store } = seed()
+    store.chats[0].retry = { status: 'pending' } as never
+    store.chats[0].last_error = 'boom'
+    const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(wrapper.find('.chat-signal--retry').attributes('aria-label')).toBe('Run failed, retry scheduled')
+    expect(wrapper.find('.chat-signal--retry').attributes('title')).toBe('Run failed, retry scheduled')
   })
 
   it('shows the schedule clock for a chat bound to a daily automation too', () => {

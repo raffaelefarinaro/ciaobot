@@ -16,8 +16,18 @@ caller owns it.
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
+import sys
 from pathlib import Path
 
+from claude_agent_sdk import (
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TaskUpdatedMessage,
+)
+
+from ciao.models import AgentRequest, provider_reuse_key
 from ciao.providers.claude import ClaudeProvider
 
 
@@ -113,3 +123,227 @@ def test_disconnect_without_a_client_is_a_no_op(tmp_path: Path) -> None:
     provider = ClaudeProvider(tmp_path)
     asyncio.run(provider.disconnect())
     assert provider._client is None
+
+
+# -- Native background tasks ------------------------------------------------
+
+
+def _task_started(task_id: str, description: str = "sleep 60") -> TaskStartedMessage:
+    return TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id=task_id,
+        description=description,
+        uuid=f"u-{task_id}",
+        session_id="sess-1",
+        task_type="local_bash",
+    )
+
+
+def _task_notification(task_id: str, status: str = "completed") -> TaskNotificationMessage:
+    return TaskNotificationMessage(
+        subtype="task_notification",
+        data={},
+        task_id=task_id,
+        status=status,  # type: ignore[arg-type]
+        output_file="/tmp/out",
+        summary="done",
+        uuid=f"n-{task_id}",
+        session_id="sess-1",
+    )
+
+
+def _task_updated(task_id: str, status: str) -> TaskUpdatedMessage:
+    return TaskUpdatedMessage(
+        subtype="task_updated",
+        data={},
+        task_id=task_id,
+        patch={"status": status},
+        status=status,  # type: ignore[arg-type]
+    )
+
+
+def test_native_task_started_and_notification_toggle_background_work(
+    tmp_path: Path,
+) -> None:
+    provider = ClaudeProvider(tmp_path)
+    assert provider.background_work_outstanding is False
+    assert provider.seconds_since_activity == math.inf
+
+    provider._observe_message(_task_started("t1"))
+    provider._observe_message(_task_started("t2", "tail -f log"))
+    assert provider.background_work_outstanding is True
+    assert provider.seconds_since_activity < 5
+    rows = provider.background_shell_rows()
+    assert [r["id"] for r in rows] == ["t1", "t2"]
+    assert rows[1]["command"] == "tail -f log"
+
+    # A non-terminal update keeps the task; a terminal one clears it.
+    provider._observe_message(_task_updated("t1", "running"))
+    assert provider.background_work_outstanding is True
+    provider._observe_message(_task_notification("t1", "completed"))
+    assert [r["id"] for r in provider.background_shell_rows()] == ["t2"]
+    provider._observe_message(_task_updated("t2", "killed"))
+    assert provider.background_work_outstanding is False
+
+
+def test_disconnect_clears_native_tasks(tmp_path: Path) -> None:
+    provider = _provider_with(_SdkLikeClient(), tmp_path)
+    provider._connected = True
+    provider._observe_message(_task_started("t1"))
+
+    asyncio.run(provider.disconnect())
+
+    assert provider.background_work_outstanding is False
+    assert provider._native_tasks == {}
+
+
+def test_a_dead_cli_clears_native_tasks(tmp_path: Path) -> None:
+    client = _SdkLikeClient()
+    provider = _provider_with(client, tmp_path)
+    provider._connected = True
+    provider._observe_message(_task_started("t1"))
+
+    async def run() -> None:
+        provider._forget_dead_cli(client)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert provider.background_work_outstanding is False
+
+
+def _connected_provider(tmp_path: Path, monkeypatch, request: AgentRequest):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", lambda options: object())
+    provider = ClaudeProvider(tmp_path)
+    live = object()
+    provider._client = live  # type: ignore[assignment]
+    provider._connected = True
+    provider._current_model = request.model
+    provider._current_mode = request.mode
+    provider._fs_scope_key = (
+        request.agent_fs_scope, request.agent_roots, request.agent_denied, request.agent_denied_except,
+    )
+    provider._mcp_token = provider_reuse_key(request)
+    provider._spawn_key = provider._spawn_key_for(request)
+    stopped: list[bool] = []
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._connected = False
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    return provider, live, stopped
+
+
+def test_spawn_options_change_defers_reconnect_while_tasks_run(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    request = AgentRequest(prompt="x", model="sonnet", mode="auto")
+    provider, live, stopped = _connected_provider(tmp_path, monkeypatch, request)
+    old_key = provider._spawn_key
+    provider._observe_message(_task_started("t1"))
+    changed = AgentRequest(
+        prompt="x", model="sonnet", mode="auto", thinking_level="high",
+    )
+
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        assert asyncio.run(provider._ensure_connected(changed)) is live
+    assert stopped == []
+    assert provider._spawn_key == old_key
+    assert "Deferring spawn_options reconnect: 1 background task(s) running" in caplog.text
+
+    # Once the task ends the pending change takes effect.
+    provider._observe_message(_task_notification("t1"))
+    asyncio.run(provider._ensure_connected(changed))
+    assert stopped == [True]
+
+
+def test_token_change_reconnects_even_with_tasks_and_warns(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    request = AgentRequest(prompt="x", model="sonnet", mode="auto")
+    provider, _live, stopped = _connected_provider(tmp_path, monkeypatch, request)
+    provider._observe_message(_task_started("t1", "sleep 600"))
+    provider._mcp_token = "stale-token"
+
+    with caplog.at_level(logging.WARNING, logger="ciao.providers.claude"):
+        asyncio.run(provider._ensure_connected(request))
+
+    assert stopped == [True]
+    assert "sleep 600" in caplog.text
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_a_non_terminal_task_update_keeps_the_task_tracked(tmp_path: Path) -> None:
+    provider = ClaudeProvider(tmp_path)
+    provider._observe_message(_task_started("t1"))
+
+    provider._observe_message(_task_updated("t1", "running"))
+    provider._observe_message(_task_updated("t1", "paused"))
+
+    assert provider.background_work_outstanding is True
+
+
+def _age_task(provider: ClaudeProvider, task_id: str, seconds: float) -> None:
+    import time
+
+    provider._native_tasks[task_id]["started_mono"] = time.monotonic() - seconds
+
+
+def test_a_task_older_than_the_cap_is_pruned(tmp_path: Path) -> None:
+    from ciao.providers.base import BACKGROUND_WORK_MAX_S
+
+    provider = ClaudeProvider(tmp_path)
+    provider._observe_message(_task_started("old"))
+    provider._observe_message(_task_started("new"))
+    _age_task(provider, "old", BACKGROUND_WORK_MAX_S + 1)
+
+    assert [r["id"] for r in provider.background_shell_rows()] == ["new"]
+    assert "started_mono" not in provider.background_shell_rows()[0]
+    _age_task(provider, "new", BACKGROUND_WORK_MAX_S + 1)
+    assert provider.background_work_outstanding is False
+
+
+def test_a_stale_task_no_longer_defers_the_spawn_options_reconnect(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.providers.base import BACKGROUND_WORK_MAX_S
+
+    request = AgentRequest(prompt="x", model="sonnet", mode="auto")
+    provider, _live, stopped = _connected_provider(tmp_path, monkeypatch, request)
+    provider._observe_message(_task_started("t1"))
+    _age_task(provider, "t1", BACKGROUND_WORK_MAX_S + 1)
+    changed = AgentRequest(prompt="x", model="sonnet", mode="auto", thinking_level="high")
+
+    asyncio.run(provider._ensure_connected(changed))
+
+    assert stopped == [True]
+
+
+def test_stop_background_task_calls_client_stop_task(tmp_path: Path) -> None:
+    stopped: list[str] = []
+
+    class _Client(_SdkLikeClient):
+        async def stop_task(self, task_id: str) -> None:
+            stopped.append(task_id)
+
+    provider = _provider_with(_Client(), tmp_path)
+    provider._connected = True
+    provider._observe_message(_task_started("t1"))
+
+    assert asyncio.run(provider.stop_background_task("t1")) is True
+    assert asyncio.run(provider.stop_background_task("nope")) is False
+    assert stopped == ["t1"]
+    # The row stays until the CLI reports the terminal status.
+    assert [r["id"] for r in provider.background_shell_rows()] == ["t1"]
+
+
+def test_stop_background_task_without_a_client_is_false(tmp_path: Path) -> None:
+    provider = ClaudeProvider(tmp_path)
+    provider._observe_message(_task_started("t1"))
+
+    assert asyncio.run(provider.stop_background_task("t1")) is False

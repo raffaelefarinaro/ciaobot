@@ -223,6 +223,8 @@ they travel as a file (`--instructions-file`) rather than as a shell argument.
 
 ### Background runs
 
+For a long command, prefer the provider's native background shell (Bash `run_in_background`, `Monitor`, OpenCode's background shell): it wakes the chat when it finishes and Ciaobot keeps the provider alive meanwhile. On Claude, a background Bash stops at its `timeout` (30 minutes by default): pass a `timeout` that covers the run, up to 24 hours. `ciao run start` is for a command that must not depend on the chat's provider process.
+
 | Command | Purpose | Guard |
 |---|---|---|
 | `run start [--cwd DIR] [--env K=V]... [--timeout-s N] [--label L] -- CMD [ARGS...]` | Run one command in a tracked background subprocess; the chat is woken with status, exit code, log tail, and log path when it exits. | Destructive (approval-gated). Does not block — end the turn after starting it, don't poll `run status` for the common case. `--cwd` must stay under the chat's workspace root; loader-hook env vars are rejected. For a dev or preview server, start it once in its own reload/watch mode (`npm run dev`, `uvicorn --reload`) and leave that run alive across edits; cancel it only when you are done. A cancel you make yourself does not wake the chat; every other exit does. |

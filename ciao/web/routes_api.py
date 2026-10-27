@@ -85,6 +85,7 @@ _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
 from ciao.task_decisions import clean_reason
 from ciao.core_prompt import system_prompt_payload
 from ciao.tool_path import resolve_command
+from ciao.providers.claude import ClaudeProvider, is_process_task
 from ciao.providers.opencode import (
     OpencodeProvider,
     opencode_child_status,
@@ -322,22 +323,6 @@ def _rename_import_store(request: Request) -> Any:
     return ImportStore(engine_store_path(request.app.state.config))
 
 
-def _rename_run_store(request: Request) -> Any:
-    """The background-run store a workspace rename rewrites.
-
-    The live runner's store when the app has one, else a store on the same
-    file.
-    """
-    from ciao.background import BackgroundRunStore  # noqa: PLC0415
-
-    runner = getattr(request.app.state, "background_runner", None)
-    if runner is not None:
-        inner = getattr(runner, "_store", None)
-        return inner if inner is not None else runner
-    config = request.app.state.config
-    return BackgroundRunStore(Path(config.state_path).parent)
-
-
 async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -389,7 +374,6 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
                     schedules=_rename_schedule_store(request),
                     webhooks=_rename_webhook_store(request),
                     imports=_rename_import_store(request),
-                    runs=_rename_run_store(request),
                 )
             except WorkspaceRenameBusy as exc:
                 return JSONResponse({"error": str(exc)}, status_code=409)
@@ -2870,48 +2854,36 @@ async def chat_move_to_background(request: Request) -> JSONResponse:
     return JSONResponse({"error": outcome}, status_code=409)
 
 
-def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
-    """The runner and the run named in the path, if this chat owns it.
+async def chat_background_task_stop(request: Request) -> JSONResponse:
+    """Stop one running native background task (Claude) or shell (OpenCode).
 
-    A run owned by another chat answers 404, like a missing one: the Work
-    details rail only ever asks about its own chat's runs.
+    ``task_id`` is the bare id from the Processes row (``task:<id>`` or
+    ``shell:<id>`` with the prefix removed). 404 when the chat, its live
+    provider or the id is unknown; the row leaves ``/api/subagents/running``
+    once the provider reports the task finished. 502 when OpenCode cannot be
+    reached.
     """
-    runner = getattr(request.app.state, "background_runner", None)
-    if runner is None:
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    task_id = request.path_params["task_id"]
+    if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    run = runner.get(request.path_params["run_id"])
-    if run is None or run.parent_chat_id != request.path_params["chat_id"]:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return runner, run
-
-
-async def chat_background_run_log(request: Request) -> JSONResponse:
-    """The last lines of a background run's log, for the Chat details rail."""
-    resolved = _chat_background_run(request)
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    runner, run = resolved
-    return JSONResponse({**run.summary(), "last_lines": runner.tail(run.run_id)})
-
-
-async def chat_background_run_cancel(request: Request) -> JSONResponse:
-    """Stop a background run from the Chat details rail.
-
-    The finish edge announces itself over /ws/events and wakes the chat, the
-    same as a cancel the agent asked for.
-    """
-    resolved = _chat_background_run(request)
-    if isinstance(resolved, JSONResponse):
-        return resolved
-    runner, run = resolved
-    from ciao.background import BackgroundRunError
-
+    service = pcm._providers.get(chat_id)
+    provider = service.provider if service is not None else None
+    stopped = False
     try:
-        updated = await runner.cancel(run.run_id)
-    except BackgroundRunError:
-        # Pruned between the lookup and the cancel.
+        if isinstance(provider, ClaudeProvider):
+            stopped = await provider.stop_background_task(task_id)
+        elif isinstance(provider, OpencodeProvider):
+            stopped = await provider.stop_background_shell(task_id)
+    except Exception:  # noqa: BLE001 - a provider failure must answer, not 500
+        logger.warning("stopping background task %s failed", task_id, exc_info=True)
+        return JSONResponse(
+            {"error": "the provider could not be reached or refused"}, status_code=502
+        )
+    if not stopped:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse(updated.summary())
+    return JSONResponse({"ok": True})
 
 
 async def chat_prompt(request: Request) -> JSONResponse:
@@ -3414,7 +3386,9 @@ async def running_subagents(request: Request) -> JSONResponse:
     config = request.app.state.config
     out: dict[str, list[dict]] = {}
     scanned: list[tuple[str, Any]] = []
-    for chat_id in pcm.active_chat_ids():
+    # A provider holding only a native shell has no stream, count or watcher,
+    # so it is absent from `active_chat_ids`; the feed lists it anyway.
+    for chat_id in sorted({*pcm.active_chat_ids(), *pcm.background_work_chat_ids()}):
         chat = pcm.get_chat(chat_id)
         if chat is None or chat.archived or not chat.session_id:
             continue
@@ -3495,6 +3469,8 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
                     "is_async": True,
                     "status": "running",
                     "turn_index": None,
+                    "started_at": _epoch_to_iso(shell["started_at"]),
+                    "stoppable": True,
                 })
         return rows
 
@@ -3505,18 +3481,33 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
     path = subagent_tracking.find_parent_session_file(
         chat.session_id, Path(config.workspace_root), agent_root=agent_root
     )
-    if path is None:
+    # Native tasks (background Bash, Monitor) come from the loaded provider
+    # when there is one: its SDK-tracked set is the live truth and the only
+    # one that can be stopped. Without a loaded provider the parent JSONL's
+    # unfinished tasks stand in, listed but not stoppable. Never both, so a
+    # task is not listed twice.
+    provider_service = pcm._providers.get(chat.chat_id)
+    live_provider = provider_service.provider if provider_service is not None else None
+    live_claude = live_provider if isinstance(live_provider, ClaudeProvider) else None
+    if path is None and live_claude is None:
         return []
-    def _scan() -> list[subagent_tracking.SubagentInfo]:
+
+    def _scan() -> tuple[
+        list[subagent_tracking.SubagentInfo], list[subagent_tracking.SubagentInfo]
+    ]:
         # Both halves belong off the event loop. running_agents() is not a
         # cheap filter over the parsed state: it stats and tail-reads each
         # running agent's own transcript, and this endpoint is polled by the
         # sidebar for every working chat.
+        if path is None:
+            return [], []
         state = subagent_tracking.parse_session_subagents(path)
-        return subagent_tracking.running_agents(path, state)
+        agents = subagent_tracking.running_agents(path, state)
+        tasks = [] if live_claude is not None else subagent_tracking.running_tasks(state)
+        return agents, tasks
 
-
-    return [
+    agents, tasks = await asyncio.to_thread(_scan)
+    claude_rows: list[dict] = [
         {
             "agent_id": info.agent_id,
             "description": info.description,
@@ -3525,8 +3516,44 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             "status": info.status,
             "turn_index": info.turn_index,
         }
-        for info in await asyncio.to_thread(_scan)
+        for info in agents
     ]
+    # Processes rows reuse the shell row shape; `isShellRow` routes them.
+    claude_rows.extend(
+        {
+            "agent_id": f"task:{info.agent_id}",
+            "description": info.command or info.description or "Background task",
+            "subagent_type": "monitor" if info.subagent_type == "Monitor" else "shell",
+            "is_async": True,
+            "status": "running",
+            "turn_index": None,
+            "started_at": info.started_at,
+            "stoppable": False,
+        }
+        for info in tasks
+    )
+    if live_claude is not None:
+        for task in live_claude.background_shell_rows():
+            task_type = str(task["task_type"])
+            if not is_process_task(task):
+                # Background agents already have their own rows above.
+                continue
+            claude_rows.append({
+                "agent_id": f"task:{task['id']}",
+                "description": task["command"] or "Background task",
+                "subagent_type": "monitor" if "monitor" in task_type else "shell",
+                "is_async": True,
+                "status": "running",
+                "turn_index": None,
+                "started_at": _epoch_to_iso(task["started_at"]),
+                "stoppable": True,
+            })
+    return claude_rows
+
+
+def _epoch_to_iso(seconds: float) -> str:
+    """ISO 8601 UTC for epoch ``seconds``."""
+    return datetime.fromtimestamp(seconds, UTC).isoformat()
 
 
 def _merge_subagent_dispatch_meta(

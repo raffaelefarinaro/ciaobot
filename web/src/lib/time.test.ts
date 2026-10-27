@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, formatRelative } from './time'
+import { formatDuration, formatRelative, minutesSince } from './time'
 
 describe('formatRelative', () => {
   const now = new Date('2026-08-04T12:00:00Z')
@@ -28,5 +28,20 @@ describe('formatDuration', () => {
     expect(formatDuration(0)).toBe('<1ms')
     expect(formatDuration(0.6)).toBe('<1ms')
     expect(formatDuration(1)).toBe('1ms')
+  })
+})
+
+describe('minutesSince', () => {
+  const start = Date.parse('2026-10-06T10:00:00Z')
+
+  it('rounds down to whole minutes, so a ticking clock does not jitter the width', () => {
+    expect(minutesSince('2026-10-06T10:00:00Z', start + 4_300)).toBe('<1m')
+    expect(minutesSince('2026-10-06T10:00:00Z', start + 125_400)).toBe('2m')
+    expect(minutesSince('2026-10-06T10:00:00Z', start + 3_725_000)).toBe('1h 2m')
+  })
+
+  it('is quiet about a missing or unparseable start', () => {
+    expect(minutesSince('', start)).toBe('')
+    expect(minutesSince('nope', start)).toBe('')
   })
 })

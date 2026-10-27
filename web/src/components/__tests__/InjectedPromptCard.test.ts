@@ -41,6 +41,24 @@ describe('InjectedPromptCard', () => {
     expect(toggle.attributes('aria-controls')).toBe(body.attributes('id'))
   })
 
+  it('shows why a run failed while collapsed, and drops the line once open', async () => {
+    const wrapper = mountCard({ prompt: runPrompt, raw: '=== raw' })
+    // runPrompt's error only repeats the exit code, so the line is its last tail line.
+    const hint = wrapper.get('.injected-card-hint')
+    expect(hint.text()).toBe('two')
+    const toggle = wrapper.get('.injected-card-toggle')
+    expect(toggle.attributes('aria-describedby')).toBe(hint.attributes('id'))
+    await toggle.trigger('click')
+    expect(wrapper.find('.injected-card-hint').exists()).toBe(false)
+    expect(toggle.attributes('aria-describedby')).toBeUndefined()
+  })
+
+  it('shows no failure line for a run that succeeded', () => {
+    const ok: InjectedPrompt = { kind: 'background_run', count: 1, runs: [{ ...runPrompt.runs[0], verdict: 'ok', exitCode: 0, error: '' }] }
+    const wrapper = mountCard({ prompt: ok, raw: '=== raw' })
+    expect(wrapper.find('.injected-card-hint').exists()).toBe(false)
+  })
+
   it("shows each run's status pill, log link and tail", async () => {
     const wrapper = mountCard({ prompt: runPrompt, raw: '=== raw' })
     await wrapper.get('.injected-card-toggle').trigger('click')
@@ -52,6 +70,21 @@ describe('InjectedPromptCard', () => {
     // A named region, not a bare focusable element: the name has to be
     // supported by a role for a screen reader to announce it.
     expect(tail.attributes('role')).toBe('region')
+  })
+
+  it('hides the full-prompt toggle and the log link when there is no raw prompt or log', async () => {
+    const native: InjectedPrompt = {
+      kind: 'background_run',
+      count: 1,
+      runs: [{ label: 'probe', runId: 'b1', verdict: 'failed', exitCode: 3, error: '', logPath: '', tail: [] }],
+    }
+    const wrapper = mountCard({ prompt: native, raw: '' })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+    expect(wrapper.find('.injected-card-log').exists()).toBe(false)
+    expect(wrapper.find('.file-link').exists()).toBe(false)
+    // Without a log nothing says whether the command printed anything.
+    expect(wrapper.text()).not.toContain('No output.')
   })
 
   it('keeps the full prompt behind its own toggle', async () => {

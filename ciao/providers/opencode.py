@@ -55,13 +55,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 
 if TYPE_CHECKING:
     import subprocess
 
+from ciao.background import format_finished_runs
 from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
     AgentRequest,
@@ -967,6 +968,56 @@ def _data(payload: object) -> object:
     return payload
 
 
+_SHELL_COMMAND_RE = re.compile(r'<shell\b[^>]*?\bcommand="([^"]*)"')
+_SHELL_EXIT_LINE_RE = re.compile(r"Exited with code -?\d+\s*$")
+_SHELL_CANCELLED_RE = re.compile(r"kill|cancel|abort|interrupt", re.IGNORECASE)
+_SHELL_TAIL_LINES = 50
+
+
+def native_shell_run(
+    text: str, description: str | None, metadata: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """A ``format_finished_runs`` entry for one finished OpenCode shell.
+
+    OpenCode wakes the session with a ``synthetic`` item whose metadata names
+    the shell (``source == "shell"``) and whose text wraps the output in a
+    ``<shell ...>`` element. ``state`` stays ``completed`` for a non-zero
+    exit, so the verdict comes from ``exit``. Returns None for any other item.
+    """
+    if not isinstance(metadata, Mapping) or metadata.get("source") != "shell":
+        return None
+    raw = str(text or "")
+    opened = raw.find("<shell ")
+    start = raw.find(">\n", opened) + 2 if opened >= 0 and raw.find(">\n", opened) >= 0 else 0
+    end = raw.rfind("</shell>")
+    body = raw[start:end] if end >= start else raw[start:]
+    body = _SHELL_EXIT_LINE_RE.sub("", body.rstrip())
+    tail = body.rstrip().splitlines()[-_SHELL_TAIL_LINES:]
+    label = str(description or "").strip()
+    if not label:
+        match = _SHELL_COMMAND_RE.search(raw)
+        label = match.group(1) if match else ""
+    label = " ".join(label.split())[:120]
+    exit_code = metadata.get("exit")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        exit_code = None
+    if exit_code == 0:
+        status = "ok"
+    elif _SHELL_CANCELLED_RE.search(str(metadata.get("state") or "")):
+        status = "cancelled"
+    else:
+        status = "failed"
+    return {
+        "label": label,
+        "run_id": str(metadata.get("shellID") or ""),
+        "exit_code": exit_code,
+        "status": status,
+        "error": "",
+        "log_path": None,
+        "last_lines": tail,
+    }
+
+
 def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
     """Project one flat V2 message into the provider's internal part shape.
 
@@ -1001,6 +1052,18 @@ def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
                 if key != "type"
             } | {"type": message_type},
             "parts": [],
+        }
+    if message_type == "synthetic":
+        return {
+            "info": {
+                key: value for key, value in message.items()
+                if key not in {"type", "text"}
+            } | {"role": "synthetic"},
+            "parts": [{
+                "type": "text",
+                "text": str(message.get("text") or ""),
+                "synthetic": True,
+            }],
         }
     if message_type != "assistant":
         return None
@@ -1688,12 +1751,18 @@ class OpencodeProvider(BaseSDKProvider):
         # Command of each shell seen in `shell.created`, for the composer's
         # process list. A shell found only by `GET /api/shell` has no entry.
         self._shell_commands: dict[str, str] = {}
+        # Epoch seconds at which each running shell was first seen here, for
+        # the composer's elapsed time; cleared with the shell.
+        self._shell_started: dict[str, float] = {}
         self._background_children: set[str] = set()
         # Task/subagent sessions spawned under a parent session (any depth),
         # child id -> parent session. Only their permission/form requests are
         # surfaced (#1617). Outlives a turn; cleared by `disconnect`.
         self._child_sessions: dict[str, str] = {}
         self._background_changed = asyncio.Event()
+        # Finished native shells whose synthetic wake items arrived since the
+        # last execution ended; `_wake_result` turns them into the notice.
+        self._wake_runs: list[dict[str, Any]] = []
         # Monotonic time of the last event seen from the server; the idle
         # reaper bounds its "work outstanding" protection with it.
         self._last_activity = time.monotonic()
@@ -1841,12 +1910,29 @@ class OpencodeProvider(BaseSDKProvider):
         """Background shells plus subagents tracked for this chat's session."""
         return len(self._background_shells) + len(self._background_children)
 
-    def background_shell_rows(self) -> list[dict[str, str]]:
-        """``{id, command}`` for each live background shell, in id order."""
+    def background_shell_rows(self) -> list[dict[str, Any]]:
+        """``{id, command, started_at}`` for each live background shell, in id order."""
         return [
-            {"id": shell_id, "command": self._shell_commands.get(shell_id, "")}
+            {
+                "id": shell_id,
+                "command": self._shell_commands.get(shell_id, ""),
+                "started_at": self._shell_started.setdefault(shell_id, time.time()),
+            }
             for shell_id in sorted(self._background_shells)
         ]
+
+    async def stop_background_shell(self, shell_id: str) -> bool:
+        """Terminate one tracked background shell (``DELETE /api/shell/:id``).
+
+        False when the shell is not tracked here or the server refused. The
+        shell leaves the tracked set on its ``shell.exited`` event or the next
+        reconcile, not here. A transport failure propagates as ``httpx.HTTPError``.
+        """
+        client = self._client
+        if client is None or shell_id not in self._background_shells:
+            return False
+        response = await client.delete(f"/api/shell/{quote(shell_id, safe='')}")
+        return bool(response.status_code < 400)
 
     @property
     def seconds_since_activity(self) -> float:
@@ -1877,10 +1963,12 @@ class OpencodeProvider(BaseSDKProvider):
             ):
                 self._background_shells.add(str(info["id"]))
                 self._shell_commands[str(info["id"])] = str(info.get("command") or "")
+                self._shell_started[str(info["id"])] = time.time()
                 changed = True
         elif kind == "shell.exited":
             shell_id = str(props.get("id") or "")
             self._shell_commands.pop(shell_id, None)
+            self._shell_started.pop(shell_id, None)
             if shell_id in self._background_shells:
                 self._background_shells.discard(shell_id)
                 changed = True
@@ -1948,6 +2036,8 @@ class OpencodeProvider(BaseSDKProvider):
         """Take the server's running shells, dropping commands of shells that are gone."""
         self._background_shells = shells
         self._shell_commands = {k: v for k, v in self._shell_commands.items() if k in shells}
+        now = time.time()
+        self._shell_started = {k: self._shell_started.get(k, now) for k in shells}
 
     def _set_background_children(self, active: set[str], session_id: str) -> None:
         """Replace ``_background_children`` with what the server reports running.
@@ -2111,6 +2201,10 @@ class OpencodeProvider(BaseSDKProvider):
 
     def _wake_result(self, session_id: str, error: str) -> ResultEvent:
         """Terminal event of one follow-up execution."""
+        notice = ""
+        if self._wake_runs:
+            notice = format_finished_runs(self._wake_runs, tail_lines=_SHELL_TAIL_LINES)[0]
+            self._wake_runs = []
         return ResultEvent(
             type="result",
             result=error or self._answer_text(),
@@ -2120,6 +2214,7 @@ class OpencodeProvider(BaseSDKProvider):
             usage=self._usage,
             cost_usd=self._cost,
             origin="task-notification",
+            wake_notice=notice,
         )
 
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
@@ -2135,6 +2230,7 @@ class OpencodeProvider(BaseSDKProvider):
         client, session_id = self._client, self._session_id
         if client is None or not session_id or not self.has_live_server:
             return
+        self._wake_runs = []
         queue: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
         subscribed = asyncio.Event()
 
@@ -2224,6 +2320,24 @@ class OpencodeProvider(BaseSDKProvider):
                     continue
                 if kind == "session.inbox.enqueued":
                     pending_inbox.add(str(props.get("inboxID") or ""))
+                    item = props.get("item")
+                    payload = item.get("payload") if isinstance(item, Mapping) else None
+                    if (
+                        isinstance(item, Mapping)
+                        and item.get("type") == "synthetic"
+                        and isinstance(payload, Mapping)
+                    ):
+                        run = native_shell_run(
+                            str(payload.get("text") or ""),
+                            payload.get("description"),
+                            payload.get("metadata"),
+                        )
+                        if run is not None and not any(
+                            seen["run_id"] == run["run_id"]
+                            for seen in self._wake_runs
+                        ):
+                            # A replayed enqueue must not double a run.
+                            self._wake_runs.append(run)
                     continue
                 if kind == "session.inbox.delivered":
                     pending_inbox.discard(str(props.get("inboxID") or ""))
@@ -2569,6 +2683,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._settled_tool_ids.clear()
         self._background_shells.clear()
         self._shell_commands.clear()
+        self._shell_started.clear()
         self._background_children.clear()
         self._child_sessions.clear()
         self._background_changed.set()

@@ -74,7 +74,8 @@ test.describe('zoom and text scaling', () => {
     })
     await page.setViewportSize({ width: 640, height: 450 })
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
-    await page.locator('.chat-code-badge').click()
+    // 640px is a phone layout: the code badge is hidden, so open Chat details from ⓘ.
+    await page.getByRole('button', { name: 'Show chat details' }).click()
     await expect(page.locator('.chat-repo-section')).toBeVisible()
     const sideways = await page.locator('#chat-work-rail').evaluate((el) => el.scrollWidth - el.clientWidth)
     expect(sideways, 'Chat details scrolls sideways').toBeLessThanOrEqual(0)

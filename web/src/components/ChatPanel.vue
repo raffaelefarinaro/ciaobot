@@ -435,6 +435,24 @@
           />
         </div>
         <!-- System message (errors, etc) -->
+        <!-- A background shell the provider ran itself: the same card as a
+             `ciao run` wake, drawn from a system row so it never counts as a turn. -->
+        <div
+          v-else-if="item.kind === 'system' && injectedPrompts.get(item.msg)"
+          class="message-wrap injected-prompt-wrap"
+          :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`"
+          :data-msg-index="i"
+          data-msg-role="system"
+        >
+          <InjectedPromptCard
+            :prompt="injectedPrompts.get(item.msg)!"
+            :raw="''"
+            :timestamp="item.msg.timestamp"
+            :chat-title="chat.title"
+            :schedule="injectedSchedule"
+            :known-paths="knownFilePaths"
+          />
+        </div>
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
           <div v-if="isErrorMsg(item.msg.content)" class="error-attribution" role="status">
@@ -1211,15 +1229,16 @@
               <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
-            <!-- Background work the turn left running: agents and command runs, right
+            <!-- Background work the turn left running: agents and shells, right
                  against Send. Fills the bar's free space, so it is also the spacer. -->
             <ComposerActivity
               :chat-id="chat.chat_id"
               :agent-count="composerAgentCount"
               :agents="runningRows"
-              :runs="chatRuns"
-              :finished="store.finishedBackgroundRuns[chat.chat_id] ?? null"
               :now="nowTs"
+              :stop-task="stopShell"
+              :stopping="store.stoppingTasks[chat.chat_id]"
+              :stop-errors="store.stopTaskErrors[chat.chat_id]"
               @open-details="openRunDetails"
             />
             <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
@@ -1328,14 +1347,14 @@
         />
       </div>
       <section
-        v-if="runningSubagents.length || chatRuns.length"
+        v-if="runningRows.length"
         ref="railRunningEl"
         class="rail-section chat-rail-running"
         aria-labelledby="chat-rail-running"
         tabindex="-1"
       >
         <p id="chat-rail-running" class="rail-label">Running</p>
-        <!-- Agents first: an agent has a transcript to open, a process only a log. -->
+        <!-- Agents first: an agent has a transcript to open, a shell only a Stop. -->
         <template v-if="runningSubagents.length">
           <p class="chat-rail-subhead">Agents</p>
           <div class="rail-list">
@@ -1352,9 +1371,16 @@
             </router-link>
           </div>
         </template>
-        <template v-if="chatRuns.length">
+        <template v-if="runningShells.length">
           <p class="chat-rail-subhead">Processes</p>
-          <BackgroundRunRows :chat-id="chat.chat_id" :runs="chatRuns" :now="nowTs" />
+          <ShellRows
+            variant="rail"
+            :rows="runningShells"
+            :now="nowTs"
+            :stop-task="stopShell"
+            :stopping="store.stoppingTasks[chat.chat_id]"
+            :errors="store.stopTaskErrors[chat.chat_id]"
+          />
         </template>
       </section>
       <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
@@ -1474,7 +1500,7 @@ import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
-import BackgroundRunRows from './BackgroundRunRows.vue'
+import ShellRows from './ShellRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
@@ -1641,20 +1667,11 @@ const {
 } = composer
 const isContinuing = ref(false)
 
-// Ticks once a second while streaming or while a background run is going, so
-// the live elapsed-time labels (the "Working..." trace meta, a run's age)
-// advance.
+// Ticks once a second while streaming, a background run is going or a native
+// shell is listed (see the watch below `runningRows`), so the live
+// elapsed-time labels advance.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
-watch(() => store.isStreaming || store.activeBackgroundRuns.length > 0, (streaming) => {
-  if (streaming && !clockTimer) {
-    nowTs.value = Date.now()
-    clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
-  } else if (!streaming && clockTimer) {
-    clearInterval(clockTimer)
-    clockTimer = null
-  }
-}, { immediate: true })
 
 const canSend = computed(() =>
   !!(inputText.value.trim()
@@ -1909,7 +1926,9 @@ const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | nul
 const injectedPrompts = computed(() => {
   const map = new Map<ChatMessage, InjectedPrompt>()
   for (const m of store.activeMessages) {
-    if (m.role !== 'user') continue
+    // A user turn the engine wrote, or the system row the backend draws for a
+    // background shell the provider ran itself.
+    if (m.role !== 'user' && !(m.role === 'system' && m.origin === 'background_run')) continue
     const parsed = parseInjectedPrompt(m.content, m.origin)
     if (parsed) map.set(m, parsed)
   }
@@ -2210,7 +2229,23 @@ function compactContext() {
 // composer lists those as processes, everything else counts as an agent.
 const runningRows = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
 const runningSubagents = computed(() => runningRows.value.filter(sub => !isShellRow(sub)))
-const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))
+function stopShell(taskId: string) {
+  if (chat.value) void store.stopBackgroundTask(chat.value.chat_id, taskId)
+}
+const runningShells = computed(() => runningRows.value.filter(isShellRow))
+watch(
+  () => store.isStreaming || runningShells.value.length > 0,
+  (ticking) => {
+    if (ticking && !clockTimer) {
+      nowTs.value = Date.now()
+      clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
+    } else if (!ticking && clockTimer) {
+      clearInterval(clockTimer)
+      clockTimer = null
+    }
+  },
+  { immediate: true },
+)
 // Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
 // the running-subagent poll tick on different clocks, so take the larger.
 const composerAgentCount = computed(() => Math.max(store.activeBackgroundAgents, runningSubagents.value.length))
@@ -6448,6 +6483,7 @@ details[open] > .activity-summary::before {
 }
 .message-content :deep(user-comment) {
   display: block;
+  white-space: pre-wrap;
   color: var(--fg);
   font-style: normal;
   font-weight: normal;
@@ -7933,6 +7969,15 @@ details[open] > .activity-summary::before {
   .message-wrap,
   .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 8px 10px; }
+}
+
+/* Phones (the pane header bell's breakpoint): the title needs the room. Back and
+   the menu already leave the chat, and Chat details' Repository section carries
+   the code mode switch, so neither control is lost. Hidden, not removed, so
+   desktop keeps them. */
+@media (max-width: 767px) {
+  .close-btn,
+  .chat-code-badge { display: none; }
 }
 
 @media (max-width: 768px) {

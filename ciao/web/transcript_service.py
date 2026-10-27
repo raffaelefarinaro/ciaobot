@@ -41,10 +41,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ciao import cli_envelopes, subagent_tracking
+from ciao.background import format_finished_runs
 from ciao.models import ChatContext
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (
     OpencodeProvider,
+    native_shell_run,
     _file_touches as _opencode_file_touches,
     _summarize_tool_input as _summarize_opencode_tool_input,
 )
@@ -398,6 +400,38 @@ def _summarize_task_notification(content: str) -> str | None:
     return f"{icon} Subagent {status}"
 
 
+def _native_task_notice(content: str) -> str | None:
+    """Wake-format text for provider-native shell completions, else None.
+
+    The first notification decides: a subagent completion or a ``Monitor
+    event`` falls through to the one-line status bubble. A record can
+    concatenate several completions; the consecutive native ones share one
+    notice. No log path or tail: the provider's output file is outside the
+    file sandbox and the notice carries only a summary.
+    """
+    runs: list[cli_envelopes.NativeTaskRun] = []
+    for fields, _task_ids in cli_envelopes.envelope_notifications(content):
+        run = cli_envelopes.native_task_run(fields)
+        if run is None:
+            break
+        runs.append(run)
+    if not runs:
+        return None
+    entries: list[dict[str, Any]] = [
+        {
+            "status": run.status,
+            "label": run.label,
+            "run_id": run.run_id,
+            "exit_code": run.exit_code,
+            "error": run.error,
+            "log_path": None,
+            "last_lines": None,
+        }
+        for run in runs
+    ]
+    return format_finished_runs(entries, tail_lines=50)[0]
+
+
 def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
     """Render SDK or JSONL message objects for the subagent transcript UI."""
     rendered: list[dict] = []
@@ -710,6 +744,7 @@ def _render_opencode_thread(
     result: list[dict] = []
     user_idx = int(start_user_idx) if isinstance(start_user_idx, int) else 0
     pending_tools: list[str] = []
+    pending_runs: list[dict] = []
 
     def flush_tools() -> None:
         if pending_tools:
@@ -720,6 +755,16 @@ def _render_opencode_thread(
             })
             pending_tools.clear()
 
+    def flush_notice() -> None:
+        # Shells that finished together draw one card, ahead of the reply.
+        if pending_runs:
+            result.append({
+                "role": "system",
+                "content": format_finished_runs(pending_runs, tail_lines=50)[0],
+                "origin": "background_run",
+            })
+            pending_runs.clear()
+
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -728,6 +773,17 @@ def _render_opencode_thread(
         role = str(info.get("role") or "")
         parts = message.get("parts")
         parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
+        if role == "synthetic":
+            flush_tools()
+            run = native_shell_run(
+                "\n".join(str(part.get("text") or "") for part in parts),
+                info.get("description"),
+                info.get("metadata"),
+            )
+            if run is not None:
+                pending_runs.append(run)
+            continue
+        flush_notice()
         if role == "user":
             flush_tools()
             # A prompt can span several text parts; synthetic ones are
@@ -826,6 +882,7 @@ def _render_opencode_thread(
                     line += f" {summary}"
                 pending_tools.append(line)
         flush_tools()
+    flush_notice()
     if metadata:
         _overlay_assistant_timings(result, chat.user_turn_timings)
     return result
@@ -1180,9 +1237,13 @@ def _align_user_turns(
 def _overlay_transcript_metadata(
     entries: list[dict], transcript_rows: list[dict]
 ) -> None:
+    # A wake reply (origin turn) belongs to no user segment: it follows the
+    # notice card, in the same segment as the reply before it. Skipping those
+    # rows keeps one metadata entry per user segment, so every real reply keeps
+    # its own footer (the wake reply's own usage is not shown).
     metadata = [
         row for row in transcript_rows
-        if row.get("role") == "assistant"
+        if row.get("role") == "assistant" and not row.get("origin")
     ]
     targets: list[int] = []
     last: int | None = None
@@ -1712,6 +1773,14 @@ async def _assemble_chat_messages(
                 # <bash-stdout> from a command that printed a session JSONL
                 # stays hidden instead of rendering a status line assembled
                 # out of shell output.
+                native_notice = _native_task_notice(content)
+                if native_notice is not None:
+                    result.append({
+                        "role": "system",
+                        "content": native_notice,
+                        "origin": "background_run",
+                    })
+                    continue
                 task_summary = _summarize_task_notification(content)
                 if task_summary is not None:
                     result.append({"role": "system", "content": task_summary})

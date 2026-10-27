@@ -26,7 +26,7 @@ export type InjectedPrompt =
   | { kind: 'update_task' }
   | { kind: 'retry' }
 
-// Mirrors ProjectChatManager._build_background_wake_prompt (ciao/web/project_chats.py).
+// Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
 export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\./
 // Mirrors subagent_tracking.CLI_TASK_WAKE_PREFIX + SubagentWatchers.build_cli_task_wake_prompt.
 export const CLI_TASK_WAKE_PREFIX = '[Ciaobot] Lost CLI tasks:'
@@ -48,6 +48,13 @@ const VERDICTS: Record<string, RunVerdict> = { ok: 'ok', CANCELLED: 'cancelled',
 /** Undo ciao/prompt_fence.py neutralize(): `&lt;tag` / `&lt;/tag` back to `<tag` / `</tag`. */
 export function unneutralize(tag: string, text: string): string {
   return text.replace(new RegExp(`&lt;(/?)${tag}`, 'gi'), `<$1${tag}`)
+}
+
+// Run logs keep the colour codes test runners print; drawn as text they are noise.
+// eslint-disable-next-line no-control-regex -- matching ESC is the point
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, '')
 }
 
 function parseBackgroundRuns(content: string, count: number): InjectedPrompt {
@@ -75,7 +82,7 @@ function parseBackgroundRuns(content: string, count: number): InjectedPrompt {
       const tail: string[] = []
       i++
       while (i < lines.length && lines[i] !== '</run-log-tail>') {
-        tail.push(unneutralize('run-log-tail', lines[i]))
+        tail.push(stripAnsi(unneutralize('run-log-tail', lines[i])))
         i++
       }
       current.tail = tail
@@ -179,7 +186,21 @@ export function parseInjectedPrompt(content: string | null | undefined, origin?:
   }
 }
 
-export interface InjectedSummary { label: string; facts: string; tone: RunVerdict | null }
+/** `hint` is the failure line shown while the card is collapsed. */
+export interface InjectedSummary { label: string; facts: string; tone: RunVerdict | null; hint?: string }
+
+const BARE_EXIT_RE = /^exit -?\d+$/
+
+/** Why a run did not succeed: its error, unless that only repeats the exit code, else its last log line, else nothing. */
+export function runFailureHint(run: BackgroundRunEntry): string {
+  if (run.verdict === 'ok') return ''
+  if (run.error && !BARE_EXIT_RE.test(run.error)) return run.error
+  for (let i = run.tail.length - 1; i >= 0; i--) {
+    const line = run.tail[i].trim()
+    if (line) return line
+  }
+  return ''
+}
 
 const TONE_ORDER: RunVerdict[] = ['failed', 'cancelled', 'ok']
 
@@ -200,6 +221,14 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
           .join(' · ')
       }
       const tone = TONE_ORDER.find(v => runs.some(r => r.verdict === v)) ?? null
+      // The first failed run with something to say, else the first cancelled one.
+      for (const verdict of ['failed', 'cancelled'] as const) {
+        for (const run of runs) {
+          if (run.verdict !== verdict) continue
+          const hint = runFailureHint(run)
+          if (hint) return { label, facts, tone, hint: runs.length > 1 ? `${run.label}: ${hint}` : hint }
+        }
+      }
       return { label, facts, tone }
     }
     case 'cli_task_wake':
