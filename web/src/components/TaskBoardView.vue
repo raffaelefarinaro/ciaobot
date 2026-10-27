@@ -444,12 +444,6 @@ function dragScopes(): DragScope[] {
   return scopes
 }
 
-function focusGrip(id: string): void {
-  void nextTick(() => {
-    lanesEl.value?.querySelector<HTMLElement>(`[data-drag-handle="${CSS.escape(id)}"]`)?.focus()
-  })
-}
-
 async function commitDrag(commit: DragCommit): Promise<boolean> {
   const task = taskById.value.get(commit.id)
   if (!task) return false
@@ -464,7 +458,6 @@ async function commitDrag(commit: DragCommit): Promise<boolean> {
       placementMessage.value = result.conflict
         ? `Could not save the new order. ${result.message}`
         : 'Could not save the new order.'
-      focusGrip(commit.id)
       return false
     }
     if (dest === 'done') {
@@ -476,10 +469,7 @@ async function commitDrag(commit: DragCommit): Promise<boolean> {
       return opened
     }
     const moved = await moveTo(task, dest, anchors)
-    if (!moved) {
-      placementMessage.value = 'Could not save the new order.'
-      focusGrip(commit.id)
-    }
+    if (!moved) placementMessage.value = 'Could not save the new order.'
     return moved
   } finally {
     placing = false

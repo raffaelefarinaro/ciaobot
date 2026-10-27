@@ -33,8 +33,11 @@ interface Sent { path: string; body: Record<string, unknown> }
 /**
  * The engine's task routes, kept in memory so a reload reads what a write left:
  * a list with the order, `POST /order`, and `PATCH` with a placement.
+ *
+ * `holdOrder` lets a test keep an order write in flight while it moves focus,
+ * then release it. It is per call, so no gate survives into another test.
  */
-async function serve(page: Page): Promise<Sent[]> {
+async function serve(page: Page, holdOrder?: Promise<void>): Promise<Sent[]> {
   const rows = TASKS.map(t => ({ ...t }))
   const sequences: Record<Status, string[]> = {
     backlog: rows.filter(t => t.status === 'backlog').map(t => t.id),
@@ -57,6 +60,7 @@ async function serve(page: Page): Promise<Sent[]> {
     json: { workspace: 'alpha', tasks: rows, order: order() },
   }))
   await page.route(/\/api\/tasks\/(\d{32})\/order$/, async route => {
+    await holdOrder
     const body = route.request().postDataJSON() as Record<string, unknown>
     const id = /tasks\/(\d{32})/.exec(route.request().url())![1]!
     sent.push({ path: `/api/tasks/${id}/order`, body })
@@ -78,9 +82,9 @@ async function serve(page: Page): Promise<Sent[]> {
   return sent
 }
 
-async function open(page: Page, id: string): Promise<Sent[]> {
+async function open(page: Page, id: string, holdOrder?: Promise<void>): Promise<Sent[]> {
   await isolate(page, id)
-  const sent = await serve(page)
+  const sent = await serve(page, holdOrder)
   await boot(page, '/tasks', '.task-card')
   return sent
 }
@@ -184,7 +188,9 @@ test.describe('placing cards by keyboard', () => {
   test.use({ viewport: { width: 1440, height: 900 } })
 
   test('Space picks a card up, the arrows move it, Enter drops it, and Shift+Arrow still changes lane', async ({ page }) => {
-    const sent = await open(page, 'task-reorder-keyboard')
+    let releaseOrder!: () => void
+    const orderHeld = new Promise<void>((resolve) => { releaseOrder = resolve })
+    const sent = await open(page, 'task-reorder-keyboard', orderHeld)
     const grip = page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.drag-grip')
     await grip.focus()
     await page.keyboard.press('Space')
@@ -192,13 +198,30 @@ test.describe('placing cards by keyboard', () => {
     await page.keyboard.press('ArrowDown')
     await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Plan the offsite', 'Send the invites'])
     await page.keyboard.press('Enter')
-    await expect.poll(() => sent.length).toBe(1)
-    await expect(page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.drag-grip')).toBeFocused()
+
+    // Move to another card while the order write is still in flight. The drop's
+    // deferred focus restoration must not pull focus back to the first grip.
+    const second = page.locator('.task-card', { hasText: 'Send the invites' }).locator('.task-open')
+    try {
+      await second.focus()
+      await expect(second).toBeFocused()
+    } finally {
+      releaseOrder()
+    }
+    // Wait on the board actually adopting the saved order, not on a request
+    // count or on the old grip already holding focus: the preview disappears
+    // only once the write has settled.
+    await expect(page.locator('.drag-lifted')).toHaveCount(0)
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Plan the offsite', 'Send the invites'])
+    expect(sent).toHaveLength(1)
+    await expect(second).toBeFocused()
 
     // The old one-lane move, with no placement.
-    await page.locator('.task-card', { hasText: 'Send the invites' }).locator('.task-open').focus()
     await page.keyboard.press('Shift+ArrowRight')
     await expect.poll(() => titles(page, 'In progress')).toContain('Send the invites')
+    expect(sent).toHaveLength(2)
+    expect(sent[1]!.path).toBe(`/api/tasks/${'3'.repeat(32)}`)
+    expect(sent[1]!.body).toMatchObject({ status: 'in_progress' })
     expect(sent[1]!.body).not.toHaveProperty('placement')
   })
 

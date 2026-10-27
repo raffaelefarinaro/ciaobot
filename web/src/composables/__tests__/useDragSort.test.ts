@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ref } from 'vue'
+import { effectScope, ref } from 'vue'
 import { useDragSort, type DragCommit, type UseDragSortOptions } from '../useDragSort'
 
 const ITEM_HEIGHT = 40
@@ -107,6 +107,15 @@ const flush = async () => {
   await new Promise((r) => setTimeout(r, 0))
 }
 
+/** A write the test decides when (and how) to answer. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
 function press(h: Harness, id: string, scope: string, x = 10, y = 10): void {
   h.handlers(id, scope).onPointerdown(pointer('pointerdown', x, y))
 }
@@ -185,6 +194,37 @@ describe('useDragSort', () => {
     expect(overlay()).toBeNull()
     expect(h.root.releasePointerCapture).toHaveBeenCalled()
   })
+
+  it.each(['cancel', 'dispose'] as const)(
+    'removes pointer focus listeners on %s while a commit is pending',
+    async (ending) => {
+      const added = vi.spyOn(document, 'addEventListener')
+      const removed = vi.spyOn(document, 'removeEventListener')
+      const write = deferred<boolean>()
+      const scope = effectScope()
+      const h = scope.run(() => setup({ onCommit: () => write.promise }))!
+      try {
+        h.grip('a1').focus()
+        press(h, 'a1', 'todo')
+        move(h, 10, 100)
+        h.root.dispatchEvent(pointer('pointerup', 10, 100))
+        const focusListener = added.mock.calls.find(([type, , capture]) => type === 'focusin' && capture === true)?.[1]
+        const pointerListener = added.mock.calls.find(([type, , capture]) => type === 'pointerdown' && capture === true)?.[1]
+        expect(focusListener).toBeDefined()
+        expect(pointerListener).toBeDefined()
+        if (ending === 'cancel') h.dnd.cancel()
+        else scope.stop()
+        expect(removed).toHaveBeenCalledWith('focusin', focusListener, true)
+        expect(removed).toHaveBeenCalledWith('pointerdown', pointerListener, true)
+        write.resolve(false)
+        await flush()
+      } finally {
+        scope.stop()
+        added.mockRestore()
+        removed.mockRestore()
+      }
+    },
+  )
 
   it('no-op drop (same scope and index) does not call onCommit', async () => {
     const h = setup()
@@ -283,6 +323,29 @@ describe('useDragSort', () => {
     document.removeEventListener('click', clicked)
   })
 
+  it('a pointer failure does not restore after a press elsewhere', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    press(h, 'a1', 'todo')
+    move(h, 10, 100)
+    h.root.dispatchEvent(pointer('pointerup', 10, 100))
+    await flush()
+    expect(h.onCommit).toHaveBeenCalledTimes(1)
+
+    // The pointer source grip still holds focus, but the user pressed another
+    // target while the write was in flight.
+    h.root.dispatchEvent(pointer('pointerdown', 900, 900))
+    expect(document.activeElement).toBe(h.grip('a1'))
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    gate.resolve(false)
+    await flush()
+    expect(focus).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(h.grip('a1'))
+    focus.mockRestore()
+  })
+
   it('keyboard pickup, arrows, drop commits once; Escape cancels; focus returns to the grip', async () => {
     const h = setup()
     const handlers = h.handlers('a1', 'todo')
@@ -317,6 +380,423 @@ describe('useDragSort', () => {
     expect(h.onCommit).toHaveBeenCalledTimes(1)
     expect(h.dnd.drag.value).toBeNull()
     expect(document.activeElement).toBe(h.grip('a1'))
+  })
+
+  it('a deferred keyboard drop does not take focus back from a control the user moved to', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    // While the write is in flight the user picks another card to work on.
+    h.grip('a2').focus()
+    await flush()
+    expect(document.activeElement).toBe(h.grip('a2'))
+
+    gate.resolve(true)
+    await flush()
+    expect(h.onCommit).toHaveBeenCalledTimes(1)
+    expect(h.dnd.drag.value).toBeNull()
+    expect(document.activeElement).toBe(h.grip('a2'))
+  })
+
+  it('a focus change during the deferred reveal tick is kept', async () => {
+    const h = setup()
+    h.onCommit.mockResolvedValueOnce(true)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+    // Let the save settle so `finish` has scheduled the reveal's `nextTick`,
+    // then move focus before that tick runs.
+    await Promise.resolve()
+    h.grip('a2').focus()
+    await flush()
+    expect(document.activeElement).toBe(h.grip('a2'))
+  })
+
+  it('a deferred keyboard drop failure does not take focus back either', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+    h.grip('a2').focus()
+    await flush()
+
+    gate.resolve(false)
+    await flush()
+    expect(h.dnd.announcement.value).toBe('Could not save the new order.')
+    expect(document.activeElement).toBe(h.grip('a2'))
+  })
+
+  it('moving focus elsewhere cancels a keyboard drag without taking focus back', async () => {
+    const h = setup()
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+
+    h.grip('a2').focus()
+    await flush()
+    expect(h.dnd.drag.value).toBeNull()
+    expect(h.onCancel).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(h.grip('a2'))
+  })
+
+  it('a deferred keyboard drop failure still restores focus to the same grip', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    gate.resolve(false)
+    await flush()
+    expect(h.dnd.announcement.value).toBe('Could not save the new order.')
+    expect(document.activeElement).toBe(h.grip('a1'))
+  })
+
+  it('a deferred keyboard drop still restores focus to the same grip', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    gate.resolve(true)
+    await flush()
+    expect(document.activeElement).toBe(h.grip('a1'))
+  })
+
+  it('a remount during a deferred drop restores focus to the card’s new grip', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    // The lane re-renders while the write is in flight: focus falls to the
+    // document, which is a remount rather than a decision to leave the drag.
+    const fresh = document.createElement('button')
+    fresh.dataset.dragHandle = 'a1'
+    h.grip('a1').replaceWith(fresh)
+    expect(document.activeElement).not.toBe(fresh)
+
+    gate.resolve(true)
+    await flush()
+    expect(document.activeElement).toBe(fresh)
+  })
+
+  it('a new pickup before the deferred reveal keeps the new drag’s grip', async () => {
+    const h = setup()
+    h.onCommit.mockResolvedValueOnce(true)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    handlers.onKeydown(key('Enter'))
+    // The finished drop has scheduled its reveal; start a new drag before it runs.
+    await Promise.resolve()
+    h.grip('a2').focus()
+    h.handlers('a2', 'todo').onKeydown(key(' '))
+    await flush()
+
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a2', mode: 'keyboard' })
+    expect(document.activeElement).toBe(h.grip('a2'))
+    // The old reveal must not have scrolled its card back into view either.
+    expect(scroll.mock.contexts).not.toContain(h.root.querySelector('[data-item="a1"]'))
+  })
+
+  it('an unmounted engine does not focus the old grip after its deferred reveal', async () => {
+    const scope = effectScope()
+    const h = scope.run(() => setup())!
+    h.onCommit.mockResolvedValueOnce(true)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+    await Promise.resolve()
+    ;(document.activeElement as HTMLElement).blur()
+    expect(document.activeElement).toBe(document.body)
+
+    scope.stop()
+    await flush()
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('a pointer press on a non-focusable area is a deliberate move, not a remount', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    // Clicking the lane's empty area focuses nothing: focus falls to the
+    // document just as a remount would, but this was the user's own move.
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    h.root.dispatchEvent(pointer('pointerdown', 900, 900))
+    ;(document.activeElement as HTMLElement).blur()
+    expect(document.activeElement).toBe(document.body)
+
+    gate.resolve(true)
+    await flush()
+    expect(document.activeElement).toBe(document.body)
+    expect(scroll).not.toHaveBeenCalled()
+  })
+
+  it('a pointer press elsewhere prevents the deferred reveal even while the grip keeps focus', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    // A touch scroll or a click on a non-focusable area leaves focus on the
+    // grip, but the user has chosen another target: no reveal, including no
+    // scroll, may run.
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    h.root.dispatchEvent(pointer('pointerdown', 900, 900))
+    expect(document.activeElement).toBe(h.grip('a1'))
+
+    gate.resolve(true)
+    await flush()
+    expect(scroll).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(h.grip('a1'))
+  })
+
+  it('a deferred failure with a press elsewhere and body focus keeps focus away', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    h.root.dispatchEvent(pointer('pointerdown', 900, 900))
+    ;(document.activeElement as HTMLElement).blur()
+    expect(document.activeElement).toBe(document.body)
+
+    gate.resolve(false)
+    await flush()
+    expect(h.dnd.announcement.value).toBe('Could not save the new order.')
+    expect(document.activeElement).toBe(document.body)
+    expect(scroll).not.toHaveBeenCalled()
+  })
+
+  it('a deferred failure with a press elsewhere while the grip stays focused does not refocus it', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    h.root.dispatchEvent(pointer('pointerdown', 900, 900))
+    expect(document.activeElement).toBe(h.grip('a1'))
+
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    gate.resolve(false)
+    await flush()
+    expect(focus).not.toHaveBeenCalled()
+    expect(scroll).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(h.grip('a1'))
+    focus.mockRestore()
+  })
+
+  it('a failure focus queued by the commit is dropped when the interaction ends first', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    gate.resolve(false)
+    // Let the commit settle so its failure focus and reveal are queued.
+    await Promise.resolve()
+    ;(document.activeElement as HTMLElement).blur()
+    expect(document.activeElement).toBe(document.body)
+
+    h.dnd.cancel()
+    await flush()
+    expect(h.dnd.announcement.value).toBe('Could not save the new order.')
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('a silent cancel while a save is pending never focuses the old grip afterwards', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    ;(document.activeElement as HTMLElement).blur()
+    // A remote change or navigation ends the drag while the write is in flight.
+    h.dnd.cancel()
+    gate.resolve(true)
+    await flush()
+
+    expect(h.dnd.drag.value).toBeNull()
+    expect(document.activeElement).toBe(document.body)
+    expect(scroll).not.toHaveBeenCalled()
+  })
+
+  it('a new drag started after a silent cancel survives the old commit resolving', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    h.dnd.cancel()
+    expect(h.dnd.drag.value).toBeNull()
+    h.grip('a2').focus()
+    h.handlers('a2', 'todo').onKeydown(key(' '))
+    await flush()
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a2', mode: 'keyboard' })
+    expect(document.activeElement).toBe(h.grip('a2'))
+
+    gate.resolve(true)
+    await flush()
+    // The stale commit must not clear or refocus the live drag.
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a2' })
+    expect(document.activeElement).toBe(h.grip('a2'))
+
+    h.handlers('a2', 'todo').onKeydown(key('ArrowDown'))
+    h.handlers('a2', 'todo').onKeydown(key('Enter'))
+    await flush()
+    expect(h.onCommit).toHaveBeenCalledTimes(2)
+    expect(h.onCommit).toHaveBeenLastCalledWith({
+      id: 'a2',
+      fromScope: 'todo',
+      toScope: 'todo',
+      index: 2,
+    })
+  })
+
+  it('a deliberate focus move that is later remounted still does not give focus back', async () => {
+    const h = setup()
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    // The user moves to another card; its row then remounts while the save is
+    // still in flight, so the document focus no longer shows where they went.
+    const other = h.grip('a2')
+    other.focus()
+    other.replaceWith(document.createElement('button'))
+    expect(document.activeElement).toBe(document.body)
+
+    gate.resolve(true)
+    await flush()
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('an unmount while a save is pending schedules no focus or scroll after it resolves', async () => {
+    const scope = effectScope()
+    const h = scope.run(() => setup())!
+    const gate = deferred<boolean>()
+    h.onCommit.mockReturnValueOnce(gate.promise)
+    h.grip('a1').focus()
+    const handlers = h.handlers('a1', 'todo')
+    handlers.onKeydown(key(' '))
+    await flush()
+    handlers.onKeydown(key('ArrowDown'))
+    await flush()
+    handlers.onKeydown(key('Enter'))
+
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    ;(document.activeElement as HTMLElement).blur()
+    scope.stop()
+    gate.resolve(true)
+    await flush()
+
+    expect(document.activeElement).toBe(document.body)
+    expect(scroll).not.toHaveBeenCalled()
   })
 
   it('keyboard left and right change scope and clamp the index', async () => {

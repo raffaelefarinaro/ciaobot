@@ -144,6 +144,20 @@ function isScrollable(style: string): boolean {
   return style === 'auto' || style === 'scroll' || style === 'overlay'
 }
 
+/**
+ * Whether focus still belongs to the dragged item with `id`: on its grip, or
+ * nowhere.
+ *
+ * A missing/body focus is a remount or a blur, not a decision to leave the drag,
+ * so keyboard restoration is still wanted then. Any other active element is the
+ * user's own navigation, and a deferred restore must not take it back.
+ */
+function focusStaysOnDragHandle(id: string): boolean {
+  const active = document.activeElement
+  if (!active || active === document.body || active === document.documentElement) return true
+  return active instanceof HTMLElement && active.dataset.dragHandle === id
+}
+
 function scrollersOf(...starts: Array<HTMLElement | null>): HTMLElement[] {
   const found = new Set<HTMLElement>()
   for (const start of starts) {
@@ -162,8 +176,31 @@ export function useDragSort(options: UseDragSortOptions) {
   let pending: Pending | null = null
   let session: Session | null = null
   let origin: { id: string; scope: string; index: number } | null = null
-  let committing = false
   let listenersOn = false
+  /**
+   * Identity of the current drag interaction. A new pickup or pointer press
+   * bumps it, as does a silent end (cancel, disposal): a reveal or write that
+   * belongs to an older interaction must do nothing once that happens.
+   */
+  let interactionToken = 0
+  /**
+   * The interaction whose write is in flight. A silent cancel or a new drag can
+   * leave an older write pending: it must not clear the live drag, announce over
+   * it, or restore its card's focus when it settles.
+   */
+  let committingToken: number | null = null
+  /**
+   * The grip whose focus a keyboard drag owns, and whether the user deliberately
+   * left it. Body focus alone cannot tell a remount from a press on something
+   * unfocusable, so the events that cause the latter are recorded here.
+   */
+  let focusWatchId: string | null = null
+  let focusWatchSeq = 0
+  let focusLeft = false
+
+  function isCommitting(): boolean {
+    return committingToken === interactionToken
+  }
 
   function announce(
     kind: MoveAnnouncementKind,
@@ -191,12 +228,91 @@ export function useDragSort(options: UseDragSortOptions) {
     return null
   }
 
-  async function reveal(id: string): Promise<void> {
+  function onFocusIn(event: FocusEvent): void {
+    const id = focusWatchId
+    if (!id) return
+    const target = event.target
+    // The reveal itself focuses the same grip, which is not a departure.
+    if (target instanceof HTMLElement && target.dataset.dragHandle === id) return
+    focusLeft = true
+  }
+
+  function onFocusWatchPointerdown(event: PointerEvent): void {
+    const id = focusWatchId
+    if (!id) return
+    const target = event.target
+    if (target instanceof Element && target.closest(`[data-drag-handle="${CSS.escape(id)}"]`)) return
+    // Pressing anything else, including a lane's empty area, is the user
+    // choosing another target. A body focus after that is not a remount.
+    focusLeft = true
+  }
+
+  function startFocusWatch(id: string): number {
+    focusWatchId = id
+    focusWatchSeq += 1
+    focusLeft = false
+    document.addEventListener('focusin', onFocusIn, true)
+    document.addEventListener('pointerdown', onFocusWatchPointerdown, true)
+    return focusWatchSeq
+  }
+
+  /**
+   * `seq` identifies the watch a deferred reveal started. A newer pickup may
+   * already own the same grip; the old reveal must not end its watch.
+   */
+  function endFocusWatch(seq?: number): void {
+    if (seq !== undefined && seq !== focusWatchSeq) return
+    if (!focusWatchId) return
+    focusWatchId = null
+    focusLeft = false
+    document.removeEventListener('focusin', onFocusIn, true)
+    document.removeEventListener('pointerdown', onFocusWatchPointerdown, true)
+  }
+
+  /** The no-steal rule, including evidence a body focus is deliberate. */
+  function canRestoreFocus(id: string): boolean {
+    // A press or focus elsewhere wins even if the grip happens to still hold
+    // focus (a touch scroll, for example): the user chose another target.
+    if (focusWatchId === id && focusLeft) return false
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active.dataset.dragHandle === id) return true
+    return focusStaysOnDragHandle(id)
+  }
+
+  async function reveal(id: string, token: number, watch?: number): Promise<void> {
+    // The user may already have moved on while the write was in flight.
+    if (!canRestoreFocus(id)) {
+      if (watch !== undefined) endFocusWatch(watch)
+      return
+    }
     await nextTick()
+    if (token !== interactionToken || !canRestoreFocus(id)) {
+      if (watch !== undefined) endFocusWatch(watch)
+      return
+    }
     const root = options.root.value
     const target = root?.querySelector<HTMLElement>('.drag-placeholder') ?? options.itemEl(id)
     target?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
     findGrip(id)?.focus()
+    if (watch !== undefined) endFocusWatch(watch)
+  }
+
+  /**
+   * A pointer failure restores the grip only when that grip held focus and the
+   * user has not navigated or chosen another target since. The preview can
+   * remount the focused row and drop focus to the document; without this the
+   * keyboard path back to the row is lost. Menu failures never come here: their
+   * menu owns trigger restoration.
+   */
+  function restorePointerFocusAfterFailure(id: string, token: number, watch: number): void {
+    void nextTick(() => {
+      if (token !== interactionToken || !canRestoreFocus(id)) {
+        endFocusWatch(watch)
+        return
+      }
+      findGrip(id)?.focus()
+      endFocusWatch(watch)
+    })
   }
 
   function allowed(id: string, from: string, to: string): boolean {
@@ -236,7 +352,7 @@ export function useDragSort(options: UseDragSortOptions) {
     // really left the picked-up grip cancels.
     setTimeout(() => {
       const d = drag.value
-      if (!d || d.mode !== 'keyboard' || committing) return
+      if (!d || d.mode !== 'keyboard' || isCommitting()) return
       const active = document.activeElement
       if (active instanceof HTMLElement && active.dataset.dragHandle === d.id) return
       abort(true)
@@ -272,13 +388,16 @@ export function useDragSort(options: UseDragSortOptions) {
     setTimeout(() => window.removeEventListener('click', swallow, true), 0)
   }
 
-  function finish(): void {
+  function finish(restoreFocus = true): void {
     const wasKeyboard = drag.value?.mode === 'keyboard'
     const id = drag.value?.id
     if (wasKeyboard) options.root.value?.removeEventListener('focusout', onFocusout)
     drag.value = null
     origin = null
-    if (wasKeyboard && id) void reveal(id)
+    if (wasKeyboard && id) {
+      if (restoreFocus) void reveal(id, interactionToken, focusWatchId ? focusWatchSeq : undefined)
+      else endFocusWatch()
+    }
   }
 
   /** End without a write. */
@@ -286,9 +405,13 @@ export function useDragSort(options: UseDragSortOptions) {
     const d = drag.value
     const o = origin
     const wasPointer = session !== null
+    const restoreFocus = speak && d?.mode === 'keyboard'
+    // The reveal and any in-flight write from this interaction are now stale.
+    interactionToken += 1
     teardownPointer()
     if (!d || !o) {
-      finish()
+      finish(false)
+      if (wasPointer || d?.mode === 'pointer') endFocusWatch()
       return
     }
     if (wasPointer) swallowNextClick()
@@ -296,19 +419,21 @@ export function useDragSort(options: UseDragSortOptions) {
       const total = options.itemIds(o.scope).length
       announce('cancel', o.id, o.scope, o.index + 1, total)
     }
-    finish()
+    finish(restoreFocus)
+    if (wasPointer || d.mode === 'pointer') endFocusWatch()
     options.onCancel?.()
   }
 
   async function commit(): Promise<void> {
     const d = drag.value
     const o = origin
-    if (!d || !o || committing) return
+    if (!d || !o || isCommitting()) return
     if (d.toScope === '') {
       abort(true)
       return
     }
     const wasPointer = session !== null
+    const pointerWatch = wasPointer && focusWatchId === d.id ? focusWatchSeq : undefined
     const unchanged = d.toScope === o.scope && d.index === o.index
     const total = visibleIds(d.toScope, d.id).length + 1
     teardownPointer()
@@ -316,9 +441,11 @@ export function useDragSort(options: UseDragSortOptions) {
     if (unchanged) {
       announce('drop', d.id, d.toScope, d.index + 1, total)
       finish()
+      if (pointerWatch !== undefined) endFocusWatch(pointerWatch)
       return
     }
-    committing = true
+    const token = interactionToken
+    committingToken = token
     let ok = false
     try {
       ok = await options.onCommit({
@@ -330,10 +457,23 @@ export function useDragSort(options: UseDragSortOptions) {
     } catch {
       ok = false
     }
-    committing = false
-    if (ok) announce('drop', d.id, d.toScope, d.index + 1, total)
-    else announcement.value = moveAnnouncement('fail', '', '', 0, 0)
+    if (committingToken === token) committingToken = null
+    // Cancelled, disposed of, or superseded by a newer interaction while the
+    // write was in flight: it ends nothing and announces nothing.
+    if (token !== interactionToken) return
+    if (ok) {
+      announce('drop', d.id, d.toScope, d.index + 1, total)
+      finish()
+      if (pointerWatch !== undefined) endFocusWatch(pointerWatch)
+      return
+    }
+    announcement.value = moveAnnouncement('fail', '', '', 0, 0)
+    // Keyboard failures restore focus through `finish`/`reveal`, the one
+    // deferred path that owns the focus watch. A pointer failure restores only
+    // the grip that held focus before the preview remounted it; menu failures
+    // never reach either path.
     finish()
+    if (pointerWatch !== undefined) restorePointerFocusAfterFailure(d.id, token, pointerWatch)
   }
 
   // ---- pointer flow ----------------------------------------------------
@@ -467,6 +607,11 @@ export function useDragSort(options: UseDragSortOptions) {
     const index = options.itemIds(p.scopeId).indexOf(p.id)
     origin = { id: p.id, scope: p.scopeId, index }
     drag.value = { id: p.id, fromScope: p.scopeId, toScope: p.scopeId, index, mode: 'pointer' }
+    // A pointer press focuses its grip in the browser. Keep that ownership so a
+    // failed write can put focus back after the preview remounts the row; touch
+    // and presses that never focused the grip start no watch.
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active.dataset.dragHandle === p.id) startFocusWatch(p.id)
     announce('pickup', p.id, p.scopeId, index + 1, options.itemIds(p.scopeId).length)
     positionOverlay()
     updateTarget(e.clientX, e.clientY)
@@ -474,13 +619,17 @@ export function useDragSort(options: UseDragSortOptions) {
   }
 
   function onPointerdown(id: string, scopeId: string, e: PointerEvent): void {
-    if (drag.value || pending || committing) return
+    if (drag.value || pending || isCommitting()) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (!e.isPrimary || !options.canDrag(id, scopeId)) return
     const root = options.root.value
     if (!root) return
     pending = { id, scopeId, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY }
     root.setPointerCapture(e.pointerId)
+    // A pointer gesture is a new interaction: any keyboard reveal still waiting
+    // on its tick belongs to the gesture the user just left.
+    interactionToken += 1
+    endFocusWatch()
     addListeners()
   }
 
@@ -517,7 +666,7 @@ export function useDragSort(options: UseDragSortOptions) {
   }
 
   function onWindowBlur(): void {
-    if (drag.value && !committing) abort(true)
+    if (drag.value && !isCommitting()) abort(true)
   }
 
   function onVisibilityChange(): void {
@@ -525,7 +674,7 @@ export function useDragSort(options: UseDragSortOptions) {
   }
 
   function onDocumentKeydown(e: KeyboardEvent): void {
-    if (e.key !== 'Escape' || !drag.value || committing) return
+    if (e.key !== 'Escape' || !drag.value || isCommitting()) return
     e.preventDefault()
     e.stopPropagation()
     abort(true)
@@ -536,11 +685,14 @@ export function useDragSort(options: UseDragSortOptions) {
   function pickUp(id: string, scopeId: string): void {
     const ids = options.itemIds(scopeId)
     const index = ids.indexOf(id)
+    // A pickup is a new interaction, superseding any deferred restore.
+    interactionToken += 1
     origin = { id, scope: scopeId, index }
     drag.value = { id, fromScope: scopeId, toScope: scopeId, index, mode: 'keyboard' }
     options.root.value?.addEventListener('focusout', onFocusout)
+    startFocusWatch(id)
     announce('pickup', id, scopeId, index + 1, ids.length)
-    void reveal(id)
+    void reveal(id, interactionToken)
   }
 
   function neighbourScope(from: string, step: -1 | 1): string | null {
@@ -577,7 +729,7 @@ export function useDragSort(options: UseDragSortOptions) {
     }
     drag.value = { ...d, toScope, index }
     announce('move', d.id, toScope, index + 1, visibleIds(toScope, d.id).length + 1)
-    void reveal(d.id)
+    void reveal(d.id, interactionToken)
     return true
   }
 
@@ -586,13 +738,13 @@ export function useDragSort(options: UseDragSortOptions) {
     const d = drag.value
     const pickKey = e.key === ' ' || e.key === 'Enter'
     if (!d) {
-      if (pending || committing || !pickKey || !options.canDrag(id, scopeId)) return
+      if (pending || isCommitting() || !pickKey || !options.canDrag(id, scopeId)) return
       e.preventDefault()
       e.stopPropagation()
       pickUp(id, scopeId)
       return
     }
-    if (d.mode !== 'keyboard' || d.id !== id || committing) return
+    if (d.mode !== 'keyboard' || d.id !== id || isCommitting()) return
     if (pickKey) {
       e.preventDefault()
       e.stopPropagation()
@@ -641,12 +793,19 @@ export function useDragSort(options: UseDragSortOptions) {
   }
 
   function cancel(_reason?: string): void {
-    if (drag.value) abort(false)
-    else if (pending) teardownPointer()
+    if (drag.value) {
+      abort(false)
+      return
+    }
+    // Navigation or an unmount can land between a drop's write and its reveal,
+    // or while the write itself is still pending.
+    interactionToken += 1
+    if (pending) teardownPointer()
+    endFocusWatch()
   }
 
   async function move(id: string, scopeId: string, direction: MoveDirection): Promise<boolean> {
-    if (drag.value || committing || !options.canDrag(id, scopeId)) return false
+    if (drag.value || isCommitting() || !options.canDrag(id, scopeId)) return false
     const ids = options.itemIds(scopeId)
     const pos = ids.indexOf(id)
     if (pos < 0) return false
@@ -667,14 +826,16 @@ export function useDragSort(options: UseDragSortOptions) {
     if (toScope === scopeId && (index < 0 || index >= ids.length)) return false
     if (!allowed(id, scopeId, toScope)) return false
     const total = visibleIds(toScope, id).length + 1
-    committing = true
+    const token = interactionToken
+    committingToken = token
     let ok = false
     try {
       ok = await options.onCommit({ id, fromScope: scopeId, toScope, index })
     } catch {
       ok = false
     }
-    committing = false
+    if (committingToken === token) committingToken = null
+    if (token !== interactionToken) return ok
     if (ok) announce('drop', id, toScope, index + 1, total)
     else announcement.value = moveAnnouncement('fail', '', '', 0, 0)
     return ok
