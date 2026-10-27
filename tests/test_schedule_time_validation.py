@@ -130,7 +130,6 @@ def plane(tmp_path: Path):
                 events=None,
             ),
             schedule_manager=store,
-            background_runner=None,
         ),
         store=store,
     )

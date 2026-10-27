@@ -1125,7 +1125,6 @@ async def _run_server_locked(
             app_settings=app_settings,
             startup_tracker=tracker,
             connection_tracker=connection_tracker,
-            background_runner=background_runner,
         )
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service

@@ -791,76 +791,6 @@ async def _op_chat_stop(service: CiaoMcpService, chat_id: str) -> dict[str, Any]
     )
 
 
-async def _op_background_run_start(service: CiaoMcpService, cmd: list[str], cwd: str = "",
-                                   env: dict[str, str] | None = None,
-                                   timeout_s: int = 1800, label: str = "") -> dict[str, Any]:
-    """Run one command in a tracked background subprocess and get woken
-    when it exits.
-
-    Sits between a plain `nohup` (survives the turn, but you lose track
-    of it) and a full agent loop. Use it
-    when the work is a single script that takes minutes: a fetch, a
-    build, a data enrichment pass. There is no model in the loop and no
-    tool access — it runs the command, nothing else.
-
-    This call does NOT block: it returns as soon as the process starts.
-    End your turn after starting one. Do not poll; Ciaobot sends you a
-    fresh turn with the status, exit code, log tail, and log path when
-    it finishes. background_run_status is for the rare case where you
-    need the state mid-turn.
-
-    Args:
-        cmd: Argv list, e.g. ["./scripts/report.sh", "--full"]. A
-            single string is rejected: there is no shell, so nothing
-            would split it. For shell features, run
-            ["bash", "-lc", "..."] explicitly and own that choice.
-        cwd: Directory for the run, relative to THIS chat's workspace
-            root — the same directory your own shell commands run in,
-            so a path that works in Bash works here unchanged.
-            Defaults to that root. Paths outside it are rejected.
-        env: Extra environment variables. Loader hooks (LD_PRELOAD and
-            friends) and Ciaobot's own session token are rejected.
-        timeout_s: Wall-clock ceiling; the process tree is terminated
-            past it and the run reports as failed. Default 1800.
-        label: Short name for the wake report, e.g. "adoption report".
-    """
-    return await service._invoke(
-        "background_run_start",
-        lambda cp, p: cp.background_run_start(
-            p, cmd=cmd, cwd=cwd, env=env, timeout_s=timeout_s, label=label
-        ),
-        mutating=True,
-    )
-
-
-async def _op_background_run_status(service: CiaoMcpService, run_id: str, lines: int = 50) -> dict[str, Any]:
-    """Status, exit code, and log tail for a background run this chat
-    started.
-
-    Prefer waiting for the wake turn. Only reach for this when you need
-    the state inside the current turn — a run started by another chat
-    reports as not found.
-    """
-    return await service._invoke(
-        "background_run_status",
-        lambda cp, p: cp.background_run_status(p, run_id, lines),
-    )
-
-
-async def _op_background_run_cancel(service: CiaoMcpService, run_id: str) -> dict[str, Any]:
-    """Stop a background run: SIGTERM to its process group, then
-    SIGKILL after a short grace period.
-
-    Idempotent — cancelling an already-finished run returns its final
-    state unchanged.
-    """
-    return await service._invoke(
-        "background_run_cancel",
-        lambda cp, p: cp.background_run_cancel(p, run_id),
-        mutating=True,
-    )
-
-
 async def _op_schedules_list(service: CiaoMcpService) -> dict[str, Any]:
     """List schedules in the active workspace with their next run."""
     return await service._invoke("schedules_list", lambda cp, p: cp.schedules_list(p))
@@ -1550,9 +1480,6 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("chat_archive", _WRITE, _op_chat_archive.__doc__ or "", _op_chat_archive),
     Operation("chat_delete", _DESTRUCTIVE, _op_chat_delete.__doc__ or "", _op_chat_delete),
     Operation("chat_stop", _DESTRUCTIVE, _op_chat_stop.__doc__ or "", _op_chat_stop),
-    Operation("background_run_start", _DESTRUCTIVE, _op_background_run_start.__doc__ or "", _op_background_run_start),
-    Operation("background_run_status", _READ, _op_background_run_status.__doc__ or "", _op_background_run_status),
-    Operation("background_run_cancel", _DESTRUCTIVE, _op_background_run_cancel.__doc__ or "", _op_background_run_cancel),
     Operation("schedules_list", _READ, _op_schedules_list.__doc__ or "", _op_schedules_list),
     Operation("schedule", _WRITE, _op_schedule.__doc__ or "", _op_schedule),
     Operation("schedule_action", _DESTRUCTIVE, _op_schedule_action.__doc__ or "", _op_schedule_action),

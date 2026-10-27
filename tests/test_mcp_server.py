@@ -265,12 +265,8 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "chat_archive",
             "chat_delete",
             "chat_stop",
-            # Migrated to `ciao run …` / `ciao schedule …` in S4 (background
-            # runs and schedules): still control-plane operations, just no
-            # longer MCP tools.
-            "background_run_start",
-            "background_run_status",
-            "background_run_cancel",
+            # Migrated to `ciao schedule …` in S4 (schedules): still
+            # control-plane operations, just no longer MCP tools.
             "schedules_list",
             "schedule",
             "schedule_action",
