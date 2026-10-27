@@ -7935,6 +7935,15 @@ details[open] > .activity-summary::before {
   .message { padding: 8px 10px; }
 }
 
+/* Phones (the pane header bell's breakpoint): the title needs the room. Back and
+   the menu already leave the chat, and Chat details' Repository section carries
+   the code mode switch, so neither control is lost. Hidden, not removed, so
+   desktop keeps them. */
+@media (max-width: 767px) {
+  .close-btn,
+  .chat-code-badge { display: none; }
+}
+
 @media (max-width: 768px) {
   /* Keep the title header compact while preserving safe tap targets. */
   :deep(.pane-header) {

@@ -56,7 +56,8 @@ test.describe('narrow viewport', () => {
 
   test('the Repository section fits the Chat details drawer at 390px', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
-    await page.locator('.chat-code-badge').click()
+    // The header's code badge is hidden on phones; Chat details opens from the ⓘ button.
+    await page.getByRole('button', { name: 'Show chat details' }).click()
     const rail = page.locator('#chat-work-rail')
     await expect(rail).toBeVisible()
     const sideways = await rail.evaluate((el) => el.scrollWidth - el.clientWidth)
