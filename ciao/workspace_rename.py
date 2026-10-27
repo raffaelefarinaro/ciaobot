@@ -29,7 +29,6 @@ from ciao.workspaces import WORKSPACE_NAME_RE
 logger = logging.getLogger(__name__)
 
 
-
 class WorkspaceRenameBusy(ValueError):
     """A rename refused because the workspace is in use.
 
