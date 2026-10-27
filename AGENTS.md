@@ -87,6 +87,17 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   string literals.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running; it just will not fail the build for you.
+- Run one full backend suite and one frontend run at a time, here and in any
+  gate script. Two concurrent suites starve the machine and time out the 20 s
+  component tests (`SettingsFsScope`), which reads as a red gate. A single
+  failure is re-run (`--lf`) before it is called red. Timing tests assert
+  relative behaviour with a small absolute allowance, not a fixed millisecond
+  budget a loaded machine can miss.
+- Assert a guard where it acts, not only in the finished output. When a change
+  bounds, redacts, filters or fences untrusted text, the test should observe the
+  value at that seam (what is handed to the fence, filter or builder), and an
+  ordering-sensitive filter needs more inputs than its limit so that reversing
+  "filter then limit" fails the test.
 - Some docs are checked by tests, so new code often needs a doc edit:
   - a new route in `app.py` goes in `PWA_API.md`. A new POST/PATCH/DELETE
     `/api/*` route also needs an entry under `## Agent recipes` there, or a
