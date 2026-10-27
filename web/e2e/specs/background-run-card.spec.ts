@@ -37,4 +37,26 @@ test.describe('background run card', () => {
     await expect(hint).toBeHidden()
     await expect(card.locator('pre.injected-card-tail')).not.toContainText('\u001b')
   })
+
+  test('draws a native shell completion as the same card between the replies', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.evaluate(() => fetch('/__fixture__/transcript', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ shape: 'native-background' }),
+    }))
+    await page.reload()
+
+    const card = page.locator('.injected-card--background_run')
+    await expect(card).toHaveCount(1)
+    await expect(card.locator('.injected-pill--failed').first()).toBeVisible()
+    await expect(page.getByText('Subagent failed')).toHaveCount(0)
+    await card.screenshot({ path: test.info().outputPath('native-background-card.png') })
+
+    await card.locator('.injected-card-toggle').click()
+    await expect(card.locator('.injected-card-raw-toggle')).toHaveCount(0)
+    await expect(card.locator('.file-link')).toHaveCount(0)
+    await expect(card).not.toContainText('No output.')
+    await page.screenshot({ path: test.info().outputPath('native-background-open.png') })
+  })
 })

@@ -168,6 +168,27 @@ const BACKGROUND_RUN_TRANSCRIPT = [
 ]
 
 /**
+ * A provider-native background shell that finished (Claude Bash): the engine
+ * serves it as a system row with origin `background_run`, no log and no tail,
+ * between the reply that started it and the model's wake reply.
+ */
+const NATIVE_BACKGROUND_TRANSCRIPT = [
+  { role: 'user', content: 'Run the probe in the background.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  { role: 'assistant', content: 'Started it.', sent_at: '2026-01-01T09:50:10Z', turn_index: 0 },
+  {
+    role: 'system',
+    origin: 'background_run',
+    content: [
+      '[Ciaobot] 1 background run finished.',
+      '',
+      '\u2014 Run probe A in background (be0mbj0cr, FAILED, exit 3)',
+      'log: None',
+    ].join('\n'),
+  },
+  { role: 'assistant', content: 'Probe A finished with exit code 3.', sent_at: '2026-01-01T09:51:00Z', turn_index: 0 },
+]
+
+/**
  * A settled reply followed by the user's comment-reference turn: the sent
  * `<user-comment-reference>` card (see lib/commentContext.ts) sits immediately
  * under the reply it annotates. It exists so a browser spec can select the
@@ -884,7 +905,9 @@ const server = http.createServer(async (req, res) => {
               ? TURN_FACTS_TRANSCRIPT
               : body?.shape === 'background-run'
                 ? BACKGROUND_RUN_TRANSCRIPT
-                : TRANSCRIPT
+                : body?.shape === 'native-background'
+                  ? NATIVE_BACKGROUND_TRANSCRIPT
+                  : TRANSCRIPT
       return sendJson(res, { ok: true, turns: state.transcript.length })
     }
     if (pathname === '/__fixture__/projects') {
