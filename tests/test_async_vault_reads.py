@@ -779,8 +779,12 @@ def test_reports_p50_p95_latency_before_and_after(
 
     # Inline, every heartbeat is parked behind a full read.
     assert before_p50 >= read_seconds / 2, before_p50
-    # Off-loop, the heartbeat keeps its own schedule.
-    assert after_p50 < read_seconds / 2, after_p50
+    # Off-loop, the heartbeat keeps its own schedule instead of parking behind
+    # the read. Compare with the inline run, with a small absolute allowance:
+    # a loaded runner can starve the loop for tens of milliseconds without the
+    # read blocking it (40.8 ms p50 while the suite ran, 2.1 ms alone), so a
+    # fixed 15 ms bound failed only on load.
+    assert after_p50 < max(before_p50 / 4, 0.05), (before_p50, after_p50)
     assert after_p50 < before_p50
     assert after_p95 < before_p95
 

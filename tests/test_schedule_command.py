@@ -150,7 +150,10 @@ async def test_timeout_kills_the_command(tmp_path: Path, monkeypatch: pytest.Mon
 async def test_timeout_keeps_output_written_before_the_kill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(schedule_command_module, "SCHEDULE_COMMAND_TIMEOUT_S", 1.0)
+    # Long enough for a loaded CI box to schedule the child and flush both
+    # streams before the deadline: at 1.0 s this test timed out before either
+    # write arrived, then passed on a rerun.
+    monkeypatch.setattr(schedule_command_module, "SCHEDULE_COMMAND_TIMEOUT_S", 3.0)
     run = await run_schedule_command(
         _py(
             "import sys, time; print('partial-out', flush=True); "
