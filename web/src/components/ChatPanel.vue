@@ -6483,6 +6483,7 @@ details[open] > .activity-summary::before {
 }
 .message-content :deep(user-comment) {
   display: block;
+  white-space: pre-wrap;
   color: var(--fg);
   font-style: normal;
   font-weight: normal;
