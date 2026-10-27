@@ -21,15 +21,16 @@ access.
 
 ## Local evidence
 
-- Run `ciao context logs` first (`--lines N`, default 200, max 1000). It works
-  under workspace-only file access.
-- It returns `version`; `error_log` and `debug_log`; `failed_jobs`; and
-  `service_log` (empty on Linux, where the user runs `journalctl -u ciaobot`
-  themselves).
-- With whole-machine access the files can also be read directly.
+- Run `ciao context logs` first (`--lines N`, default 200, max 1000; retained
+  for compatibility). It works under workspace-only file access.
+- It returns `version`; `failed_jobs` (only runs whose recorded workspace is
+  this one, redacted, capped and fenced as untrusted data); `scope`/`omitted`;
+  and the three log fields, which stay empty. Engine-wide error, debug and
+  service logs are omitted because they carry no immutable workspace
+  provenance. With whole-machine access the files can also be read directly.
 
 State clearly when evidence is missing or empty. Do not claim the problem is
-fixed from a log tail alone.
+fixed from the scoped evidence alone.
 
 ## Check whether an update already fixes it
 

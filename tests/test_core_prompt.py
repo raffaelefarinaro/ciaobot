@@ -67,13 +67,16 @@ def test_system_prompt_delegates_issue_labeling_to_skills() -> None:
 
 
 def test_system_prompt_keeps_diagnostic_entrypoint_compact() -> None:
-    """Installed agents should know which local logs to inspect for support."""
+    """Installed agents learn the workspace-scoped entry point, not log paths."""
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
     assert "When diagnosing Ciaobot itself" in append
-    assert ".runtime/server_errors.log" in append
-    assert ".runtime/job_runs.jsonl" in append
+    assert "engine-wide error, debug and service logs are omitted" in append
+    assert "`scope`/`omitted`" in append
+    # The engine-wide runtime files are not advertised as readable evidence.
+    assert ".runtime/server_errors.log" not in append
+    assert ".runtime/job_runs.jsonl" not in append
     assert ".runtime/ciao.stderr.log" not in append
     assert "Public GitHub issues" in append
     assert "ciao context logs" in append
