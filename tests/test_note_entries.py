@@ -21,6 +21,7 @@ Three things are pinned throughout:
 from __future__ import annotations
 
 import datetime
+import time
 
 import pytest
 
@@ -217,6 +218,194 @@ def test_skip_frontmatter_fences_headings_blockquotes_and_tables() -> None:
         # heading's own text does not extend.
         run = heading.lstrip()
         assert doc.entries[0].section_level == len(run) - len(run.lstrip("#")), heading
+
+
+def test_heading_spans_are_what_the_walk_read_not_markdown_lookalikes() -> None:
+    """The document names its own section boundaries for display surfaces.
+
+    A caller showing the prose around an entry must not restate the heading
+    rules: an ATX line, a setext underline with the paragraph it lifts, and
+    nothing inside frontmatter or a fence. The span is sliced from ``original``
+    so a test fails on a boundary that moved, not only on a count.
+    """
+    text = (
+        "---\n"
+        "type: person\n"
+        "updated: 2026-01-01\n"
+        "---\n"
+        "\n"
+        "# Top\n"
+        "\n"
+        "- a fact\n"
+        "\n"
+        "```markdown\n"
+        "## not a heading in code\n"
+        "```\n"
+        "\n"
+        "Sub\n"
+        "===\n"
+        "\n"
+        "- another fact\n"
+    )
+    doc = _parse(text)
+    assert [doc.original[start:end] for start, end in doc.headings] == [
+        "# Top",
+        "Sub\n===",
+    ]
+
+    # A `---` with no paragraph above it is a rule, and a heading-free note has
+    # no boundaries at all.
+    ruled = _parse("## A\n\n- one\n\n---\n\n## B\n- two\n")
+    assert [ruled.original[start:end] for start, end in ruled.headings] == [
+        "## A",
+        "## B",
+    ]
+    assert _parse("- only a fact\n").headings == ()
+
+
+def test_prose_spans_are_plain_paragraph_lines_only() -> None:
+    """A surface may quote prose, never structure, and the parser says which.
+
+    ``uncovered`` is exact but undifferentiated; ``prose`` is the subset a
+    heading-free context slot can show. A rule, a table, a quote, a fence, the
+    frontmatter, a list item and a heading's own setext base are all absent, and
+    a two-line paragraph is two spans because it is two physical lines.
+    """
+    text = (
+        "---\n"
+        "type: person\n"
+        "---\n"
+        "\n"
+        "# Top\n"
+        "\n"
+        "First prose line.\n"
+        "Second prose line.\n"
+        "\n"
+        "---\n"
+        "\n"
+        "| Field | Value |\n"
+        "| --- | --- |\n"
+        "| Phone | 912 |\n"
+        "\n"
+        "> A quoted line.\n"
+        "\n"
+        "```text\n"
+        "code line\n"
+        "```\n"
+        "\n"
+        "Sub\n"
+        "===\n"
+        "\n"
+        "- a fact\n"
+    )
+    doc = _parse(text)
+    assert [doc.original[start:end] for start, end in doc.prose] == [
+        "First prose line.",
+        "Second prose line.",
+    ]
+    # The setext base line is the heading's text, not context prose.
+    assert not any("Sub" in doc.original[start:end] for start, end in doc.prose)
+    # And no structure leaked in.
+    for span in doc.prose:
+        line = doc.original[span[0] : span[1]]
+        assert line not in {"---", "```text", "```", "> A quoted line.", "| Phone | 912 |"}
+
+
+def test_a_table_without_leading_pipes_is_one_table_block() -> None:
+    """The delimiter row turns its header and body into a table, not prose.
+
+    GFM tables need not start each row with `|`; the delimiter is what makes the
+    block. A line-level classifier read ``Field | Value`` and ``Phone | 912`` as
+    paragraphs, which put them in the prose a surface may quote beside a fact.
+    The walk that knows the delimiter must own the whole block, and end it at a
+    blank line or the next paragraph.
+    """
+    text = (
+        "Field | Value\n"
+        "--- | ---\n"
+        "Phone number | Home\n"
+        "\n"
+        "This paragraph is not part of the table.\n"
+        "\n"
+        "- a fact\n"
+    )
+    doc = _parse(text)
+    assert _texts(doc) == ["- a fact"]
+    assert [doc.original[start:end] for start, end in doc.prose] == [
+        "This paragraph is not part of the table.",
+    ]
+    # The whole block is still uncovered — a table nobody read as facts is a
+    # coverage gap — but none of it is prose.
+    uncovered = "".join(doc.original[start:end] for start, end in doc.uncovered)
+    for row in ("Field | Value", "--- | ---", "Phone number | Home"):
+        assert row in uncovered
+        assert row not in doc.prose
+
+    # Without a delimiter there is no table: the line is a plain paragraph.
+    plain = _parse("Field | Value\n")
+    assert [plain.original[start:end] for start, end in plain.prose] == [
+        "Field | Value",
+    ]
+
+
+def test_table_display_exclusion_never_moves_a_section_or_identity() -> None:
+    """A broader display table must not change what the entry walk made of it.
+
+    ``Field | Value`` / ``--- | ---`` / ``Phone | Home`` / ``===`` is a valid
+    setext heading under the module's existing rule: the delimiter row is a
+    table, then ``Phone | Home`` is a paragraph line and the ``===`` lifts it
+    into the section. Widening the table *in the walk* made that section empty
+    and minted a different identity, silently orphaning every decision keyed by
+    the old one. The display pass may exclude all three rows from grey prose;
+    the section and these fixed digests must not move.
+    """
+    setext = "Field | Value\n--- | ---\nPhone | Home\n===\n- fact\n"
+    doc = _parse(setext, note_path="People/Alice.md", workspace="work")
+    entry = doc.entries[0]
+    assert entry.section == "Phone | Home"
+    assert entry.section_level == 1
+    assert entry.identity == (
+        "33782626f280be73d7e899ddd754216c0e795e8c4b58e5fa1d5ebb68e68c25d6"
+    )
+    assert entry.fingerprint == (
+        "0a8092a15e7b800d9be128d3745818b5a993b7bfb4b91ad76cbbca5ba906dd30"
+    )
+    assert doc.prose == ()
+
+    # Direct table-to-list, with no heading: the baseline section is empty and
+    # the fact keeps its own identity. The whole table block is still not prose.
+    direct = "Field | Value\n--- | ---\nPhone | Home\n- fact\n"
+    doc = _parse(direct, note_path="People/Alice.md", workspace="work")
+    entry = doc.entries[0]
+    assert entry.section == ""
+    assert entry.section_level == 0
+    assert entry.identity == (
+        "5ce2f5e411be4d650f0298b40cee96558337d8989f45442f77417ae07b0be4b3"
+    )
+    assert entry.fingerprint == (
+        "0a8092a15e7b800d9be128d3745818b5a993b7bfb4b91ad76cbbca5ba906dd30"
+    )
+    assert doc.prose == ()
+
+
+def test_prose_classification_removes_setext_bases_in_the_single_walk() -> None:
+    """Removing heading bases must not rescan every heading for every prose line.
+
+    An earlier implementation filtered each prose span against every heading
+    span after the walk. This note has 12,000 setext headings, which is 144
+    million comparisons for that shape and a linear pass for this one. The bound
+    is deliberately loose — orders of magnitude above what the walk needs — so
+    it catches the quadratic shape rather than a busy host.
+    """
+    sections = 12_000
+    text = "".join(f"Section {index}\n===\n\n" for index in range(sections))
+    started = time.monotonic()
+    document = ne.parse_note_entries(text)
+    elapsed = time.monotonic() - started
+
+    assert len(document.headings) == sections
+    assert document.prose == ()
+    assert elapsed < 5.0
 
 
 def test_frontmatter_needs_to_look_like_frontmatter() -> None:

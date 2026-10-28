@@ -1,5 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { boot, isolate, releasePointerInSameTask } from '../support/app'
 
 /**
  * Placing cards on the board: the grip's pointer drag within and across lanes,
@@ -161,6 +161,36 @@ test.describe('placing cards with the mouse', () => {
     await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Send the invites'])
   })
 
+  test('a fast release above a card lands before it even when its lane has not rendered', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-fast-seam')
+    const source = page.locator('.task-card', { hasText: 'Plan the offsite' })
+    const draft = page.locator('.task-card', { hasText: 'Draft the agenda' })
+    await source.hover()
+    const grip = (await source.locator('.drag-grip').boundingBox())!
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2)
+    await page.mouse.down()
+    // Activate inside To do and stay there: In progress has drawn no placeholder.
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 12, { steps: 3 })
+    await expect(page.locator('.drag-overlay')).toHaveCount(1)
+    await expect(lane(page, 'In progress').locator('.drag-placeholder')).toHaveCount(0)
+
+    // Destination move and release share one task. The release is clearly above
+    // Draft's midpoint, so it must land before Draft with no preview to read.
+    const target = (await draft.boundingBox())!
+    await releasePointerInSameTask(page.locator('.task-lanes'), {
+      x: target.x + target.width / 2,
+      y: target.y + 8,
+    })
+    await page.mouse.up()
+
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0]!.body).toMatchObject({
+      status: 'in_progress',
+      placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
+    })
+    expect(await titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
+  })
+
   test('Escape cancels a drag without a request', async ({ page }) => {
     const sent = await open(page, 'task-reorder-escape')
     const card = page.locator('.task-card', { hasText: 'Plan the offsite' })
@@ -225,8 +255,10 @@ test.describe('placing cards with the mouse', () => {
     await page.mouse.move(60, target.y)
     await expect(page.locator('.drag-overlay')).toHaveCount(1)
     expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('')
-    // Captured by now, so the rest of the drag tracks and lands normally.
-    await page.mouse.move(target.x, target.y, { steps: 8 })
+    // Captured by now, so the rest of the drag tracks and lands normally. The
+    // release is clearly above Draft's midpoint: exactly on it is a tie that
+    // subpixel pointer rounding can decide either way.
+    await page.mouse.move(target.x, target.y - 10, { steps: 8 })
     await page.mouse.up()
 
     await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
