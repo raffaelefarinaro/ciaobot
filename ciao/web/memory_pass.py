@@ -854,12 +854,7 @@ class MemoryPassCoordinator:
         if chat.last_response_status == "success" and chat.last_response.strip():
             self._set_state(chat, "done")
             self._set_source_step(source_chat_id, "ok", chat_id)
-            outcome = await host.archive_chat(chat_id)
-            if outcome is not None:
-                project = host._projects.get(chat.project_id)
-                # The recursion guard is `is_memory_pass_chat`: this pass is
-                # never enqueued for another pass.
-                host.run_archive_postprocess(chat_id, outcome, chat, project)
+            await self._archive_finished(chat)
             self.pump(workspace)
             return True
 
@@ -868,14 +863,17 @@ class MemoryPassCoordinator:
         self.pump(workspace)
         return False
 
-    def resume(self) -> None:
+    async def resume(self) -> None:
         """Reconcile the queue with a freshly started process.
 
         A pass recorded as ``running`` was streaming when the previous process
-        died, so nothing is driving it: it needs the owner, not a retry. The
-        queue is otherwise untouched and pumped again.
+        died, so nothing is driving it: it needs the owner, not a retry. A pass
+        recorded as ``done`` but not archived was interrupted between settling
+        and archiving, so resume finishes the archive. The queue is otherwise
+        untouched and pumped again.
         """
         workspaces: set[str] = set()
+        finished: list[ChatInfo] = []
         for chat in list(self._host._chats.values()):
             if chat.archived:
                 continue
@@ -890,10 +888,28 @@ class MemoryPassCoordinator:
                 )
             elif state == "queued":
                 workspaces.add(self._workspace_of(chat))
+            elif state == "done":
+                finished.append(chat)
+        for chat in finished:
+            try:
+                await self._archive_finished(chat)
+            except Exception:
+                logger.exception(
+                    "Archiving finished memory pass %s failed on resume", chat.chat_id
+                )
         for workspace in sorted(workspaces):
             self.pump(workspace)
 
     # ── internals ───────────────────────────────────────────────────────
+
+    async def _archive_finished(self, chat: ChatInfo) -> None:
+        host = self._host
+        outcome = await host.archive_chat(chat.chat_id)
+        if outcome is not None:
+            project = host._projects.get(chat.project_id)
+            # The recursion guard is `is_memory_pass_chat`: this pass is
+            # never enqueued for another pass.
+            host.run_archive_postprocess(chat.chat_id, outcome, chat, project)
 
     @staticmethod
     def _helper(chat: ChatInfo) -> dict:
