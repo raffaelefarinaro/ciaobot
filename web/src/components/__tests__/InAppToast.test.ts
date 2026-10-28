@@ -45,7 +45,7 @@ describe('error toast Fix action', () => {
     const { wrapper, store } = mountToast()
     const fixError = vi.spyOn(store, 'fixError')
     store.pushErrorToast('Google Workspace login needs attention', 're-auth', {
-      fixRoute: '/settings/workspaces',
+      fixRoute: '/settings/workspace',
       fixLabel: 'Fix in Settings',
     })
     await wrapper.vm.$nextTick()
@@ -54,7 +54,7 @@ describe('error toast Fix action', () => {
     expect(fixBtn.text()).toBe('Fix in Settings')
     await fixBtn.trigger('click')
 
-    expect(routerPush).toHaveBeenCalledWith('/settings/workspaces')
+    expect(routerPush).toHaveBeenCalledWith('/settings/workspace')
     expect(fixError).not.toHaveBeenCalled()
     expect(store.toasts).toHaveLength(0)
   })

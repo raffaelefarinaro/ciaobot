@@ -96,7 +96,7 @@ not collapse them.
 
 ## Step 4 — file access and network (Workspace only)
 
-Regression check for #1234. In Settings → Manage workspaces, confirm this chat's
+Regression check for #1234. In Settings → Overview → All workspaces, confirm this chat's
 workspace row summary shows *Workspace only*. Start a Claude chat in
 that workspace and ask the agent, in one message, to run:
 

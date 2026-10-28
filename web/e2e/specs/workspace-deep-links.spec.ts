@@ -4,7 +4,7 @@ import { COMPOSER, boot, horizontalOverflow, isolate } from '../support/app'
 
 const CHAT = '/chat/alpha-chat-1'
 const SETTINGS = '.settings-main'
-const TARGET = '/settings/workspaces?workspace=beta#file-access'
+const TARGET = '/settings/workspace?workspace=beta#file-access'
 const DRAFT = 'add the design workspace before I forget'
 
 /**
@@ -21,7 +21,7 @@ async function transcriptWithFileAccessLink(page: import('@playwright/test').Pag
     { role: 'user', content: 'How do I tighten beta file access?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
     {
       role: 'assistant',
-      content: 'Open [File access for beta](/settings/workspaces?workspace=beta#file-access) and choose a scope.',
+      content: 'Open [File access for beta](/settings/workspace?workspace=beta#file-access) and choose a scope.',
       sent_at: '2026-01-01T09:50:20Z',
       duration_ms: 20000,
       effective_model: 'synthetic-model',

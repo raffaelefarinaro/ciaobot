@@ -11,8 +11,6 @@ export function settingsTabTitle(tab: string | undefined): string {
   switch (tab) {
     case 'providers':
       return 'providers'
-    case 'workspaces':
-      return 'workspaces'
     case 'skills':
       return 'agent assets'
     case 'home':

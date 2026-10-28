@@ -462,7 +462,7 @@
             <p class="section-title">Ciaobot folder</p>
             <p class="hint">
               The folder Ciaobot runs from: routines, skills, scripts, runtime state and the <code>.env</code> file.
-              Chat workspaces (the sidebar switcher) are managed from the workspace switcher: Manage workspaces.
+              Chat workspaces (the sidebar switcher) are managed in Settings, Overview, under All workspaces.
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
@@ -863,12 +863,10 @@
         <div v-if="routinesError" class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
       </template>
 
-      <!-- WORKSPACE OVERVIEW TAB (the active workspace; /settings/workspace) -->
-      <template v-if="currentTab === 'workspace'"><SettingsWorkspaceOverview /></template>
-
-      <!-- WORKSPACES TAB (the list of all of them; /settings/workspaces) -->
-      <template v-if="currentTab === 'workspaces'">
-        <SettingsManageWorkspaces />
+      <!-- WORKSPACE OVERVIEW TAB (the active workspace's cards, then every workspace; /settings/workspace) -->
+      <template v-if="currentTab === 'workspace'">
+        <SettingsWorkspaceOverview />
+        <SettingsAllWorkspaces />
       </template>
 
 
@@ -1317,7 +1315,7 @@
 
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
-import SettingsManageWorkspaces from './settings/SettingsManageWorkspaces.vue'
+import SettingsAllWorkspaces from './settings/SettingsAllWorkspaces.vue'
 import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch, provide } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -2460,7 +2458,7 @@ async function createAssetViaChat(kind: keyof typeof ASSET_CHAT_PROMPTS) {
 }
 
 
-// ── Workspaces settings (Overview and Manage workspaces) ───────────────────────────────────
+// ── Workspace settings (Overview and All workspaces) ───────────────────────────────────
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
 // leaving persistent inline text under the form.
@@ -2492,7 +2490,7 @@ const {
   fetchWorkspacesList,
   fetchArchivedWorkspaces,
 } = workspaceAdmin
-// The sidebar's "New workspace" links to /settings/workspaces#new-workspace:
+// The sidebar's "New workspace" links to /settings/workspace#new-workspace:
 // open the form and bring it into view instead of landing on the list.
 watch(
   () => [route.hash, currentTab.value, workspacesLoaded.value] as const,
@@ -2500,7 +2498,7 @@ watch(
     if (hash !== '#new-workspace') return
     showNewWorkspace.value = true
     // The form renders once the list has loaded, so wait for that to focus it.
-    if (tab !== 'workspaces' || !loaded) return
+    if (tab !== 'workspace' || !loaded) return
     void nextTick(() => {
       document.querySelector('.workspace-card--new')?.scrollIntoView?.({ block: 'start' })
       document.querySelector<HTMLInputElement>('.workspace-card--new input')?.focus()
@@ -2561,8 +2559,8 @@ async function applyWorkspaceFileAccessLink(fullPath: string): Promise<void> {
   workspaceLinkStatus.value = ''
   workspaceLinkTarget.value = null
   const name = parseWorkspaceFileAccessHref(fullPath)
-  if (!name || currentTab.value !== 'workspaces') return
-  await loadSettingsTab('workspaces')
+  if (!name || currentTab.value !== 'workspace') return
+  await loadSettingsTab('workspace')
   if (request !== workspaceLinkRequest) return
   await nextTick()
   if (request !== workspaceLinkRequest) return
@@ -2588,10 +2586,13 @@ async function applyWorkspaceFileAccessLink(fullPath: string): Promise<void> {
 
 // The Overview page is the active workspace's editor. A File access link lands
 // here with #file-access: scroll to and focus the selector once the list is in.
+// While the link still carries ?workspace=NAME, applyWorkspaceFileAccessLink
+// owns it: it switches to NAME and then drops the query, which re-runs this
+// watcher on the right workspace (scrolling now would hit the previous one).
 watch(
-  () => [route.hash, currentTab.value, workspacesLoaded.value] as const,
-  async ([hash, tab, loaded]) => {
-    if (tab !== 'workspace' || !loaded) return
+  () => [route.hash, currentTab.value, workspacesLoaded.value, route.query.workspace] as const,
+  async ([hash, tab, loaded, linked]) => {
+    if (tab !== 'workspace' || !loaded || linked) return
     await nextTick()
     if (hash === '#file-access') scrollToWorkspaceFileAccess(projectStore.activeWorkspace)
     else if (hash === '#workspace-name') document.getElementById('workspace-name-input')?.focus()
@@ -2686,9 +2687,6 @@ function loadSettingsTab(tab: string): Promise<void> {
     case 'workspace':
       // Not scoped: the list covers every workspace. Handover and Update tasks
       // reload themselves when the active workspace changes.
-      reads = [fetchGwsIntegration(), ensureWorkspaceList()]
-      break
-    case 'workspaces':
       reads = [fetchGwsIntegration(), ensureWorkspaceList(), fetchArchivedWorkspaces()]
       break
     case 'skills':
@@ -2729,14 +2727,15 @@ onMounted(() => {
 watch(currentTab, tab => { void loadSettingsTab(tab) })
 
 watch(() => projectStore.workspaceRegistryRevision, () => {
-  tabLoads.delete('workspaces')
   tabLoads.delete('workspace')
   workspaceListLoad = null
-  if (currentTab.value === 'workspaces') void loadSettingsTab('workspaces')
-  else if (currentTab.value === 'workspace') void loadSettingsTab('workspace')
+  if (currentTab.value === 'workspace') void loadSettingsTab('workspace')
 })
 
 watch(() => projectStore.activeWorkspace, () => {
+  // "Settings ↑" and Create and open land at the top. Only a File access deep
+  // link keeps its own scroll target; every other switch returns to the top.
+  if (currentTab.value === 'workspace' && route.hash !== '#file-access') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
   // Asset refs hold one workspace's data, so invalidate cached scope keys:
   // returning to an earlier root must never show a different root's rows.
   for (const key of tabLoads.keys()) {

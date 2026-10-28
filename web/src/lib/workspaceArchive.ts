@@ -1,7 +1,7 @@
 import type { ArchivedWorkspace } from './types'
 
 /**
- * Wording for archiving a workspace (Manage workspaces or Overview → Archive).
+ * Wording for archiving a workspace (All workspaces or Overview → Archive).
  *
  * Archiving replaced a delete that merged the workspace's notes into the
  * primary one, so the confirmation has to say plainly what happens and what
@@ -13,7 +13,7 @@ export function archiveConfirmMessage(name: string): string {
     + 'Its chats are archived and its automations are set aside. '
     + 'A restore brings back its files, settings and automations (paused until you re-enable them), but not its chat list. '
     + 'Files are kept in .archived-workspaces/ in your Ciaobot folder, '
-    + 'and you can restore it under Manage workspaces (workspace switcher).'
+    + 'and you can restore it under All workspaces (Settings, Overview).'
   )
 }
 

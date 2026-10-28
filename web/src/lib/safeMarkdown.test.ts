@@ -33,16 +33,16 @@ describe('safe markdown rendering', () => {
   it('keeps supported page and anchor links in the app instead of opening a new tab', () => {
     const html = renderMarkdown(
       '[Tasks](/tasks) [Automations](/schedules) [Memory](/memory/map) ' +
-      '[Settings](/settings) [Workspaces](/settings/workspaces) ' +
-      '[New workspace](/settings/workspaces#new-workspace) [Home](/)',
+      '[Settings](/settings) [Workspaces](/settings/workspace) ' +
+      '[New workspace](/settings/workspace#new-workspace) [Home](/)',
     )
 
     expect(html).toContain('<a href="/tasks">Tasks</a>')
     expect(html).toContain('<a href="/schedules">Automations</a>')
     expect(html).toContain('<a href="/memory/map">Memory</a>')
     expect(html).toContain('<a href="/settings">Settings</a>')
-    expect(html).toContain('<a href="/settings/workspaces">Workspaces</a>')
-    expect(html).toContain('<a href="/settings/workspaces#new-workspace">New workspace</a>')
+    expect(html).toContain('<a href="/settings/workspace">Workspaces</a>')
+    expect(html).toContain('<a href="/settings/workspace#new-workspace">New workspace</a>')
     expect(html).toContain('<a href="/">Home</a>')
     expect(html).not.toContain('target="_blank"')
   })

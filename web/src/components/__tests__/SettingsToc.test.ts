@@ -110,6 +110,7 @@ it('lists Overview cards on the rail', async () => {
       'Memory handover',
       'Update task history',
       'Archive this workspace',
+      'All workspaces',
     ])
   } finally {
     wrapper.unmount()

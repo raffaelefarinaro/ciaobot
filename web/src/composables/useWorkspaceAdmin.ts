@@ -1,4 +1,4 @@
-import { computed, onScopeDispose, ref, watch, type ComputedRef, type InjectionKey, type Ref } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch, type ComputedRef, type InjectionKey, type Ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiErrorMessage, errorMessage } from '../lib/errorMessage'
 import { askConfirm } from '../lib/confirm'
@@ -140,7 +140,7 @@ export function useWorkspaceAdmin(deps: {
   // key, PATCH path), and changing it mid-edit would re-key the card and lose focus.
   const workspaceNameDraft = ref('')
 
-  // A File access link (`/settings/workspaces?workspace=NAME#file-access`)
+  // A File access link (`/settings/workspace?workspace=NAME#file-access`)
   // switches the active workspace to NAME and focuses its File access control;
   // it never selects a value and never saves. This is the status shown when it
   // cannot: an unknown workspace, or unsaved changes the user chose to keep.
@@ -169,7 +169,7 @@ export function useWorkspaceAdmin(deps: {
   }
 
   // `provider · file access · Google email`, the one-line summary on the
-  // Manage workspaces rows. File access is the effective one (own choice, else
+  // All workspaces rows. File access is the effective one (own choice, else
   // the engine's default) and is dropped until the default has loaded.
   function workspaceSummary(form: WorkspaceForm): string {
     const provider = workspaceProviderOptions.value.find((option) => option.value === form.default_provider)?.label
@@ -320,7 +320,7 @@ export function useWorkspaceAdmin(deps: {
         name: form.name.trim(),
         vault_root: form.name.trim(),
         default_provider: form.default_provider,
-        // Google is linked afterwards, in the new workspace's Overview.
+        // Google is linked afterwards, in the new workspace's cards.
         gws_profile: '',
         disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
         color: form.color,
@@ -355,6 +355,11 @@ export function useWorkspaceAdmin(deps: {
     await projectStore.switchWorkspace(name, { transition: false })
     if (projectStore.activeWorkspace !== name) return false
     await router.push({ path: '/settings/workspace', hash })
+    // A repeat Rename (hash already #workspace-name) makes the push a no-op.
+    if (hash === '#workspace-name') {
+      await nextTick()
+      document.getElementById('workspace-name-input')?.focus()
+    }
     return true
   }
 
