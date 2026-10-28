@@ -1997,10 +1997,10 @@ class OpencodeProvider(BaseSDKProvider):
                 elif (
                     isinstance(metadata, Mapping)
                     and metadata.get("status") == "running"
-                    and shell_id in self._shell_commands
+                    and shell_id in self._foreground_shells
                 ):
-                    # OpenCode moved the call to the background; an exited
-                    # shell has lost its command entry and stays out.
+                    # OpenCode moved the call to the background; `shell.exited`
+                    # already dropped an exited shell from the foreground set.
                     self._foreground_shells.discard(shell_id)
                     self._background_shells.add(shell_id)
                     changed = True

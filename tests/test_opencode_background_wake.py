@@ -240,6 +240,62 @@ def test_foreground_shell_moved_to_background_counts(tmp_path):
     assert provider.background_work_outstanding is False
 
 
+def _track_all(provider: OpencodeProvider, *lines: str) -> None:
+    for line in lines:
+        provider._track_background_event(json.loads(line), "ses_fgshell_parent")
+
+
+def _slow_created() -> str:
+    return _event(
+        "shell.created",
+        info={
+            "id": "sh_slow", "command": "sleep 99",
+            "metadata": {"sessionID": "ses_fgshell_parent"},
+        },
+    )
+
+
+def _slow_progress() -> str:
+    return _event(
+        "session.tool.progress", sessionID="ses_fgshell_parent", id="call_slow",
+        metadata={"shellID": "sh_slow"},
+    )
+
+
+def _slow_backgrounded() -> str:
+    return _event(
+        "session.tool.success", sessionID="ses_fgshell_parent", id="call_slow",
+        metadata={"status": "running", "shellID": "sh_slow"},
+    )
+
+
+def test_moved_to_background_survives_mid_call_reconcile(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    _track_all(provider, _slow_created(), _slow_progress())
+    provider._replace_background_shells(set())
+    _track_all(provider, _slow_backgrounded())
+    assert provider._background_shells == {"sh_slow"}
+    assert provider._foreground_shells == set()
+    assert provider.background_work_outstanding is True
+
+
+def test_moved_to_background_without_shell_created(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    _track_all(provider, _slow_progress(), _slow_backgrounded())
+    assert provider._background_shells == {"sh_slow"}
+
+
+def test_exited_shell_not_promoted_by_late_success(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    _track_all(
+        provider,
+        _slow_progress(),
+        _event("shell.exited", id="sh_slow", exit=0, status="exited"),
+        _slow_backgrounded(),
+    )
+    assert provider._background_shells == set()
+
+
 @pytest.mark.asyncio
 async def test_refresh_excludes_running_foreground_shell(tmp_path, monkeypatch):
     provider = OpencodeProvider(tmp_path)
