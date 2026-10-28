@@ -156,8 +156,9 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.get('.pr-row-meta').text()).toContain('decide: you')
-    expect(wrapper.get('.pr-row-reason').text()).toBe('Why: Judgement about identity.')
+    expect(wrapper.get('.pr-decider').text()).toBe('Needs your call')
+    expect(wrapper.get('.pr-row-why-label').text()).toBe('Why it needs you')
+    expect(wrapper.get('.pr-row-why').text()).toBe('Why it needs you Judgement about identity.')
     wrapper.unmount()
   })
 
@@ -249,8 +250,8 @@ describe('ProposalReviewPanel', () => {
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.get('.pr-row-reason').text()).toBe('Why: <b>x</b>')
-    expect(wrapper.find('.pr-row-reason b').exists()).toBe(false)
+    expect(wrapper.get('.pr-row-why').text()).toBe('Why it needs you <b>x</b>')
+    expect(wrapper.find('.pr-row-why b').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -369,7 +370,7 @@ describe('ProposalReviewPanel', () => {
     expect(candidates).toEqual(['work', 'client'])
     // And the non-committal options stay available.
     const chips = rowEl.findAll('.pr-actions button:not(.pr-row-action)').map(o => o.text())
-    expect(chips).toEqual(['Dismiss', 'Discuss'])
+    expect(chips).toEqual(['Discuss', 'Dismiss'])
     wrapper.unmount()
   })
 
@@ -499,7 +500,7 @@ describe('ProposalReviewPanel', () => {
     // exists, so "Improve" is the task and "New"/"Create" would be a different one.
     expect(skillRow.find('.pr-row-action').text()).toBe('Improve skill')
     expect(skillRow.findAll('.pr-actions button:not(.pr-row-action)').map(b => b.text()))
-      .toEqual(['Dismiss', 'Discuss'])
+      .toEqual(['Discuss', 'Dismiss'])
     expect(skillRow.find('.pr-op').text()).toBe('Improve skill')
     wrapper.unmount()
   })
@@ -1046,7 +1047,7 @@ describe('talk about it', () => {
     await flushPromises()
 
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss'])
+    expect(labels).toEqual(['Review', 'Edit first', 'Discuss', 'Dismiss'])
 
     const store = useProposalsStore()
     const act = vi.spyOn(store, 'act')
@@ -1087,7 +1088,7 @@ describe('talk about it', () => {
       title: 'Discuss: Remember the thing',
     }))
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first'])
+    expect(labels).toEqual(['Review', 'Edit first', 'Dismiss'])
     const band = wrapper.find('.pr-discussion')
     expect(band.exists()).toBe(true)
     expect(band.classes()).toContain('pr-discussion--idle')
@@ -1113,7 +1114,7 @@ describe('talk about it', () => {
     projects.chats = chats
     await flushPromises()
     expect(reloaded.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Review', 'Dismiss', 'Edit first'])
+      .toEqual(['Review', 'Edit first', 'Dismiss'])
     expect(reloaded.find('.pr-discussion').exists()).toBe(true)
     await testArchiveDropsLink(reloaded)
   })
@@ -1124,7 +1125,7 @@ describe('talk about it', () => {
     projects.chats.find((c) => c.chat_id === 'chat-d')!.archived = true
     await flushPromises()
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss'])
+      .toEqual(['Review', 'Edit first', 'Discuss', 'Dismiss'])
     expect(wrapper.find('.pr-discussion').exists()).toBe(false)
     wrapper.unmount()
   }
@@ -2517,7 +2518,7 @@ describe('reconcile before writing', () => {
     await nextTick()
     expect(wrapper.find('.pr-actions--deferred').exists()).toBe(false)
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Add entry', 'Dismiss', 'Edit first', 'Discuss'])
+      .toEqual(['Add entry', 'Edit first', 'Discuss', 'Dismiss'])
     wrapper.unmount()
   })
 
@@ -2613,16 +2614,16 @@ describe('the change on the row', () => {
     expect(p.get('.pr-op').text()).toBe('New note')
     expect(p.get('.pr-dest').text()).toBe('People/Mo.md')
     expect(p.get('.pr-where').text()).toBe('· does not exist yet')
-    expect(p.get('.pr-diff .mr-box-head').text()).toBe('New file, 6 lines')
+    expect(p.get('.pr-diff .pr-diff-head').text()).toBe('· New file, 6 lines')
     expect(p.findAll('.pr-diff .mr-box-line--added')).toHaveLength(6)
     expect(p.get('.pr-row-accept').text()).toBe('Create note')
 
     const d = rowFor(wrapper, 'Order OCR moves out.')
     expect(d.get('.pr-op').text()).toBe('Add to a note')
     expect(d.get('.pr-where').text()).toBe('· under ## Decisions')
-    expect(d.get('.pr-diff .mr-box-head').text()).toBe('1 line added after line 3')
+    expect(d.get('.pr-diff .pr-diff-head').text()).toBe('· 1 line added after line 3')
     expect(d.findAll('.pr-diff .mr-box-line').map(l => l.get('.mr-box-num').text())).toEqual(['3', '4'])
-    expect(d.get('.pr-row-accept').text()).toBe('Add line')
+    expect(d.get('.pr-row-accept').text()).toBe('Add to Learnings.md')
 
     const f = rowFor(wrapper, 'Ships on Fridays.')
     expect(f.get('.pr-op').text()).toBe('Merge into a note')
@@ -2679,7 +2680,7 @@ describe('the change on the row', () => {
     // Closing the card leaves the row showing the same refreshed change.
     await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Cancel')!.trigger('click')
     await flushPromises()
-    expect(wrapper.get('.pr-diff .mr-box-head').text()).toBe('1 line added after line 4')
+    expect(wrapper.get('.pr-diff .pr-diff-head').text()).toBe('· 1 line added after line 4')
     wrapper.unmount()
   })
 
@@ -2720,5 +2721,91 @@ describe('the change on the row', () => {
     await flushPromises()
     expect(wrapper.get('.pr-op').text()).toBe('New note')
     wrapper.unmount()
+  })
+
+  describe('the proposal row layout', () => {
+    const agentsBefore = '# Old\n\ntext'
+    const agentsPreview = preview({
+      id: 'x', kind: 'memory', action: 'append_learnings', operation: 'add',
+      destination: '/Users/me/repos/stazionesmart/AGENTS.md',
+      before: agentsBefore, after: `${agentsBefore}\n\n## Agent learnings\n\n- fact`,
+      separator: '\n', revision: 'rev-x', text: 'fact',
+    })
+    const agentsRow = row({ id: 'x', kind: 'repo', target: '/Users/me/repos/stazionesmart', text: 'fact', decider: 'nightly', decide_reason: 'Not sure where it goes.' })
+
+    async function mountAgents() {
+      apiGet.mockImplementation((url: string) => {
+        if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+        if (/^\/api\/proposals\/x\/preview/.test(url)) return Promise.resolve({ ok: true, preview: agentsPreview })
+        return Promise.resolve({ rows: [agentsRow] })
+      })
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+      await flushPromises()
+      return wrapper
+    }
+
+    it('qualifier skips blank added lines and names a new section', async () => {
+      const wrapper = await mountAgents()
+      const where = wrapper.get('.pr-diff .pr-where')
+      expect(where.text()).toBe('· new section Agent learnings')
+      expect(where.text()).not.toContain('Old')
+      expect(wrapper.get('.pr-diff .pr-dest').text()).toBe('stazionesmart/AGENTS.md')
+      expect(wrapper.get('.pr-diff .pr-box-title').attributes('title')).toContain('/Users/me/repos/stazionesmart/AGENTS.md')
+      wrapper.unmount()
+    })
+
+    it('the fact is not repeated in the diff', async () => {
+      const wrapper = await mountAgents()
+      const same = wrapper.get('.pr-diff .pr-same')
+      expect(same.text()).toBe('the fact above')
+      const visible = wrapper.findAll('.pr-diff .mr-box-text').map((t) => {
+        const clone = t.element.cloneNode(true) as HTMLElement
+        clone.querySelectorAll('.mr-sr-only').forEach((n) => n.remove())
+        return clone.textContent ?? ''
+      }).join(' ')
+      expect(visible).not.toContain('fact\n')
+      expect(visible.replace('the fact above', '')).not.toMatch(/\bfact\b/)
+      expect(wrapper.get('.pr-diff .mr-sr-only').text()).not.toBe('')
+      wrapper.unmount()
+    })
+
+    it('decider badge and why label', async () => {
+      const wrapper = await mountAgents()
+      expect(wrapper.get('.pr-decider').text()).toBe('Nightly review will decide')
+      expect(wrapper.get('.pr-row-why-label').text()).toBe('Why it was left for nightly review')
+      wrapper.unmount()
+    })
+
+    it('accept is the primary and comes first', async () => {
+      const wrapper = await mountAgents()
+      const buttons = wrapper.findAll('.pr-actions button')
+      expect(buttons.map((b) => b.text())).toEqual(['Add to AGENTS.md', 'Edit first', 'Discuss', 'Dismiss'])
+      expect(buttons[0].classes()).toContain('mr-btn--primary')
+      expect(buttons[1].classes()).not.toContain('mr-btn--primary')
+      wrapper.unmount()
+    })
+
+    it('keeps the server reason in the footer of a rehome row', async () => {
+      const rehome = rehomeRow({
+        id: 'rh',
+        source: 'chat-1',
+        rehome: { note: 'personal/People/Mo.md', destination: 'work', candidates: ['work'], justified: true, reason: 'tagged work' },
+      })
+      apiGet.mockImplementation((url: string) => {
+        if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+        if (/^\/api\/proposals\/rh\/preview/.test(url)) {
+          return Promise.resolve({ ok: true, preview: preview({
+            id: 'rh', action: 'move_file', operation: 'move', destination: 'work', exact: false, revision: '',
+            reason: 'Mo is tagged for two workspaces.',
+          }) })
+        }
+        return Promise.resolve({ rows: [rehome] })
+      })
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+      await flushPromises()
+      expect(wrapper.get('.pr-row-foot .pr-row-reason').text()).toBe('Mo is tagged for two workspaces.')
+      expect(wrapper.get('.pr-row-foot').text()).not.toContain('chat-1')
+      wrapper.unmount()
+    })
   })
 })

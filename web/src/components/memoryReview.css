@@ -106,6 +106,24 @@
 .mr-btn:hover:not(:disabled) { border-color: var(--fg3); }
 .mr-btn:disabled { opacity: 0.55; cursor: default; }
 
+.mr-btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.mr-btn--primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+
+.mr-btn--primary:disabled {
+  background: var(--bg3);
+  border-color: var(--border);
+  color: var(--fg3);
+  opacity: 1;
+}
+
 .mr-btn--quiet {
   background: none;
   color: var(--fg2);

@@ -13,6 +13,7 @@
  *   add        a people note, or a file whose `before`   new      New note
  *              is empty (not a bounded region)
  *   add        otherwise                                 add      Add to a note
+ *              (verb: "Add entry" for a region, "Add to <file>" otherwise)
  *   update     exact (a learning's recurrence bump)      update   Update a line
  *   update     not exact (a model folds it in on accept) merge    Merge into a note
  *   move       —                                         move     Move a note
@@ -145,10 +146,11 @@ export function changeFor(
     if (creates) {
       return { type: 'new', label: 'New note', verb: 'Create note', destination, qualifier: 'does not exist yet' }
     }
+    const leaf = destination.split(/[\\/]/).pop() || destination
     return {
       type: 'add',
       label: 'Add to a note',
-      verb: region ? 'Add entry' : 'Add line',
+      verb: region ? 'Add entry' : `Add to ${leaf}`,
       destination,
       qualifier: region ? regionQualifier(preview) : '',
     }
@@ -262,4 +264,12 @@ export function changeFor(
     }
   }
   return { type: 'blocked', label: 'Cannot save yet', verb: '', destination, qualifier: '' }
+}
+
+/** A short form of a destination for a header: an absolute path (POSIX, `~`
+ * or a Windows drive) keeps its last two segments, `/a/b/repos/x/AGENTS.md` ->
+ * `x/AGENTS.md`; anything else is returned unchanged. */
+export function displayDestination(dest: string): string {
+  if (!/^(\/|~|[A-Za-z]:[\\/])/.test(dest)) return dest
+  return dest.split(/[\\/]/).filter(Boolean).slice(-2).join('/')
 }

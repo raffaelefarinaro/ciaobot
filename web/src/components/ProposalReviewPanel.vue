@@ -9,7 +9,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import type { ProposalAcceptRefusal, ProposalPreview, ProposalRow } from '../lib/types'
 import { diffWithContext, headingAbove, lineChanges, type DiffLine, type LineChange } from '../lib/textDiff'
 import { canReconcile, descriptorFor, kindLabel, rehomeMode } from '../lib/proposalKinds'
-import { CHANGE_FILTERS, changeFor, isRegionPreview, type ProposalChange, type ProposalChangeType } from '../lib/proposalChange'
+import { CHANGE_FILTERS, changeFor, displayDestination, isRegionPreview, type ProposalChange, type ProposalChangeType } from '../lib/proposalChange'
 import type { ProposalMergeFallback } from '../lib/proposalKinds'
 import ProposalHistoryList from './ProposalHistoryList.vue'
 import DecisionReason from './DecisionReason.vue'
@@ -747,7 +747,11 @@ function computeQualifier(row: ProposalRow): string {
   const change = rowChange(row)
   const preview = store.previews[row.id]
   if (preview && (change.type === 'add' || change.type === 'update') && !isRegionPreview(preview)) {
-    const first = diffWithContext(preview.before, preview.after, '\n', 0).find(l => l.op === 'added')
+    // The first added line with text: a blank separator ahead of a new heading
+    // would otherwise name the heading above the insertion.
+    const first = diffWithContext(preview.before, preview.after, '\n', 0)
+      .find(l => l.op === 'added' && l.text.trim())
+    if (first && /^\s{0,3}#{1,6}\s/.test(first.text)) return `new section ${first.text.replace(/^\s*#+\s*/, '')}`
     const heading = first ? headingAbove(preview.after, first.line) : ''
     if (heading) return `under ${heading}`
   }
@@ -1014,6 +1018,21 @@ function inlineCodeParts(text: string): Array<{ text: string; code: boolean }> {
  * Every kind's answer lives in its descriptor, including the re-home row's
  * `from → to · why` form and the skill row's path.
  */
+function deciderLabel(row: ProposalRow): string {
+  return row.decider === 'nightly' ? 'Nightly review will decide' : 'Needs your call'
+}
+
+function whyLabel(row: ProposalRow): string {
+  if (row.decider === 'nightly') return 'Why it was left for nightly review'
+  if (row.decider === 'you') return 'Why it needs you'
+  return 'Why'
+}
+
+/** An added line that is the row's own fact: the title already says it. */
+function isTitleLine(row: ProposalRow, text: string): boolean {
+  return text.replace(/^\s*[-*]\s+/, '').trim() === rowTitle(row).trim()
+}
+
 function rowSubtitle(row: ProposalRow): string {
   return descriptorFor(row).destination(row)
 }
@@ -1820,24 +1839,25 @@ watch(
           </label>
 
           <div class="pr-row-body">
-            <p class="pr-row-meta">
-              <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
-              <template v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</template>
-              <template v-if="row.decider"> · decide: {{ row.decider }}</template>
-              <template v-if="entryNote(row)"> · in <span class="pr-meta-note" :title="row.target">{{ entryNote(row) }}</span></template>
-            </p>
-            <p v-if="row.decide_reason" class="pr-row-reason">Why: {{ row.decide_reason }}</p>
+            <div class="pr-row-meta">
+              <span class="pr-row-meta-main">
+                <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
+                <template v-if="entryNote(row)"> · in <span class="pr-meta-note" :title="row.target">{{ entryNote(row) }}</span></template>
+              </span>
+              <span v-if="row.decider" class="pr-decider" :class="`pr-decider--${row.decider}`">{{ deciderLabel(row) }}</span>
+            </div>
             <div class="pr-row-top">
               <!-- Backtick spans render as inline code rather than raw backticks;
                    built from segments, never v-html, since the text is model-written. -->
               <span class="pr-row-title"><template v-for="(part, pi) in inlineCodeParts(rowTitle(row))" :key="pi"><code v-if="part.code" class="pr-inline-code">{{ part.text }}</code><template v-else>{{ part.text }}</template></template></span>
             </div>
+            <p v-if="row.decide_reason" class="pr-row-why"><span class="pr-row-why-label">{{ whyLabel(row) }}</span> {{ row.decide_reason }}</p>
 
             <!-- The change, on the row: a tag naming what an accept does, the
                  file it does it to, and the lines. Hidden while the decision
                  card is open, which shows the same thing with its own actions. -->
             <template v-if="!isPreviewOpen(row)">
-              <p v-if="rowChange(row).label" class="pr-change" :title="rowSubtitle(row)">
+              <p v-if="rowChange(row).label && !rowDiff(row)" class="pr-change" :title="rowSubtitle(row)">
                 <span class="pr-op" :class="`pr-op--${rowChange(row).type}`">
                   <svg class="pr-op-icon" viewBox="0 0 24 24" aria-hidden="true"><path v-for="(d, di) in changeIcon(rowChange(row).type)" :key="di" :d="d" /></svg>
                   {{ rowChange(row).label }}
@@ -1849,7 +1869,7 @@ watch(
                   :title="row.path"
                   @click="view(row)"
                 >{{ pathLeaf(row.path) }}</button>
-                <span v-else-if="rowChange(row).destination" class="pr-dest">{{ rowChange(row).destination }}</span>
+                <span v-else-if="rowChange(row).destination" class="pr-dest">{{ displayDestination(rowChange(row).destination) }}</span>
                 <span v-if="changeQualifier(row)" class="pr-where">· {{ changeQualifier(row) }}</span>
                 <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
               </p>
@@ -1869,7 +1889,7 @@ watch(
               <!-- No preview yet (or none to be had): what keeping it does, in
                    words, until the server says exactly. -->
               <p
-                v-else-if="consequenceShown(row) || store.isPreviewLoading(row.id) || store.previewErrors[row.id] || (row.leak_warning && !rowChange(row).label)"
+                v-else-if="!rowDiff(row) && (consequenceShown(row) || store.isPreviewLoading(row.id) || store.previewErrors[row.id] || (row.leak_warning && !rowChange(row).label))"
                 class="pr-row-sub"
                 :title="rowSubtitle(row)"
               >
@@ -1888,7 +1908,18 @@ watch(
               </p>
 
               <div v-if="rowDiff(row)" class="mr-box pr-diff">
-                <div class="mr-box-head"><span>{{ rowDiff(row)!.head }}</span></div>
+                <div class="mr-box-head">
+                  <span class="pr-box-title" :title="rowSubtitle(row)">
+                    <span v-if="rowChange(row).label" class="pr-op" :class="`pr-op--${rowChange(row).type}`">
+                      <svg class="pr-op-icon" viewBox="0 0 24 24" aria-hidden="true"><path v-for="(d, di) in changeIcon(rowChange(row).type)" :key="di" :d="d" /></svg>
+                      {{ rowChange(row).label }}
+                    </span>
+                    <span v-if="rowChange(row).destination" class="pr-dest">{{ displayDestination(rowChange(row).destination) }}</span>
+                    <span v-if="changeQualifier(row)" class="pr-where">· {{ changeQualifier(row) }}</span>
+                    <span class="pr-diff-head">· {{ rowDiff(row)!.head }}</span>
+                    <span v-if="row.leak_warning" class="pr-badge --warn">visible in every workspace</span>
+                  </span>
+                </div>
                 <ol class="mr-box-lines">
                   <li
                     v-for="(line, li) in rowDiff(row)!.lines"
@@ -1898,14 +1929,16 @@ watch(
                   >
                     <span v-if="rowDiff(row)!.numbered" class="mr-box-num">{{ line.line }}</span>
                     <span class="mr-box-sign" aria-hidden="true">{{ line.op === 'added' ? '+' : line.op === 'removed' ? '−' : ' ' }}</span>
-                    <span class="mr-box-text">{{ line.text }}</span>
+                    <span v-if="line.op === 'added' && isTitleLine(row, line.text)" class="mr-box-text">
+                      <span aria-hidden="true">{{ line.text.match(/^\s*[-*]\s+/)?.[0] ?? '' }}</span><span class="pr-same" aria-hidden="true">the fact above</span><span class="mr-sr-only">{{ line.text }}</span>
+                    </span>
+                    <span v-else class="mr-box-text">{{ line.text }}</span>
                     <span v-if="line.op !== 'context'" class="mr-sr-only">{{ line.op }}</span>
                   </li>
                 </ol>
                 <p v-if="rowDiff(row)!.more" class="mr-box-foot">{{ rowDiff(row)!.more }} more {{ rowDiff(row)!.more === 1 ? 'line' : 'lines' }}. <button type="button" class="mr-link" data-pr-action="show-all" @click="reviewAccept(row, 'show-all')">Show all</button></p>
                 <p v-if="rowDiff(row)!.note" class="mr-box-foot">{{ rowDiff(row)!.note }}</p>
               </div>
-              <p v-if="rowReason(row)" class="pr-row-reason">{{ rowReason(row) }}</p>
             </template>
 
             <!-- A discussion chat for this row: its state in words with the
@@ -2130,7 +2163,8 @@ watch(
 
           <!-- Any rehome row that is not a plain justified accept: pick the
                destination, never pre-filled, from every registered workspace. -->
-          <div v-else-if="isRehome(row) && rehomeMode(row) !== 'accept'" class="mr-actions pr-actions">
+          <template v-else-if="isRehome(row) && rehomeMode(row) !== 'accept'">
+          <div class="mr-actions pr-actions">
             <span class="pr-confirm-text">Move to…</span>
             <button
               v-for="c in moveTargets(row)"
@@ -2140,9 +2174,11 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="doAccept(row, c)"
             >{{ store.isBusy(row.id) ? 'working…' : c }}</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-btn pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
-            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
+          <p v-if="rowReason(row)" class="pr-row-foot"><span class="pr-row-reason">{{ rowReason(row) }}</span></p>
+          </template>
 
           <!-- A skill proposal is a change to a skill that already exists: read
                it, improve it, or drop it. The improvement is a chat, and the
@@ -2151,7 +2187,8 @@ watch(
                browser knows about. Ahead of the linked branch below: that one
                replaces a row's actions with its chat, and this row's actions ARE
                the answer to the question that chat is working on. -->
-          <div v-else-if="isSkill(row)" class="mr-actions pr-actions">
+          <template v-else-if="isSkill(row)">
+          <div class="mr-actions pr-actions">
             <button
               v-if="hasActiveLink(row)"
               type="button"
@@ -2164,9 +2201,11 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="implementSkill(row)"
             >{{ store.isBusy(row.id) ? 'starting…' : 'Improve skill' }}</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-btn pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
-            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
           </div>
+          <p v-if="rowReason(row)" class="pr-row-foot"><span class="pr-row-reason">{{ rowReason(row) }}</span></p>
+          </template>
 
           <!-- Linked: a refused accept spawned a merge chat that is still active,
                so the row points at it instead of offering the same decision
@@ -2192,7 +2231,7 @@ watch(
             <button
               v-if="canAccept(row) && store.previews[row.id] && rowChange(row).verb"
               type="button"
-              class="mr-btn pr-row-accept"
+              class="mr-btn mr-btn--primary pr-row-accept"
               data-pr-action="accept"
               :disabled="store.isBusy(row.id) || store.isPreviewLoading(row.id)"
               @click="reviewAccept(row, 'accept')"
@@ -2205,16 +2244,20 @@ watch(
               :disabled="store.isBusy(row.id)"
               @click="reviewAccept(row, 'review')"
             >{{ store.isBusy(row.id) ? 'working…' : (isRehome(row) ? `Move to ${rehomeTarget(row)}` : 'Review') }}</button>
-            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
             <button
               v-if="canAccept(row) && !isRehome(row) && isEditable(row)"
               type="button"
-              class="mr-link pr-edit-first"
+              class="mr-btn pr-edit-first"
               data-pr-action="edit"
               @click="editFirst(row)"
             >Edit first</button>
-            <button v-if="!discussionChat(row)" type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <button v-if="!discussionChat(row)" type="button" class="mr-btn pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
           </div>
+          <p v-if="rowReason(row) || (row.source && !isRehome(row) && !isSkill(row))" class="pr-row-foot">
+            <span v-if="rowReason(row)" class="pr-row-reason">{{ rowReason(row) }}</span>
+            <span v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</span>
+          </p>
           </template>
         </li>
         </ul>
@@ -2316,8 +2359,14 @@ watch(
 /* Actions sit on their own line under the fact, left-aligned with it: one
    primary, a neutral secondary, and "talk about it" as a link. */
 .pr-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
+
+.pr-actions .pr-quiet { margin-left: auto; }
 
 .pr-card :deep(.btn-small) {
   min-height: 34px;
@@ -2339,7 +2388,7 @@ watch(
   border-color: var(--border-strong);
 }
 
-.pr-actions .pr-talk,
+.pr-actions .mr-link.pr-talk,
 .pr-card .pr-talk {
   border-color: transparent;
   background: none;
@@ -2347,7 +2396,7 @@ watch(
   font-weight: 500;
 }
 
-.pr-actions .pr-talk:hover:not(:disabled),
+.pr-actions .mr-link.pr-talk:hover:not(:disabled),
 .pr-card .pr-talk:hover:not(:disabled) {
   border-color: transparent;
   text-decoration: underline;
@@ -2828,7 +2877,7 @@ watch(
    the actions on their own line beneath. */
 .pr-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
   gap: var(--space-2) var(--space-5);
   padding: var(--space-4) 0;
@@ -2920,10 +2969,75 @@ watch(
 }
 
 .pr-row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2px var(--space-3);
   margin: 0 0 3px;
   color: var(--fg3);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
+}
+
+.pr-decider {
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.pr-decider--you { color: var(--fg); }
+
+/* Why the memory pass left this for someone: an inset under the fact, so it
+   does not read as a justification of the fact itself. */
+.pr-row-why {
+  max-width: 72ch;
+  margin: var(--space-2) 0 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.pr-row-why-label {
+  display: block;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.pr-box-title {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.pr-diff-head { color: var(--fg3); }
+
+.pr-same {
+  color: var(--fg3);
+  font-style: italic;
+}
+
+.pr-row-foot {
+  margin: 0;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.pr-row-foot .pr-row-reason {
+  display: inline;
+  margin: 0;
+  font-size: inherit;
+}
+
+@media (pointer: coarse) {
+  .pr-actions .mr-btn { min-height: var(--touch); }
 }
 
 /* The fact is prose to read, not a heading: regular weight at a readable
@@ -3149,19 +3263,13 @@ watch(
 /* Without checkboxes: body | actions. The card and a deferral carry prose,
    so they take a full-width row under the body rather than the action
    column (with checkboxes, everything after the checkbox column). */
-.pr-rows--plain > .pr-row { grid-template-columns: minmax(0, 1fr) auto; }
+.pr-rows--plain > .pr-row { grid-template-columns: minmax(0, 1fr); }
 .pr-card,
-.pr-actions--deferred { grid-column: 2 / -1; }
+.pr-actions,
+.pr-row-foot { grid-column: 2; }
 .pr-rows--plain .pr-card,
-.pr-rows--plain .pr-actions--deferred { grid-column: 1 / -1; }
-
-/* On a phone the actions drop under the body. */
-@media (max-width: 640px) {
-  .pr-row { grid-template-columns: auto minmax(0, 1fr); }
-  .pr-rows--plain > .pr-row { grid-template-columns: minmax(0, 1fr); }
-  .pr-actions { grid-column: 2 / -1; }
-  .pr-rows--plain .pr-actions { grid-column: 1 / -1; }
-}
+.pr-rows--plain .pr-actions,
+.pr-rows--plain .pr-row-foot { grid-column: 1; }
 
 /* ── The change on the row ───────────────────────────────────────────────
    A small bordered tag with a drawn icon (shape and words, never colour
