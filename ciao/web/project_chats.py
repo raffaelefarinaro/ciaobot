@@ -7626,7 +7626,12 @@ class ProjectChatManager:
             publish_automations_changed(self)
 
     def try_chat_retry_now(self, chat_id: str) -> ChatStream | None:
-        """Start the saved retry prompt immediately if the chat is idle."""
+        """Start the saved retry prompt immediately if the chat is idle.
+
+        The resend is tagged `retry` so the PWA draws the compact Retry notice
+        instead of the prompt (the automation prompt, an unattended network
+        retry, or a user-armed hourly retry).
+        """
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived or chat.retry_status != "pending":
             return None
@@ -7649,6 +7654,7 @@ class ProjectChatManager:
             images=images or None,
             is_retry=True,
             unattended=network or chat.retry_unattended,
+            origin="retry",
         )
 
     def _resolve_retry_images(self, chat: ChatInfo) -> list[ImageAttachment]:
