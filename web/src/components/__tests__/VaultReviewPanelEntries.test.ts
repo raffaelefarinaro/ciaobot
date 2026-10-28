@@ -49,10 +49,11 @@ function staleEntry(over = {}) {
     identity: IDENTITY, line_number: 8, section: 'Alice',
     // The engine strips markdown from the excerpt, so the panel never sees a
     // leading `-` or `**` — it renders plain prose. The context is the nearest
-    // non-fact line, which for a dense list is the note's heading, not the
-    // sibling bullet (that used to be reprinted here and read as a second fact).
+    // same-section prose line; a heading is a boundary and the entry's own
+    // section is already named above, so neither appears here (and a sibling
+    // bullet used to be reprinted and read as a second fact).
     excerpt: 'Landlord is Mr Silva [verified: 2019-05-01]',
-    context: ['# Alice'],
+    context: ['Verified with the agency.'],
     reason: 'aged', detail: 'unverified for 2698d against a 90d horizon',
     age_days: 2698, last_verified: '2019-05-01', own_date: true, supported: true,
     ...over,
@@ -122,20 +123,28 @@ describe('VaultReviewPanel — the facts inside a note', () => {
     const block = wrapper.get('.vr-entries')
     expect(block.text()).toContain('Facts inside this note')
     expect(block.text()).toContain('3 facts in the note')
-    expect(wrapper.get('.vr-entry-text').text()).toContain('Landlord is Mr Silva')
+    // The fact is prose, not a `<pre><code>` block: a sentence written in a note
+    // is not an output sample, and the engine has already stripped its markers.
+    const fact = wrapper.get('.vr-entry-text')
+    expect(fact.element.tagName).toBe('P')
+    expect(wrapper.find('.vr-entry-text code').exists()).toBe(false)
+    expect(fact.text()).toContain('Landlord is Mr Silva')
     expect(wrapper.get('.vr-entry-section').text()).toContain('Alice')
     // The context is the point of the block: a reader deciding whether a bullet
-    // is current needs the neighbouring line, not just the sentence.
-    expect(wrapper.get('.vr-entry-context').text()).toContain('# Alice')
+    // is current needs the same-section prose around it, not the heading they
+    // already see above or a sibling fact.
+    const context = wrapper.get('.vr-entry-context').text()
+    expect(context).toContain('Verified with the agency.')
+    expect(context).not.toContain('# Alice')
     wrapper.unmount()
   })
 
   it('renders a markdown fact as prose and does not repeat its sibling as context', async () => {
-    // The boxed fact is plain text: the engine strips the markers before the
-    // panel sees them, so a bold, ordered list item reads "Learn. People…"
-    // rather than "1. **Learn.** People…". And the grey context line is a
-    // neighbour that is *not* itself a fact — a sibling bullet reprinted here
-    // read as the same claim made twice.
+    // The fact is plain text: the engine strips the markers before the panel
+    // sees them, so a bold, ordered list item reads "Learn. People…" rather
+    // than "1. **Learn.** People…". And the grey context line is same-section
+    // prose, never the fact's own heading or a sibling bullet reprinted as if
+    // it were the same claim made twice.
     const wrapper = await mountWith([
       candidate({
         evidence: {
@@ -144,7 +153,7 @@ describe('VaultReviewPanel — the facts inside a note', () => {
             stale_entries: [
               staleEntry({
                 excerpt: 'Learn. People leave each session knowing more.',
-                context: ['# Sessions'],
+                context: ['Intro line before the bullet.'],
               }),
             ],
           }),
@@ -156,8 +165,40 @@ describe('VaultReviewPanel — the facts inside a note', () => {
     expect(text).not.toContain('**')
     expect(text).not.toContain('1.')
     const context = wrapper.get('.vr-entry-context').text()
-    expect(context).toContain('# Sessions')
+    expect(context).toContain('Intro line before the bullet.')
+    expect(context).not.toContain('# Sessions')
     expect(context).not.toContain('Learn. People')
+    wrapper.unmount()
+  })
+
+  it('escapes a malicious-looking fact, keeps it literal, and still links its decision', async () => {
+    // A note is user text. Interpolation is the whole guarantee here: the fact
+    // must read back exactly as written and never become an element, while the
+    // decision underneath the fact stays a working link.
+    const malicious = '<img src=x onerror="alert(1)"> & **not bold**'
+    const wrapper = await mountWith([
+      candidate({
+        evidence: {
+          ...candidate().evidence,
+          entry_verification: coverage({
+            stale_entries: [staleEntry({ excerpt: malicious })],
+            proposals: [{
+              identity: IDENTITY, proposal_id: 'p-1', operation: 'retire_entry',
+              outcome: 'retire', checked_at: '2026-09-30', retry_after: '2026-10-30',
+              coverage: 'complete', reason: 'the employer is not this person any more',
+              citations: 2, receipt_id: '', conflicted: false,
+            }],
+          }),
+        },
+      }),
+    ])
+    const fact = wrapper.get('.vr-entry-text')
+    expect(fact.element.tagName).toBe('P')
+    expect(fact.text()).toBe(malicious)
+    expect(fact.element.querySelector('img')).toBeNull()
+    expect(fact.element.innerHTML).not.toContain('<img')
+    expect(fact.element.innerHTML).toContain('&lt;img')
+    expect(wrapper.get('.vr-entry-decision .vr-pending-link').text()).toBe('Open the proposal')
     wrapper.unmount()
   })
 

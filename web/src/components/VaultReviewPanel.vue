@@ -867,7 +867,7 @@ function clearedDate(note: VaultClearedNote): string {
                           unverified for {{ entry.age_days }}d
                         </p>
                         <blockquote v-if="entry.section" class="vr-entry-section">in “{{ entry.section }}”</blockquote>
-                        <pre class="vr-entry-text"><code>{{ entry.excerpt }}</code></pre>
+                        <p class="vr-entry-text">{{ entry.excerpt }}</p>
                         <p v-if="entry.context.length" class="vr-entry-context">
                           <span v-for="(line, li) in entry.context" :key="li" class="vr-entry-context-line">{{ line }}</span>
                         </p>
@@ -1441,11 +1441,11 @@ function clearedDate(note: VaultClearedNote): string {
 .vr-entry-section { font-style: italic; }
 
 .vr-entry-text {
+  /* Prose, not a code sample: the excerpt is a fact somebody wrote, and a
+     bordered mono box made a sentence look like an output block. The engine
+     has already stripped the list marker, emphasis and link targets, so this
+     is interpolated text and never markup. */
   margin: 4px 0 0;
-  padding: var(--space-1) var(--space-2);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 6px);
   font-size: var(--text-sm);
   line-height: 1.5;
   white-space: pre-wrap;
