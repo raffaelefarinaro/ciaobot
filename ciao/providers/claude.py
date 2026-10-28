@@ -131,6 +131,31 @@ _STEER_CANCEL_TIMEOUT_S = 5.0
 # ever costs the first turn its exact figure; the local estimate covers it.
 _CONTEXT_USAGE_TIMEOUT_S = 3.0
 
+# Claude Code fetches the account's claude.ai connector list at startup with a
+# hardcoded 5 s timeout. The interactive TUI retries a failed fetch in the
+# background (+5/+15/+45 s); headless/SDK mode does not, so one slow response
+# leaves the CLI without its claude.ai connectors for its whole life and the
+# model never sees them. A spawn that shows no ``claude.ai `` MCP row within
+# the deadline, on an account that has shown them before, is respawned on the
+# next turn.
+_CLAUDEAI_CATALOG_DEADLINE_S = 30.0
+_CLAUDEAI_CATALOG_POLL_S = 2.0
+_CLAUDEAI_CATALOG_MAX_RETRIES = 2
+_CLAUDEAI_PREFIX = "claude.ai "
+# Set once any spawn in this engine has shown a claude.ai row.
+_claudeai_catalog_seen = False
+CLAUDEAI_CATALOG_RETRY_NOTICE = (
+    "claude.ai connectors didn't load: Claude Code's connector list request "
+    "timed out. Ciaobot will restart the session on your next message to retry."
+)
+CLAUDEAI_CATALOG_GAVE_UP_NOTICE = (
+    "claude.ai connectors still didn't load after 2 retries: Claude Code can't "
+    "reach the connector list. Try again later."
+)
+CLAUDEAI_CATALOG_RESPAWNED_NOTICE = (
+    "Restarted the Claude session to retry loading the claude.ai connectors."
+)
+
 # The SDK sizes its ``initialize`` control-request deadline from this
 # process-wide environment variable and exposes no option for it. A cold CLI
 # start under load measured 13-53 s on a 10-core Mac, so the SDK's 60 s floor
@@ -687,6 +712,13 @@ class ClaudeProvider(BaseSDKProvider):
         self._spawn_key: tuple[object, ...] = ()
         # Fire-and-forget closes of dead clients, held so they are not collected.
         self._closing_tasks: set[asyncio.Future[None]] = set()
+        # claude.ai connector catalog recovery (see _CLAUDEAI_CATALOG_DEADLINE_S).
+        self._claudeai_catalog_missing = False
+        self._claudeai_catalog_retries = 0
+        self._claudeai_watch: asyncio.Task[None] | None = None
+        self._claudeai_expected = False
+        self._claudeai_respawn_notice_pending = False
+        self._turn_status_sink: Callable[[str], None] | None = None
         # Background tasks (native ``run_in_background`` Bash, ``Monitor``,
         # background agents) the live CLI process owns, from the SDK's task
         # messages: task_id -> {"command", "task_type", "started_at"}. They die
@@ -802,6 +834,64 @@ class ClaudeProvider(BaseSDKProvider):
                 result[name] = "needs_auth" if state == "needs-auth" else state
         return result
 
+    async def _watch_claudeai_catalog(self, client: ClaudeSDKClient) -> None:
+        """Wait for claude.ai MCP rows after a spawn; flag the catalog missing if none show."""
+        global _claudeai_catalog_seen
+        started = time.monotonic()
+        try:
+            while time.monotonic() - started < _CLAUDEAI_CATALOG_DEADLINE_S:
+                if self._client is not client:
+                    return
+                try:
+                    states = await self.read_mcp_status()
+                except (asyncio.TimeoutError, ValueError, *_CLAUDE_OP_ERRORS):
+                    states = {}
+                if any(name.startswith(_CLAUDEAI_PREFIX) for name in states):
+                    _claudeai_catalog_seen = True
+                    self._claudeai_catalog_retries = 0
+                    return
+                await asyncio.sleep(_CLAUDEAI_CATALOG_POLL_S)
+            if not _claudeai_catalog_seen:
+                return
+            self._claudeai_catalog_missing = True
+            logger.warning(
+                "claude.ai connector catalog missing %.0fs after spawn (retry %d/%d)",
+                time.monotonic() - started,
+                self._claudeai_catalog_retries,
+                _CLAUDEAI_CATALOG_MAX_RETRIES,
+            )
+            notice = (
+                CLAUDEAI_CATALOG_RETRY_NOTICE
+                if self._claudeai_catalog_retries < _CLAUDEAI_CATALOG_MAX_RETRIES
+                else CLAUDEAI_CATALOG_GAVE_UP_NOTICE
+            )
+            if self._turn_status_sink is not None:
+                self._turn_status_sink(notice)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the watcher must never fail a turn
+            logger.debug("claude.ai catalog watcher failed", exc_info=True)
+
+    def _start_claudeai_watch(self, client: ClaudeSDKClient) -> None:
+        """Start the catalog watcher for a freshly connected client."""
+        if not self._claudeai_expected:
+            return
+        self._cancel_claudeai_watch()
+        self._claudeai_watch = asyncio.ensure_future(self._watch_claudeai_catalog(client))
+
+    def _cancel_claudeai_watch(self) -> None:
+        watch, self._claudeai_watch = self._claudeai_watch, None
+        if watch is not None and not watch.done():
+            watch.cancel()
+        self._claudeai_catalog_missing = False
+
+    def _take_respawn_notice(self) -> SystemStatusEvent | None:
+        """The one-shot status line for a catalog respawn, or None once shown."""
+        if not self._claudeai_respawn_notice_pending:
+            return None
+        self._claudeai_respawn_notice_pending = False
+        return SystemStatusEvent(type="system", status=CLAUDEAI_CATALOG_RESPAWNED_NOTICE)
+
     def _log_client_turn(self, request: AgentRequest, *, reused: bool, reason: str) -> None:
         """One line per turn: whether the live SDK client was reused or replaced, and why."""
         chat = (request.extra_env or {}).get("CIAO_CHAT_ID") or request.resume_session or "-"
@@ -898,6 +988,17 @@ class ClaudeProvider(BaseSDKProvider):
             reconnect_reason = "resume"
             self._warn_tasks_stopped(reconnect_reason)
             await self.disconnect()
+        if (
+            self._client is not None
+            and self._connected
+            and self._claudeai_catalog_missing
+            and self._claudeai_catalog_retries < _CLAUDEAI_CATALOG_MAX_RETRIES
+            and not self.background_work_outstanding
+        ):
+            self._claudeai_catalog_retries += 1
+            self._claudeai_respawn_notice_pending = True
+            reconnect_reason = "claudeai_catalog"
+            await self.disconnect()
 
         if self._client is not None and self._connected:
             if requested_model != self._current_model:
@@ -946,6 +1047,7 @@ class ClaudeProvider(BaseSDKProvider):
         add_dirs: list[str | Path] = []
         file_tool_hooks: list[HookMatcher] = []
         cli_env = dict(request.extra_env or {})
+        self._claudeai_expected = cli_env.get("ENABLE_CLAUDEAI_MCP_SERVERS") != "false"
         if request.agent_fs_scope == "workspace":
             if sys.platform == "win32":
                 raise FsSandboxUnavailable(
@@ -1172,6 +1274,7 @@ class ClaudeProvider(BaseSDKProvider):
         # slot used to be cleared only after the await, so the second caller
         # read the same client out of it.
         client, self._client = self._client, None
+        self._cancel_claudeai_watch()
         if client is not None:
             try:
                 await client.disconnect()
@@ -1203,6 +1306,7 @@ class ClaudeProvider(BaseSDKProvider):
         # both single-owner: whichever takes the client out of the slot owns
         # closing it, and the other finds nothing to close.
         self._client = None
+        self._cancel_claudeai_watch()
         task = asyncio.ensure_future(self._close_dead_client(client))
         self._closing_tasks.add(task)
         task.add_done_callback(self._closing_tasks.discard)
@@ -1472,6 +1576,12 @@ class ClaudeProvider(BaseSDKProvider):
         # turn's merge queue. On finally we restore a noop so a delayed gate
         # callback from a prior turn can't publish into a new turn.
         self._permission_gate.set_emit(lambda ev: merged.put_nowait(ev))
+        self._turn_status_sink = lambda text: merged.put_nowait(
+            SystemStatusEvent(type="system", status=text)
+        )
+        respawn_notice = self._take_respawn_notice()
+        if respawn_notice is not None:
+            merged.put_nowait(respawn_notice)
 
         async def consume_sdk() -> None:
             """Drive connect/query then fan SDK events into ``merged``."""
@@ -1486,6 +1596,7 @@ class ClaudeProvider(BaseSDKProvider):
                     catalog_generation = _catalog_account_generation()
                     await _connect_with_deadline(client)
                     self._connected = True
+                    self._start_claudeai_watch(client)
                     await self._capture_catalog_evidence(client, generation=catalog_generation)
                 await asyncio.wait_for(client.query(payload), timeout=120)
 
@@ -1773,6 +1884,7 @@ class ClaudeProvider(BaseSDKProvider):
         finally:
             # Unbind the gate so a late callback can't land on a stale queue.
             self._permission_gate.set_emit(None)
+            self._turn_status_sink = None
             # Resolve any still-pending approvals as deny — otherwise the
             # SDK's can_use_tool await would hang after the turn ends.
             self._permission_gate.cancel_all("Turn ended before approval")
