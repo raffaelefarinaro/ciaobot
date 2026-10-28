@@ -2629,6 +2629,19 @@ describe('terminal store bounds', () => {
       expect(store.error).toBe('')
     })
 
+    it('reports a stall that began while hidden once the terminal is shown again', async () => {
+      const { store, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      store.hide()
+      await vi.advanceTimersByTimeAsync(6000)
+      expect(store.error).toBe('')
+
+      await store.open({ chatId: 'chat-1' })
+
+      expect(store.error).toContain('stopped drawing')
+      expect(store.phase).toBe('error')
+    })
+
     it('an overflow behind a stalled write names the view', async () => {
       const { store, socket } = await stalled()
       const chunk = new Uint8Array(64 * 1024)

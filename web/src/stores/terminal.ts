@@ -445,6 +445,26 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   /**
+   * Fail the store when the surface on show has had one write in flight for
+   * the stall window, and say whether it did. Also called when a hidden pane
+   * is shown or a surface is attached: a timer that fired while the surface
+   * was off show did nothing.
+   */
+  function reportStalledWrite(surface: Surface): boolean {
+    if (
+      surface.writing &&
+      surface.inflightSince !== null &&
+      Date.now() - surface.inflightSince >= RENDER_STALL_MS &&
+      surface.attached &&
+      visible.value
+    ) {
+      fail(RENDER_STALL_MESSAGE)
+      return true
+    }
+    return false
+  }
+
+  /**
    * One drain loop per surface, not one task per frame.
    *
    * The renderer writes asynchronously, so the bytes it has not taken yet
@@ -469,14 +489,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         surface.inflightSince = Date.now()
         if (surface.pendingReset !== null) applyReset(surface, surface.pendingReset)
         const stallTimer = scheduleTimer(() => {
-          if (
-            surface.writing &&
-            surface.inflightEnd === chunk.nextOffset &&
-            surface.attached &&
-            visible.value
-          ) {
-            fail(RENDER_STALL_MESSAGE)
-          }
+          if (surface.inflightEnd === chunk.nextOffset) reportStalledWrite(surface)
         }, RENDER_STALL_MS)
         try {
           await surface.view.write(chunk.bytes)
@@ -534,8 +547,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (surface.queued + bytes.length > PENDING_OUTPUT_MAX_BYTES) {
       // The shell is outrunning the screen. The stream is broken, so it is
       // not retried: a new connection would replay the same output into the
-      // same slow screen.
-      // A write that has been stuck for the stall window means the view
+      // same slow screen. A write stuck for the stall window means the view
       // stopped drawing, which is not the shell's fault.
       const stalled =
         surface.inflightSince !== null && Date.now() - surface.inflightSince >= RENDER_STALL_MS
@@ -968,6 +980,8 @@ export const useTerminalStore = defineStore('terminal', () => {
     error.value = ''
     warning.value = ''
     phase.value = 'loading'
+    const shown = currentSurface()
+    if (shown && reportStalledWrite(shown)) return
     const myScope = scopeEpoch
     const myOpen = ++openEpoch
     try {
@@ -1339,6 +1353,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const surface = surfaceOf(next)
     surface.attached = true
     error.value = ''
+    if (reportStalledWrite(surface)) return
     maybeConnect()
   }
 
