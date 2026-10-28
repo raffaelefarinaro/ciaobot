@@ -126,8 +126,13 @@ TERMINAL_MAX_ROWS = 200
 #: a sweep at least once a second; this is twice that.
 _SWEEP_INTERVAL_S = 0.5
 
-#: How long the reader waits before polling a quiet terminal again.
+#: The longest the reader waits before polling a quiet terminal again.
+#: The wait starts at ``_READER_MIN_IDLE_S``, doubles on each empty
+#: poll up to this cap, and drops back after output.
 _READER_IDLE_S = 0.02
+
+#: The first wait after output: a busy terminal is polled this often.
+_READER_MIN_IDLE_S = 0.001
 
 #: How long the flusher waits before it retries bytes the terminal did
 #: not take. The flusher is woken by an input, so this only matters for
@@ -1183,10 +1188,10 @@ class TerminalSessionManager:
     async def _reader(self, session: _Session) -> None:
         """Move the terminal's output into the ring, until it ends.
 
-        The read is non-blocking by contract, so it is polled inline
-        and the reader sleeps between quiet ticks. The reader never
-        waits for a consumer: the ring holds the output, and each
-        client asks for it by offset. The reader never touches the
+        The read is non-blocking by contract, so it is polled inline:
+        the reader backs off from 1 ms to the cap while quiet and resets
+        on output. The reader never waits for a consumer: the ring holds
+        the output, and each client asks for it by offset. The reader never touches the
         pending input either, so a terminal that will not take its
         input cannot stop its output.
 
@@ -1197,6 +1202,7 @@ class TerminalSessionManager:
         process = session.process
         if process is None:
             return
+        idle = _READER_MIN_IDLE_S
         try:
             while True:
                 if session.close_requested:
@@ -1207,7 +1213,8 @@ class TerminalSessionManager:
                     session.failed = True
                     break
                 if chunk is None:
-                    await asyncio.sleep(_READER_IDLE_S)
+                    await asyncio.sleep(idle)
+                    idle = min(idle * 2, _READER_IDLE_S)
                     continue
                 if not chunk:
                     break
@@ -1218,6 +1225,7 @@ class TerminalSessionManager:
                     # can be kept, so the session ends here.
                     break
                 session.wake.set()
+                idle = _READER_MIN_IDLE_S
         finally:
             # The exit code is taken first, while the process is still
             # there to be asked, and the close is awaited before the
