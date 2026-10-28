@@ -438,6 +438,7 @@ function close(): void {
   flex-direction: column;
   gap: var(--space-2);
 }
+#gws-connect-storage code { overflow-wrap: anywhere; }
 .gws-account-name {
   margin: 0;
   font-size: 15px;
