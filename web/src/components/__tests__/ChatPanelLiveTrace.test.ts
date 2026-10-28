@@ -650,13 +650,16 @@ describe('ChatPanel live trace', () => {
     expect(wrapper.get('.trace-block').classes()).toContain('open')
   })
 
-  it('keeps an explicitly expanded trace open until the reader returns to bottom', async () => {
+  it('keeps the finished trace open for a reader who scrolled away, until they return', async () => {
     const { wrapper, store, messagesEl } = await streamingPanel()
     stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
     messagesEl.dispatchEvent(new Event('scroll'))
     await flushPromises()
     const summary = wrapper.get('.trace-block.live .trace-summary')
     await summary.trigger('click')
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 600 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
 
     await finishTurn(store)
     expect(wrapper.get('.trace-block').classes()).toContain('open')
@@ -664,12 +667,47 @@ describe('ChatPanel live trace', () => {
     await flushPromises()
     expect(wrapper.get('.trace-block').classes()).toContain('open')
 
-    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 600 })
-    messagesEl.dispatchEvent(new Event('scroll'))
-    await flushPromises()
-    expect(wrapper.get('.trace-block').classes()).toContain('open')
     stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
     messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
+  it('collapses the finished trace when the reader scrolled up but was back at the bottom at turn end', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel()
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 600 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    await finishTurn(store)
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
+  it('collapses the finished trace when the live trace was expanded and the reader is at the bottom', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel()
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
+
+    await finishTurn(store)
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
+  it('does not carry an expanded trace into another chat', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.chats = [makeChat('chat-1'), makeChat('chat-2')]
+    store.messages['chat-1'] = turnMessages()
+    store.messages['chat-2'] = turnMessages()
+    await flushPromises()
+    await wrapper.get('.trace-block .trace-summary').trigger('click')
+    expect(wrapper.get('.trace-block').classes()).toContain('open')
+
+    store.activeChatId = 'chat-2'
     await flushPromises()
     expect(wrapper.get('.trace-block').classes()).not.toContain('open')
   })
@@ -704,6 +742,24 @@ describe('ChatPanel live trace', () => {
 
     await finishTurn(store)
     expect(wrapper.get('.trace-block').classes()).toContain('open')
+  })
+
+  it('collapses the finished trace when the reader scrolled up in the live body and then closed it', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel(true, true)
+    store.streamingText['chat-1'] = 'working on it'
+    await flushPromises()
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    const body = wrapper.get('.trace-block.live .trace-body').element
+    stubMetrics(body, { scrollHeight: 900, clientHeight: 300, scrollTop: 600 })
+    body.dispatchEvent(new Event('scroll'))
+    stubMetrics(body, { scrollHeight: 900, clientHeight: 300, scrollTop: 100 })
+    body.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
+
+    await finishTurn(store)
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
   })
 
   it('ignores a growth-only scroll inside the live trace body', async () => {
