@@ -36,6 +36,15 @@ export default defineConfig(({ mode }) => {
         ? resolve(__dirname, 'e2e/fixture/harness-dist')
         : resolve(__dirname, '../ciao/web/static'),
       emptyOutDir: true,
+      // The app is ES2022 (tsconfig `target`, and it calls `Object.hasOwn`), so
+      // the bundle is too. Vite 6's default target is ES2020, which makes
+      // esbuild lower `x ||= y` in dependencies, and esbuild 0.25 miscompiles
+      // that lowering under minification when `x` is an uninitialised `let`:
+      // it drops the declaration and assigns an undeclared name. xterm 6's
+      // DECRQM handler is written that way, so every `CSI ? Ps $ p` query a
+      // TUI sends threw a ReferenceError mid-parse and wedged the screen.
+      // `src/lib/__tests__/terminalBundle.test.ts` replays that transform.
+      target: 'es2022',
       rollupOptions: e2e ? { input: { harness: resolve(root, 'index.html') } } : {},
     },
     test: {

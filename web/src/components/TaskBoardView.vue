@@ -2066,7 +2066,10 @@ const today = localDateKey()
             v-else
             ref="lanesEl"
             class="task-lanes"
-            :class="lanes.length > 1 ? 'task-lanes--columns' : 'task-lanes--list'"
+            :class="[
+              lanes.length > 1 ? 'task-lanes--columns' : 'task-lanes--list',
+              { 'task-lanes--dragging': drag.drag.value },
+            ]"
           >
             <section
               v-for="lane in boardLanes"
@@ -2094,7 +2097,10 @@ const today = localDateKey()
                 {{ drag.drag.value && drag.drag.value.toScope !== lane.status ? 'Drop here.' : lane.status === 'done' && lane.earlierDone ? 'Nothing done today.' : 'Nothing here.' }}
               </p>
               <!-- One element per entry, never a fragment: TransitionGroup moves its
-                   direct children, and the engine's placeholder shares that shape. -->
+                   direct children, and the engine's placeholder shares that shape.
+                   The card is also its own drag surface: the engine ignores a press
+                   that starts on a link, button or field, so only the card's text and
+                   padding pick it up. -->
               <TransitionGroup v-else tag="ul" name="drag-reorder" class="task-cards">
                 <li
                   v-for="{ task } in laneEntries(lane.status)"
@@ -2108,6 +2114,7 @@ const today = localDateKey()
                   :data-task-id="task?.id"
                   :data-drag-row="task ? '' : undefined"
                   :aria-hidden="task ? undefined : 'true'"
+                  v-bind="task ? drag.surfaceHandlers(task.id, task.status) : {}"
                   @click="task && openDetail(task)"
                 >
                   <template v-if="task">
@@ -2942,11 +2949,22 @@ const today = localDateKey()
   overflow: hidden;
 }
 .task-view > .page-grid {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+}
+/* The main column fills the scrollport, so a board shorter than the pane can
+   still use the space under its rows as drop targets. */
+.task-view .page-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* ── Filters ───────────────────────────────────────────────────────────── */
@@ -3087,7 +3105,16 @@ const today = localDateKey()
 /* ── Board ─────────────────────────────────────────────────────────────── */
 .task-lanes {
   display: flex;
-  align-items: flex-start;
+  /* Every lane fills the board: a short lane stretches to the tallest one, and
+     the board grows to the space under the filters, so the empty space below a
+     short lane's last card is still a drop target. Lanes past the last column
+     keep their own width. */
+  align-items: stretch;
+  flex: 1 1 auto;
+  /* Grow into the space under the filters when the lanes are short, but never
+     shrink below the tallest lane: a tall board scrolls with the page, not in
+     its own nested vertical scrollbar. */
+  min-height: min-content;
   gap: var(--space-3);
   /* The board owns the sideways scroll: the four lanes sit in one row at every
      width, and a narrow pane scrolls this element, not the page. */
@@ -3098,6 +3125,8 @@ const today = localDateKey()
   /* The engine sets the picked-up card's height here while a drag is active. */
   --drag-item-height: 0px;
 }
+/* A card surface drag must not paint a text selection across the board. */
+.task-lanes--dragging { user-select: none; -webkit-user-select: none; }
 /* One lane width at every pane width (no stretching, no 85% switch): a narrow
    pane scrolls the board sideways, a wide one leaves room after the last lane.
    310px keeps a card's state and its action on one line. */
@@ -3218,6 +3247,11 @@ const today = localDateKey()
   background: var(--bg2);
   cursor: pointer;
   min-width: 0;
+  /* A fine pointer can drag the card by its own text, so a press must not start
+     selecting that text on the way to the drag threshold. The editor keeps the
+     text selectable. */
+  user-select: none;
+  -webkit-user-select: none;
   /* The checkbox's net width in the head row (28px box with -6/-2 margins on
      a fine pointer, 44px with -14/-10 on touch: 20px either way) plus the head
      gap. Every text block under the title starts here; the ring's centre sits

@@ -18,6 +18,7 @@ interface Harness {
   onCancel: ReturnType<typeof vi.fn>
   grip: (id: string) => HTMLElement
   handlers: (id: string, scope: string) => ReturnType<ReturnType<typeof useDragSort>['gripHandlers']>
+  surface: (id: string, scope: string) => ReturnType<ReturnType<typeof useDragSort>['surfaceHandlers']>
   root: HTMLElement
 }
 
@@ -37,6 +38,10 @@ function setup(overrides: Partial<UseDragSortOptions> = {}): Harness {
       const grip = document.createElement('button')
       grip.dataset.dragHandle = id
       li.appendChild(grip)
+      const surface = document.createElement('span')
+      surface.className = 'surface'
+      surface.textContent = id
+      li.appendChild(surface)
       ul.appendChild(li)
     }
   }
@@ -61,9 +66,28 @@ function setup(overrides: Partial<UseDragSortOptions> = {}): Harness {
     ...overrides,
   })
 
+  // The row itself is the surface target, exactly as the view binds it.
+  for (const [scope, ids] of Object.entries(lists)) {
+    for (const id of ids) {
+      root
+        .querySelector<HTMLElement>(`[data-item="${id}"]`)!
+        .addEventListener('pointerdown', dnd.surfaceHandlers(id, scope).onPointerdown)
+    }
+  }
+
   // A flex-like layout driven by what the view would render right now.
   scopeEls.todo.getBoundingClientRect = () => new DOMRect(0, -1, 100, 500)
   scopeEls.doing.getBoundingClientRect = () => new DOMRect(100, -1, 100, 500)
+  // Hit testing follows the same rects: a scope is only under the pointer where
+  // it is actually drawn.
+  document.elementsFromPoint = (x, y) => {
+    const hits: Element[] = []
+    for (const ul of Object.values(scopeEls)) {
+      const rect = ul.getBoundingClientRect()
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) hits.push(ul)
+    }
+    return hits
+  }
   root.querySelectorAll<HTMLElement>('[data-item]').forEach((li) => {
     li.getBoundingClientRect = () => {
       for (const scope of Object.keys(lists)) {
@@ -87,18 +111,27 @@ function setup(overrides: Partial<UseDragSortOptions> = {}): Harness {
     root,
     grip: (id) => root.querySelector<HTMLElement>(`[data-drag-handle="${id}"]`)!,
     handlers: (id, scope) => dnd.gripHandlers(id, scope),
+    surface: (id, scope) => dnd.surfaceHandlers(id, scope),
   }
 }
 
-function pointer(type: string, x: number, y: number): PointerEvent {
+function pointer(type: string, x: number, y: number, pointerType = 'mouse'): PointerEvent {
   return new PointerEvent(type, {
     clientX: x,
     clientY: y,
     pointerId: 1,
     isPrimary: true,
     button: 0,
+    pointerType,
     bubbles: true,
   })
+}
+
+const surfaceText = (h: Harness, id: string) =>
+  h.root.querySelector<HTMLElement>(`[data-item="${id}"] .surface`)!
+
+function pressSurface(h: Harness, id: string, x = 10, y = 10, pointerType = 'mouse'): void {
+  surfaceText(h, id).dispatchEvent(pointer('pointerdown', x, y, pointerType))
 }
 
 const overlay = () => document.querySelector<HTMLElement>('.drag-overlay')
@@ -266,6 +299,27 @@ describe('useDragSort', () => {
     }
   })
 
+  it('ignores a descendant losing capture as the root takes the pointer over', async () => {
+    const h = setup()
+    pressSurface(h, 'a1')
+    move(h, 10, 30)
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a1', mode: 'pointer' })
+    // A pen captures the pressed card implicitly; transferring that capture to
+    // the root as the drag activates reports the card's loss here.
+    h.root
+      .querySelector('[data-item="a1"]')!
+      .dispatchEvent(new Event('lostpointercapture', { bubbles: true }))
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a1', mode: 'pointer' })
+    expect(overlay()).not.toBeNull()
+
+    // The root's own capture is the one that matters.
+    h.root.dispatchEvent(new Event('lostpointercapture'))
+    await flush()
+    expect(h.dnd.drag.value).toBeNull()
+    expect(overlay()).toBeNull()
+    expect(h.onCommit).not.toHaveBeenCalled()
+  })
+
   it('release outside any valid scope cancels', async () => {
     const h = setup()
     press(h, 'a1', 'todo')
@@ -277,6 +331,27 @@ describe('useDragSort', () => {
     expect(h.onCommit).not.toHaveBeenCalled()
     expect(h.onCancel).toHaveBeenCalledTimes(1)
     expect(overlay()).toBeNull()
+  })
+
+  it('only targets a scope the pointer actually hits', () => {
+    const h = setup()
+    press(h, 'a1', 'todo')
+    move(h, 10, 30)
+    // The point is inside `doing`'s rect, but a cover sits on top of it: neither
+    // an empty hit stack nor one with the lane underneath counts.
+    const cover = document.createElement('div')
+    const doing = h.root.querySelector('[data-scope="doing"]')!
+    const hits = vi.spyOn(document, 'elementsFromPoint')
+    hits.mockReturnValue([])
+    move(h, 150, 70)
+    expect(h.dnd.drag.value?.toScope).toBe('')
+    hits.mockReturnValue([cover, doing])
+    move(h, 150, 70)
+    expect(h.dnd.drag.value?.toScope).toBe('')
+    hits.mockRestore()
+    move(h, 150, 70)
+    expect(h.dnd.drag.value?.toScope).toBe('doing')
+    document.dispatchEvent(key('Escape'))
   })
 
   it('canDropIn false (pinned) cancels', async () => {
@@ -321,6 +396,166 @@ describe('useDragSort', () => {
     h.grip('a1').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     expect(clicked).toHaveBeenCalledTimes(1)
     document.removeEventListener('click', clicked)
+  })
+
+  it('drags from the row surface and swallows the click that follows', async () => {
+    const h = setup()
+    const clicked = vi.fn()
+    document.addEventListener('click', clicked)
+    pressSurface(h, 'a1')
+    move(h, 10, 30)
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a1', mode: 'pointer' })
+    expect(overlay()).not.toBeNull()
+    expect(h.root.setPointerCapture).toHaveBeenCalledWith(1)
+    h.root.dispatchEvent(pointer('pointerup', 10, 30))
+    // The click the browser sends after the release lands on the row; a drag
+    // must never also be a click-to-open.
+    surfaceText(h, 'a1').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(clicked).not.toHaveBeenCalled()
+    await flush()
+    surfaceText(h, 'a1').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(clicked).toHaveBeenCalledTimes(1)
+    document.removeEventListener('click', clicked)
+  })
+
+  it('leaves a short surface press as an ordinary click', async () => {
+    const h = setup()
+    const clicked = vi.fn()
+    document.addEventListener('click', clicked)
+    pressSurface(h, 'a1')
+    move(h, 12, 12)
+    expect(h.dnd.drag.value).toBeNull()
+    // Nothing captured the pointer: the click the browser sends next still
+    // targets the card, so its own click-to-open runs.
+    expect(h.root.setPointerCapture).not.toHaveBeenCalled()
+    h.root.dispatchEvent(pointer('pointerup', 12, 12))
+    surfaceText(h, 'a1').dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(clicked).toHaveBeenCalledTimes(1)
+    expect(h.onCommit).not.toHaveBeenCalled()
+    document.removeEventListener('click', clicked)
+  })
+
+  function selectElsewhere(): Selection {
+    const aside = document.createElement('p')
+    aside.textContent = 'keep me selected'
+    document.body.appendChild(aside)
+    const range = document.createRange()
+    range.selectNodeContents(aside)
+    const selection = window.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+    return selection
+  }
+
+  it('a grip drag leaves an unrelated selection alone', () => {
+    const h = setup()
+    const selection = selectElsewhere()
+    press(h, 'a1', 'todo')
+    move(h, 10, 30)
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a1', mode: 'pointer' })
+    // The sidebar shares this path: its grip must not clear what the user is
+    // reading elsewhere.
+    expect(selection.toString()).toBe('keep me selected')
+    document.dispatchEvent(key('Escape'))
+  })
+
+  it('a surface drag clears the selection its press began', () => {
+    const h = setup()
+    const selection = selectElsewhere()
+    pressSurface(h, 'a1')
+    move(h, 10, 30)
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a1', mode: 'pointer' })
+    expect(selection.toString()).toBe('')
+    document.dispatchEvent(key('Escape'))
+  })
+
+  it('a surface press released outside the row before the threshold ends cleanly', () => {
+    const h = setup()
+    pressSurface(h, 'a1')
+    // No drag yet, and the release lands outside the board: the deferred
+    // surface press has no captured root handler, so the document ends it.
+    document.dispatchEvent(pointer('pointerup', 900, 900))
+    expect(h.dnd.drag.value).toBeNull()
+    expect(h.onCommit).not.toHaveBeenCalled()
+
+    // The next press is not blocked by a stuck pending gesture.
+    pressSurface(h, 'a2')
+    move(h, 10, 30)
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a2', mode: 'pointer' })
+  })
+
+  it('a surface press that never cleared the threshold ends on window blur', () => {
+    const h = setup()
+    pressSurface(h, 'a1')
+    window.dispatchEvent(new Event('blur'))
+    expect(h.dnd.drag.value).toBeNull()
+
+    pressSurface(h, 'a1')
+    move(h, 10, 30)
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a1', mode: 'pointer' })
+  })
+
+  it('does not start a surface drag on an interactive descendant', () => {
+    const h = setup()
+    const li = h.root.querySelector<HTMLElement>('[data-item="a1"]')!
+    const controls = [
+      Object.assign(document.createElement('button'), { type: 'button' }),
+      Object.assign(document.createElement('a'), { href: '#x' }),
+      Object.assign(document.createElement('input'), { type: 'text' }),
+    ]
+    for (const control of controls) {
+      li.appendChild(control)
+      control.dispatchEvent(pointer('pointerdown', 10, 10))
+      move(h, 10, 30)
+      expect(h.dnd.drag.value).toBeNull()
+      expect(overlay()).toBeNull()
+      control.remove()
+    }
+    expect(h.root.setPointerCapture).not.toHaveBeenCalled()
+  })
+
+  it('does not start a surface drag from touch, so a swipe still scrolls', () => {
+    const h = setup()
+    pressSurface(h, 'a1', 10, 10, 'touch')
+    move(h, 10, 30)
+    expect(h.dnd.drag.value).toBeNull()
+    expect(overlay()).toBeNull()
+    expect(h.root.setPointerCapture).not.toHaveBeenCalled()
+  })
+
+  it('reads a first surface move that lands outside the root', () => {
+    const h = setup()
+    pressSurface(h, 'a1')
+    // The deferred press has no capture yet, so this move never reaches the
+    // root's own listener. The document sees it and starts the drag.
+    document.body.dispatchEvent(pointer('pointermove', 900, 900))
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a1', mode: 'pointer', toScope: '' })
+    expect(overlay()).not.toBeNull()
+    expect(h.root.setPointerCapture).toHaveBeenCalledWith(1)
+    document.dispatchEvent(key('Escape'))
+  })
+
+  it('a cancelled surface drag writes nothing and leaves the keyboard grip working', async () => {
+    const h = setup()
+    pressSurface(h, 'a1')
+    move(h, 10, 100)
+    expect(overlay()).not.toBeNull()
+    document.dispatchEvent(key('Escape'))
+    await flush()
+    expect(h.onCommit).not.toHaveBeenCalled()
+    expect(overlay()).toBeNull()
+
+    h.handlers('a1', 'todo').onKeydown(key(' '))
+    expect(h.dnd.drag.value).toMatchObject({ id: 'a1', mode: 'keyboard' })
+    h.handlers('a1', 'todo').onKeydown(key('ArrowDown'))
+    h.handlers('a1', 'todo').onKeydown(key('Enter'))
+    await flush()
+    expect(h.onCommit).toHaveBeenCalledWith({
+      id: 'a1',
+      fromScope: 'todo',
+      toScope: 'todo',
+      index: 1,
+    })
   })
 
   it('a pointer failure does not restore after a press elsewhere', async () => {

@@ -2586,6 +2586,79 @@ describe('terminal store bounds', () => {
     expect(fakeSockets).toHaveLength(1)
     expect(store.phase).toBe('error')
   })
+
+  describe('render stall', () => {
+    async function stalled(deferred = true) {
+      const store = useTerminalStore()
+      await store.open({ chatId: 'chat-1' })
+      apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+      await store.createSession()
+      const view = makeRenderer('s1', deferred)
+      store.attachRenderer(view.renderer)
+      const socket = fakeSockets[0]
+      socket.ready()
+      return { store, view, socket }
+    }
+
+    it('reports a renderer that stops drawing instead of blaming the shell', async () => {
+      const { store, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      await vi.advanceTimersByTimeAsync(5000)
+
+      expect(store.error).toContain('stopped drawing')
+      expect(store.error).not.toContain('faster than the terminal')
+      expect(store.phase).toBe('error')
+    })
+
+    it('does not report a stall for a write that finishes in time', async () => {
+      const { store, view, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      await vi.advanceTimersByTimeAsync(4000)
+      view.settle()
+      await vi.advanceTimersByTimeAsync(6000)
+
+      expect(store.error).toBe('')
+    })
+
+    it('does not report a stall on a hidden surface', async () => {
+      const { store, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      store.hide()
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      expect(store.error).toBe('')
+    })
+
+    it('reports a stall that began while hidden once the terminal is shown again', async () => {
+      const { store, socket } = await stalled()
+      socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+      store.hide()
+      await vi.advanceTimersByTimeAsync(6000)
+      expect(store.error).toBe('')
+
+      await store.open({ chatId: 'chat-1' })
+
+      expect(store.error).toContain('stopped drawing')
+      expect(store.phase).toBe('error')
+    })
+
+    it('an overflow behind a stalled write names the view', async () => {
+      const { store, socket } = await stalled()
+      const chunk = new Uint8Array(64 * 1024)
+      socket.receive({ type: 'output', start: 0, end: 1, data: b64('h') })
+      // Move the clock without running timers, so only the overflow path can notice.
+      vi.setSystemTime(Date.now() + 5000)
+      for (let i = 0; i < 17; i += 1) {
+        socket.receive({
+          type: 'output', start: 1 + i * chunk.length, end: 1 + (i + 1) * chunk.length,
+          data: encodeTerminalBytes(chunk),
+        })
+      }
+
+      expect(store.error).toContain('stopped drawing')
+      expect(store.error).not.toContain('faster than the terminal')
+    })
+  })
 })
 
 // ── Close codes and takeover ─────────────────────────────────────────────

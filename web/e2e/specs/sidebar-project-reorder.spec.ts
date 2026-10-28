@@ -112,6 +112,40 @@ test.describe('sidebar project reordering', () => {
     expect((await rowOrder(page)).slice(0, 2)).toEqual(['alpha-general', NOTES])
   })
 
+  test('a cover over the list blocks a drop through it', async ({ page }) => {
+    let posted = 0
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/projects/reorder')) posted += 1
+    })
+    const group = page.locator(`[data-project-id="${NOTES}"]`)
+    await group.locator('.project-header').hover()
+    const box = (await group.locator('.drag-grip').boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + 40, box.y + 120, { steps: 8 })
+    await expect(page.locator('.drag-overlay')).toBeVisible()
+
+    // Something opens over the sidebar while the row is picked up.
+    await page.evaluate(() => {
+      const cover = document.createElement('div')
+      cover.className = 'e2e-cover'
+      Object.assign(cover.style, {
+        position: 'fixed', top: '0', left: '0', width: '320px', height: '100vh',
+        zIndex: '2000', background: 'rgb(0 0 0 / 20%)',
+      })
+      document.body.append(cover)
+    })
+    const target = page.locator('[data-project-id="filler-01"] .project-header')
+    const at = (await target.boundingBox())!
+    await page.mouse.move(at.x + 20, at.y + 5, { steps: 8 })
+    await page.mouse.up()
+
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+    expect(posted).toBe(0)
+    expect((await rowOrder(page)).slice(0, 2)).toEqual(['alpha-general', NOTES])
+    await page.evaluate(() => document.querySelector('.e2e-cover')?.remove())
+  })
+
   test('a chat can still be dropped onto another project header', async ({ page }) => {
     let patched: Record<string, unknown> | null = null
     await page.route('**/api/chats/alpha-chat-2', async (route) => {

@@ -164,7 +164,14 @@ function layOutBoard() {
     }
     return rectOf(0, 0, 0, 0)
   })
-  document.elementsFromPoint = () => [...document.querySelectorAll('.task-done-toggle')]
+  document.elementsFromPoint = (x, y) => {
+    const hits: Element[] = []
+    for (const el of document.querySelectorAll('.task-lane, .task-done-toggle')) {
+      const rect = el.getBoundingClientRect()
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) hits.push(el)
+    }
+    return hits
+  }
   Element.prototype.setPointerCapture = vi.fn()
   Element.prototype.releasePointerCapture = vi.fn()
   Element.prototype.hasPointerCapture = vi.fn(() => true)
@@ -3263,6 +3270,16 @@ describe('TaskBoardView', () => {
     const grip = (wrapper: ReturnType<typeof mount>, title: string) => card(wrapper, title).get('.drag-grip')
     const key = (k: string, init: KeyboardEventInit = {}) => ({ key: k, ...init })
 
+    /** Press the card's own text (not its grip) and move far enough to pick it up. */
+    async function pickUpSurface(wrapper: ReturnType<typeof mount>, title: string) {
+      layOutBoard()
+      const at = card(wrapper, title).element.getBoundingClientRect()
+      const text = card(wrapper, title).get('.task-title').element
+      text.dispatchEvent(pointer('pointerdown', at.left + 20, at.top + 10))
+      boardRoot().dispatchEvent(pointer('pointermove', at.left + 20, at.top + 24))
+      await nextTick()
+    }
+
     async function openMenu(wrapper: ReturnType<typeof mount>, title: string) {
       await card(wrapper, title).get('.task-more').trigger('click')
       await flushPromises()
@@ -3488,6 +3505,114 @@ describe('TaskBoardView', () => {
       await card(wrapper, 'Charlie').trigger('click')
       await flushPromises()
       expect(wrapper.find('.task-sheet').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('reorders from the card surface, not only from its grip', async () => {
+      const wrapper = await mountPlaced()
+      apiPost.mockResolvedValueOnce(placed('c', { ...SEQUENCES, backlog: ['c', 'a', 'b'] }))
+
+      await pickUpSurface(wrapper, 'Charlie')
+      expect(document.querySelector('.drag-overlay')).not.toBeNull()
+      const at = dropPoint(0, 0)
+      await dragTo(at.x, at.y)
+      await release(at.x, at.y)
+
+      expect(apiPost).toHaveBeenCalledTimes(1)
+      expect(apiPost).toHaveBeenCalledWith('/api/tasks/c/order', {
+        workspace: 'personal', before_id: 'a', after_id: null, expected_order_version: 7,
+      })
+      expect(cardTitles(wrapper, 0)).toEqual(['Charlie', 'Alpha', 'Bravo'])
+      wrapper.unmount()
+    })
+
+    it('a short press on the card surface opens the editor rather than dragging', async () => {
+      const wrapper = await mountPlaced()
+      layOutBoard()
+      const at = card(wrapper, 'Alpha').element.getBoundingClientRect()
+      const text = card(wrapper, 'Alpha').get('.task-title').element
+      text.dispatchEvent(pointer('pointerdown', at.left + 20, at.top + 10))
+      text.dispatchEvent(pointer('pointerup', at.left + 20, at.top + 12))
+      await flushPromises()
+      await nextTick()
+
+      expect(document.querySelector('.drag-overlay')).toBeNull()
+      expect(apiPost).not.toHaveBeenCalled()
+      await card(wrapper, 'Alpha').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('.task-sheet').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('accepts a drop far below the last card of a short lane', async () => {
+      const wrapper = await mountPlaced()
+      apiPatch.mockResolvedValueOnce(placed(
+        'a', { ...SEQUENCES, backlog: ['b', 'c'], in_progress: ['d', 'e', 'a'] }, 'in_progress',
+      ))
+
+      await pickUpSurface(wrapper, 'Alpha')
+      // In progress holds two cards; the release is well under the last one,
+      // where a short lane's empty space is.
+      const box = lanes(wrapper)[1]!.element.getBoundingClientRect()
+      await dragTo(box.left + 100, box.top + 900)
+      await release(box.left + 100, box.top + 900)
+
+      expect(apiPatch).toHaveBeenCalledWith('/api/tasks/a', {
+        workspace: 'personal',
+        expected_revision: REVISION,
+        status: 'in_progress',
+        placement: { before_id: null, after_id: 'e', expected_order_version: 7 },
+      })
+      wrapper.unmount()
+    })
+
+    it('leaves the card checkbox and menu working when the card surface can drag', async () => {
+      const wrapper = await mountPlaced()
+      layOutBoard()
+      const alpha = card(wrapper, 'Alpha')
+      const at = alpha.element.getBoundingClientRect()
+      const pressFar = (el: Element) => {
+        el.dispatchEvent(pointer('pointerdown', at.left + 20, at.top + 10))
+        boardRoot().dispatchEvent(pointer('pointermove', at.left + 20, at.top + 40))
+        boardRoot().dispatchEvent(pointer('pointerup', at.left + 20, at.top + 40))
+      }
+
+      // The menu: a press on its trigger must not become a card drag.
+      pressFar(alpha.get('.task-more').element)
+      await flushPromises()
+      expect(document.querySelector('.drag-overlay')).toBeNull()
+      const items = await openMenu(wrapper, 'Alpha')
+      expect(items.map((el) => el.textContent)).toEqual(['Move up', 'Move down'])
+      await closeAnyMenu()
+
+      // The Done checkbox: same guard, and its own click still completes.
+      pressFar(alpha.get('.task-check').element)
+      await flushPromises()
+      expect(document.querySelector('.drag-overlay')).toBeNull()
+      await card(wrapper, 'Alpha').get('.task-check').trigger('click')
+      await nextTick()
+      expect(wrapper.find('.task-resolution-sheet').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('opens a link in a title instead of starting a drag from it', async () => {
+      const wrapper = await mountPlaced({}, [
+        ...PLACED,
+        task({ id: 'u', title: 'Read https://example.com/doc', status: 'backlog' }),
+      ])
+      layOutBoard()
+      const urlCard = card(wrapper, 'example.com')
+      const at = urlCard.element.getBoundingClientRect()
+      const link = urlCard.get('.task-title a').element
+      link.dispatchEvent(pointer('pointerdown', at.left + 20, at.top + 10))
+      boardRoot().dispatchEvent(pointer('pointermove', at.left + 20, at.top + 40))
+      await nextTick()
+      expect(document.querySelector('.drag-overlay')).toBeNull()
+      expect(boardRoot().style.getPropertyValue('--drag-item-height')).toBe('')
+
+      await urlCard.get('.task-title a').trigger('click')
+      await nextTick()
+      expect(wrapper.find('.task-sheet').exists()).toBe(false)
       wrapper.unmount()
     })
 
