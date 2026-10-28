@@ -1177,6 +1177,19 @@ describe('ProjectSidebar project ordering', () => {
     }
     patch()
     new MutationObserver(patch).observe(list, { childList: true })
+    // jsdom has no hit testing. The pointer is over the group (or placeholder)
+    // laid out at that row; in a browser its header or a chat row would be the
+    // topmost element, which is still inside the same group. The list's own
+    // empty foot is the list itself.
+    document.elementsFromPoint = (x, y) => {
+      const bounds = list.getBoundingClientRect()
+      if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) return []
+      const hit = (Array.from(list.children) as HTMLElement[]).find((child) => {
+        const rect = child.getBoundingClientRect()
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+      })
+      return hit ? [hit, list] : [list]
+    }
     return list
   }
 

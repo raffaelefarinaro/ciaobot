@@ -29,6 +29,12 @@
 // - Every grip carries `data-drag-handle="<id>"` (DragGrip does) and
 //   `touch-action: none`; nothing else on the row does. Spread
 //   `gripHandlers(id, scopeId)` onto it with `v-bind`.
+// - A row that should also be draggable from its own surface spreads
+//   `surfaceHandlers(id, scopeId)` onto the row. That path is pointer-only and
+//   ignores presses that start on an interactive descendant, so a link, button
+//   or form control keeps its gesture. Touch stays with the grip, which lets a
+//   swipe on the surface scroll the board. The click that follows an activated
+//   drag is swallowed, so a drag never doubles as a click on the row.
 // - Menu "Move up/down" items call `move(id, scopeId, direction)`, which runs
 //   the same commit and announcement path as a drop.
 // - Bind `announcement` to an sr-only `role="status" aria-live="polite"` region.
@@ -109,6 +115,12 @@ interface Pending {
   pointerId: number
   startX: number
   startY: number
+  /**
+   * A surface press captures only once it clears the threshold: capturing on
+   * pointerdown would retarget the plain click that should open the row to the
+   * root element instead.
+   */
+  deferCapture: boolean
 }
 
 interface Session {
@@ -127,6 +139,19 @@ interface Session {
 // there is no shadow token to reference.
 const OVERLAY_ELEVATION = '0 1rem 2.5rem rgb(0 0 0 / 38%)'
 const HEIGHT_VAR = '--drag-item-height'
+
+/**
+ * Controls that own the press they receive. A surface drag must not take a
+ * press from a link, button or form control inside the row: their click is the
+ * action the user asked for. The grip is listed too, though it has its own
+ * pointer path, so a delegated press on it can never reach the surface.
+ */
+const OWN_GESTURE =
+  'a[href], button, input, select, textarea, label, [contenteditable="true"], [role="button"], [role="menuitem"], [data-drag-handle]'
+
+function isOwnGesture(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest(OWN_GESTURE) !== null
+}
 
 function translateY(el: HTMLElement): number {
   const transform = getComputedStyle(el).transform
@@ -328,7 +353,10 @@ export function useDragSort(options: UseDragSortOptions) {
     root.addEventListener('pointermove', onPointermove)
     root.addEventListener('pointerup', onPointerup)
     root.addEventListener('pointercancel', onPointercancel)
-    root.addEventListener('lostpointercapture', onPointercancel)
+    root.addEventListener('lostpointercapture', onLostPointerCapture)
+    document.addEventListener('pointermove', onDocumentPointermove, true)
+    document.addEventListener('pointerup', onDocumentPointerup, true)
+    document.addEventListener('pointercancel', onDocumentPointercancel, true)
     document.addEventListener('keydown', onDocumentKeydown)
     window.addEventListener('blur', onWindowBlur)
     document.addEventListener('visibilitychange', onVisibilityChange)
@@ -341,10 +369,50 @@ export function useDragSort(options: UseDragSortOptions) {
     root?.removeEventListener('pointermove', onPointermove)
     root?.removeEventListener('pointerup', onPointerup)
     root?.removeEventListener('pointercancel', onPointercancel)
-    root?.removeEventListener('lostpointercapture', onPointercancel)
+    root?.removeEventListener('lostpointercapture', onLostPointerCapture)
+    document.removeEventListener('pointermove', onDocumentPointermove, true)
+    document.removeEventListener('pointerup', onDocumentPointerup, true)
+    document.removeEventListener('pointercancel', onDocumentPointercancel, true)
     document.removeEventListener('keydown', onDocumentKeydown)
     window.removeEventListener('blur', onWindowBlur)
     document.removeEventListener('visibilitychange', onVisibilityChange)
+  }
+
+  /**
+   * A pen implicitly captures the pointer on the card it pressed. When the drag
+   * activates the root takes that capture over, and the card reports the loss
+   * here as it bubbles. Only the root losing its own capture ends the gesture.
+   */
+  function onLostPointerCapture(e: PointerEvent): void {
+    if (e.target !== options.root.value) return
+    onPointercancel()
+  }
+
+  /**
+   * A surface press has no pointer capture until it clears the threshold, so
+   * its first move can land anywhere in the document and never reach the root.
+   * Read that move at the document so the gesture still becomes a drag; once
+   * it has, the root's own handler tracks the captured pointer.
+   */
+  function onDocumentPointermove(e: PointerEvent): void {
+    if (!pending?.deferCapture || e.pointerId !== pending.pointerId) return
+    onPointermove(e)
+  }
+
+  /**
+   * A surface press captured its pointer only after it cleared the threshold,
+   * so a release outside the board before then has no root handler. End that
+   * press quietly; an activated drag is already captured and commits through
+   * the root's own listener.
+   */
+  function onDocumentPointerup(e: PointerEvent): void {
+    if (!pending?.deferCapture || e.pointerId !== pending.pointerId) return
+    if (!session) teardownPointer()
+  }
+
+  function onDocumentPointercancel(e: PointerEvent): void {
+    if (!pending?.deferCapture || e.pointerId !== pending.pointerId) return
+    if (!session) teardownPointer()
   }
 
   function onFocusout(): void {
@@ -481,14 +549,16 @@ export function useDragSort(options: UseDragSortOptions) {
   function targetAt(x: number, y: number): { scope: string; index: number } | null {
     const d = drag.value
     if (!d) return null
+    // What is actually on top at the pointer. A lane clipped by the board's
+    // sideways scroll, or one a sheet or menu covers, is not a target even
+    // though its own rect and the stack behind the cover still contain it.
+    const top = document.elementsFromPoint(x, y)[0]
     for (const scope of options.scopes()) {
       const el = scope.el()
       if (!el) continue
       const rect = el.getBoundingClientRect()
       if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue
-      if (scope.positional === false) {
-        if (!document.elementsFromPoint(x, y).includes(el)) continue
-      }
+      if (!top || (top !== el && !el.contains(top))) continue
       if (!allowed(d.id, d.fromScope, scope.id)) return null
       const ids = visibleIds(scope.id, d.id)
       if (scope.positional === false) return { scope: scope.id, index: ids.length }
@@ -560,7 +630,7 @@ export function useDragSort(options: UseDragSortOptions) {
     session.raf = requestAnimationFrame(tick)
   }
 
-  function activate(e: PointerEvent): void {
+  function activate(e: PointerEvent, clearSelection = false): void {
     const p = pending
     const source = p ? options.itemEl(p.id) : null
     const root = options.root.value
@@ -607,6 +677,10 @@ export function useDragSort(options: UseDragSortOptions) {
     const index = options.itemIds(p.scopeId).indexOf(p.id)
     origin = { id: p.id, scope: p.scopeId, index }
     drag.value = { id: p.id, fromScope: p.scopeId, toScope: p.scopeId, index, mode: 'pointer' }
+    // A surface press was selecting text until it became a drag; the trail it
+    // leaves would follow the pointer across the board. A grip press owns no
+    // selection, and a sidebar row may share one the user is reading.
+    if (clearSelection) window.getSelection()?.removeAllRanges()
     // A pointer press focuses its grip in the browser. Keep that ownership so a
     // failed write can put focus back after the preview remounts the row; touch
     // and presses that never focused the grip start no watch.
@@ -618,14 +692,14 @@ export function useDragSort(options: UseDragSortOptions) {
     session.raf = requestAnimationFrame(tick)
   }
 
-  function onPointerdown(id: string, scopeId: string, e: PointerEvent): void {
+  function onPointerdown(id: string, scopeId: string, e: PointerEvent, deferCapture = false): void {
     if (drag.value || pending || isCommitting()) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (!e.isPrimary || !options.canDrag(id, scopeId)) return
     const root = options.root.value
     if (!root) return
-    pending = { id, scopeId, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY }
-    root.setPointerCapture(e.pointerId)
+    pending = { id, scopeId, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, deferCapture }
+    if (!deferCapture) root.setPointerCapture(e.pointerId)
     // A pointer gesture is a new interaction: any keyboard reveal still waiting
     // on its tick belongs to the gesture the user just left.
     interactionToken += 1
@@ -644,7 +718,14 @@ export function useDragSort(options: UseDragSortOptions) {
     }
     if (!pending || e.pointerId !== pending.pointerId) return
     if (exceedsThreshold(e.clientX - pending.startX, e.clientY - pending.startY, options.threshold)) {
-      activate(e)
+      // From here the gesture is a drag, not a click: capture so the rest of it
+      // keeps arriving even over another lane, and the root can commit it.
+      const fromSurface = pending.deferCapture
+      if (pending.deferCapture) {
+        options.root.value?.setPointerCapture(pending.pointerId)
+        pending.deferCapture = false
+      }
+      activate(e, fromSurface)
     }
   }
 
@@ -666,7 +747,14 @@ export function useDragSort(options: UseDragSortOptions) {
   }
 
   function onWindowBlur(): void {
-    if (drag.value && !isCommitting()) abort(true)
+    if (drag.value) {
+      if (!isCommitting()) abort(true)
+      return
+    }
+    // A captured pointer would deliver a cancel; a surface press that never
+    // cleared the threshold has no capture, so the window losing focus is its
+    // only end.
+    if (pending) teardownPointer()
   }
 
   function onVisibilityChange(): void {
@@ -772,6 +860,24 @@ export function useDragSort(options: UseDragSortOptions) {
     }
   }
 
+  /**
+   * The row's own surface as a second pointer target: the same pick-up,
+   * threshold, placement and write as the grip.
+   *
+   * Only a press on non-interactive content starts it, and touch is excluded so
+   * a swipe still scrolls the board; the grip remains the touch path. A press
+   * that never clears the threshold is an ordinary click, and the engine eats
+   * the click the browser sends after an activated drag.
+   */
+  function surfaceHandlers(id: string, scopeId: string) {
+    return {
+      onPointerdown: (e: PointerEvent) => {
+        if (e.pointerType === 'touch' || isOwnGesture(e.target)) return
+        onPointerdown(id, scopeId, e, true)
+      },
+    }
+  }
+
   function entriesFor(scopeId: string): PreviewEntry[] {
     const ids = options.itemIds(scopeId)
     const d = drag.value
@@ -847,6 +953,7 @@ export function useDragSort(options: UseDragSortOptions) {
     drag: drag as Readonly<ShallowRef<DragState | null>>,
     announcement: announcement as Readonly<Ref<string>>,
     gripHandlers,
+    surfaceHandlers,
     entriesFor,
     isSource,
     isLifted,
