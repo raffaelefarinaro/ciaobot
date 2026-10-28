@@ -137,6 +137,39 @@ async def test_try_retry_now_starts_stream_when_chat_is_idle(tmp_path: Path) -> 
     assert updated.retry_prompt == ""
 
 
+async def test_try_retry_now_tags_the_resend_as_a_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    pcm.set_chat_retry(chat.chat_id, "run me", reason="manual", unattended=True)
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="done",
+            session_id="sess-ok",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    echo = next(e for e in events if e.get("type") == "user_echo")
+    assert echo["origin"] == "retry"
+    assert echo["unattended"] is True
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.user_turn_origin == {"0": "retry"}
+    assert updated.user_turn_unattended == {"0": True}
+
+
 async def test_try_retry_now_refuses_active_chat(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
@@ -1479,6 +1512,25 @@ async def test_network_retry_turn_that_rearms_survives_its_own_turn_end(
     assert updated.retry_attempts == 1
     assert updated.retry_interval_seconds == 1200
     pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_network_retry_resend_is_tagged_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+    assert pcm.arm_network_retry(chat.chat_id, "job") == "armed"
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield _ok_result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    events = await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    echo = next(e for e in events if e.get("type") == "user_echo")
+    assert echo["origin"] == "retry"
+    assert echo["unattended"] is True
 
 
 async def test_network_retry_turn_that_succeeds_clears_the_retry(tmp_path: Path) -> None:
