@@ -188,7 +188,7 @@ test.describe('placing cards with the mouse', () => {
       status: 'in_progress',
       placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
     })
-    expect(await titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
   })
 
   test('Escape cancels a drag without a request', async ({ page }) => {
