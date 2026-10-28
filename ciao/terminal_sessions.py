@@ -1188,11 +1188,10 @@ class TerminalSessionManager:
     async def _reader(self, session: _Session) -> None:
         """Move the terminal's output into the ring, until it ends.
 
-        The read is non-blocking by contract, so it is polled inline
-        and the reader backs off from 1 ms to the cap while quiet and resets
-        on output. The reader never
-        waits for a consumer: the ring holds the output, and each
-        client asks for it by offset. The reader never touches the
+        The read is non-blocking by contract, so it is polled inline:
+        the reader backs off from 1 ms to the cap while quiet and resets
+        on output. The reader never waits for a consumer: the ring holds
+        the output, and each client asks for it by offset. The reader never touches the
         pending input either, so a terminal that will not take its
         input cannot stop its output.
 
