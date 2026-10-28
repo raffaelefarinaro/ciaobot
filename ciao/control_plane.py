@@ -1547,8 +1547,11 @@ class CiaoControlPlane:
         current_turn = str(max(0, int(chat.user_turn_count) - 1))
         return bool(chat.user_turn_unattended.get(current_turn))
 
-    #: Turn origins a person's own message produces. ``retry`` replays one the
-    #: person typed; every other origin in ``TURN_ORIGINS`` is the engine's.
+    #: Turn origins a person's own message produces. ``retry`` replays an
+    #: earlier prompt, whether the person asked for it or the engine's deferred
+    #: retry ran it; an unattended retry is still refused by
+    #: ``_unattended_turn``. Every other origin in ``TURN_ORIGINS`` is the
+    #: engine's.
     _PERSON_TURN_ORIGINS = frozenset({"", "retry"})
     #: Helper chats the engine starts from its own prompt, not a typed one.
     _ENGINE_HELPER_KINDS = frozenset({"memory_pass", "update_task", "proposal"})
