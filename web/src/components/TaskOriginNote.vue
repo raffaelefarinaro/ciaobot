@@ -96,7 +96,7 @@ const canMarkDone = computed(() => {
 })
 
 /**
- * The task link opens its peek over this chat, the same as a task link in a
+ * The task link opens its editor over this chat, the same as a task link in a
  * message. A modified click is left to the browser, which opens the task page
  * in a new tab.
  */

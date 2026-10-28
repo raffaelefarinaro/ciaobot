@@ -1629,6 +1629,9 @@ export const useProjectStore = defineStore('projects', () => {
     const previousWorkspace = activeWorkspace.value
     const previousChatId = activeChatId.value
     const crossing = project.workspace !== previousWorkspace
+    // A surface holding an unsaveable draft refuses the switch; creating the
+    // chat anyway would open it in the workspace the overlay is still drawing.
+    if (crossing && !(await workspaceSwitchAllowed(previousWorkspace))) return
     if (crossing && previousChatId) {
       disconnectWs(previousChatId)
     }
@@ -2066,8 +2069,7 @@ export const useProjectStore = defineStore('projects', () => {
       // requests must not be undone by the route that started them.
       const urlChatId = routeChatId()
       if (urlChatId && !canOpenChat(urlChatId)) await ensureChatInfo(urlChatId)
-      if (urlChatId && canOpenChat(urlChatId)) {
-        await ensureWorkspaceForChat(urlChatId)
+      if (urlChatId && canOpenChat(urlChatId) && await ensureWorkspaceForChat(urlChatId)) {
         activeChatId.value = urlChatId
       } else if (!bootstrapped.value) {
         activeChatId.value = null
@@ -4109,12 +4111,21 @@ export const useProjectStore = defineStore('projects', () => {
     return chats.value.some(ch => ch.chat_id === chatId && ch.archived)
   }
 
-  async function ensureWorkspaceForChat(chatId: string) {
+  /**
+   * Put the chat's own workspace on screen before the chat is opened.
+   *
+   * Resolves false when a workspace-switch guard refused the move (an overlay
+   * with a draft that cannot be saved): the caller must not go on to open a
+   * chat that belongs to the workspace it was told to stay out of.
+   */
+  async function ensureWorkspaceForChat(chatId: string): Promise<boolean> {
     const project = projectFor(chatId)
-    if (!project || project.workspace === activeWorkspace.value) return
+    if (!project || project.workspace === activeWorkspace.value) return true
+    if (!(await workspaceSwitchAllowed(activeWorkspace.value))) return false
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = project.workspace
     persistState()
+    return true
   }
 
   async function ensureChatInfo(chatId: string): Promise<void> {
@@ -4131,7 +4142,7 @@ export const useProjectStore = defineStore('projects', () => {
   async function openChatFromDeepLink(chatId: string) {
     await ensureChatInfo(chatId)
     if (!canOpenChat(chatId)) return
-    await ensureWorkspaceForChat(chatId)
+    if (!(await ensureWorkspaceForChat(chatId))) return
     if (activeChatId.value === chatId) {
       // switchChat's "already active" fast path only marks read — fine for
       // e.g. re-clicking the same sidebar entry, but arriving via a
@@ -4166,7 +4177,7 @@ export const useProjectStore = defineStore('projects', () => {
     chatId: string,
     opts?: { skipHistory?: boolean; keepSubView?: boolean },
   ) {
-    await ensureWorkspaceForChat(chatId)
+    if (!(await ensureWorkspaceForChat(chatId))) return
     // Always sync URL, even if activeChatId already matches (we may have
     // landed here from /settings or /schedules where the chat route isn't
     // currently active).
@@ -4189,7 +4200,14 @@ export const useProjectStore = defineStore('projects', () => {
     // still leaves the sub-view, which is what that click means.
     const keepSubView = Boolean(opts?.keepSubView) && currentRouteChatId === chatId
     if ((currentRouteChatId !== chatId || currentRoute.params.agentId) && !keepSubView) {
-      router.push(`/chat/${chatId}`)
+      // Awaited, and the failure matters: a guard can refuse this navigation to
+      // keep an unsaved task draft on screen. Going on to switch `activeChatId`
+      // would then draw the new chat under the overlay while the URL stayed on
+      // the old one. vue-router resolves a cancelled or aborted push with a
+      // NavigationFailure instead of rejecting it, so a truthy answer means the
+      // view did not change and this switch must not either.
+      const failure = await router.push(`/chat/${chatId}`)
+      if (failure) return
     }
     if (activeChatId.value === chatId) {
       void markRead(chatId)
@@ -4225,12 +4243,37 @@ export const useProjectStore = defineStore('projects', () => {
     if (workspaceSwitchGuard === guard) workspaceSwitchGuard = null
   }
 
-  // Resolves true once the workspace is active (or already was), false when the
-  // settings guard declined: a caller that goes on to act in `ws` must stop.
+  /**
+   * Guards that run after the Settings slot, in registration order.
+   *
+   * A registry rather than a second slot because more than one surface can own
+   * unsaved state at once (the task overlay is the first), and whichever mounts
+   * last must not take the slot from the one before it. `false` keeps the
+   * workspace and stops the switch; the returned function unregisters.
+   */
+  const workspaceSwitchGuards = new Set<(from: WorkspaceName) => Promise<boolean>>()
+  function registerWorkspaceSwitchGuard(guard: (from: WorkspaceName) => Promise<boolean>): () => void {
+    workspaceSwitchGuards.add(guard)
+    return () => { workspaceSwitchGuards.delete(guard) }
+  }
+
+  /** Every guard that must agree before `from` may be left; false refuses the switch. */
+  async function workspaceSwitchAllowed(from: WorkspaceName): Promise<boolean> {
+    if (workspaceSwitchGuard && !(await workspaceSwitchGuard(from))) return false
+    // A snapshot, because a guard that unregisters itself while it runs must
+    // not make the iteration skip the next one.
+    for (const guard of [...workspaceSwitchGuards]) {
+      if (!(await guard(from))) return false
+    }
+    return true
+  }
+
+  // Resolves true once the workspace is active (or already was), false when a
+  // guard declined: a caller that goes on to act in `ws` must stop.
   async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }): Promise<boolean> {
     const transition = options?.transition !== false
     if (activeWorkspace.value === ws) return true
-    if (workspaceSwitchGuard && !(await workspaceSwitchGuard(activeWorkspace.value))) return false
+    if (!(await workspaceSwitchAllowed(activeWorkspace.value))) return false
     if (activeWorkspace.value === ws) return true
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
@@ -7034,7 +7077,7 @@ export const useProjectStore = defineStore('projects', () => {
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
+    switchChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,

@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
 
 /**
- * The peek overlay's task read. A peek over a chat must show the task of the
- * workspace on screen, drop any answer that a newer open or a close has
- * overtaken, and survive a live re-read without blanking what it shows.
+ * The peek store holds a target, nothing more.
+ *
+ * The task surface that a target opens owns the read, the editor, resolution
+ * and delegation; a store read beside it was a second authority that could
+ * disagree with what the user was editing. So this covers the contract the host
+ * relies on: a target records the workspace it opened in, a same-id open is a
+ * no-op (a self-link must not reset the open editor), a different id replaces
+ * it, and a workspace change that bypassed the switch guard closes it.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -28,67 +33,9 @@ vi.mock('./projects', async () => {
 import { api } from '../lib/api'
 import * as projects from './projects'
 import { useItemPeekStore } from './itemPeek'
-import { useTaskSignalsStore } from './taskSignals'
-import type { Task } from '../lib/types'
 
 const get = vi.mocked(api.get)
 const activeWorkspace = (projects as unknown as { __activeWorkspace: ReturnType<typeof ref<string>> }).__activeWorkspace
-
-const REVISION = 'a'.repeat(64)
-
-function task(overrides: Partial<Task> = {}): Task {
-  return {
-    id: 'ship',
-    title: 'Ship the board',
-    status: 'in_progress',
-    project_id: '',
-    due: '',
-    assignee: 'agent',
-    chat_id: '',
-    attempt_id: '',
-    linked_chats: [],
-    created_at: '',
-    updated_at: '',
-    revision: REVISION,
-    relative_path: 'Tasks/ship.md',
-    attempt_state: '',
-    attempt_outcome: '',
-    attempt_summary: '',
-    attempt_detail: '',
-    live_attempt_id: '',
-    completed_at: null,
-    has_resolution: false,
-    ...overrides,
-  }
-}
-
-function answer(overrides: Partial<Task> = {}): { task: Record<string, unknown> } {
-  return {
-    task: {
-      ...task(overrides),
-      body: '',
-      resolution: '',
-      completions: [],
-      delegation_log: '',
-      updates: [],
-    },
-  }
-}
-
-/** A promise the test resolves by hand, so a read can be held in flight. */
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (e: unknown) => void } {
-  let resolve!: (value: T) => void
-  let reject!: (e: unknown) => void
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res
-    reject = rej
-  })
-  return { promise, resolve, reject }
-}
-
-function httpError(status: number, payload?: unknown): Error {
-  return Object.assign(new Error(`HTTP ${status}`), { status, payload })
-}
 
 beforeEach(() => {
   setActivePinia(createPinia())
@@ -97,137 +44,62 @@ beforeEach(() => {
 })
 
 describe('itemPeek store', () => {
-  it('reads the task in the active workspace', async () => {
-    get.mockResolvedValueOnce(answer({ title: 'Ship the board' }))
+  it('records the target and the workspace it opened in', () => {
     const peek = useItemPeekStore()
+    expect(peek.isOpen).toBe(false)
+
     peek.openTask('ship')
+
     expect(peek.isOpen).toBe(true)
-    expect(peek.loading).toBe(true)
-    await vi.waitFor(() => expect(peek.task?.title).toBe('Ship the board'))
-    expect(get).toHaveBeenCalledWith('/api/tasks/ship?workspace=personal')
-    expect(peek.loading).toBe(false)
-    expect(peek.notFound).toBe(false)
-    expect(peek.error).toBe('')
+    expect(peek.target).toEqual({ kind: 'task', id: 'ship', workspace: 'personal' })
   })
 
-  it('a 404 is not-found, not an error', async () => {
-    get.mockRejectedValueOnce(httpError(404))
-    const peek = useItemPeekStore()
-    peek.openTask('gone')
-    await vi.waitFor(() => expect(peek.notFound).toBe(true))
-    expect(peek.error).toBe('')
-    expect(peek.task).toBeNull()
-  })
-
-  it('another failure keeps the server\'s sentence', async () => {
-    get.mockRejectedValueOnce(httpError(500, { error: { code: 'locked', message: 'The task is being edited' } }))
+  it('reads nothing: the surface owns the task', async () => {
     const peek = useItemPeekStore()
     peek.openTask('ship')
-    await vi.waitFor(() => expect(peek.error).toBe('The task is being edited'))
-    expect(peek.notFound).toBe(false)
-  })
-
-  it('retry from an error shows loading until the answer lands', async () => {
-    get.mockRejectedValueOnce(httpError(500, { error: { message: 'The task is being edited' } }))
-    const peek = useItemPeekStore()
-    peek.openTask('ship')
-    await vi.waitFor(() => expect(peek.error).toBe('The task is being edited'))
-
-    const retry = deferred<unknown>()
-    get.mockReturnValueOnce(retry.promise as Promise<never>)
-    void peek.refresh()
-    expect(peek.loading).toBe(true)
-    expect(peek.error).toBe('')
-
-    retry.resolve(answer({ title: 'Back' }))
-    await vi.waitFor(() => expect(peek.task?.title).toBe('Back'))
-    expect(peek.loading).toBe(false)
-    expect(peek.error).toBe('')
-  })
-
-  it('a failed background refresh keeps the task on screen', async () => {
-    get.mockResolvedValueOnce(answer({ title: 'Kept' }))
-    const peek = useItemPeekStore()
-    peek.openTask('ship')
-    await vi.waitFor(() => expect(peek.task?.title).toBe('Kept'))
-
-    get.mockRejectedValueOnce(httpError(500, { error: { message: 'Connection dropped' } }))
-    await peek.refresh()
-    expect(peek.task?.title).toBe('Kept')
-    expect(peek.error).toBe('')
-    expect(peek.notFound).toBe(false)
-    expect(peek.loading).toBe(false)
-  })
-
-  it('a background refresh that finds the task gone shows not-found', async () => {
-    get.mockResolvedValueOnce(answer({ title: 'Soon gone' }))
-    const peek = useItemPeekStore()
-    peek.openTask('ship')
-    await vi.waitFor(() => expect(peek.task?.title).toBe('Soon gone'))
-
-    get.mockRejectedValueOnce(httpError(404))
-    await peek.refresh()
-    expect(peek.task).toBeNull()
-    expect(peek.notFound).toBe(true)
-    expect(peek.error).toBe('')
-  })
-
-  it('a late answer for an earlier task is dropped', async () => {
-    const first = deferred<unknown>()
-    const second = deferred<unknown>()
-    get.mockReturnValueOnce(first.promise as Promise<never>).mockReturnValueOnce(second.promise as Promise<never>)
-    const peek = useItemPeekStore()
-    peek.openTask('first')
-    peek.openTask('second')
-    second.resolve(answer({ id: 'second', title: 'Second' }))
-    await vi.waitFor(() => expect(peek.task?.id).toBe('second'))
-    first.resolve(answer({ id: 'first', title: 'First' }))
+    await nextTick()
     await Promise.resolve()
-    await Promise.resolve()
-    expect(peek.task?.id).toBe('second')
+    expect(get).not.toHaveBeenCalled()
   })
 
-  it('close drops an answer still in flight', async () => {
-    const pending = deferred<unknown>()
-    get.mockReturnValueOnce(pending.promise as Promise<never>)
+  it('does nothing when the same task is already the target', () => {
+    const peek = useItemPeekStore()
+    peek.openTask('ship')
+    const first = peek.target
+
+    // A task linking to itself, or a second click on its own link, must leave
+    // the editor the user is typing in exactly where it is.
+    peek.openTask('ship')
+
+    expect(peek.target).toBe(first)
+  })
+
+  it('replaces the target when another task is opened', () => {
+    const peek = useItemPeekStore()
+    peek.openTask('ship')
+    peek.openTask('doing')
+
+    expect(peek.target).toEqual({ kind: 'task', id: 'doing', workspace: 'personal' })
+  })
+
+  it('close clears the target', () => {
     const peek = useItemPeekStore()
     peek.openTask('ship')
     peek.close()
+
     expect(peek.isOpen).toBe(false)
-    pending.resolve(answer())
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(peek.task).toBeNull()
-    expect(peek.isOpen).toBe(false)
+    expect(peek.target).toBeNull()
   })
 
-  it('a workspace switch closes the peek', async () => {
-    get.mockResolvedValueOnce(answer())
+  it('a workspace change that bypassed the guard closes the target', async () => {
     const peek = useItemPeekStore()
     peek.openTask('ship')
-    await vi.waitFor(() => expect(peek.task).not.toBeNull())
+
+    // Rename, delete or an external change: the guarded switch is the normal
+    // path, and this is the cleanup for the ones that are not.
     activeWorkspace.value = 'work'
     await nextTick()
+
     expect(peek.isOpen).toBe(false)
-    expect(peek.task).toBeNull()
-  })
-
-  it('a tasks_changed re-read refreshes the open task without blanking it', async () => {
-    get.mockResolvedValueOnce(answer({ title: 'Before' }))
-    const peek = useItemPeekStore()
-    const signals = useTaskSignalsStore()
-    peek.openTask('ship')
-    await vi.waitFor(() => expect(peek.task?.title).toBe('Before'))
-
-    const reread = deferred<unknown>()
-    get.mockReturnValueOnce(reread.promise as Promise<never>)
-    signals.tasks = [task({ title: 'After' })]
-    await nextTick()
-    expect(get).toHaveBeenCalledTimes(2)
-    expect(peek.task?.title).toBe('Before')
-    expect(peek.loading).toBe(false)
-
-    reread.resolve(answer({ title: 'After' }))
-    await vi.waitFor(() => expect(peek.task?.title).toBe('After'))
   })
 })
