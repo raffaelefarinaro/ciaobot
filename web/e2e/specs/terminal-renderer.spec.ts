@@ -71,3 +71,28 @@ test('the screen draws, gates input, resizes and disposes', async ({ page }) => 
   expect(consoleMessages.slice(loggedBefore)).toEqual([])
   expect(pageErrors).toEqual([])
 })
+
+test('a TUI start-up probe is answered and the screen keeps drawing', async ({ page }) => {
+  // A full-screen program opens with mode queries (`CSI ? Ps $ p`). The
+  // shipped xterm once threw on them — a build-target miscompile — and a
+  // screen that throws mid-parse never acknowledges another write.
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => {
+    pageErrors.push(error.message)
+  })
+
+  await page.goto(HARNESS)
+  await page.waitForFunction(() => Boolean(window.__terminal))
+  // xterm answers a query only while the screen may send input.
+  await page.evaluate(() => window.__terminal.setInputEnabled(true))
+
+  const probe = '\x1b[?2026$p\x1b[?2004$p'
+  expect(await page.evaluate((text) => window.__terminal.write(text), probe)).toBe(probe.length)
+  const replies = await page.evaluate(() =>
+    window.__terminal.inputs().map((bytes) => String.fromCharCode(...bytes)))
+  expect(replies).toEqual(['\x1b[?2026;2$y', '\x1b[?2004;2$y'])
+
+  expect(await page.evaluate((text) => window.__terminal.write(text), TEXT)).toBe(probe.length + TEXT.length)
+  await expect(page.locator('#terminal')).toContainText(TEXT)
+  expect(pageErrors).toEqual([])
+})
