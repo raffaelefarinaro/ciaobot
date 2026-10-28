@@ -483,7 +483,9 @@ describe('Connect Google account dialog', () => {
       const dialog = await openDialog(wrapper)
       const replace = dialog.get('.gws-checks .gws-link-btn')
       expect(replace.text()).toBe('Replace file')
-      expect(replace.attributes('aria-label')).toBe('Replace client_secret.json')
+      const label = replace.attributes('aria-label')
+      expect(label).toBe('Replace file: client_secret.json')
+      expect(label!.startsWith(replace.text())).toBe(true)
     } finally {
       wrapper.unmount()
     }

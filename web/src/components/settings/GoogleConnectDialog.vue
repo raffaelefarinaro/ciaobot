@@ -44,7 +44,7 @@
               v-if="profile?.client_secret_present"
               type="button"
               class="gws-link-btn"
-              aria-label="Replace client_secret.json"
+              aria-label="Replace file: client_secret.json"
               @click="fileInput?.click()"
             >Replace file</button>
           </li>
