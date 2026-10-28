@@ -107,23 +107,24 @@ describe('TaskOriginNote', () => {
 
   it('names the task, links to its editor, and says the agent is running', async () => {
     const wrapper = mountNote([task()])
-    expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
+    expect(wrapper.get('.task-origin-title').text()).toContain('Ship the board')
+    expect(wrapper.get('.task-origin-label').text()).toBe('Task')
     const link = wrapper.get('a')
     expect(link.attributes('href')).toBe('/tasks/ship')
     await link.trigger('click')
     expect(openTask).toHaveBeenCalledWith('ship')
-    expect(wrapper.get('.task-origin-status').text()).toBe('Running')
+    expect(wrapper.get('.task-origin-pill').text()).toBe('Running')
     // The user can always override: detaching stops the turn.
-    expect(wrapper.get('button').text()).toBe('Mark done')
+    expect(wrapper.get('button').text()).toBe('Mark done…')
   })
 
   it('says the agent needs input, and still lets the user mark it done', () => {
     const wrapper = mountNote([task({ status: 'in_progress', attempt_state: 'needs_you', attempt_outcome: 'needs_input' })])
-    expect(wrapper.get('.task-origin-status').text()).toBe('Needs input')
-    expect(wrapper.get('button').text()).toBe('Mark done')
+    expect(wrapper.get('.task-origin-pill').text()).toBe('Needs input')
+    expect(wrapper.get('button').text()).toBe('Mark done…')
   })
 
-  it('Mark done overrides the attempt: asks, detaches, completes, then hands the archive back', async () => {
+  it('Mark done overrides the attempt: detaches, completes, then hands the archive back, with no modal', async () => {
     const wrapper = mountNote([task({ attempt_state: 'needs_you', attempt_detail: 'the turn ended without a report from the agent' })])
     const NEXT = 'b'.repeat(64)
     apiPost.mockImplementation((url: string) => Promise.resolve(
@@ -132,10 +133,10 @@ describe('TaskOriginNote', () => {
     await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(apiPost).not.toHaveBeenCalled()
-    await wrapper.findAll('button').find((b) => b.text() === 'Mark done')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === 'Mark done and archive')!.trigger('click')
     await flushPromises()
 
-    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(askConfirm).not.toHaveBeenCalled()
     expect(apiPost.mock.calls.map((c) => c[0])).toEqual([
       '/api/tasks/ship/attempt/att-1/detach',
       '/api/tasks/ship/complete',
@@ -144,22 +145,22 @@ describe('TaskOriginNote', () => {
     expect(wrapper.emitted('marked-done')).toHaveLength(1)
   })
 
-  it('Mark done does nothing when the user cancels', async () => {
-    askConfirm.mockResolvedValue(false)
+  it('Cancel in the form closes it and writes nothing', async () => {
     const wrapper = mountNote([task({ attempt_state: 'interrupted', live_attempt_id: '' })])
     await wrapper.get('button').trigger('click')
     await flushPromises()
-    await wrapper.findAll('button').find((b) => b.text() === 'Mark done')!.trigger('click')
+    await wrapper.findAll('button').find((b) => b.text() === 'Cancel')!.trigger('click')
     await flushPromises()
-    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(askConfirm).not.toHaveBeenCalled()
     expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.find('#task-origin-resolution').exists()).toBe(false)
     expect(wrapper.emitted('marked-done')).toBeUndefined()
   })
 
   it('offers Approve Done for a result waiting on review, at the revision read', async () => {
     const reviewed = task({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })
     const wrapper = mountNote([reviewed])
-    expect(wrapper.get('.task-origin-status').text()).toBe('Agent says done')
+    expect(wrapper.get('.task-origin-pill').text()).toBe('Agent says done')
     const button = wrapper.get('button')
     expect(button.text()).toBe('Approve Done')
     expect(button.classes()).toContain('btn-small')
@@ -175,7 +176,7 @@ describe('TaskOriginNote', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', { workspace: 'personal', expected_revision: REVISION, resolution: '' })
     expect(apiGet).toHaveBeenCalledWith('/api/tasks?workspace=personal')
     expect(wrapper.find('button').exists()).toBe(false)
-    expect(wrapper.get('.task-origin-status').text()).toBe('Done')
+    expect(wrapper.get('.task-origin-pill').text()).toBe('Done')
   })
 
   it('sends the typed note as typed, trimmed', async () => {
@@ -197,11 +198,25 @@ describe('TaskOriginNote', () => {
     await wrapper.get('button').trigger('click')
     await flushPromises()
 
-    expect(wrapper.findAll('.task-origin-actions button').map(b => b.text())).toEqual(['Mark done', 'Cancel'])
+    expect(wrapper.findAll('.task-origin-actions button').map(b => b.text())).toEqual(['Mark done and archive', 'Cancel'])
     expect(wrapper.text()).not.toContain('Complete without note')
-    expect(wrapper.get('label[for="task-origin-resolution"]').text()).toBe('How was this completed? (optional)')
+    expect(wrapper.get('label[for="task-origin-resolution"]').text()).toBe('How was it completed? (optional)')
     // A blank note is allowed: the action is never held back by the field.
-    expect((wrapper.get('.task-origin-actions .task-origin-approve').element as HTMLButtonElement).disabled).toBe(false)
+    expect((wrapper.get('.task-origin-actions .btn-primary').element as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('the submit carries no stray margin', async () => {
+    const wrapper = mountNote([task()])
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.task-origin-actions .btn-primary').classes()).not.toContain('task-origin-approve')
+  })
+
+  it('the form states the consequence', async () => {
+    const wrapper = mountNote([task()])
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.task-origin-conseq').text()).toContain('archives this chat')
   })
 
   it('moves focus into the note field when the prompt opens', async () => {
@@ -223,7 +238,7 @@ describe('TaskOriginNote', () => {
 
     // The prompt is gone, so its only button is the one that opened it.
     const opener = wrapper.get('button')
-    expect(opener.text()).toBe('Mark done')
+    expect(opener.text()).toBe('Mark done…')
     expect(document.activeElement).toBe(opener.element)
   })
 
@@ -277,13 +292,13 @@ describe('TaskOriginNote', () => {
       status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done',
       attempt_id: 'att-2', live_attempt_id: 'att-2', chat_id: 'chat-2',
     })])
-    expect(wrapper.get('.task-origin-status').text()).toBe('A newer attempt holds this task')
+    expect(wrapper.get('.task-origin-pill').text()).toBe('A newer attempt holds this task')
     expect(wrapper.find('button').exists()).toBe(false)
   })
 
   it('reads Done for an approved task', () => {
     const wrapper = mountNote([task({ status: 'done', attempt_state: 'ready_for_review', attempt_id: '', live_attempt_id: '' })])
-    expect(wrapper.get('.task-origin-status').text()).toBe('Done')
+    expect(wrapper.get('.task-origin-pill').text()).toBe('Done')
     expect(wrapper.find('button').exists()).toBe(false)
   })
 
@@ -296,9 +311,9 @@ describe('TaskOriginNote', () => {
 
   it('falls back to the stamp alone when the store does not hold the task', () => {
     const wrapper = mountNote([])
-    expect(wrapper.text()).toContain('This chat works on a task on the board.')
+    expect(wrapper.get('.task-origin-title').text()).toContain('A task on the board')
     expect(wrapper.get('a').attributes('href')).toBe('/tasks/ship')
-    expect(wrapper.find('.task-origin-status').exists()).toBe(false)
+    expect(wrapper.find('.task-origin-pill').exists()).toBe(false)
   })
 
   it('renders nothing for an ordinary chat', () => {
@@ -311,7 +326,8 @@ describe('TaskOriginNote', () => {
       [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] })],
       { chat_id: 'chat-1' },
     )
-    expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
+    expect(wrapper.get('.task-origin-label').text()).toBe('Linked task')
+    expect(wrapper.get('.task-origin-title').text()).toContain('Write the spec')
     const link = wrapper.get('a')
     expect(link.attributes('href')).toBe('/tasks/linked')
     await link.trigger('click')
@@ -330,8 +346,8 @@ describe('TaskOriginNote', () => {
       )
       // The link is a relation, not a delegation: the task's own state and its
       // completion are none of this chat's business.
-      expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
-      expect(wrapper.find('.task-origin-status').exists()).toBe(false)
+      expect(wrapper.get('.task-origin-title').text()).toContain('Write the spec')
+      expect(wrapper.find('.task-origin-pill').exists()).toBe(false)
       expect(wrapper.find('button').exists()).toBe(false)
       expect(wrapper.text()).not.toContain('Approve')
     }
@@ -345,10 +361,7 @@ describe('TaskOriginNote', () => {
       ],
       { chat_id: 'chat-1' },
     )
-    expect(wrapper.findAll('.task-origin-line').map(line => line.text())).toEqual([
-      'This chat is linked to the task Alpha.',
-      'This chat is linked to the task Zulu.',
-    ])
+    expect(wrapper.findAll('.task-origin-title').map(t => t.text().replace(' · open on board', ''))).toEqual(['Alpha', 'Zulu'])
   })
 
   it('leaves a modified click on a linked task to the browser', async () => {
@@ -375,9 +388,9 @@ describe('TaskOriginNote', () => {
 
   it('does not repeat a task the chat is both delegated to and linked to', () => {
     const wrapper = mountNote([task({ id: 'ship', chat_id: 'chat-1', linked_chats: ['chat-1'] })])
-    expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
-    expect(wrapper.text()).not.toContain('This chat is linked to the task')
-    expect(wrapper.findAll('.task-origin-line')).toHaveLength(1)
+    expect(wrapper.get('.task-origin-title').text()).toContain('Ship the board')
+    expect(wrapper.text()).not.toContain('Linked task')
+    expect(wrapper.findAll('.task-origin-title')).toHaveLength(1)
   })
 
   it('still names a linked task when the chat works on another one', () => {
@@ -385,7 +398,8 @@ describe('TaskOriginNote', () => {
       task({ id: 'ship', chat_id: 'chat-1', linked_chats: [] }),
       task({ id: 'other', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] }),
     ])
-    expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
-    expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
+    const titles = wrapper.findAll('.task-origin-title').map(t => t.text())
+    expect(titles[0]).toContain('Ship the board')
+    expect(titles[1]).toContain('Write the spec')
   })
 })

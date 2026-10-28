@@ -3,24 +3,26 @@
  * Where a chat's tasks come from: the board task it works on, and the board
  * tasks it is linked to.
  *
- * One sentence naming the task, linked to its editor on the board, then the
- * agent's state in words. When the agent reported done and the result waits for
- * review, one neutral **Approve Done** — the same completion the board's card
- * makes (`POST /api/tasks/{id}/complete` at the revision read), so the user can
- * approve from where they read the result. A task waiting on the user gets no
- * button: the composer is the answer.
+ * A small Task label with the agent's state as a status pill, then the task
+ * title as one link to its editor on the board. When the agent reported done
+ * and the result waits for review, one neutral **Approve Done** — the same
+ * completion the board's card makes (`POST /api/tasks/{id}/complete` at the
+ * revision read), so the user can approve from where they read the result. A
+ * task waiting on the user gets no button: the composer is the answer.
  *
  * The completion asks for a note in the field, and the note is optional: one
  * action completes the task, and a blank note completes it without a
- * resolution — the same contract as the board's completion sheet.
+ * resolution — the same contract as the board's completion sheet. The form
+ * states its consequence and is the confirmation: **Mark done and archive**
+ * needs no second modal.
  *
  * A task the chat is only *linked* to (`task link-chat`) is named in its own
- * read-only sentence, with no state and no completion: the chat did not run
+ * read-only row (a Linked task label and the title link), with no state and no completion: the chat did not run
  * that task, so it has nothing to report and nothing to close.
  *
  * Read from `taskSignals`, the app-wide view of the active workspace's tasks. A
  * task that store does not hold (not loaded yet, or deleted) still gets the
- * sentence, from the chat's own `task_delegation` stamp, with no state.
+ * row, from the chat's own `task_delegation` stamp, with no state.
  */
 import { computed, nextTick, ref, watch } from 'vue'
 import { taskAttemptLabel } from '../lib/taskBoard'
@@ -29,7 +31,6 @@ import type { ChatInfo, Task } from '../lib/types'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import { useItemPeekStore } from '../stores/itemPeek'
 import AppIcon from './AppIcon.vue'
-import { askConfirm } from '../lib/confirm'
 import { isPlainLeftClick } from '../lib/appLinks'
 
 const props = defineProps<{
@@ -72,6 +73,11 @@ const statusWords = computed(() => {
   if (t.status === 'done') return 'Done'
   if (superseded.value) return 'A newer attempt holds this task'
   return taskAttemptLabel(t.attempt_state, t.attempt_outcome, t.attempt_detail)
+})
+
+const pillTone = computed(() => {
+  if (task.value?.status === 'done') return 'done'
+  return superseded.value ? 'muted' : 'warn'
 })
 
 const canApprove = computed(() => {
@@ -141,11 +147,6 @@ async function markDone(resolution: string): Promise<void> {
   const t = task.value
   const workspace = taskSignals.loadedWorkspace
   if (!t || !workspace || approving.value) return
-  const ok = await askConfirm(
-    `Mark "${t.title}" done? Its attempt is detached, the task is closed, and this chat is archived. The transcript stays in your vault.`,
-    { title: 'Mark done', confirmLabel: 'Mark done and archive' },
-  )
-  if (!ok) return
   approving.value = true
   approveError.value = ''
   let done = false
@@ -199,29 +200,31 @@ function submitNote(): void {
     <AppIcon class="task-origin-icon" name="activity" :size="16" />
     <div class="task-origin-body">
       <template v-if="taskId">
-        <p class="task-origin-line">
-          <template v-if="task">This chat works on the task <a class="task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink($event, taskId)">{{ task.title || taskId }}</a>.</template>
-          <template v-else>This chat works on <a class="task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink($event, taskId)">a task on the board</a>.</template>
-        </p>
-        <p v-if="statusWords" class="task-origin-status">{{ statusWords }}</p>
+        <div class="task-origin-top">
+          <span class="task-origin-label">Task</span>
+          <span v-if="statusWords" class="task-origin-pill" :class="pillTone">{{ statusWords }}</span>
+        </div>
+        <a class="task-origin-link task-origin-title" :href="`/tasks/${taskId}`" @click="onTaskLink($event, taskId)">{{ task ? (task.title || taskId) : 'A task on the board' }}<span class="task-origin-open"> · open on board</span></a>
         <template v-if="noteOpen">
-          <label class="task-origin-note-label" for="task-origin-resolution">How was this completed? (optional)</label>
+          <label class="task-origin-note-label" for="task-origin-resolution">How was it completed? <span class="task-origin-optional">(optional)</span></label>
           <textarea
             id="task-origin-resolution"
             ref="noteField"
             v-model="noteDraft"
             class="task-origin-note"
             rows="3"
+            placeholder="What worked, and how did you check it?"
             :disabled="approving"
           ></textarea>
+          <p class="task-origin-conseq">{{ canApprove ? 'Marks the task done and archives this chat.' : 'Closes the task and archives this chat. The transcript stays in your vault.' }}</p>
           <div class="task-origin-actions">
             <button
               type="button"
-              class="btn-small task-origin-approve"
+              class="btn-small btn-primary"
               :disabled="approving"
               @click="submitNote()"
-            >{{ approving ? 'Saving…' : (canApprove ? 'Approve Done' : 'Mark done') }}</button>
-            <button type="button" class="btn-small" :disabled="approving" @click="cancelClosure">Cancel</button>
+            >{{ approving ? 'Saving…' : (canApprove ? 'Approve Done' : 'Mark done and archive') }}</button>
+            <button type="button" class="btn-small task-origin-cancel" :disabled="approving" @click="cancelClosure">Cancel</button>
           </div>
         </template>
         <button
@@ -241,10 +244,13 @@ function submitNote(): void {
           :disabled="approving"
           :aria-label="`Mark ${task!.title} done and archive this chat`"
           @click="beginClosure"
-        >Mark done</button>
+        >Mark done…</button>
         <p v-if="approveError" class="task-origin-error" role="alert">{{ approveError }}</p>
       </template>
-      <p v-for="linked in linkedTasks" :key="linked.id" class="task-origin-line">This chat is linked to the task <a class="task-origin-link" :href="`/tasks/${linked.id}`" @click="onTaskLink($event, linked.id)">{{ linked.title || linked.id }}</a>.</p>
+      <div v-for="linked in linkedTasks" :key="linked.id" class="task-origin-line">
+        <div class="task-origin-top"><span class="task-origin-label">Linked task</span></div>
+        <a class="task-origin-link task-origin-title" :href="`/tasks/${linked.id}`" @click="onTaskLink($event, linked.id)">{{ linked.title || linked.id }}<span class="task-origin-open"> · open on board</span></a>
+      </div>
     </div>
   </div>
 </template>
@@ -266,26 +272,44 @@ function submitNote(): void {
 .task-origin-icon { flex: none; margin-top: 2px; color: var(--fg3); }
 .task-origin-body { min-width: 0; }
 .task-origin-line { margin: 0; overflow-wrap: anywhere; }
-/* Two sentences in a row — a delegated task and a linked one, or two links —
-   read as two lines, not one block. */
-.task-origin-line + .task-origin-line { margin-top: 2px; }
+.task-origin-line + .task-origin-line { margin-top: 10px; }
+.task-origin-top { display: flex; gap: 8px; align-items: center; }
+.task-origin-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--fg3);
+}
+.task-origin-pill {
+  --tone: var(--warning);
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 13%, transparent);
+}
+.task-origin-pill.done { --tone: var(--success); }
+.task-origin-pill.muted { --tone: var(--fg3); }
+.task-origin-title { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+.task-origin-open { color: var(--fg3); font-weight: 400; white-space: nowrap; }
+.task-origin-conseq { margin: 6px 0 0; color: var(--fg3); font-size: var(--text-xs); }
+.task-origin-optional { color: var(--fg3); }
+.task-origin-cancel { margin-left: auto; }
 .task-origin-link {
   color: var(--fg);
-  font-weight: 650;
-  text-decoration: underline;
-  text-decoration-color: var(--border-strong);
+  font-weight: 600;
+  text-decoration: none;
   text-underline-offset: 3px;
 }
-.task-origin-link:hover { color: var(--fg); text-decoration-color: currentColor; }
+.task-origin-link:hover { color: var(--fg); text-decoration: underline; }
 .task-origin-link:focus-visible {
+  text-decoration: underline;
   outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-xs);
-}
-.task-origin-status {
-  margin: 2px 0 0;
-  color: var(--fg3);
-  font-size: var(--text-sm);
 }
 .task-origin-approve { margin-top: 8px; }
 .task-origin-note-label {
@@ -302,6 +326,7 @@ function submitNote(): void {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
   margin-top: 8px;
 }
 .task-origin-approve:disabled { opacity: 0.6; cursor: default; }
@@ -310,7 +335,6 @@ function submitNote(): void {
   color: var(--fg2);
   font-size: var(--text-sm);
 }
-/* The link is inline in a sentence, which the target-size rule exempts. */
 @media (pointer: coarse) {
   .task-origin-approve,
   .task-origin-actions .btn-small { min-height: 44px; }

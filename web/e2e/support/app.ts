@@ -63,6 +63,37 @@ export function activeWorkspaceButton(page: Page) {
 }
 
 /**
+ * Finish an active pointer drag with a destination move and release in the same
+ * JavaScript task, before Vue can flush the preview. The caller must already
+ * have pressed and activated the drag with real mouse events; this keeps the
+ * browser's layout and hit testing while forcing the pending-render seam.
+ */
+export async function releasePointerInSameTask(
+  root: Locator,
+  point: { x: number; y: number },
+  pointerId = 1,
+): Promise<void> {
+  await root.evaluate(
+    (el, arg) => {
+      const init: PointerEventInit = {
+        pointerId: arg.pointerId,
+        isPrimary: true,
+        pointerType: 'mouse',
+        button: 0,
+        buttons: 1,
+        clientX: arg.point.x,
+        clientY: arg.point.y,
+        bubbles: true,
+        cancelable: true,
+      }
+      el.dispatchEvent(new PointerEvent('pointermove', init))
+      el.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }))
+    },
+    { point, pointerId },
+  )
+}
+
+/**
  * How far the document scrolls sideways, plus — only when it does — the
  * elements that are pushing it, so a failure names the culprit instead of
  * printing two numbers. Elements inside a region that clips or scrolls its own
