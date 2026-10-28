@@ -149,7 +149,7 @@ async function loadGuide() {
   const workspace = props.project?.workspace
   const seq = ++guideSeq
   clearRetryTimer()
-  if (!workspace) { guide.value = { path: '', content: '', error: '' }; guideLoading.value = false; return }
+  if (!workspace) { guide.value = { path: '', content: '', error: '' }; guideLoading.value = false; settle(); return }
   guideLoading.value = true
   const result = await fetchWorkspaceGuide(workspace)
   if (seq !== guideSeq) return
@@ -168,7 +168,7 @@ function clearRetryTimer() { clearTimeout(retryTimer); retryTimer = undefined }
 const guideFailed = computed(() => !guideLoading.value && !guide.value.path && !!guide.value.error)
 function settle() {
   if (disposed || retryTimer) return
-  if (!guideFailed.value && systemPromptState.value !== 'failed') { retryAttempt = 0; return }
+  if (!guideFailed.value && systemPromptState.value !== 'failed') return
   if (retryAttempt >= RETRY_DELAYS_MS.length) return
   retryTimer = setTimeout(() => {
     retryTimer = undefined

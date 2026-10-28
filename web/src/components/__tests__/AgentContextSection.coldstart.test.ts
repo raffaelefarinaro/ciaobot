@@ -68,14 +68,25 @@ describe('AgentContextSection engine cold start', () => {
     expect(wrapper.get(META).text()).toBe('2.4k tokens')
   })
 
-  it('stops after four retries', async () => {
+  it('stops after exactly four automatic retries', async () => {
+    const promptCalls = () => fetchMock.mock.calls.filter(([u]) => u === '/api/system-prompt').length
     await mountRail()
-    const initial = fetchMock.mock.calls.length
+    expect(promptCalls()).toBe(1)
     await advance(1000 + 2000 + 4000 + 8000 + 1000)
-    const afterRetries = fetchMock.mock.calls.length
-    expect(afterRetries).toBeGreaterThan(initial)
-    await advance(60000)
-    expect(fetchMock.mock.calls.length).toBe(afterRetries)
+    expect(promptCalls()).toBe(5)
+    await advance(120000)
+    expect(promptCalls()).toBe(5)
+  })
+
+  it('keeps a pending prompt retry when the project switches to one with no workspace', async () => {
+    const wrapper = await mountRail()
+    await wrapper.setProps({ project: { ...PROJECT, workspace: '' } as unknown as ProjectInfo })
+    await flushPromises()
+    up = true
+    await advance(1000 + 2000 + 100)
+    expect(wrapper.find('.agent-context-system-error').exists()).toBe(false)
+    expect(wrapper.get('.agent-context-system').text()).toContain('Ciaobot system prompt')
+    expect(wrapper.get(META).text()).toMatch(/tokens$/)
   })
 
   it('makes no fetch after unmount', async () => {
