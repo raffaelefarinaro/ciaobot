@@ -9,13 +9,18 @@ describe('fetchSystemPrompt', () => {
     expect(await fetchSystemPrompt()).toBe('be kind')
   })
 
-  it('returns an empty string on 500', async () => {
+  it('returns null on 500', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('boom', { status: 500 })))
-    expect(await fetchSystemPrompt()).toBe('')
+    expect(await fetchSystemPrompt()).toBeNull()
   })
 
-  it('returns an empty string when fetch throws', async () => {
+  it('returns null when fetch throws', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
+    expect(await fetchSystemPrompt()).toBeNull()
+  })
+
+  it('returns an empty string for a 200 with no text', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ chars: 0 }), { status: 200 })))
     expect(await fetchSystemPrompt()).toBe('')
   })
 })
