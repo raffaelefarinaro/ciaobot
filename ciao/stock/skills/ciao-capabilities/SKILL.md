@@ -37,6 +37,9 @@ When a user has to sign in, install a CLI, or set up an MCP server, read
 and the exact places in the app. The agent hands over a command to review and
 run — `ciao chat terminal-offer` puts one in the chat as a copyable card — and
 never runs a sign-in, an install or an MCP setup on the user's behalf.
+When the user asks for that setup in a chat, offer the command in that chat
+straight away rather than pointing them to a Settings page, and link any
+Settings page you do mention by its in-app path (`[MCP servers](/settings/mcp)`).
 
 ## Capability areas
 
