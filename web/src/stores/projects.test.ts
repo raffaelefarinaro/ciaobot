@@ -6591,6 +6591,137 @@ describe('workspace and chat transitions', () => {
     expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
   })
 
+  test('registered workspace guards run after the settings guard, in order', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const calls: string[] = []
+    const settings = vi.fn(async () => {
+      calls.push('settings')
+      return true
+    })
+    store.setWorkspaceSwitchGuard(settings)
+    const unregisterFirst = store.registerWorkspaceSwitchGuard(async (from) => {
+      calls.push(`first:${from}`)
+      return true
+    })
+    store.registerWorkspaceSwitchGuard(async () => {
+      calls.push('second')
+      return true
+    })
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+    // The slot belongs to Settings and keeps its place; the registry is what
+    // an in-session overlay adds beside it.
+    expect(calls).toEqual(['settings', 'first:work', 'second'])
+    expect(store.activeWorkspace).toBe('personal')
+    unregisterFirst()
+    store.setWorkspaceSwitchGuard(null)
+  })
+
+  test('a registered guard that declines keeps the workspace and stops the later ones', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const later = vi.fn(async () => true)
+    store.registerWorkspaceSwitchGuard(async () => false)
+    store.registerWorkspaceSwitchGuard(later)
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(later).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('work')
+  })
+
+  test('a registered guard is removed by the function registering it returned', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn(async () => false)
+    const unregister = store.registerWorkspaceSwitchGuard(guard)
+
+    unregister()
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+    expect(guard).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('personal')
+  })
+
+  test('a declining settings guard stops the registered guards', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const registered = vi.fn(async () => true)
+    store.setWorkspaceSwitchGuard(async () => false)
+    store.registerWorkspaceSwitchGuard(registered)
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(registered).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('work')
+    store.setWorkspaceSwitchGuard(null)
+  })
+
+  test('a cross-workspace project open asks the registered guards first', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'work'
+    store.registerWorkspaceSwitchGuard(async () => false)
+
+    // Cmd+T into another workspace is a switch like any other: an overlay that
+    // refuses to close must keep the workspace it is drawing.
+    await expect(store.newChatInProject('p-personal')).resolves.toBeUndefined()
+    expect(store.activeWorkspace).toBe('work')
+    expect(apiPost).not.toHaveBeenCalledWith('/api/projects/p-personal/chats', expect.anything())
+  })
+
+  test('a chat in another workspace is not opened while a guard refuses the switch', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c-personal'
+    store.registerWorkspaceSwitchGuard(async () => false)
+
+    // A sidebar row, a toast or a deep link into the other workspace is a
+    // switch too: opening its chat would draw it under the overlay that just
+    // refused to close.
+    await store.switchChat('c-work')
+
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.activeChatId).toBe('c-personal')
+    expect(routerPush).not.toHaveBeenCalledWith('/chat/c-work')
+  })
+
+  test('a chat switch a guard refuses leaves the open chat and the route alone', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p-personal', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c2', project_id: 'p-personal', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c1'
+    // Same workspace, so nothing here is a workspace switch: the guard is about
+    // the view a surface is drawing, and a chat switch replaces that view.
+    store.registerWorkspaceSwitchGuard(async () => false)
+
+    await store.switchChat('c2')
+
+    // The draft kept the route, so the chat under it must not move either: a
+    // switched activeChatId under an unchanged URL is the half-state this test
+    // exists to prevent.
+    expect(store.activeChatId).toBe('c1')
+    expect(routerPush).not.toHaveBeenCalledWith('/chat/c2')
+  })
+
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
     const store = useProjectStore()
     store.projects = [

@@ -2389,7 +2389,7 @@ describe('ChatLayout home arrow navigation', () => {
     wrapper.unmount()
   })
 
-  it('Esc with the task peek open leaves the chat open', async () => {
+  it('Esc with the task overlay open leaves the chat open', async () => {
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = 'chat-1'
