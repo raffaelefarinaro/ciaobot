@@ -73,8 +73,14 @@ web/
     components/TaskBoardView.vue  the `/tasks` route entry point: a thin wrapper that
                            renders `TaskWorkspaceSurface.vue` and forwards its
                            `open-sidebar` request. The surface owns the board, the full
-                           task editor, resolution and delegation state; the route is its
-                           only caller today, so there is no overlay or second controller.
+                           task editor, resolution and delegation state. It also carries
+                           an internal `mode="overlay"` + `taskId` prerequisite with no
+                           caller yet: the same editor over another screen, with no board
+                           chrome and no address change, an awaited `requestClose()`, and
+                           a `detail-close` that distinguishes the editor's internal close
+                           before the delegation preview from final closure. Task links
+                           still open the read-only peek; mounting this mode for them is a
+                           later slice, so this is not a user-facing entry point.
     components/*.css      stylesheets two panes share, each pulled in with
                            `<style scoped src>` (overviewSections.css, chatTrace.css,
                            titleShimmer.css)
