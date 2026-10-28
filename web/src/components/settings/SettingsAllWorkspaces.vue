@@ -1,13 +1,11 @@
 <template>
-  <div v-if="!workspacesLoaded" class="card"><SkeletonLoader label="Loading workspaces" :count="3" /></div>
-  <div v-else-if="workspacesError" class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
-  <div v-else class="card">
+  <div v-if="workspacesLoaded && !workspacesError" class="card">
     <div class="sr-only" role="status" aria-live="polite">{{ announcement }}</div>
     <div class="settings-card-header settings-card-header--split">
       <div>
-        <p class="section-title">Workspaces</p>
+        <p class="section-title">All workspaces</p>
         <p class="hint">
-          Each workspace keeps its own projects, chats, memory, model defaults and Google account.
+          Each workspace keeps its own projects, chats, memory, model defaults and Google account. Add, reorder or archive them here; the cards above edit the current one.
         </p>
       </div>
       <button class="btn-small" :aria-expanded="showNewWorkspace" @click="showNewWorkspace = !showNewWorkspace">
@@ -20,7 +18,7 @@
         <div>
           <p class="workspace-title">New workspace</p>
           <p class="hint hint--compact">
-            Saved to <code>.runtime/workspaces.json</code> and applied immediately. Google and claude.ai connectors are set afterwards in the new workspace's Overview.
+            Saved to <code>.runtime/workspaces.json</code> and applied immediately. Google and claude.ai connectors are set afterwards in the cards above, once the new workspace is open.
           </p>
         </div>
       </div>
@@ -60,10 +58,6 @@
       </div>
     </div>
 
-    <p v-if="workspaceLinkStatus" class="hint hint--warn workspace-link-status" role="status">
-      {{ workspaceLinkStatus }}
-    </p>
-
     <div class="workspace-list">
       <div
         v-for="(form, index) in orderedForms"
@@ -100,11 +94,13 @@
         </div>
         <div class="workspace-actions set-row-actions">
           <button
+            v-if="form.name !== activeWorkspaceName"
             type="button"
             class="set-link"
             :aria-label="`Settings for workspace ${form.name}`"
             @click="openWorkspaceSettings(form.name)"
-          >Settings &rarr;</button>
+          >Settings &uarr;</button>
+          <span v-else class="workspace-row-current">Current</span>
           <DropdownMenuRoot
             :open="settingsMenu === `ws:${form.name}`"
             :modal="false"
@@ -126,7 +122,7 @@
               @close-auto-focus="onMenuCloseAutoFocus"
             >
               <div class="settings-menu" @keydown.esc="closeSettingsMenuOnEscape">
-                <DropdownMenuItem as-child @select="openWorkspaceSettings(form.name, '#workspace-name')">
+                <DropdownMenuItem as-child @select="renameWorkspace(form.name)">
                   <button
                     type="button"
                     class="settings-menu-item"
@@ -220,7 +216,6 @@ import {
   DropdownMenuRoot,
   DropdownMenuTrigger,
 } from 'reka-ui'
-import SkeletonLoader from '../SkeletonLoader.vue'
 import WorkspaceTile from '../WorkspaceTile.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
 import { workspaceLabel } from '../../lib/workspaceLabel'
@@ -232,15 +227,13 @@ import {
   WORKSPACE_FS_SCOPE_COPY,
 } from '../../composables/useWorkspaceAdmin'
 
-// Manage workspaces (/settings/workspaces, reached from the workspace
-// switcher): every workspace as a boxed row, the short New workspace form and
-// the Archived list. Rows reorder by drag, by Alt+Arrow on the row handle or
-// from the row menu; the order is engine-wide and is the switcher order and
-// the 1-9 shortcut mapping. Editing happens on a workspace's Overview. The state
-// belongs to SettingsView's useWorkspaceAdmin, which also provides the shared
-// row-menu helpers.
+// All workspaces: the last card of Workspace > Overview (/settings/workspace).
+// Every workspace as a boxed row, the short New workspace form and the
+// Archived list. Rows reorder by drag, Alt+Arrow on the handle or the row
+// menu; the order is engine-wide and is the switcher order and the 1-9
+// mapping. The state belongs to SettingsView's useWorkspaceAdmin.
 const admin = inject(WORKSPACE_ADMIN_KEY)
-if (!admin) throw new Error('SettingsManageWorkspaces needs the workspace admin SettingsView provides')
+if (!admin) throw new Error('SettingsAllWorkspaces needs the workspace admin SettingsView provides')
 
 const {
   workspacesLoaded,
@@ -256,7 +249,6 @@ const {
   showNewWorkspace,
   workspaceForms,
   newWorkspaceForm,
-  workspaceLinkStatus,
   fsScopeDefaultOptionLabel,
   workspaceProviderFieldLabel,
   workspaceProviderOptions,
@@ -274,6 +266,7 @@ const {
 } = admin
 
 const projectStore = useProjectStore()
+const activeWorkspaceName = computed(() => projectStore.activeWorkspace)
 
 // The rows follow the store's order (the persisted one); each row's draft form
 // stays the same object when it moves.
@@ -349,8 +342,22 @@ function moveBy(name: string, delta: -1 | 1, fromMenu = false): void {
   })
 }
 
+// Rename stays on this page now, so the closing menu must not hand focus back
+// to its trigger over the name field the rename just focused. A declined
+// switch focuses nothing, so the trigger gets its focus back by hand.
+let renaming = false
+async function renameWorkspace(name: string): Promise<void> {
+  renaming = true
+  const opened = await openWorkspaceSettings(name, '#workspace-name')
+  renaming = false
+  if (!opened) {
+    await nextTick()
+    document.querySelector<HTMLElement>(`[aria-label="Actions for workspace ${name}"]`)?.focus()
+  }
+}
+
 function onMenuCloseAutoFocus(event: Event): void {
-  if (menuMoveName.value) event.preventDefault()
+  if (menuMoveName.value || renaming) event.preventDefault()
 }
 
 function onHandleKeydown(name: string, event: KeyboardEvent): void {
@@ -452,6 +459,11 @@ function onRowDragEnd(): void {
   color: var(--fg3);
   font-size: var(--text-xs);
 }
+.workspace-row-current {
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  padding: 0 var(--space-2);
+}
 @media (pointer: coarse) {
   .workspace-row { --handle: var(--touch); }
 }
@@ -466,9 +478,6 @@ function onRowDragEnd(): void {
 }
 .workspace-card {
   display: flex;
-}
-.workspace-link-status {
-  margin: var(--space-2) 0;
 }
 /* The unsaved new workspace keeps a light frame: it is a draft form, and it
    has to read as not-yet-real next to the saved rows. */

@@ -7,7 +7,7 @@ import { activeWorkspaceButton, boot, isolate } from '../support/app'
  * landing on the page the order was changed from. jsdom has no focus routing
  * or drag-and-drop, so only a real engine can say the whole path works.
  */
-const MANAGE = '/settings/workspaces'
+const MANAGE = '/settings/workspace'
 const READY = '.settings-main .section-title'
 
 const handle = (page: Page, name: string) => page.locator(`[data-workspace-handle="${name}"]`)

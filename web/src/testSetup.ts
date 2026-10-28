@@ -14,3 +14,9 @@ Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: s
 if (typeof window !== 'undefined') {
   Object.defineProperty(window, 'localStorage', { configurable: true, value: storage })
 }
+
+// jsdom has no Element.scrollTo. Components that scroll a pane call it, so give
+// every jsdom test a no-op; a test that asserts on scrolling installs its own.
+if (typeof Element !== 'undefined' && typeof Element.prototype.scrollTo !== 'function') {
+  Object.defineProperty(Element.prototype, 'scrollTo', { configurable: true, writable: true, value: () => {} })
+}

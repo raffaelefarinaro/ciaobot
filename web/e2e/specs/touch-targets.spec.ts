@@ -7,17 +7,16 @@ import { BOOTED, COMPOSER, boot, isolate, quiesce } from '../support/app'
  * emulation can measure that.
  */
 const TOUCH_MIN = 44
-// The two workspace settings tabs are behind `workspacesLoaded`; measure the
-// loaded card, not the skeleton that satisfies the settings shell (#2274).
-const WORKSPACE_READY = '.overview-title'
-const WORKSPACES_READY = '.workspace-row'
+// The workspace settings page is behind `workspacesLoaded`; measure the loaded
+// cards, not the skeleton that satisfies the settings shell (#2274). The list
+// renders in the same branch as the Overview cards and is the stronger wait.
+const WORKSPACE_READY = '.workspace-row'
 const TABS: Array<[string, string]> = [
   ['/settings', '.settings-main'],
   ['/settings/appearance', '.settings-main'],
   ['/settings/access', '.settings-main'],
   ['/settings/advanced', '.settings-main'],
   ['/settings/workspace', WORKSPACE_READY],
-  ['/settings/workspaces', WORKSPACES_READY],
   ['/settings/providers', '.settings-main'],
   ['/settings/skills', '.settings-main'],
   ['/settings/subagents', '.settings-main'],
@@ -52,7 +51,6 @@ const POPUP_SURFACES: Array<[string, string]> = [
   ...MAIN_SURFACES,
   ['/chat/alpha-chat-1', COMPOSER],
   ['/settings/workspace', WORKSPACE_READY],
-  ['/settings/workspaces', WORKSPACES_READY],
   ['/settings/providers', '.settings-main'],
   ['/settings/advanced', '.settings-main'],
 ]
@@ -112,7 +110,7 @@ const TRIGGER_CAP = 80
 const KNOWN_TRIGGERS: Record<string, string[]> = {
   '/': ['Model for the new chat'],
   '/chat/alpha-chat-1': ['Show chat details'],
-  '/settings/workspaces': ['New workspace', 'Actions for workspace'],
+  '/settings/workspace': ['New workspace', 'Actions for workspace'],
 }
 // Triggers a surface may legitimately fail to click because another element
 // covers them. This was one whole-run cap of 3; each surface is now its own
@@ -362,7 +360,7 @@ test.describe('touch targets', () => {
   }
 
   /**
-   * #2274's regression: on /settings/workspaces the New workspace button and
+   * #2274's regression: on /settings/workspace the New workspace button and
    * every row's actions menu live in a card behind `workspacesLoaded`. Until
    * GET /api/workspaces answers, the page shows a SkeletonLoader that
    * satisfies `.settings-main` and animation quiescence - quiesce only waits
@@ -379,7 +377,7 @@ test.describe('touch targets', () => {
    * existing per-trigger assertion.
    */
   test('#2274: New workspace is reached when /api/workspaces is still pending at boot', async ({ page }) => {
-    const route = '/settings/workspaces'
+    const route = '/settings/workspace'
     // One gate per boot, created before that boot navigates. A request captures
     // the gate current when it starts, so a later boot can neither release an
     // earlier document's fetch nor be released by it.
@@ -415,9 +413,9 @@ test.describe('touch targets', () => {
       enumerated += 1
     }
     const expectLoadingCard = async (where: string) => {
-      await expect(page.getByRole('status', { name: 'Loading workspaces' }), `${where}: the skeleton is on screen`)
+      await expect(page.getByRole('status', { name: 'Loading workspace' }), `${where}: the skeleton is on screen`)
         .toBeVisible()
-      await expect(page.locator(WORKSPACES_READY), `${where}: no workspace row before the response`).toHaveCount(0)
+      await expect(page.locator(WORKSPACE_READY), `${where}: no workspace row before the response`).toHaveCount(0)
       await expect(page.locator('[data-touch-trigger]'), `${where}: nothing is tagged yet`).toHaveCount(0)
       await expect(page.getByRole('button', { name: 'New workspace' }), `${where}: the card is not rendered yet`)
         .toHaveCount(0)
@@ -432,7 +430,7 @@ test.describe('touch targets', () => {
     // First walk: the readiness wait itself is the block. The seam runs once
     // the document is up and before the ready selector can pass; the walk is
     // then bounded so the test observes it cannot get past that point.
-    const blocked = checkPopupSurface(page, route, WORKSPACES_READY, {
+    const blocked = checkPopupSurface(page, route, WORKSPACE_READY, {
       readyTimeout: 1000,
       onEnumerate: countEnumeration,
       beforeNavigate: async (boot) => {
@@ -449,14 +447,14 @@ test.describe('touch targets', () => {
     try {
       rejection = await blocked.then(() => null, (err: Error) => err)
       expect(rejection, 'the walk must not get past readiness while the response is gated').not.toBeNull()
-      expect(rejection!.message, 'the walk blocked on the workspace readiness selector').toContain(WORKSPACES_READY)
+      expect(rejection!.message, 'the walk blocked on the workspace readiness selector').toContain(WORKSPACE_READY)
       expect(enumerated, 'the blocked walk never reached enumeration').toBe(0)
     } finally {
       releaseEveryGate()
     }
     // The released response renders the card, so the second walk starts from a
     // page whose held request has actually been answered.
-    await expect(page.locator(WORKSPACES_READY).first(), 'the released response renders the card').toBeVisible()
+    await expect(page.locator(WORKSPACE_READY).first(), 'the released response renders the card').toBeVisible()
 
     // Second walk: every boot is gated again. Boot 1 shows the delayed
     // readiness and is released at its seam. Boot 2 is a reload after the first
@@ -465,7 +463,7 @@ test.describe('touch targets', () => {
     enumerated = 0
     let reloadIsWaiting!: () => void
     const reloadWait = new Promise<void>((resolve) => { reloadIsWaiting = resolve })
-    const walk = checkPopupSurface(page, route, WORKSPACES_READY, {
+    const walk = checkPopupSurface(page, route, WORKSPACE_READY, {
       onEnumerate: countEnumeration,
       onReadyWait: (boot) => { if (boot === 2) reloadIsWaiting() },
       beforeNavigate: async (boot) => {
@@ -497,7 +495,7 @@ test.describe('touch targets', () => {
 
       // Explicit observation: while that wait is active the readiness selector
       // cannot pass, so the walk cannot enumerate.
-      const stillLoading = await expect(page.locator(WORKSPACES_READY).first())
+      const stillLoading = await expect(page.locator(WORKSPACE_READY).first())
         .toBeVisible({ timeout: 1000 })
         .then(() => null, (err: Error) => err)
       expect(stillLoading, 'the readiness selector cannot pass while the reload is held').not.toBeNull()
@@ -517,7 +515,7 @@ test.describe('touch targets', () => {
   })
 
   test('the workspace reorder handle and Move up / Move down are at least 44×44 on touch', async ({ page }) => {
-    await boot(page, '/settings/workspaces', WORKSPACES_READY)
+    await boot(page, '/settings/workspace', WORKSPACE_READY)
     const handle = page.locator('[data-workspace-handle="beta"]')
     await expect(handle).toBeVisible()
     const box = await handle.boundingBox()

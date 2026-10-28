@@ -1452,7 +1452,7 @@ def setup_workspace(
     # First-run wizard names the user's first logical workspace. Writing a
     # real registry (instead of relying on the legacy personal+work fallback)
     # means new installs start with exactly one workspace; more are added in
-    # Settings → Manage workspaces. The explicit vault_root also keeps the legacy
+    # Settings → Overview → All workspaces. The explicit vault_root also keeps the legacy
     # personal/work nested-vault special case from ever triggering.
     #
     # If the vault already holds nested workspace directories (e.g.

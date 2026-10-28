@@ -104,7 +104,7 @@ function archived(overrides: Partial<ArchivedWorkspace> = {}): ArchivedWorkspace
   }
 }
 
-async function mountWorkspacesTab(path = '/settings/workspaces') {
+async function mountWorkspacesTab(path = '/settings/workspace') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
@@ -213,7 +213,7 @@ describe('Settings > Workspaces archive', () => {
       expect(request!.message).toBe(archiveConfirmMessage('work'))
       expect(request!.message).toContain('stops using its notes and memory')
       expect(request!.message).toContain('.archived-workspaces/')
-      expect(request!.message).toContain('restore it under Manage workspaces (workspace switcher)')
+      expect(request!.message).toContain('restore it under All workspaces (Settings, Overview)')
       expect(request!.message).not.toMatch(/delete/i)
 
       state.workspaces = workspaces(['personal'])

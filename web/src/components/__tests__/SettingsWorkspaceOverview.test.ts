@@ -120,6 +120,7 @@ describe('Settings > Workspace Overview', () => {
         'Memory handover',
         'Update task history',
         'Archive this workspace',
+        'All workspaces',
       ])
       expect(nameValue(wrapper)).toBe('work')
       expect(wrapper.find('.workspace-tile').exists()).toBe(true)
