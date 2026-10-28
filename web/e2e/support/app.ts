@@ -22,6 +22,20 @@ export const BOOTED = 'text=alpha first conversation'
 /** The chat composer; the readiness signal for a `/chat/...` route. */
 export const COMPOSER = 'textarea.chat-input'
 
+export interface BootOptions {
+  /** Awaited before navigation, so a test can set up state for this load. */
+  beforeNavigate?: () => Promise<void>
+  /**
+   * Awaited after navigation and before the readiness wait. The seam a test
+   * uses to inspect a surface that is still loading, or to hold it there.
+   */
+  beforeReady?: () => Promise<void>
+  /** Called in the same turn the readiness wait starts, after `beforeReady`. */
+  onReadyWait?: () => void
+  /** Bound on the readiness wait, so a test can prove that it blocks. */
+  readyTimeout?: number
+}
+
 /**
  * Load a route and wait until the app has finished booting.
  *
@@ -29,9 +43,18 @@ export const COMPOSER = 'textarea.chat-input'
  * because a fixed wait is how a browser suite becomes both slow and flaky on a
  * loaded CI runner.
  */
-export async function boot(page: Page, path = '/', ready: string = BOOTED): Promise<void> {
+export async function boot(
+  page: Page,
+  path = '/',
+  ready: string = BOOTED,
+  options: BootOptions = {},
+): Promise<void> {
+  await options.beforeNavigate?.()
   await page.goto(path)
-  await expect(page.locator(ready).first()).toBeVisible()
+  await options.beforeReady?.()
+  options.onReadyWait?.()
+  await expect(page.locator(ready).first())
+    .toBeVisible(options.readyTimeout === undefined ? undefined : { timeout: options.readyTimeout })
 }
 
 /** The current workspace scope control at the top of the sidebar. */
