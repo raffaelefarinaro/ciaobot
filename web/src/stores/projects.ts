@@ -956,8 +956,9 @@ export const useProjectStore = defineStore('projects', () => {
     clearStreamingState(chatId)
     // The resend reuses the surviving optimistic bubble (found by send id)
     // and pushes a fresh one only when a reload dropped it; a successful
-    // delivery clears the tracking via the echoed user_echo. Empty comment buckets: the original
-    // send already consumed them via consumePreparedAttachments.
+    // delivery clears the tracking via the echoed user_echo. Empty comment
+    // buckets: the original send already consumed them via
+    // consumePreparedAttachments.
     // The same send id rides on: this is the same logical send, so the
     // engine can recognise it instead of running a second turn for it. The
     // retry tag rides with it, so a resend of a deliberate retry is still
