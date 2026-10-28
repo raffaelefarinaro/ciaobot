@@ -2375,11 +2375,10 @@ const openTraces = ref<Record<number, boolean>>({})
 // a reference, not part of the reply, and a turn that touched many files used
 // to push the answer off screen behind a wall of pills.
 const openOutputs = ref<Record<number, boolean>>({})
-// The live trace starts compact; explicit expansion is kept through completion.
+// The live trace starts compact.
 // `Reading` means they scrolled away from the tail (transcript or trace body),
 // so the finished trace must not move under them.
 const liveTraceOpen = ref(false)
-const liveTraceTouched = ref(false)
 const liveTraceReading = ref(false)
 const liveBodyAtBottom = ref(true)
 const liveTraceBodyEl = ref<HTMLElement>()
@@ -2587,7 +2586,6 @@ function toggleOutputs(i: number) {
 }
 
 function toggleLiveTrace() {
-  liveTraceTouched.value = true
   liveTraceOpen.value = !liveTraceOpen.value
   if (liveTraceOpen.value) {
     // The body remounts, so it follows its tail again from the top.
@@ -2598,7 +2596,6 @@ function toggleLiveTrace() {
 
 function resetLiveTraceState() {
   liveTraceOpen.value = false
-  liveTraceTouched.value = false
   liveTraceReading.value = false
   liveBodyAtBottom.value = true
   pendingCollapseIdx.value = null
@@ -2648,7 +2645,6 @@ function onLiveTraceBodyClick(e: MouseEvent): void {
   if (isInteractiveTraceChild(e.target)) return
   if (window.getSelection()?.toString()) return
   if (!liveTraceOpen.value) return
-  liveTraceTouched.value = true
   liveTraceOpen.value = false
 }
 
@@ -4503,6 +4499,8 @@ watch(
 watch(() => store.activeChatId, () => {
   isNearBottom.value = true
   resetLiveTraceState()
+  openTraces.value = {}
+  openOutputs.value = {}
   // The dock disclosure is per-chat state; carrying it across a switch meant a
   // chat you never expanded opened with its dock already open.
   dockExpanded.value = false
@@ -4570,9 +4568,11 @@ watch(
     prevStreaming = streaming
     prevStreamingChatId = store.activeChatId
     if (justFinished) {
-      if (liveTraceReading.value || (liveTraceTouched.value && liveTraceOpen.value)) {
-        // The reader keeps their place: hold the finished trace open until
-        // they come back to the bottom.
+      if (liveTraceReading.value && (!isNearBottom.value || !liveBodyAtBottom.value)) {
+        // The reader scrolled away from the bottom: hold the finished trace
+        // open until they come back. A reader at the bottom, or one who only
+        // expanded the live trace, gets the collapsed turn and the landing on
+        // the reply.
         nextTick(holdTraceOpen)
         return
       }
