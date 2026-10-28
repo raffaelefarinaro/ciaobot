@@ -218,3 +218,40 @@ def test_watch_not_started_when_connectors_disabled(tmp_path: Path) -> None:
     provider = asyncio.run(run())
 
     assert provider._claudeai_watch is None
+
+
+def test_start_watch_creates_task_and_replaces_previous(tmp_path: Path) -> None:
+    async def run() -> tuple[asyncio.Task[None], asyncio.Task[None]]:
+        client = _StatusClient()
+        provider = _provider(tmp_path, client)
+        provider._claudeai_expected = True
+        provider._start_claudeai_watch(client)  # type: ignore[arg-type]
+        first = provider._claudeai_watch
+        assert first is not None
+        provider._start_claudeai_watch(client)  # type: ignore[arg-type]
+        second = provider._claudeai_watch
+        assert second is not None
+        await asyncio.sleep(0)
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first is not second
+    assert first.cancelled()
+
+
+def test_gave_up_notice_deferred_to_next_turn_when_no_sink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(claude_mod, "_claudeai_catalog_seen", True)
+    client = _StatusClient()
+    provider = _provider(tmp_path, client)
+    provider._claudeai_catalog_retries = _CLAUDEAI_CATALOG_MAX_RETRIES
+
+    _watch(provider, client)
+
+    first = provider._take_respawn_notice()
+    second = provider._take_respawn_notice()
+    assert isinstance(first, SystemStatusEvent)
+    assert first.status == CLAUDEAI_CATALOG_GAVE_UP_NOTICE
+    assert second is None

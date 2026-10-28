@@ -718,6 +718,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._claudeai_watch: asyncio.Task[None] | None = None
         self._claudeai_expected = False
         self._claudeai_respawn_notice_pending = False
+        self._claudeai_gave_up_notice_pending = False
         self._turn_status_sink: Callable[[str], None] | None = None
         # Background tasks (native ``run_in_background`` Bash, ``Monitor``,
         # background agents) the live CLI process owns, from the SDK's task
@@ -867,6 +868,9 @@ class ClaudeProvider(BaseSDKProvider):
             )
             if self._turn_status_sink is not None:
                 self._turn_status_sink(notice)
+            elif notice == CLAUDEAI_CATALOG_GAVE_UP_NOTICE:
+                # No turn is open; say it at the start of the next one.
+                self._claudeai_gave_up_notice_pending = True
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - the watcher must never fail a turn
@@ -886,11 +890,14 @@ class ClaudeProvider(BaseSDKProvider):
         self._claudeai_catalog_missing = False
 
     def _take_respawn_notice(self) -> SystemStatusEvent | None:
-        """The one-shot status line for a catalog respawn, or None once shown."""
-        if not self._claudeai_respawn_notice_pending:
-            return None
-        self._claudeai_respawn_notice_pending = False
-        return SystemStatusEvent(type="system", status=CLAUDEAI_CATALOG_RESPAWNED_NOTICE)
+        """The one-shot status line for a catalog respawn or give-up, or None once shown."""
+        if self._claudeai_respawn_notice_pending:
+            self._claudeai_respawn_notice_pending = False
+            return SystemStatusEvent(type="system", status=CLAUDEAI_CATALOG_RESPAWNED_NOTICE)
+        if self._claudeai_gave_up_notice_pending:
+            self._claudeai_gave_up_notice_pending = False
+            return SystemStatusEvent(type="system", status=CLAUDEAI_CATALOG_GAVE_UP_NOTICE)
+        return None
 
     def _log_client_turn(self, request: AgentRequest, *, reused: bool, reason: str) -> None:
         """One line per turn: whether the live SDK client was reused or replaced, and why."""
