@@ -80,7 +80,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
       <time v-if="timestamp" class="injected-card-time" :datetime="timestamp">{{ formatTime(timestamp) }}</time>
     </div>
 
-    <p v-if="!open && summary.hint" :id="hintId" class="injected-card-hint">{{ summary.hint }}</p>
+    <p v-if="!open && summary.hint" :id="hintId" class="injected-card-hint" :role="prompt.kind === 'error' ? 'status' : undefined">{{ summary.hint }}</p>
 
     <!-- Recovery actions stay reachable while the card is collapsed. -->
     <div v-if="$slots.actions" class="injected-card-actions"><slot name="actions" /></div>

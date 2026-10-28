@@ -333,7 +333,7 @@
             :chat-title="chat.title"
             :known-paths="knownFilePaths"
           >
-            <template #actions>
+            <template v-if="errorHasActions(i, item.msg.content)" #actions>
               <div class="error-actions">
                 <button
                   v-if="lastUserBefore(i) && !hasLaterItem(i)"
@@ -4315,7 +4315,7 @@ const renderData = computed<{
     // attachments still have a home adjacent to the answer.
     const needsHost =
       traceSubs.length > 0
-      || (!finalMsg && turnOutputs.length > 0)
+      || ((!finalMsg || finalMsg.is_error) && turnOutputs.length > 0)
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
@@ -4324,7 +4324,7 @@ const renderData = computed<{
     }
     if (host) {
       if (traceSubs.length) host.subs = traceSubs
-      if (!finalMsg && turnOutputs.length) host.outputs = turnOutputs
+      if ((!finalMsg || finalMsg.is_error) && turnOutputs.length) host.outputs = turnOutputs
     }
     for (const it of turnItems) items.push(it)
     if (finalMsg) {
@@ -4332,7 +4332,7 @@ const renderData = computed<{
         kind: 'assistant',
         msg: finalMsg,
         turnIndex: currentTurnIndex ?? undefined,
-        ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
+        ...(turnOutputs.length && !finalMsg.is_error ? { outputs: turnOutputs } : {}),
       }))
     }
     attachTurnMeta(items, turnMeta)
@@ -4741,10 +4741,17 @@ function lastUserBefore(errorIdx: number): { text: string; images: string[] } | 
   }
   return null
 }
-// A later item of any kind (user, assistant, system, trace) means the chat
+// A later message (user, assistant, system; a trace is not one) means the chat
 // moved on, so resending the failed turn would run it out of order.
 function hasLaterItem(errorIdx: number): boolean {
-  return errorIdx < renderItems.value.length - 1
+  return renderItems.value.slice(errorIdx + 1).some(it => it.kind !== 'trace')
+}
+// Whether the notice's actions slot has anything to draw. The same
+// conditions the template uses for each button and the sign-in hint.
+function errorHasActions(errorIdx: number, content: string): boolean {
+  const canRetry = Boolean(lastUserBefore(errorIdx)) && !hasLaterItem(errorIdx)
+  const signIn = isProviderAuthError(content) && canRetry && !chat.value.archived
+  return canRetry || errorBubbleAction(errorIdx, content) !== null || signIn
 }
 function retryFromError(errorIdx: number) {
   if (chat.value.archived) return

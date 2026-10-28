@@ -164,6 +164,7 @@ async function mountPanel(options: MountOptions = {}): Promise<{
         // The real notice card, so a test can read what the reader sees: the
         // stub would only carry the props.
         InjectedPromptCard: false,
+        ChatTurnActivity: false,
       },
     },
   })
@@ -493,6 +494,63 @@ describe('ChatPanel retry from error bubble', () => {
     await flushPromises()
     expect(wrapper.findComponent({ name: 'ProviderSignInHint' }).exists()).toBe(false)
     expect(wrapper.findAll('.retry-btn')).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('keeps a failed turn\'s file outputs on its activity trace', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Write it', timestamp: '2026-10-11T18:01:00Z', turn_index: 0 },
+      { role: 'system', tool_name: '_activity', content: 'Write notes.md', timestamp: '2026-10-11T18:01:01Z' },
+      {
+        role: 'system',
+        tool_name: '_filecard',
+        content: 'Workspace/notes.md',
+        file_path: 'Workspace/notes.md',
+        action: 'created',
+        timestamp: '2026-10-11T18:01:02Z',
+      },
+      { role: 'assistant', content: 'Error: connection refused', timestamp: '2026-10-11T18:01:03Z', is_error: true },
+    ]
+    await flushPromises()
+    expect(wrapper.find('.injected-card--error').exists()).toBe(true)
+    // Outputs live in the trace body, which opens on its summary.
+    await wrapper.get('.trace-summary').trigger('click')
+    expect(wrapper.find('.outputs-summary').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('draws no empty actions row when nothing is offered', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      {
+        role: 'assistant',
+        content: 'you have reached your weekly usage limit, upgrade for higher limits',
+        timestamp: '2026-10-11T18:01:01Z',
+        is_error: true,
+      },
+      { role: 'user', content: 'continue', timestamp: '2026-10-11T18:02:00Z' },
+    ]
+    await flushPromises()
+    expect(wrapper.find('.injected-card--error').exists()).toBe(true)
+    expect(wrapper.find('.injected-card-actions').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('still offers Retry when only a trace follows the error', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hi', timestamp: '2026-10-11T18:01:00Z', turn_index: 0 },
+      { role: 'assistant', content: 'Error: connection refused', timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    // A background subagent transcript with no turn lands as a trace item
+    // after the error.
+    store.subagents['chat-1'] = [
+      { agent_id: 'bg', messages: [], status: 'completed', turn_index: null },
+    ] as never
+    await flushPromises()
+    expect(wrapper.findAll('.retry-btn').map(b => b.text())).toContain('Retry')
     wrapper.unmount()
   })
 

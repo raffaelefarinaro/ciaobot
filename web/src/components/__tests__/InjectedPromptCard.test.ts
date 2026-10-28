@@ -311,4 +311,11 @@ describe('InjectedPromptCard', () => {
     const wrapper = mountCard({ prompt: runPrompt, raw: '' })
     expect(wrapper.find('.injected-card-actions').exists()).toBe(false)
   })
+
+  it('announces only an error card\'s hint', () => {
+    const err = mountCard({ prompt: errorNoticePrompt('Error: connection refused'), raw: '' })
+    expect(err.get('.injected-card-hint').attributes('role')).toBe('status')
+    const run = mountCard({ prompt: runPrompt, raw: '' })
+    expect(run.get('.injected-card-hint').attributes('role')).toBeUndefined()
+  })
 })
