@@ -4178,6 +4178,11 @@ export const useProjectStore = defineStore('projects', () => {
     opts?: { skipHistory?: boolean; keepSubView?: boolean },
   ) {
     if (!(await ensureWorkspaceForChat(chatId))) return
+    // Ask the same guards that veto a workspace switch before anything moves.
+    // A guard belongs to a surface holding a draft it cannot save — the task
+    // overlay is the first — and refusing here is what keeps that draft's view
+    // intact: the URL stays, so the chat under it must stay too.
+    if (!(await workspaceSwitchAllowed(activeWorkspace.value))) return
     // Always sync URL, even if activeChatId already matches (we may have
     // landed here from /settings or /schedules where the chat route isn't
     // currently active).
@@ -4200,14 +4205,11 @@ export const useProjectStore = defineStore('projects', () => {
     // still leaves the sub-view, which is what that click means.
     const keepSubView = Boolean(opts?.keepSubView) && currentRouteChatId === chatId
     if ((currentRouteChatId !== chatId || currentRoute.params.agentId) && !keepSubView) {
-      // Awaited, and the failure matters: a guard can refuse this navigation to
-      // keep an unsaved task draft on screen. Going on to switch `activeChatId`
-      // would then draw the new chat under the overlay while the URL stayed on
-      // the old one. vue-router resolves a cancelled or aborted push with a
-      // NavigationFailure instead of rejecting it, so a truthy answer means the
-      // view did not change and this switch must not either.
-      const failure = await router.push(`/chat/${chatId}`)
-      if (failure) return
+      // Fire-and-forget: the route is a consequence of this switch, not a gate
+      // on it. The guards above already refused the switch when a surface holds
+      // an unsaveable draft, and a `beforeEach` guard still vetoes Browser
+      // Back/Forward for the same reason.
+      void router.push(`/chat/${chatId}`)
     }
     if (activeChatId.value === chatId) {
       void markRead(chatId)

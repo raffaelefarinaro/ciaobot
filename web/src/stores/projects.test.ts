@@ -6698,7 +6698,7 @@ describe('workspace and chat transitions', () => {
     expect(routerPush).not.toHaveBeenCalledWith('/chat/c-work')
   })
 
-  test('a chat switch whose navigation the route guard cancelled leaves the open chat alone', async () => {
+  test('a chat switch a guard refuses leaves the open chat and the route alone', async () => {
     const store = useProjectStore()
     store.projects = [
       { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
@@ -6709,16 +6709,17 @@ describe('workspace and chat transitions', () => {
     ]
     store.activeWorkspace = 'personal'
     store.activeChatId = 'c1'
-    // The overlay's route guard refused: vue-router resolves the push with a
-    // NavigationFailure instead of rejecting it.
-    routerPush.mockResolvedValueOnce({ type: 4, message: 'aborted' })
+    // Same workspace, so nothing here is a workspace switch: the guard is about
+    // the view a surface is drawing, and a chat switch replaces that view.
+    store.registerWorkspaceSwitchGuard(async () => false)
 
     await store.switchChat('c2')
 
-    // The draft kept the route, so the chat under it must not move either:
-    // a switched activeChatId under an unchanged URL is the half-state this
-    // test exists to prevent.
+    // The draft kept the route, so the chat under it must not move either: a
+    // switched activeChatId under an unchanged URL is the half-state this test
+    // exists to prevent.
     expect(store.activeChatId).toBe('c1')
+    expect(routerPush).not.toHaveBeenCalledWith('/chat/c2')
   })
 
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
