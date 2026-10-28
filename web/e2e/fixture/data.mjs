@@ -567,8 +567,8 @@ export const VERIFICATION_REVIEW = {
       // The whole-note signal did not fire — the file's own `updated:` is a day
       // old — which is the only reason the entry-level block has anything to
       // add, and the only reason this row exists at all. It is a browser case
-      // because the block adds a quoted line, a context line and two links into
-      // a row whose path is an unbreakable token.
+      // because the block adds a quoted section, a plain-prose fact and two
+      // links into a row whose path is an unbreakable token.
       candidate_id: 'pend0000000000000000000e5',
       workspace: 'alpha',
       path: 'memory-vault/alpha/People/Nadia.md',
@@ -595,7 +595,9 @@ export const VERIFICATION_REVIEW = {
               line_number: 9,
               section: 'Nadia',
               excerpt: '- Reports to the CTO [verified: 2019-05-01]',
-              context: ['- Based in Lisbon [verified: 2026-09-28]'],
+              // A dense list has no same-section prose, and the heading is a
+              // boundary the panel already names, so the fact carries no context.
+              context: [],
               reason: 'aged',
               detail: 'unverified for 2698d against a 90d horizon',
               age_days: 2698,
@@ -616,7 +618,9 @@ export const VERIFICATION_REVIEW = {
               line_number: 11,
               section: 'Nadia',
               excerpt: '- Leads the platform team [verified: 2026-02-30]',
-              context: ['- Based in Lisbon [verified: 2026-09-28]'],
+              // A dense list has no same-section prose, and the heading is a
+              // boundary the panel already names, so the fact carries no context.
+              context: [],
               reason: 'unusable-stamp',
               detail: 'the [verified:] stamp on this entry is unusable (impossible), so nobody has recorded a check on it',
               age_days: 1,

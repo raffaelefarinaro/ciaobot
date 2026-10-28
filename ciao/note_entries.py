@@ -178,7 +178,9 @@ _THEMATIC_BREAK_RE = re.compile(
 
 _BLOCKQUOTE_RE = re.compile(r"^[ ]{0,3}>")
 
-# A table row: the first non-space character is a pipe.
+# A table row that begins with a pipe. This is the entry walk's table notion; a
+# row without the leading pipe is recognised as part of a table only by the
+# display pass in `_table_line_flags`, which never feeds sections or identity.
 _TABLE_ROW_RE = re.compile(r"^[ ]{0,3}\|")
 
 # A table delimiter row. The lookahead and the mandatory inner group both
@@ -336,12 +338,29 @@ class EntryDocument:
     That is what makes a coverage claim checkable — an empty finding list over
     a note whose facts are all in a table is not a clean note, and this
     document says so.
+
+    ``headings`` is the character span of every section heading the same walk
+    read, in document order: an ATX heading line, or a setext underline together
+    with the paragraph line it lifts. A display surface that shows the material
+    around an entry needs this to tell a section boundary from prose without
+    restating the heading rules; a heading-looking line inside a fenced block or
+    the frontmatter is never one.
+
+    ``prose`` is the character span of every line a display may quote from the
+    note: a plain paragraph line, minus the base line a setext underline lifts
+    into a heading and minus every line of a GFM table block, whether or not a
+    row starts with `|`. It is derived after the entry walk from that walk's own
+    plain-line record, so it carries no section, entry or identity decision. A
+    thematic break, a table row, a quote, a list marker, a fenced block and the
+    frontmatter are never here.
     """
 
     original: str
     entries: tuple[NoteEntry, ...]
     uncovered: tuple[tuple[int, int], ...]
     diagnostics: tuple[str, ...]
+    headings: tuple[tuple[int, int], ...] = ()
+    prose: tuple[tuple[int, int], ...] = ()
     note_path: str = ""
     workspace: str = ""
 
@@ -395,6 +414,8 @@ def parse_note_entries(
         diagnostics.append(DIAG_BARE_CR)
 
     entries: list[NoteEntry] = []
+    headings: list[tuple[int, int]] = []
+    prose: list[tuple[int, int]] = []
     ordinals: dict[tuple[str, str], int] = {}
     section = ""
     section_level = 0
@@ -442,6 +463,15 @@ def parse_note_entries(
             # text and never reaches here at all.
             section = _heading_text(line, base)
             section_level = _heading_level(line)
+            # A setext underline is only a heading because of the paragraph line
+            # directly above it, which the same walk tracked as `base`; its span
+            # starts there. An ATX heading is its own line whatever came before.
+            heading_start = (
+                line.start
+                if _ATX_HEADING_RE.match(line.view)
+                else lines[index - 1].start
+            )
+            headings.append((heading_start, line.end))
             base = None
             index += 1
             continue
@@ -467,6 +497,8 @@ def parse_note_entries(
             continue
         # A rule, a quote, a table or a paragraph line. Only the last of those
         # can be a setext base; the others are cleared above by their branch.
+        if kind == _BLOCK_PLAIN:
+            prose.append((line.start, line.end))
         base = line.view if kind == _BLOCK_PLAIN else None
         index += 1
 
@@ -475,6 +507,8 @@ def parse_note_entries(
         entries=tuple(entries),
         uncovered=_uncovered_spans(len(text), entries),
         diagnostics=tuple(diagnostics),
+        headings=tuple(headings),
+        prose=_display_prose(lines, prose, headings),
         note_path=note_path,
         workspace=workspace,
     )
@@ -1065,6 +1099,88 @@ def _is_setext_base(previous: str | None) -> bool:
     if _indent_width(previous) > 0:
         return False
     return _classify_text(previous, None) == _BLOCK_PLAIN
+
+
+def _table_line_flags(lines: list[_Line]) -> list[bool]:
+    """Flag every line in a GFM table block, for display prose only.
+
+    ``_classify_text`` sees one line, so a header row and body rows written
+    without a leading pipe are plain to it. The delimiter row is what makes the
+    block; this pass follows it, marks the pipe-bearing header above it and the
+    rows below it (including single-cell rows), and stops at a blank line or a construct the
+    line classifier already treats as a new block.
+
+    Deliberately separate from the document walk: the existing parser's table
+    notion (a leading-pipe row, plus a delimiter row) is load-bearing for
+    sections and entry identity, and widening it there would move a fact's
+    section and so every decision keyed by its identity. This only decides which
+    lines are withheld from the grey context slot.
+    """
+    flags = [False] * len(lines)
+    table_open = False
+    for index, line in enumerate(lines):
+        if line.blank:
+            table_open = False
+            continue
+        kind = _classify_text(line.view, None)
+        if table_open and kind != _BLOCK_TABLE:
+            if kind == _BLOCK_PLAIN:
+                flags[index] = True
+                continue
+            table_open = False
+        if kind != _BLOCK_TABLE:
+            continue
+        flags[index] = True
+        if not _TABLE_DELIMITER_RE.match(line.view):
+            continue
+        table_open = True
+        if index:
+            header = lines[index - 1]
+            if (
+                "|" in header.view
+                and _classify_text(header.view, None) == _BLOCK_PLAIN
+            ):
+                flags[index - 1] = True
+    return flags
+
+
+def _display_prose(
+    lines: list[_Line],
+    prose: list[tuple[int, int]],
+    headings: list[tuple[int, int]],
+) -> tuple[tuple[int, int], ...]:
+    """Plain lines a display may quote, with heading text and tables removed.
+
+    The document walk records every line it read as a plain paragraph, because
+    that is also what tells the next line whether a setext underline lifts it.
+    Two kinds of that line are not prose a card may quote: the base line of a
+    setext heading, which the heading span now covers, and every line of a GFM
+    table block, with or without leading pipes.
+
+    Both exclusions are linear. The heading merge walks each sorted list once;
+    the table flags come from one pass. This runs after the walk, so neither
+    exclusion can change the classifications, `base`, section or entry identity
+    the rest of the parser produced.
+    """
+    table = _table_line_flags(lines)
+    table_starts = {
+        line.start for index, line in enumerate(lines) if table[index]
+    }
+    kept: list[tuple[int, int]] = []
+    heading = 0
+    for span in prose:
+        start = span[0]
+        while heading < len(headings) and headings[heading][1] <= start:
+            heading += 1
+        if (
+            heading < len(headings)
+            and headings[heading][0] <= start < headings[heading][1]
+        ):
+            continue
+        if start in table_starts:
+            continue
+        kept.append(span)
+    return tuple(kept)
 
 
 def _opens_new_block(line: _Line, previous: _Line | None) -> bool:
