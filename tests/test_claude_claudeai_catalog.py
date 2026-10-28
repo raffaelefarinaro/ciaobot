@@ -69,6 +69,16 @@ def test_watch_marks_seen_and_resets_retries_when_rows_appear(tmp_path: Path) ->
     assert provider._claudeai_catalog_retries == 0
 
 
+def test_watch_drops_stale_gave_up_notice_when_rows_appear(tmp_path: Path) -> None:
+    client = _StatusClient(_SLACK_ROW)
+    provider = _provider(tmp_path, client)
+    provider._claudeai_gave_up_notice_pending = True
+
+    _watch(provider, client)
+
+    assert provider._take_respawn_notice() is None
+
+
 def test_watch_flags_missing_and_emits_notice_when_seen_before(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

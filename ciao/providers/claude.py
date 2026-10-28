@@ -850,6 +850,7 @@ class ClaudeProvider(BaseSDKProvider):
                 if any(name.startswith(_CLAUDEAI_PREFIX) for name in states):
                     _claudeai_catalog_seen = True
                     self._claudeai_catalog_retries = 0
+                    self._claudeai_gave_up_notice_pending = False
                     return
                 await asyncio.sleep(_CLAUDEAI_CATALOG_POLL_S)
             if not _claudeai_catalog_seen:
