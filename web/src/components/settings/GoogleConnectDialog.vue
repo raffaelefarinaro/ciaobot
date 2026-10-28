@@ -9,17 +9,22 @@
     >
       <header class="gws-connect-head">
         <h3 id="gws-connect-title">{{ mode === 'reauth' ? 'Sign in to Google again' : 'Connect Google account' }}</h3>
-        <button type="button" class="gws-connect-close" aria-label="Close" @click="close">×</button>
+        <button type="button" class="gws-connect-close" aria-label="Close" @click="close">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" /></svg>
+        </button>
       </header>
 
       <div class="gws-connect-body">
-        <label class="settings-field">
+        <div v-if="mode === 'reauth' || !!profile" class="settings-field">
+          <span class="ws-label">Display name</span>
+          <p class="gws-account-name">{{ displayName }}</p>
+        </div>
+        <label v-else class="settings-field">
           <span class="ws-label">Display name</span>
           <input
             ref="nameInput"
             v-model="displayName"
             class="routine-input"
-            :readonly="mode === 'reauth' || !!profile"
             aria-describedby="gws-connect-storage"
           />
         </label>
@@ -27,9 +32,26 @@
           Stored on this machine in <code>{{ profile?.config_dir || gwsStorageHint(profileId) }}</code>.
         </p>
 
+        <ul v-if="stepState('install') === 'done' || stepState('client') === 'done'" class="gws-checks" aria-label="Setup">
+          <li v-if="stepState('install') === 'done'">
+            <svg class="gws-check" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            <span class="gws-check-text">gws CLI installed</span>
+          </li>
+          <li v-if="stepState('client') === 'done'">
+            <svg class="gws-check" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            <span class="gws-check-text">OAuth client present</span>
+            <button
+              v-if="profile?.client_secret_present"
+              type="button"
+              class="gws-link-btn"
+              aria-label="Replace file: client_secret.json"
+              @click="fileInput?.click()"
+            >Replace file</button>
+          </li>
+        </ul>
+
         <!-- Step 1: the gws CLI -->
-        <p v-if="stepState('install') === 'done'" class="gws-step-done">gws installed</p>
-        <section v-else class="gws-step" aria-labelledby="gws-step-install">
+        <section v-if="stepState('install') !== 'done'" class="gws-step" aria-labelledby="gws-step-install">
           <h4 id="gws-step-install" class="gws-step-title">Install the gws CLI</h4>
           <p class="hint hint--warn">
             Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
@@ -43,13 +65,7 @@
         </section>
 
         <!-- Step 2: the OAuth client -->
-        <div v-if="stepState('client') === 'done'" class="gws-step-done-row">
-          <p class="gws-step-done">OAuth client present</p>
-          <template v-if="profile?.client_secret_present">
-            <button type="button" class="btn-small" @click="fileInput?.click()">Replace client_secret.json</button>
-          </template>
-        </div>
-        <section v-else class="gws-step" aria-labelledby="gws-step-client">
+        <section v-if="stepState('client') !== 'done'" class="gws-step" aria-labelledby="gws-step-client">
           <h4 id="gws-step-client" class="gws-step-title">OAuth client</h4>
           <div class="gws-radio-group" role="radiogroup" aria-label="OAuth client">
             <label class="gws-radio">
@@ -100,9 +116,9 @@
             <span id="gws-signin-reason" class="gws-action-hint">Upload an OAuth client first.</span>
           </template>
           <template v-else-if="profile">
-            <p v-if="accountState === 'expired'" class="gws-action-hint hint--warn">
-              This login has expired or been revoked<span v-if="profile.token_error"> ({{ profile.token_error }})</span>.
-              Sign back in to restore Gmail, Calendar, Drive, and scheduled Google tasks.
+            <p v-if="accountState === 'expired'" class="hint hint--warn gws-expired">
+              This login expired or was revoked<span v-if="profile.token_error"> ({{ profile.token_error }})</span>.
+              Sign in again to restore Gmail, Calendar, Drive and scheduled Google tasks.
             </p>
             <p v-if="connected" class="gws-action-hint gws-connected-line">
               Connected as {{ profile.email || profile.label }}<template v-if="linked">. Linked to {{ openedWorkspace }}</template>
@@ -123,16 +139,20 @@
                   @click="onPasteCode"
                 >Paste a code instead</button>
               </div>
-              <p v-if="gwsReloginPending[profileId]" class="gws-action-hint">
-                <template v-if="gwsAuthUrls[profileId]">
-                  The sign-in tab was blocked. Open this link, then finish in the browser — it connects automatically:
-                  <a :href="gwsAuthUrls[profileId]" target="_blank" class="gws-auth-link">Open authorization page</a>
-                </template>
-                <template v-else>
-                  Sign-in in progress: complete it in the browser tab that opened. It will connect automatically.
-                </template>
-                <button type="button" class="btn-small" @click="gwsReloginCancel(profileId)">Cancel</button>
-              </p>
+              <div v-if="gwsReloginPending[profileId]" class="gws-waiting" role="status">
+                <span class="gws-spin" aria-hidden="true"></span>
+                <p class="gws-waiting-text">
+                  <strong>Waiting for the browser</strong>
+                  <template v-if="gwsAuthUrls[profileId]">
+                    The sign-in tab was blocked. Open this link, then finish in the browser — it connects automatically:
+                    <a :href="gwsAuthUrls[profileId]" target="_blank" class="gws-auth-link">Open authorization page</a>
+                  </template>
+                  <template v-else>
+                    Finish signing in in the tab that opened. This connects on its own.
+                  </template>
+                </p>
+                <button type="button" class="btn-small" @click="gwsReloginCancel(profileId)">Stop sign-in</button>
+              </div>
               <p v-else-if="gwsReloginError[profileId]" class="gws-action-hint hint--warn">{{ gwsReloginError[profileId] }}</p>
               <div v-else-if="gwsAuthUrls[profileId]" class="gws-auth-flow-box">
                 <p class="gws-flow-step">
@@ -172,11 +192,13 @@
       </div>
 
       <footer class="gws-connect-foot">
-        <button type="button" class="btn-small" @click="close">Cancel</button>
+        <span v-if="!(connected && linked)" id="gws-done-reason" class="gws-done-reason">Done is available once you are signed in and linked.</span>
+        <button type="button" class="btn-small" @click="close">Close</button>
         <button
           type="button"
           class="btn-primary btn-small"
           :disabled="!(connected && linked) || linking"
+          :aria-describedby="!(connected && linked) ? 'gws-done-reason' : undefined"
           @click="emit('close')"
         >Done</button>
       </footer>
@@ -374,14 +396,15 @@ function close(): void {
 }
 .gws-connect-head h3 { margin: 0; font-size: var(--text-lg); font-weight: 700; }
 .gws-connect-close {
-  width: 36px;
-  height: 36px;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
   color: var(--fg2);
-  font-size: 20px;
-  line-height: 1;
   cursor: pointer;
 }
 .gws-connect-close:hover { color: var(--fg); background: var(--bg3); }
@@ -415,22 +438,79 @@ function close(): void {
   flex-direction: column;
   gap: var(--space-2);
 }
-.gws-step-done {
+#gws-connect-storage code { overflow-wrap: anywhere; }
+.gws-account-name {
   margin: 0;
-  color: var(--fg2);
-  font-size: var(--text-sm);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
 }
-.gws-step-done::before {
-  content: "\2713";
-  margin-right: var(--space-2);
-  color: var(--success);
+.gws-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
 }
-.gws-step-done-row {
+.gws-checks li {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+.gws-checks li + li { border-top: 1px solid var(--border); }
+.gws-check { flex: none; stroke: var(--success); color: var(--success); }
+.gws-check-text { flex: 1; }
+.gws-link-btn {
+  min-height: var(--touch);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.gws-link-btn:hover { color: var(--fg); text-decoration: underline; }
+.gws-expired { margin: 0; }
+.gws-waiting {
+  display: flex;
+  align-items: center;
   gap: var(--space-3);
-  flex-wrap: wrap;
+}
+.gws-waiting-text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+.gws-waiting-text strong {
+  display: block;
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+.gws-spin {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .gws-spin { animation: gws-spin 0.8s linear infinite; }
+}
+@keyframes gws-spin { to { transform: rotate(360deg); } }
+.gws-done-reason {
+  flex: 1;
+  align-self: center;
+  font-size: var(--text-xs);
+  color: var(--fg3);
 }
 .gws-radio-group {
   display: flex;
@@ -463,13 +543,16 @@ function close(): void {
 }
 .gws-btn-group {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-2);
 }
-.gws-btn-group > .btn-small,
-.gws-btn-group > .btn-primary {
-  width: 100%;
+@media (max-width: 600px) {
+  .gws-btn-group > .btn-small,
+  .gws-btn-group > .btn-primary {
+    flex: 1 1 100%;
+  }
 }
 .gws-auth-flow-box {
   background: var(--bg3);

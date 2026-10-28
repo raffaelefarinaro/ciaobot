@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { useProjectStore } from '../../stores/projects'
 import InAppToast from '../InAppToast.vue'
 
@@ -97,5 +97,27 @@ describe('error toast Fix action', () => {
 
     expect(fixError).toHaveBeenCalledWith({ errorText: 'boom', title: 'Fix error' })
     expect(routerPush).not.toHaveBeenCalled()
+  })
+})
+
+describe('modal layering', () => {
+  it('toasts drop under an open modal dialog', async () => {
+    const { wrapper, store } = mountToast()
+    store.pushToast({ chat_id: '', title: 't', body: 'b' })
+    await flushPromises()
+    expect(wrapper.find('.toast-stack').classes()).not.toContain('toast-stack--under-modal')
+
+    const dialog = document.createElement('div')
+    dialog.setAttribute('aria-modal', 'true')
+    document.body.appendChild(dialog)
+    try {
+      await flushPromises()
+      expect(wrapper.find('.toast-stack').classes()).toContain('toast-stack--under-modal')
+    } finally {
+      dialog.remove()
+    }
+    await flushPromises()
+    expect(wrapper.find('.toast-stack').classes()).not.toContain('toast-stack--under-modal')
+    wrapper.unmount()
   })
 })

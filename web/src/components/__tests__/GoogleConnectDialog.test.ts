@@ -211,7 +211,7 @@ describe('Connect Google account dialog', () => {
     const wrapper = await mountOverview()
     try {
       const dialog = await openDialog(wrapper)
-      await button(dialog, 'Cancel').trigger('click')
+      await button(dialog, 'Close').trigger('click')
       await flushPromises()
       expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
       expect(posts(api, '/api/integrations/gws/profiles/add')).toHaveLength(0)
@@ -258,9 +258,8 @@ describe('Connect Google account dialog', () => {
     const wrapper = await mountOverview()
     try {
       const dialog = await openDialog(wrapper)
-      const name = dialog.get('input.routine-input')
-      expect((name.element as HTMLInputElement).value).toBe('Old')
-      expect(name.attributes('readonly')).toBeDefined()
+      expect(dialog.find('input.routine-input').exists()).toBe(false)
+      expect(dialog.get('.gws-account-name').text()).toBe('Old')
       await button(dialog, 'Paste a code instead').trigger('click')
       await flushPromises()
       expect(posts(api, '/api/integrations/gws/profiles/add')).toHaveLength(0)
@@ -393,7 +392,7 @@ describe('Connect Google account dialog', () => {
       const dialog = await openDialog(wrapper)
       await button(dialog, 'Sign in with Google').trigger('click')
       await flushPromises()
-      expect(dialog.text()).toContain('Sign-in in progress')
+      expect(dialog.text()).toContain('Waiting for the browser')
       await dialog.trigger('keydown', { key: 'Escape' })
       await flushPromises()
       await nextTick()
@@ -412,12 +411,81 @@ describe('Connect Google account dialog', () => {
     try {
       const dialog = await openDialog(wrapper)
       const first = dialog.get('[aria-label="Close"]').element as HTMLElement
-      const last = button(dialog, 'Cancel').element as HTMLElement
+      const last = button(dialog, 'Close').element as HTMLElement
       last.focus()
       await dialog.trigger('keydown', { key: 'Tab' })
       expect(document.activeElement).toBe(first)
       await dialog.trigger('keydown', { key: 'Tab', shiftKey: true })
       expect(document.activeElement).toBe(last)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('reauth shows the account name as text, not an input', async () => {
+    state.workspaces = registry('acme')
+    state.gws = integration([profile({ configured: true, client_secret_present: true, email: 'me@acme.co', workspaces: ['acme'] })])
+    const wrapper = await mountOverview()
+    try {
+      await wrapper.get('[aria-label="Actions for Google account"]').trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      await nextTick()
+      await wrapper.findAll('.settings-menu-item').find((i) => i.text() === 'Re-authenticate')!.trigger('click')
+      await flushPromises()
+      const dialog = wrapper.get('[role="dialog"]')
+      expect(dialog.find('.gws-connect-body input:not([type="file"]):not([type="radio"])').exists()).toBe(false)
+      expect(dialog.get('.gws-account-name').text()).toBe('Acme Google account')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('pending sign-in puts Stop sign-in in its own row', async () => {
+    state.gws = integration([profile({ client_secret_present: true })])
+    vi.stubGlobal('open', vi.fn(() => ({ location: { href: '' }, close: vi.fn() })))
+    const wrapper = await mountOverview()
+    try {
+      const dialog = await openDialog(wrapper)
+      await button(dialog, 'Sign in with Google').trigger('click')
+      await flushPromises()
+      expect(dialog.find('.gws-waiting').exists()).toBe(true)
+      expect(button(dialog, 'Stop sign-in').element.closest('p')).toBeNull()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('disabled Done names why', async () => {
+    state.gws = integration([profile({ client_secret_present: true })])
+    state.exchange = integration([profile({ client_secret_present: true, configured: true, email: 'me@acme.co' })])
+    vi.stubGlobal('open', vi.fn(() => ({ location: { href: '' }, close: vi.fn() })))
+    const wrapper = await mountOverview()
+    try {
+      const dialog = await openDialog(wrapper)
+      expect(dialog.find('#gws-done-reason').exists()).toBe(true)
+      expect(button(dialog, 'Done').attributes('aria-describedby')).toBe('gws-done-reason')
+      await button(dialog, 'Paste a code instead').trigger('click')
+      await flushPromises()
+      await dialog.get('input.gws-auth-input').setValue('4/abc')
+      await button(dialog, 'Complete Sign-In').trigger('click')
+      await flushPromises()
+      expect(dialog.find('#gws-done-reason').exists()).toBe(false)
+      expect(button(dialog, 'Done').attributes('aria-describedby')).toBeUndefined()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('Replace file keeps its accessible name', async () => {
+    state.gws = integration([profile({ client_secret_present: true })])
+    const wrapper = await mountOverview()
+    try {
+      const dialog = await openDialog(wrapper)
+      const replace = dialog.get('.gws-checks .gws-link-btn')
+      expect(replace.text()).toBe('Replace file')
+      const label = replace.attributes('aria-label')
+      expect(label).toBe('Replace file: client_secret.json')
+      expect(label!.startsWith(replace.text())).toBe(true)
     } finally {
       wrapper.unmount()
     }

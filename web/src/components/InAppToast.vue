@@ -1,5 +1,5 @@
 <template>
-  <div class="toast-stack" v-if="store.toasts.length">
+  <div class="toast-stack" :class="{ 'toast-stack--under-modal': modalOpen }" v-if="store.toasts.length">
     <div
       v-for="t in store.toasts"
       :key="t.id"
@@ -48,10 +48,12 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { clearChatDraft } from '../lib/chatDrafts'
+import { useModalOpen } from '../composables/useModalOpen'
 import type { InAppToast } from '../lib/types'
 
 const store = useProjectStore()
 const router = useRouter()
+const modalOpen = useModalOpen()
 
 // ── Swipe-to-dismiss ────────────────────────────────────────────────────────
 // Horizontal drag past a threshold dismisses the toast. Tracked per-toast so
@@ -167,6 +169,8 @@ async function onFix(toast: InAppToast) {
   max-width: min(360px, calc(100vw - 24px));
   pointer-events: none;
 }
+
+.toast-stack--under-modal { z-index: 99; }
 
 .toast {
   background: var(--bg-elev);
