@@ -2360,10 +2360,19 @@ watch(
    primary, a neutral secondary, and "talk about it" as a link. */
 .pr-actions {
   display: flex;
+  flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  width: auto;
   min-width: 0;
+}
+
+/* memoryReview.css stretches every button on a phone; here the row keeps its
+   natural widths and the accept takes the first line. */
+@media (max-width: 640px) {
+  .pr-actions .mr-btn { flex: 0 0 auto; }
+  .pr-actions .mr-btn--primary { flex: 1 1 100%; }
 }
 
 .pr-actions .pr-quiet { margin-left: auto; }
