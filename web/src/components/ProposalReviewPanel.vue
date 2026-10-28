@@ -1012,12 +1012,6 @@ function inlineCodeParts(text: string): Array<{ text: string; code: boolean }> {
   return parts
 }
 
-/** Where an accept would write, as a path. Now the tooltip and the details
- * line rather than the row's own subtitle.
- *
- * Every kind's answer lives in its descriptor, including the re-home row's
- * `from → to · why` form and the skill row's path.
- */
 function deciderLabel(row: ProposalRow): string {
   return row.decider === 'nightly' ? 'Nightly review will decide' : 'Needs your call'
 }
@@ -1033,6 +1027,12 @@ function isTitleLine(row: ProposalRow, text: string): boolean {
   return text.replace(/^\s*[-*]\s+/, '').trim() === rowTitle(row).trim()
 }
 
+/** Where an accept would write, as a path. Now the tooltip and the details
+ * line rather than the row's own subtitle.
+ *
+ * Every kind's answer lives in its descriptor, including the re-home row's
+ * `from → to · why` form and the skill row's path.
+ */
 function rowSubtitle(row: ProposalRow): string {
   return descriptorFor(row).destination(row)
 }
@@ -2163,8 +2163,7 @@ watch(
 
           <!-- Any rehome row that is not a plain justified accept: pick the
                destination, never pre-filled, from every registered workspace. -->
-          <template v-else-if="isRehome(row) && rehomeMode(row) !== 'accept'">
-          <div class="mr-actions pr-actions">
+          <div v-else-if="isRehome(row) && rehomeMode(row) !== 'accept'" class="mr-actions pr-actions">
             <span class="pr-confirm-text">Move to…</span>
             <button
               v-for="c in moveTargets(row)"
@@ -2177,8 +2176,6 @@ watch(
             <button v-if="!discussionChat(row)" type="button" class="mr-btn pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">Dismiss</button>
           </div>
-          <p v-if="rowReason(row)" class="pr-row-foot"><span class="pr-row-reason">{{ rowReason(row) }}</span></p>
-          </template>
 
           <!-- A skill proposal is a change to a skill that already exists: read
                it, improve it, or drop it. The improvement is a chat, and the
@@ -2187,8 +2184,7 @@ watch(
                browser knows about. Ahead of the linked branch below: that one
                replaces a row's actions with its chat, and this row's actions ARE
                the answer to the question that chat is working on. -->
-          <template v-else-if="isSkill(row)">
-          <div class="mr-actions pr-actions">
+          <div v-else-if="isSkill(row)" class="mr-actions pr-actions">
             <button
               v-if="hasActiveLink(row)"
               type="button"
@@ -2204,18 +2200,22 @@ watch(
             <button v-if="!discussionChat(row)" type="button" class="mr-btn pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
             <button type="button" class="mr-btn mr-btn--quiet pr-quiet" data-pr-action="dismiss" :disabled="store.isBusy(row.id)" @click="doDismiss(row)">{{ store.isBusy(row.id) ? 'working…' : 'Dismiss' }}</button>
           </div>
-          <p v-if="rowReason(row)" class="pr-row-foot"><span class="pr-row-reason">{{ rowReason(row) }}</span></p>
-          </template>
 
           <!-- Linked: a refused accept spawned a merge chat that is still active,
                so the row points at it instead of offering the same decision
                twice. "Show actions" is the way back: the refusal it answers may
                have been a stale revision a fresh accept resolves. -->
-          <div v-else-if="hasActiveLink(row)" class="mr-actions pr-actions pr-actions--linked">
+          <template v-else-if="hasActiveLink(row)">
+          <div class="mr-actions pr-actions pr-actions--linked">
             <span class="pr-linked-label">Working in <strong>{{ linkedChatTitle(row) }}</strong></span>
             <button type="button" class="mr-btn pr-row-action" @click="openLinkedChat(row)">Open chat</button>
             <button type="button" class="mr-link" @click="clearLink(row.id)">Show actions</button>
           </div>
+          <p v-if="rowReason(row) || (row.source && !isRehome(row) && !isSkill(row))" class="pr-row-foot">
+            <span v-if="rowReason(row)" class="pr-row-reason">{{ rowReason(row) }}</span>
+            <span v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</span>
+          </p>
+          </template>
 
           <template v-else>
           <div class="mr-actions pr-actions">

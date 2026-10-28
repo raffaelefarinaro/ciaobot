@@ -2729,7 +2729,7 @@ describe('the change on the row', () => {
       id: 'x', kind: 'memory', action: 'append_learnings', operation: 'add',
       destination: '/Users/me/repos/stazionesmart/AGENTS.md',
       before: agentsBefore, after: `${agentsBefore}\n\n## Agent learnings\n\n- fact`,
-      separator: '\n', revision: 'rev-x', text: 'fact',
+      separator: '\n', revision: 'rev-x', text: 'fact', reason: 'Nothing to add.',
     })
     const agentsRow = row({ id: 'x', kind: 'repo', target: '/Users/me/repos/stazionesmart', text: 'fact', decider: 'nightly', decide_reason: 'Not sure where it goes.' })
 
@@ -2763,10 +2763,21 @@ describe('the change on the row', () => {
         clone.querySelectorAll('.mr-sr-only').forEach((n) => n.remove())
         return clone.textContent ?? ''
       }).join(' ')
-      expect(visible).not.toContain('fact\n')
       expect(visible.replace('the fact above', '')).not.toMatch(/\bfact\b/)
       expect(wrapper.get('.pr-diff .mr-sr-only').text()).not.toBe('')
       wrapper.unmount()
+    })
+
+    it('keeps the server reason and source in the footer of a linked row', async () => {
+      localStorage.setItem('ciao:proposal-chat-links', JSON.stringify({ x: 'chat-m' }))
+      useProjectStore().chats = [
+        { chat_id: 'chat-m', project_id: 'p-work', title: 'Merge x', archived: false } as never,
+      ]
+      const wrapper = await mountAgents()
+      expect(wrapper.find('.pr-actions--linked').exists()).toBe(true)
+      expect(wrapper.get('.pr-row-foot .pr-row-reason').text()).toBe('Nothing to add.')
+      wrapper.unmount()
+      localStorage.removeItem('ciao:proposal-chat-links')
     })
 
     it('decider badge and why label', async () => {
