@@ -4660,7 +4660,7 @@ class ProjectChatManager:
         )
 
     async def resume_memory_passes(self) -> None:
-        self._memory_pass.resume()
+        await self._memory_pass.resume()
 
     async def _memory_pass_turn_finished(self, chat_id: str) -> bool:
         try:

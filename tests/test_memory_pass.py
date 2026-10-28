@@ -1227,6 +1227,32 @@ async def test_resume_after_restart(
     assert reloaded.get_chat(ids[1]).helper["state"] == "running"
 
 
+async def test_resume_archives_a_pass_left_done_by_a_restart(
+    tmp_path: Path, passes_enabled: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _make_manager(tmp_path)
+    archive = tmp_path / "archive.md"
+    archive.write_text("# chat\n", encoding="utf-8")
+    pass_id = manager.enqueue_memory_pass(_source(manager, "First"), None, archive, "")
+    chat = manager.get_chat(pass_id)
+    assert chat is not None
+    # The process died after the pass settled as done but before archiving.
+    manager._memory_pass._set_state(chat, "done")
+
+    reloaded = _make_manager(tmp_path)
+    reloaded_streams = _FakeStreams()
+    reloaded.start_stream = reloaded_streams  # type: ignore[method-assign]
+    archived = _stub_archive(reloaded, monkeypatch)
+    assert reloaded.get_chat(pass_id).archived is False
+
+    await reloaded.resume_memory_passes()
+
+    assert archived == [pass_id]
+    assert reloaded.get_chat(pass_id).archived is True
+    assert reloaded.get_chat(pass_id).helper["state"] == "done"
+    assert reloaded_streams.chat_ids == []
+
+
 # ── The terminal turn a pass settles on ────────────────────────────────────
 #
 # `on_turn_finished` above is called directly, which pins the queue but proves
