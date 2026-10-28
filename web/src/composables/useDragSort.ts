@@ -169,6 +169,34 @@ function isScrollable(style: string): boolean {
   return style === 'auto' || style === 'scroll' || style === 'overlay'
 }
 
+/** The preview placeholder drawn in this scope, if Vue has rendered one. */
+function renderedPlaceholder(scopeEl: HTMLElement): HTMLElement | null {
+  return scopeEl.querySelector<HTMLElement>('.drag-placeholder')
+}
+
+/**
+ * The placeholder's slot index among the visible items, read from the drawn
+ * order rather than from the reactive target. A release in the same task as the
+ * last move can see a placeholder that Vue has not moved yet, or none at all.
+ * `compareDocumentPosition` keeps this correct when the rows sit in a list
+ * nested inside the scope (a task lane) as well as when they are direct children
+ * (the project sidebar).
+ */
+function renderedSlotIndex(
+  placeholder: HTMLElement,
+  ids: readonly string[],
+  itemEl: (id: string) => HTMLElement | null,
+): number {
+  let count = 0
+  for (const id of ids) {
+    const item = itemEl(id)
+    if (item && item !== placeholder) {
+      if (item.compareDocumentPosition(placeholder) & Node.DOCUMENT_POSITION_FOLLOWING) count += 1
+    }
+  }
+  return count
+}
+
 /**
  * Whether focus still belongs to the dragged item with `id`: on its grip, or
  * nowhere.
@@ -562,8 +590,12 @@ export function useDragSort(options: UseDragSortOptions) {
       if (!allowed(d.id, d.fromScope, scope.id)) return null
       const ids = visibleIds(scope.id, d.id)
       if (scope.positional === false) return { scope: scope.id, index: ids.length }
-      const hasPlaceholder = d.toScope === scope.id
-      const shift = hasPlaceholder ? placeholderShift(el) : 0
+      // Hit testing follows what is drawn: a placeholder that Vue has not
+      // flushed yet does not shift anything, and one drawn at an older index
+      // shifts the slots that actually follow it.
+      const placeholder = renderedPlaceholder(el)
+      const shift = placeholder ? placeholderShift(placeholder) : 0
+      const at = placeholder ? renderedSlotIndex(placeholder, ids, options.itemEl) : -1
       const slots: DragSlot[] = []
       ids.forEach((id, i) => {
         const item = options.itemEl(id)
@@ -571,7 +603,7 @@ export function useDragSort(options: UseDragSortOptions) {
         const rect2 = layoutRect(item)
         slots.push({
           id,
-          top: rect2.top - (hasPlaceholder && i >= d.index ? shift : 0),
+          top: rect2.top - (i >= at ? shift : 0),
           height: rect2.height,
         })
       })
@@ -580,10 +612,14 @@ export function useDragSort(options: UseDragSortOptions) {
     return null
   }
 
-  function placeholderShift(scopeEl: HTMLElement): number {
-    const height = session?.height ?? 0
-    const gap = parseFloat(getComputedStyle(scopeEl).rowGap) || 0
-    return height + gap
+  function placeholderShift(placeholder: HTMLElement): number {
+    // The drawn placeholder's own size, not the source card's remembered
+    // height: borders and an in-flight move must not skew the row it occupies.
+    // Gap lives on the list that holds the rows, which need not be the scope
+    // element itself (a task lane wraps its `ul.task-cards`).
+    const list = placeholder.parentElement
+    const gap = list ? parseFloat(getComputedStyle(list).rowGap) || 0 : 0
+    return layoutRect(placeholder).height + gap
   }
 
   function updateTarget(x: number, y: number): void {

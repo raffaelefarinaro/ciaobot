@@ -190,7 +190,11 @@ this file; the gates are the ones under Verification.
   win32`, `PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto
   tests/` (re-run only `--lf` before calling it red; latency tests flake under
   load), and, after symlinking `web/node_modules`, `npm test` and `npm run build`
-  in `web/` (remove the symlink afterwards).
+  in `web/` (remove the symlink afterwards). When the diff touches `web/`, it
+  also runs `npm run test:e2e` after the build: the Playwright suite runs in CI
+  only on the macOS job after merge, so a renamed button a spec still looks for
+  reaches `develop` red (#2279). The terminal-renderer specs need
+  `npm run build:harness` first.
 - `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and
   `docs/ARCHITECTURE.md` are appended to by most PRs and conflict when two land
   together. Resolve by keeping both sides.

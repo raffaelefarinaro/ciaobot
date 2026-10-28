@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, isolate, quiesce } from '../support/app'
+import { boot, isolate, quiesce, releasePointerInSameTask } from '../support/app'
 
 const READY = '.project-header'
 const NOTES = 'alpha-notes'
@@ -82,6 +82,38 @@ test.describe('sidebar project reordering', () => {
     await page.reload()
     await expect(page.locator(READY).first()).toBeVisible()
     expect(await rowOrder(page)).toEqual(['alpha-general', ...order])
+  })
+
+  test('a fast release above a project lands before it when the drawn placeholder is stale', async ({ page }) => {
+    const requests: Array<Record<string, unknown>> = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/projects/reorder')) {
+        requests.push(request.postDataJSON())
+      }
+    })
+    const group = page.locator('[data-project-id="filler-02"]')
+    await group.locator('.project-header').hover()
+    const grip = (await group.locator('.drag-grip').boundingBox())!
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2)
+    await page.mouse.down()
+    // Activate at the source slot, so the preview has drawn its placeholder there.
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 12, { steps: 3 })
+    await expect(page.locator('.drag-overlay')).toBeVisible()
+    await expect(page.locator('.project-list > .drag-placeholder')).toHaveCount(1)
+
+    // Move above Notes and release in one task: the drawn placeholder is still
+    // at the old slot while targetAt recomputes for the new one.
+    const notes = (await page.locator(`[data-project-id="${NOTES}"]`).boundingBox())!
+    await releasePointerInSameTask(page.locator('.project-list'), {
+      x: notes.x + notes.width / 2,
+      y: notes.y + 8,
+    })
+    await page.mouse.up()
+
+    await expect.poll(() => requests.length).toBe(1)
+    const expected = ['filler-02', NOTES, 'filler-01', ...FILLERS.slice(2)]
+    expect(requests[0]!.order).toEqual(expected)
+    expect(await rowOrder(page)).toEqual(['alpha-general', ...expected])
   })
 
   test('an expanded group moves as one and Escape cancels with no request', async ({ page }) => {

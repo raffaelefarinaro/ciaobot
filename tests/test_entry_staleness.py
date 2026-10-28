@@ -528,6 +528,8 @@ def test_find_stale_entries_reports_counts_coverage_and_diagnostics(
         _note(
             textwrap.dedent(
                 """\
+                Tenancy notes from the letting agency.
+
                 - Lives in Porto [verified: 2026-09-28]
                 - Landlord is Mr Silva [verified: 2019-05-01]
                 """
@@ -567,18 +569,26 @@ def test_find_stale_entries_reports_counts_coverage_and_diagnostics(
     # nobody read.
     assert result["entries_checked"] == 2
     assert result["entries_unverified"] == 0
-    assert result["entries_uncovered"] == 1  # Bob's table
+    # Alice's paragraph and Bob's table are both real gaps, and neither is
+    # dropped from the count to make the other look clean.
+    assert result["entries_uncovered"] == 2
     assert result["notes_unreadable"] == ["memory-vault/People/Gone.md"]
     coverage = {row["relative_path"]: row for row in result["entry_coverage"]}
     assert coverage["People/Alice.md"]["fully_verified"] is False
     assert coverage["People/Bob.md"]["fully_verified"] is False
+    assert coverage["People/Alice.md"]["entries_uncovered"] == 1
+    assert coverage["People/Bob.md"]["entries_uncovered"] == 1
     assert coverage["People/Alice.md"]["last_verified"] == "2026-09-29"
     # The finding carries everything a caller cannot rederive.
     finding = result["stale_entries"][0]
     assert finding["identity"] and finding["fingerprint"] and finding["revision"]
     assert finding["reason"] == ma.STALE_ENTRY_AGED
     assert "Landlord" in finding["excerpt"]
-    assert finding["context"]  # the neighbouring line is named
+    # The same-section paragraph survives as context; the note's own heading
+    # and the sibling fact above it do not.
+    assert finding["context"] == ["Tenancy notes from the letting agency."]
+    assert all("# Alice" not in line for line in finding["context"])
+    assert all("Lives in Porto" not in line for line in finding["context"])
     assert finding["own_date"] is True
 
 

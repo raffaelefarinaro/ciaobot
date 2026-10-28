@@ -10,8 +10,8 @@ import { boot, horizontalOverflow, isolate } from '../support/app'
  * 1. **Focus.** The entry block's proposal link is the only way to act on a
  *    fact, and it has to be reachable, visible and take focus. `mount()` in
  *    jsdom reports every rect as 0x0 and never runs a layout or a paint.
- * 2. **Layout at 390px.** The block adds a quoted bullet, a context line and
- *    two links to a row whose path is an unbreakable token — the combination
+ * 2. **Layout at 390px.** The block adds a quoted section, a plain-prose fact
+ *    and two links to a row whose path is an unbreakable token — the combination
  *    that widens a flex parent, and the only thing that detects it is a real
  *    `scrollWidth`.
  * 3. **Touch targets.** `--touch: 44px` is a media query over
@@ -67,10 +67,12 @@ test.describe('a note holding one overdue fact', () => {
     await expect(head).toContainText('1 block of prose not read as facts')
     await expect(head).toContainText('never counted as verified')
 
-    // The bullet itself, the section it is under, and the line beside it.
+    // The bullet itself, the section it is under, and no borrowed neighbour:
+    // this dense note has no same-section prose, and the heading the panel
+    // already names is a boundary rather than a grey context line.
     await expect(row.locator('.vr-entry-text').first()).toContainText('Reports to the CTO')
     await expect(row.locator('.vr-entry-section').first()).toContainText('Nadia')
-    await expect(row.locator('.vr-entry-context').first()).toContainText('Based in Lisbon')
+    await expect(row.locator('.vr-entry-context')).toHaveCount(0)
 
     // One head per reason, not one per fact: the two facts here are overdue for
     // different amounts of work, and the panel says why once for each rather

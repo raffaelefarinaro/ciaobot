@@ -885,56 +885,85 @@ def _lines_with_offsets(text: str) -> list[tuple[int, int, str]]:
     return lines
 
 
-def context_index(
-    text: str, document: ne.EntryDocument
-) -> tuple[list[tuple[int, int, str]], list[bool]]:
-    """A note's line table and the flag for each line lying inside an entry.
+_ContextIndex = tuple[list[tuple[int, int, str]], list[bool], list[bool]]
+"""A note's line table and the heading/prose flags :func:`context_index` builds."""
+
+
+def _line_flags(
+    lines: list[tuple[int, int, str]], spans: tuple[tuple[int, int], ...]
+) -> list[bool]:
+    """Flag each line that lies inside one of ``spans``, once per note.
+
+    Both the parser's heading spans and its prose spans are sorted and
+    non-overlapping, so one sweep is enough.
+    """
+    flags = [False] * len(lines)
+    cursor = 0
+    for index, (line_start, _line_end, _line) in enumerate(lines):
+        while cursor < len(spans) and spans[cursor][1] <= line_start:
+            cursor += 1
+        if cursor < len(spans) and spans[cursor][0] <= line_start:
+            flags[index] = True
+    return flags
+
+
+def context_index(text: str, document: ne.EntryDocument) -> _ContextIndex:
+    """A note's line table plus the flags :func:`_context_for` walks by.
 
     Built once per note and handed to every :func:`_context_for` call. The
     obvious implementation — re-walking the text and re-scanning every entry
     span for each candidate line — is ``entries × lines × entries`` per note,
     which is the entire page-load cost on a dense note; a sweep here is
-    ``lines`` once. Entries never overlap, so the first span still open at a
-    line is the only one that can cover it.
+    ``lines`` once.
+
+    ``headings`` marks a line the parser read as a section heading, and ``prose``
+    a line it read as a plain paragraph. The two are what the walk needs, and
+    they are deliberately exhaustive: a thematic break, a table row, a quote, a
+    list marker, a fence, the frontmatter and a blank line are none of them, so
+    the context slot cannot quote structure as if somebody had written it as a
+    sentence.
     """
     lines = _lines_with_offsets(text)
-    spans = sorted((other.start, other.end) for other in document.entries)
-    inside: list[bool] = []
-    cursor = 0
-    for line_start, line_end, _line in lines:
-        while cursor < len(spans) and spans[cursor][1] <= line_start:
-            cursor += 1
-        inside.append(cursor < len(spans) and spans[cursor][0] < line_end)
-    return lines, inside
+    headings = _line_flags(lines, document.headings)
+    prose = _line_flags(lines, document.prose)
+    return lines, headings, prose
 
 
 def _context_for(
     text: str,
     entry: ne.NoteEntry,
     document: ne.EntryDocument,
-    index: tuple[list[tuple[int, int, str]], list[bool]] | None = None,
+    index: _ContextIndex | None = None,
 ) -> tuple[str, ...]:
-    """The nearest physical lines either side that are not sibling facts.
+    """The nearest same-section prose lines either side of a fact.
 
     Deliberately the file's own lines rather than the neighbouring *entries*: a
     reader deciding whether a bullet is current needs the prose around it — a
-    heading that says which address this is, a stray sentence explaining the
-    move. But a dense list has no prose between its bullets, so the line beside a
-    fact is very often the next fact, and reprinting that in grey reads as the
-    same claim made twice. A line that lies inside any entry's span is therefore
-    skipped and the walk continues outward; a heading or a prose line is not an
-    entry and is still shown. Blank lines are dropped, because a gap is context
-    of nothing.
+    stray sentence explaining the move. But a dense list has no prose between
+    its bullets, so the line beside a fact is very often the next fact, and
+    reprinting that in grey reads as the same claim made twice. Only a line the
+    parser classified as a plain paragraph is eligible, so a sibling bullet, a
+    table row, a thematic break, a quote, a fenced block, a list marker, the
+    frontmatter and a blank line are all skipped and the walk continues outward.
+
+    A section heading is a hard boundary in both directions: it names the
+    section the row already shows, reprinting it made one card say *Address*
+    twice, and walking through it borrowed the next section's heading as if it
+    described this fact. Headings are never shown, and the walk stops when it
+    reaches one — structure on the entry's own side is passed over, but a
+    heading is never crossed.
 
     ``index`` is the note's :func:`context_index`, built once by the caller. A
     caller that passes none gets the index built here, so a one-off use stays
     correct.
     """
-    lines, inside = context_index(text, document) if index is None else index
+    lines, headings, prose = context_index(text, document) if index is None else index
 
     def first(candidates: list[int]) -> str:
         for candidate in candidates:
-            if inside[candidate]:
+            if headings[candidate]:
+                return ""
+            if not prose[candidate]:
                 continue
             shown = _excerpt_line(lines[candidate][2])
             if shown:
@@ -1383,7 +1412,7 @@ def _verdict_for(
     *,
     document: ne.EntryDocument,
     text: str,
-    index: tuple[list[tuple[int, int, str]], list[bool]] | None = None,
+    index: _ContextIndex | None = None,
     code: str,
     dated: datetime.date | None,
     own_date: bool,
