@@ -1005,8 +1005,14 @@ def test_sibling_bullets_are_not_reprinted_as_context() -> None:
     assert all(verdict.context == ("Intro line.",) for verdict in selected)
 
 
-def test_prose_and_a_heading_neighbour_still_show_as_context() -> None:
-    """Skipping siblings must not empty the context of a fact that has real prose."""
+def test_same_section_prose_shows_while_the_heading_does_not() -> None:
+    """Skipping siblings must not empty the context of a fact that has real prose.
+
+    The heading above the fact is the section the row already names, so it is not
+    context: reprinting it made the same heading appear twice on one card. The
+    heading is still a boundary, so the walk stops there rather than reaching
+    into the section above.
+    """
     text = (
         "# Address\n"
         "\n"
@@ -1017,5 +1023,360 @@ def test_prose_and_a_heading_neighbour_still_show_as_context() -> None:
         "Verified with the agency.\n"
     )
     verdict = _entry_verdicts(text)[0]
-    assert "## Landlord" in verdict.context
-    assert "Verified with the agency." in verdict.context
+    assert verdict.section == "Landlord"
+    assert "## Landlord" not in verdict.context
+    assert "# Address" not in verdict.context
+    assert verdict.context == ("Verified with the agency.",)
+
+
+def test_a_heading_is_a_boundary_from_the_next_section() -> None:
+    """A dense list beside another section must not borrow that section's heading.
+
+    The reproduction for this issue: the fact's grey context read
+    ``('## Address', '## Employment')``, so the card showed the next section's
+    heading as if it described this fact. The heading is a hard boundary even
+    when blank lines and several sibling facts separate it from the entry.
+    """
+    text = (
+        "## Address\n"
+        "- First fact\n"
+        "- Second fact\n"
+        "- Third fact\n"
+        "\n"
+        "## Employment\n"
+        "- Fourth fact\n"
+    )
+    selected = _entry_verdicts(text)
+    assert len(selected) == 4
+    excerpts = {verdict.excerpt for verdict in selected}
+    for verdict in selected:
+        assert all(line not in excerpts for line in verdict.context)
+        assert all("Address" not in line for line in verdict.context)
+        assert all("Employment" not in line for line in verdict.context)
+    first = next(v for v in selected if v.excerpt == "First fact")
+    fourth = next(v for v in selected if v.excerpt == "Fourth fact")
+    assert first.context == ()
+    assert fourth.context == ()
+
+
+def test_prose_either_side_of_a_dense_list_stays_useful_context() -> None:
+    """Same-section prose on both sides survives, and the heading does not.
+
+    The useful before/after lines are the whole point of the context slot, and a
+    walk that stopped at the *first* heading it found would be right for this
+    note but only because the prose happens to sit on the entry's own side.
+    """
+    text = (
+        "## Address\n"
+        "\n"
+        "Intro paragraph.\n"
+        "\n"
+        "- First fact\n"
+        "- Second fact\n"
+        "- Third fact\n"
+        "\n"
+        "A closing sentence.\n"
+        "\n"
+        "## Employment\n"
+        "- Fourth fact\n"
+    )
+    selected = _entry_verdicts(text)
+    first = next(v for v in selected if v.excerpt == "First fact")
+    third = next(v for v in selected if v.excerpt == "Third fact")
+    fourth = next(v for v in selected if v.excerpt == "Fourth fact")
+    assert first.context == ("Intro paragraph.", "A closing sentence.")
+    assert third.context == ("Intro paragraph.", "A closing sentence.")
+    # The next section's entry has its own heading as a boundary above it and
+    # nothing of the previous section's prose crosses it.
+    assert fourth.context == ()
+
+
+def test_heading_like_text_in_a_fence_is_not_a_boundary_or_context() -> None:
+    """Code is neither prose nor a section heading, so the walk passes over it.
+
+    A note that documents Markdown keeps `## Something` inside a fence. Reading
+    it as a heading would end the walk at a code sample; showing it as context
+    would put code in the grey prose slot. Both are wrong: the fenced block is
+    skipped, and the same-section prose on the other side of it still shows.
+    """
+    text = (
+        "# Address\n"
+        "\n"
+        "Same section prose.\n"
+        "\n"
+        "```text\n"
+        "## Employment\n"
+        "- Not a fact, the sibling of nobody\n"
+        "```\n"
+        "\n"
+        "- First fact [verified: 2019-05-01]\n"
+        "\n"
+        "After the fact.\n"
+    )
+    verdict = _entry_verdicts(text)[0]
+    assert verdict.context == ("Same section prose.", "After the fact.")
+    assert all("## Employment" not in line for line in verdict.context)
+    assert all("```" not in line for line in verdict.context)
+
+
+def test_frontmatter_is_never_context_on_a_note_without_a_heading() -> None:
+    """A heading-free note's first fact must not inherit the frontmatter.
+
+    The parser recognises frontmatter as structure, not prose; a context walk
+    that only knew about headings would show the closing ``---`` and the
+    ``type:``/``updated:`` lines above the first bullet. The same parser boundary
+    (``frontmatter_span``) is what decides it here, including when real prose
+    follows.
+    """
+    frontmatter = (
+        "---\n"
+        "type: person\n"
+        "updated: 2026-01-01\n"
+        "---\n"
+        "\n"
+    )
+    bare = _entry_verdicts(frontmatter + "- First fact\n- Second fact\n")
+    assert len(bare) == 2
+    assert all(verdict.context == () for verdict in bare)
+
+    with_prose = _entry_verdicts(
+        frontmatter + "Tenancy notes from the letting agency.\n\n"
+        "- First fact\n- Second fact\n"
+    )
+    assert [verdict.context for verdict in with_prose] == [
+        ("Tenancy notes from the letting agency.",),
+        ("Tenancy notes from the letting agency.",),
+    ]
+    for verdict in with_prose:
+        assert all("---" not in line for line in verdict.context)
+        assert all("type:" not in line for line in verdict.context)
+        assert all("updated:" not in line for line in verdict.context)
+
+
+def test_single_cell_table_row_is_not_fact_context() -> None:
+    text = "Field | Value\n--- | ---\nOnly one cell\n\n- fact\n"
+    verdict = _entry_verdicts(text)[0]
+    assert verdict.context == ()
+    assert verdict.identity == "5ce2f5e411be4d650f0298b40cee96558337d8989f45442f77417ae07b0be4b3"
+    assert verdict.fingerprint == "0a8092a15e7b800d9be128d3745818b5a993b7bfb4b91ad76cbbca5ba906dd30"
+
+
+def test_a_thematic_break_is_not_context_but_prose_beyond_it_is() -> None:
+    """A rule is structure, not a sentence somebody wrote beside the fact.
+
+    ``# A`` / ``- fact`` / ``---`` / ``More prose.`` used to put the bare rule in
+    the grey context slot. The break is skipped in both directions, while the
+    same-section prose on the far side of it still names the move.
+    """
+    after = _entry_verdicts(
+        "# Address\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "\n"
+        "---\n"
+        "\n"
+        "Verified with the agency.\n"
+    )[0]
+    assert after.context == ("Verified with the agency.",)
+    assert all("---" not in line for line in after.context)
+
+    before = _entry_verdicts(
+        "# Address\n"
+        "\n"
+        "Notes from the tenancy file.\n"
+        "\n"
+        "---\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+    )[0]
+    assert before.context == ("Notes from the tenancy file.",)
+
+    bare = _entry_verdicts(
+        "# Address\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "\n"
+        "---\n"
+    )[0]
+    assert bare.context == ()
+
+
+def test_table_rows_are_structure_not_context() -> None:
+    """A table beside a fact is not the prose that explains it.
+
+    The rows and the delimiter used to be eligible lines; the parser files them
+    as a table, so the walk passes over the whole block and reaches the real
+    paragraphs on either side.
+    """
+    text = (
+        "# Address\n"
+        "\n"
+        "Before the table.\n"
+        "\n"
+        "| Field | Value |\n"
+        "| --- | --- |\n"
+        "| Phone | 912 |\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "\n"
+        "After the table.\n"
+    )
+    verdict = _entry_verdicts(text)[0]
+    assert verdict.context == ("Before the table.", "After the table.")
+    assert all("|" not in line for line in verdict.context)
+    assert all("---" not in line for line in verdict.context)
+
+
+def test_a_table_without_leading_pipes_is_not_context() -> None:
+    """The delimiter owns the header and body even when no row starts with `|`.
+
+    GFM tables need not use a leading pipe. ``Field | Value`` and
+    ``Phone | 912`` used to reach the prose slot as if somebody had written them
+    as sentences. The fact after the block keeps the real paragraphs on either
+    side and none of the rows.
+    """
+    text = (
+        "# Address\n"
+        "\n"
+        "Before the table.\n"
+        "\n"
+        "Field | Value\n"
+        "--- | ---\n"
+        "Phone number | Home\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "\n"
+        "After the table.\n"
+    )
+    verdict = _entry_verdicts(text)[0]
+    assert verdict.context == ("Before the table.", "After the table.")
+    assert all("|" not in line for line in verdict.context)
+    assert all("Phone number" not in line for line in verdict.context)
+
+
+def test_quotes_are_not_context_and_real_prose_is() -> None:
+    """A quoted line is somebody else's words, not the note's own explanation."""
+    text = (
+        "# Address\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "\n"
+        "> The agency said the boiler was due.\n"
+        "\n"
+        "The repair was booked afterwards.\n"
+    )
+    verdict = _entry_verdicts(text)[0]
+    assert verdict.context == ("The repair was booked afterwards.",)
+    assert all(not line.startswith(">") for line in verdict.context)
+
+
+def test_structure_between_sections_does_not_let_prose_cross_a_heading() -> None:
+    """Skipping structure must not turn a heading into a soft boundary.
+
+    A rule before the next section is a rule; the heading after it is still the
+    boundary that keeps the next section's prose out of this fact's context.
+    """
+    text = (
+        "# Address\n"
+        "\n"
+        "- Landlord is Mr Silva [verified: 2019-05-01]\n"
+        "\n"
+        "---\n"
+        "\n"
+        "## Employment\n"
+        "\n"
+        "Employed at Radix since March.\n"
+    )
+    verdict = _entry_verdicts(text)[0]
+    assert verdict.context == ()
+    assert all("Radix" not in line for line in verdict.context)
+    assert all("Employment" not in line for line in verdict.context)
+
+
+def test_identity_and_fingerprint_baseline_for_a_representative_note() -> None:
+    """The display changes are not allowed to move a fact's identity.
+
+    These are fixed digests, not a comparison with another call in this module:
+    the same source text, workspace and note path must keep minting the same
+    keys, because check state and pending proposals are keyed by them. A change
+    here is a migration, not a display tweak.
+    """
+    from ciao import note_entries as ne
+
+    source = (
+        "---\n"
+        "type: person\n"
+        "updated: 2026-01-01\n"
+        "---\n"
+        "# Alice\n"
+        "\n"
+        "- Lives in Porto\n"
+        "- Landlord is Mr Silva\n"
+        "\n"
+        "Tenancy notes from the letting agency.\n"
+    )
+    document = ne.parse_note_entries(
+        source, note_path="People/Alice.md", workspace="work"
+    )
+    assert [
+        (entry.text, entry.identity, entry.fingerprint) for entry in document.entries
+    ] == [
+        (
+            "- Lives in Porto",
+            "1ccd42ea26f881ed6b6d6ac70d1c42868a84bfe4e7b365a16a2ffe69c696b0e6",
+            "648fe46b4e4dcec3762e3306af803d111986dfdd81c18d4ac07ddb8de57bff99",
+        ),
+        (
+            "- Landlord is Mr Silva",
+            "bd2daf068e6d3f7a89254599b4e99274e6c4400afbf65ea5ca9d70bec1f83fc3",
+            "435110450cdd5cb5e0b37b1621a254b144e0850938baee488563bd5f058c8b14",
+        ),
+    ]
+    assert document.headings == ((source.index("# Alice"), source.index("# Alice") + 7),)
+
+    # A thematic break and a table around the facts change neither their
+    # identity nor their fingerprints: the display walk never takes part in the
+    # key. The prose still shows, and the structure does not.
+    decorated = source.replace(
+        "Tenancy notes from the letting agency.\n",
+        "---\n"
+        "\n"
+        "| Field | Value |\n"
+        "| --- | --- |\n"
+        "| Phone | 912 |\n"
+        "\n"
+        "Tenancy notes from the letting agency.\n",
+    )
+    decorated_doc = ne.parse_note_entries(
+        decorated, note_path="People/Alice.md", workspace="work"
+    )
+    assert [
+        (entry.identity, entry.fingerprint) for entry in decorated_doc.entries
+    ] == [(entry.identity, entry.fingerprint) for entry in document.entries]
+    assert [verdict.context for verdict in _entry_verdicts(decorated)] == [
+        ("Tenancy notes from the letting agency.",),
+        ("Tenancy notes from the letting agency.",),
+    ]
+
+
+def test_heading_boundaries_leave_identity_and_fingerprint_untouched() -> None:
+    """Context is display only; the same source text still mints the same fact."""
+    from ciao import note_entries as ne
+
+    source = (
+        "## Address\n"
+        "- First fact\n"
+        "- Second fact\n"
+        "\n"
+        "## Employment\n"
+        "- Third fact\n"
+    )
+    selected = _entry_verdicts(source)
+    document = ne.parse_note_entries(
+        source, note_path="People/Alice.md", workspace="work"
+    )
+    assert [(v.identity, v.fingerprint) for v in selected] == [
+        (entry.identity, entry.fingerprint) for entry in document.entries
+    ]
+    assert [v.start for v in selected] == [entry.start for entry in document.entries]
+    assert [v.excerpt for v in selected] == ["First fact", "Second fact", "Third fact"]
