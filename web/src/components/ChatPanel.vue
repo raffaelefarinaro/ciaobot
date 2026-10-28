@@ -4480,8 +4480,11 @@ const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.live
 // see loadMessages' `background` option), which could leave an incomplete
 // transcript on screen with no visible signal. Once a turn is actively
 // streaming, the live Activity/typing UI is the better indicator, so that
-// takes over instead of hiding the transcript.
-const blockingHistoryLoad = computed(() => store.messageHistoryLoading && !store.isStreaming)
+// takes over instead of hiding the transcript. With nothing to show yet (an
+// engine-started turn whose echo has not arrived) the live UI has no user turn
+// to sit under, and "Start with a request" would be a lie, so the skeleton stays.
+const blockingHistoryLoad = computed(() =>
+  store.messageHistoryLoading && (!store.isStreaming || transcriptEmpty.value))
 
 // Watcher: keep highlights in sync with the pending list and message DOM.
 watch(

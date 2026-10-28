@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { effectScope, ref } from 'vue'
+import { effectScope, ref, watch } from 'vue'
 import { useDragSort, type DragCommit, type UseDragSortOptions } from '../useDragSort'
 
 const ITEM_HEIGHT = 40
@@ -20,9 +20,21 @@ interface Harness {
   handlers: (id: string, scope: string) => ReturnType<ReturnType<typeof useDragSort>['gripHandlers']>
   surface: (id: string, scope: string) => ReturnType<ReturnType<typeof useDragSort>['surfaceHandlers']>
   root: HTMLElement
+  /** Apply `entriesFor` to the DOM, standing in for Vue's async flush. */
+  render: () => void
+  /** Give an item an in-flight FLIP translation without moving its layout slot. */
+  flip: (id: string, dy: number) => void
 }
 
-function setup(overrides: Partial<UseDragSortOptions> = {}): Harness {
+/**
+ * `reactive` geometry reads `entriesFor` straight from the drag state, so the
+ * placeholder is laid out synchronously. `dom` geometry reads the elements that
+ * are actually in the document, exactly as `getBoundingClientRect` would before
+ * Vue has flushed the preview; `render()` is the flush.
+ */
+type Layout = 'reactive' | 'dom'
+
+function setup(overrides: Partial<UseDragSortOptions> = {}, layout: Layout = 'reactive'): Harness {
   document.body.innerHTML = ''
   const root = document.createElement('div')
   document.body.appendChild(root)
@@ -30,6 +42,9 @@ function setup(overrides: Partial<UseDragSortOptions> = {}): Harness {
   for (const [scope, ids] of Object.entries(lists)) {
     const ul = document.createElement('ul')
     ul.dataset.scope = scope
+    // The geometry model, the placeholder's measured height and targetAt's gap
+    // must agree.
+    ul.style.rowGap = `${GAP}px`
     scopeEls[scope] = ul
     root.appendChild(ul)
     for (const id of ids) {
@@ -75,7 +90,9 @@ function setup(overrides: Partial<UseDragSortOptions> = {}): Harness {
     }
   }
 
-  // A flex-like layout driven by what the view would render right now.
+  // The `reactive` mode renders synchronously after every drag-state change so
+  // its geometry always matches the current preview. The `dom` mode only renders
+  // when the test calls `render`, which stands in for Vue's async flush.
   scopeEls.todo.getBoundingClientRect = () => new DOMRect(0, -1, 100, 500)
   scopeEls.doing.getBoundingClientRect = () => new DOMRect(100, -1, 100, 500)
   // Hit testing follows the same rects: a scope is only under the pointer where
@@ -88,27 +105,100 @@ function setup(overrides: Partial<UseDragSortOptions> = {}): Harness {
     }
     return hits
   }
+  // Flex-like layout read from the elements actually in the document. The
+  // `reactive` mode instead lays items out from `entriesFor`, as the old
+  // harness did, but its placeholder element is real so the engine can see it.
+  const flips = new Map<string, number>()
+  const rectForDom = (el: HTMLElement): DOMRect => {
+    const ul = el.parentElement as HTMLElement
+    let top = 0
+    for (const child of Array.from(ul.children) as HTMLElement[]) {
+      const height = child.classList.contains('drag-placeholder')
+        ? ITEM_HEIGHT
+        : child.classList.contains('drag-source')
+          ? 0
+          : ITEM_HEIGHT
+      if (child === el) {
+        const flip = el.dataset.item ? (flips.get(el.dataset.item) ?? 0) : 0
+        return new DOMRect(ul.dataset.scope === 'todo' ? 0 : 100, top + flip, 100, height)
+      }
+      top += height + GAP
+    }
+    return new DOMRect(0, 0, 0, 0)
+  }
+  const rectForReactive = (id: string): DOMRect => {
+    for (const scope of Object.keys(lists)) {
+      let top = 0
+      for (const entry of dnd.entriesFor(scope)) {
+        const height = entry.kind === 'item' && dnd.isSource(entry.id) ? 0 : ITEM_HEIGHT
+        if (entry.kind === 'item' && entry.id === id) {
+          return new DOMRect(scope === 'todo' ? 0 : 100, top, 100, height)
+        }
+        top += height + GAP
+      }
+    }
+    return new DOMRect(0, 0, 0, 0)
+  }
   root.querySelectorAll<HTMLElement>('[data-item]').forEach((li) => {
-    li.getBoundingClientRect = () => {
-      for (const scope of Object.keys(lists)) {
-        let top = 0
-        for (const entry of dnd.entriesFor(scope)) {
-          const height =
-            entry.kind === 'item' && dnd.isSource(entry.id) ? 0 : ITEM_HEIGHT
-          if (entry.kind === 'item' && entry.id === li.dataset.item) {
-            return new DOMRect(scope === 'todo' ? 0 : 100, top, 100, height)
-          }
-          top += height + GAP
+    li.getBoundingClientRect =
+      layout === 'dom'
+        ? () => rectForDom(li)
+        : () => rectForReactive(li.dataset.item!)
+  })
+  const makePlaceholder = (): HTMLElement => {
+    const placeholder = document.createElement('li')
+    placeholder.className = 'drag-placeholder'
+    placeholder.setAttribute('aria-hidden', 'true')
+    placeholder.getBoundingClientRect = () => rectForDom(placeholder)
+    return placeholder
+  }
+  const render = (): void => {
+    for (const scope of Object.keys(lists)) {
+      const ul = scopeEls[scope]
+      const nodes: HTMLElement[] = []
+      for (const entry of dnd.entriesFor(scope)) {
+        if (entry.kind === 'placeholder') {
+          nodes.push(makePlaceholder())
+        } else {
+          const li = root.querySelector<HTMLElement>(`[data-item="${entry.id}"]`)!
+          li.classList.toggle('drag-source', dnd.isSource(entry.id))
+          nodes.push(li)
         }
       }
-      return new DOMRect(0, 0, 0, 0)
+      ul.replaceChildren(...nodes)
     }
-  })
+  }
+  // Reactive mode stands in for a view that has already flushed the preview at
+  // every step: only the placeholder element is needed for the engine to read a
+  // real slot and height; item geometry still comes from `entriesFor`.
+  const syncPlaceholder = (): void => {
+    const d = dnd.drag.value
+    for (const scope of Object.keys(lists)) {
+      const ul = scopeEls[scope]
+      for (const child of Array.from(ul.children)) {
+        if (child.classList.contains('drag-placeholder')) child.remove()
+      }
+      if (!d || d.mode !== 'pointer' || d.toScope !== scope) continue
+      const ids = lists[scope].filter((id) => id !== d.id)
+      const before = ids[d.index]
+        ? root.querySelector<HTMLElement>(`[data-item="${ids[d.index]}"]`)
+        : null
+      ul.insertBefore(makePlaceholder(), before)
+    }
+  }
+  if (layout === 'reactive') watch(dnd.drag, syncPlaceholder, { flush: 'sync' })
+  const flip = (id: string, dy: number): void => {
+    flips.set(id, dy)
+    const el = root.querySelector<HTMLElement>(`[data-item="${id}"]`)
+    if (el) el.style.transform = `translateY(${dy}px)`
+  }
   return {
     dnd,
     onCommit,
     onCancel,
     root,
+    render,
+    flip,
     grip: (id) => root.querySelector<HTMLElement>(`[data-drag-handle="${id}"]`)!,
     handlers: (id, scope) => dnd.gripHandlers(id, scope),
     surface: (id, scope) => dnd.surfaceHandlers(id, scope),
@@ -165,6 +255,19 @@ describe('useDragSort', () => {
   beforeEach(() => {
     vi.stubGlobal('requestAnimationFrame', () => 1)
     vi.stubGlobal('cancelAnimationFrame', () => undefined)
+    // jsdom has no DOMMatrix; layoutRect only needs the translateY component.
+    vi.stubGlobal(
+      'DOMMatrix',
+      class {
+        m42 = 0
+        constructor(transform: string) {
+          const translateY = /translateY\((-?[\d.]+)px\)/.exec(transform)
+          const matrix = /matrix\(([^)]+)\)/.exec(transform)
+          const values = matrix?.[1]?.split(',') ?? []
+          this.m42 = translateY ? Number(translateY[1] ?? 0) : Number(values[5] ?? 0)
+        }
+      },
+    )
     Element.prototype.scrollIntoView = vi.fn()
   })
 
@@ -380,6 +483,166 @@ describe('useDragSort', () => {
       fromScope: 'todo',
       toScope: 'doing',
       index: 1,
+    })
+  })
+
+  it('drops a fast drag above the first card when the destination move and release share a task', async () => {
+    const h = setup({}, 'dom')
+    // "Draft" (a1) is first, y 0..40 with midpoint 20; "Plan" (a3) starts last.
+    // The destination sits clearly above Draft's original midpoint.
+    press(h, 'a3', 'todo', 10, 110)
+    move(h, 10, 45)
+    move(h, 10, 10)
+
+    // The destination move has not reached the view: the card is not collapsed
+    // and no placeholder exists for targetAt to compensate for.
+    expect(h.root.querySelector('.drag-placeholder')).toBeNull()
+    expect(h.root.querySelector('[data-item="a3"]')!.classList.contains('drag-source')).toBe(false)
+    expect(h.root.querySelector('[data-item="a3"]')!.getBoundingClientRect().height).toBe(ITEM_HEIGHT)
+
+    h.root.dispatchEvent(pointer('pointerup', 10, 10))
+    await flush()
+
+    expect(h.onCommit).toHaveBeenCalledTimes(1)
+    const commit = h.onCommit.mock.calls[0][0]
+    expect(commit).toEqual({ id: 'a3', fromScope: 'todo', toScope: 'todo', index: 0 })
+    const visible = lists.todo.filter((id) => id !== commit.id)
+    const placed = [...visible]
+    placed.splice(commit.index, 0, commit.id)
+    // The card lands before Draft, so Draft is the card at the commit index.
+    expect(visible[commit.index]).toBe('a1')
+    expect(placed).toEqual(['a3', 'a1', 'a2'])
+  })
+
+  it('drops across lanes before the first card when the destination move and release share a task', async () => {
+    const h = setup({}, 'dom')
+    // "Plan" (a2) starts second in To do. "Draft" (b1) is first in In progress,
+    // y 0..40 with midpoint 20; the pointer ends clearly above it. The first
+    // targetAt still names `todo`, so it does not shift the destination lane;
+    // the release sees `doing` and assumes a placeholder that was never drawn.
+    press(h, 'a2', 'todo', 10, 60)
+    move(h, 10, 40)
+    move(h, 150, 10)
+    expect(h.dnd.drag.value).toMatchObject({ toScope: 'doing', index: 0 })
+    expect(h.root.querySelector('[data-scope="doing"] .drag-placeholder')).toBeNull()
+
+    h.root.dispatchEvent(pointer('pointerup', 150, 10))
+    await flush()
+
+    expect(h.onCommit).toHaveBeenCalledTimes(1)
+    const commit = h.onCommit.mock.calls[0][0]
+    expect(commit).toEqual({ id: 'a2', fromScope: 'todo', toScope: 'doing', index: 0 })
+    const visible = lists.doing.filter((id) => id !== commit.id)
+    expect(visible[commit.index]).toBe('b1')
+  })
+
+  it('drops across lanes before the first card when a drawn placeholder is one index stale', async () => {
+    const h = setup({}, 'dom')
+    press(h, 'a2', 'todo', 10, 60)
+    move(h, 10, 40)
+    // Enter In progress below Draft's midpoint, so the preview draws the
+    // placeholder at index 1 and Vue has flushed it.
+    move(h, 150, 45)
+    expect(h.dnd.drag.value).toMatchObject({ toScope: 'doing', index: 1 })
+    h.render()
+    expect(h.root.querySelectorAll('[data-scope="doing"] .drag-placeholder')).toHaveLength(1)
+    expect(h.root.querySelector('[data-item="b1"]')!.getBoundingClientRect().top).toBe(0)
+    expect(h.root.querySelector('[data-item="b2"]')!.getBoundingClientRect().top).toBe(100)
+
+    // The final move above Draft's midpoint sets index 0. The release arrives in
+    // the same task, so the placeholder is still drawn at index 1 while targetAt
+    // shifts every slot as though it were at index 0.
+    move(h, 150, 10)
+    expect(h.dnd.drag.value).toMatchObject({ toScope: 'doing', index: 0 })
+    h.root.dispatchEvent(pointer('pointerup', 150, 10))
+    await flush()
+
+    expect(h.onCommit).toHaveBeenCalledTimes(1)
+    const commit = h.onCommit.mock.calls[0][0]
+    expect(commit).toEqual({ id: 'a2', fromScope: 'todo', toScope: 'doing', index: 0 })
+    const visible = lists.doing.filter((id) => id !== commit.id)
+    expect(visible[commit.index]).toBe('b1')
+  })
+
+  it('shifts only the slots that follow the drawn placeholder, not those before it', async () => {
+    const h = setup({}, 'dom')
+    press(h, 'a3', 'todo', 10, 110)
+    move(h, 10, 40)
+    move(h, 150, 10)
+    h.render()
+    expect(h.root.querySelectorAll('[data-scope="doing"] .drag-placeholder')).toHaveLength(1)
+
+    // The drawn placeholder heads the lane, so both cards follow it and their
+    // midpoints are read a row higher. Counting the two cards after it instead
+    // would apply no shift, and y=45 would stay above b1's live midpoint.
+    move(h, 150, 45)
+    expect(h.dnd.drag.value).toMatchObject({ toScope: 'doing', index: 1 })
+    h.root.dispatchEvent(pointer('pointerup', 150, 45))
+    await flush()
+    expect(h.onCommit).toHaveBeenCalledWith({
+      id: 'a3',
+      fromScope: 'todo',
+      toScope: 'doing',
+      index: 1,
+    })
+  })
+
+  it('uses the settled midpoint of an earlier item while its FLIP move is in flight', async () => {
+    const h = setup({}, 'dom')
+    press(h, 'a2', 'todo', 10, 60)
+    move(h, 10, 40)
+    move(h, 150, 45)
+    h.render()
+    // b1 is drawn 10px below its layout slot for the move transition, but the
+    // insertion point reads its settled position.
+    h.flip('b1', 10)
+    expect(h.root.querySelector('[data-item="b1"]')!.getBoundingClientRect().top).toBe(10)
+    move(h, 150, 25)
+    expect(h.dnd.drag.value).toMatchObject({ toScope: 'doing', index: 1 })
+
+    document.dispatchEvent(key('Escape'))
+    await flush()
+  })
+
+  it('uses the settled midpoint of a later item while its FLIP move is in flight', async () => {
+    const h = setup({}, 'dom')
+    press(h, 'a2', 'todo', 10, 60)
+    move(h, 10, 40)
+    move(h, 150, 45)
+    h.render()
+    // b2's live rect is 10px lower than its layout slot; a release at y=75 is
+    // below the settled midpoint (70) but above the translated one (80).
+    h.flip('b2', 10)
+    expect(h.root.querySelector('[data-item="b2"]')!.getBoundingClientRect().top).toBe(110)
+    move(h, 150, 75)
+    expect(h.dnd.drag.value).toMatchObject({ toScope: 'doing', index: 2 })
+    h.root.dispatchEvent(pointer('pointerup', 150, 75))
+    await flush()
+    expect(h.onCommit).toHaveBeenCalledWith({
+      id: 'a2',
+      fromScope: 'todo',
+      toScope: 'doing',
+      index: 2,
+    })
+  })
+
+  it('drops that same fast drag above the first card once the preview has flushed', async () => {
+    const h = setup({}, 'dom')
+    press(h, 'a3', 'todo', 10, 110)
+    move(h, 10, 45)
+    move(h, 10, 10)
+    // The one difference from the failing case: Vue has flushed the preview.
+    h.render()
+    expect(h.root.querySelector('.drag-placeholder')).not.toBeNull()
+    expect(h.root.querySelector('[data-item="a3"]')!.classList.contains('drag-source')).toBe(true)
+
+    h.root.dispatchEvent(pointer('pointerup', 10, 10))
+    await flush()
+    expect(h.onCommit).toHaveBeenCalledWith({
+      id: 'a3',
+      fromScope: 'todo',
+      toScope: 'todo',
+      index: 0,
     })
   })
 

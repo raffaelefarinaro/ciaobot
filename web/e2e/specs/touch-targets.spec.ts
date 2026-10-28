@@ -7,18 +7,22 @@ import { BOOTED, COMPOSER, boot, isolate, quiesce } from '../support/app'
  * emulation can measure that.
  */
 const TOUCH_MIN = 44
-const TABS = [
-  '/settings',
-  '/settings/appearance',
-  '/settings/access',
-  '/settings/advanced',
-  '/settings/workspace',
-  '/settings/workspaces',
-  '/settings/providers',
-  '/settings/skills',
-  '/settings/subagents',
-  '/settings/commands',
-  '/settings/mcp',
+// The two workspace settings tabs are behind `workspacesLoaded`; measure the
+// loaded card, not the skeleton that satisfies the settings shell (#2274).
+const WORKSPACE_READY = '.overview-title'
+const WORKSPACES_READY = '.workspace-row'
+const TABS: Array<[string, string]> = [
+  ['/settings', '.settings-main'],
+  ['/settings/appearance', '.settings-main'],
+  ['/settings/access', '.settings-main'],
+  ['/settings/advanced', '.settings-main'],
+  ['/settings/workspace', WORKSPACE_READY],
+  ['/settings/workspaces', WORKSPACES_READY],
+  ['/settings/providers', '.settings-main'],
+  ['/settings/skills', '.settings-main'],
+  ['/settings/subagents', '.settings-main'],
+  ['/settings/commands', '.settings-main'],
+  ['/settings/mcp', '.settings-main'],
 ]
 
 // Content selectors, not shell ones: a surface must have rendered its data
@@ -40,11 +44,15 @@ const MAIN_SURFACES: Array<[string, string]> = [
 ]
 
 // Surfaces whose menus, popovers and dialogs are opened and measured.
+// The settings surfaces wait for their own loaded controls, not the settings
+// shell: the workspace card and the workspace overview are behind
+// `workspacesLoaded`, so `.settings-main` is satisfied by a SkeletonLoader that
+// has none of the triggers below (#2274).
 const POPUP_SURFACES: Array<[string, string]> = [
   ...MAIN_SURFACES,
   ['/chat/alpha-chat-1', COMPOSER],
-  ['/settings/workspace', '.settings-main'],
-  ['/settings/workspaces', '.settings-main'],
+  ['/settings/workspace', WORKSPACE_READY],
+  ['/settings/workspaces', WORKSPACES_READY],
   ['/settings/providers', '.settings-main'],
   ['/settings/advanced', '.settings-main'],
 ]
@@ -185,6 +193,99 @@ async function settled(page: Page, before: number): Promise<boolean> {
   }, { was: before, quiet: 5, idle: 60 }, { polling: 'raf', timeout: 0 }).then(async (h) => (await h.jsonValue()) === 'opened')
 }
 
+interface PopupWalkOptions {
+  /** Awaited before each navigation, so a test can hold this boot's fetch. */
+  beforeNavigate?: (boot: number) => Promise<void>
+  /**
+   * Awaited inside the walk after navigation and before the readiness wait,
+   * once per boot. The seam a test uses to inspect (or hold) a surface before
+   * its readiness condition can pass and before anything is tagged.
+   */
+  beforeReady?: (boot: number) => Promise<void>
+  /** Bound on every readiness wait, so a test can prove that the walk blocks. */
+  readyTimeout?: number
+  /** Called in the turn each boot's readiness wait starts. */
+  onReadyWait?: (boot: number) => void
+  /** Called with the tag count after every enumeration. */
+  onEnumerate?: (count: number) => void
+}
+
+/**
+ * Walk every tagged popup trigger on one surface: click it, wait for it to
+ * open, measure the controls it revealed, and check that the surface's known
+ * triggers did open. Shared with the #2274 regression below, whose gated
+ * workspace fetch holds every boot at the readiness seam.
+ */
+async function checkPopupSurface(
+  page: Page,
+  route: string,
+  ready: string,
+  options: PopupWalkOptions = {},
+) {
+  const small: string[] = []
+  const panels: string[] = []
+  const opened: string[] = []
+  const skipped: string[] = []
+  let boots = 0
+  const bootSurface = () => {
+    boots += 1
+    return boot(page, route, ready, {
+      beforeNavigate: options.beforeNavigate ? () => options.beforeNavigate!(boots) : undefined,
+      beforeReady: options.beforeReady ? () => options.beforeReady!(boots) : undefined,
+      onReadyWait: options.onReadyWait ? () => options.onReadyWait!(boots) : undefined,
+      readyTimeout: options.readyTimeout,
+    })
+  }
+  await bootSurface()
+  await quiesce(page)
+  let count = await tagTriggers(page)
+  options.onEnumerate?.(count)
+  expect(count, `${route}: trigger cap of ${TRIGGER_CAP} would hide triggers`).toBeLessThan(TRIGGER_CAP)
+  const baseline = new Set((await measure(page)).bad)
+  for (let i = 0; i < count; i += 1) {
+    let trigger = page.locator(`[data-touch-trigger="${i}"]`)
+    if ((await trigger.count()) !== 1) {
+      // A re-render replaced it, or measure() opened a <details> that hid it: start clean.
+      await bootSurface()
+      count = await tagTriggers(page)
+      options.onEnumerate?.(count)
+      trigger = page.locator(`[data-touch-trigger="${i}"]`)
+    }
+    const label = (await trigger.first().evaluate((el) => (el.getAttribute('aria-label') || el.textContent || '')
+      .trim().replace(/\s+/g, ' ').slice(0, 40)).catch(() => '')) || `#${i}`
+    const name = `${route} › ${label}`
+    await quiesce(page)
+    const before = await page.evaluate(() => document.getElementsByTagName('*').length)
+    try {
+      await trigger.click({ timeout: 2000 })
+    } catch (err) {
+      skipped.push(`${name}: ${String(err)}`)
+      await bootSurface()
+      count = await tagTriggers(page)
+      options.onEnumerate?.(count)
+      continue
+    }
+    if (!(await settled(page, before))) continue // nothing opened
+    opened.push(name)
+    const found = await measure(page)
+    for (const f of found.bad) if (!baseline.has(f)) small.push(`${name}: ${f}`)
+    const p = await panelProblems(page)
+    for (const m of p.out) panels.push(`${name}: ${m}`)
+    await page.keyboard.press('Escape')
+    // Escape leaves forms open on Settings, and a trigger may navigate: start those clean.
+    if (route.startsWith('/settings') || new URL(page.url()).pathname !== route) {
+      await bootSurface()
+      count = await tagTriggers(page)
+      options.onEnumerate?.(count)
+    }
+  }
+  for (const known of KNOWN_TRIGGERS[route] ?? []) {
+    expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened on ${route}; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
+  }
+  expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED[route] ?? 0)
+  return { small, panels, opened, skipped }
+}
+
 test.use({ ...devices['iPhone 13'], defaultBrowserType: undefined })
 
 test.describe('touch targets', () => {
@@ -213,8 +314,8 @@ test.describe('touch targets', () => {
 
   test('every Settings control is at least 44×44 on touch', async ({ page }) => {
     const small: string[] = []
-    for (const tab of TABS) {
-      await boot(page, tab, '.settings-main')
+    for (const [tab, ready] of TABS) {
+      await boot(page, tab, ready)
       const found = await measure(page, '.settings-main')
       expect(found.total, `no controls measured on ${tab}`).toBeGreaterThan(0)
       for (const f of found.bad) small.push(`${tab}: ${f}`)
@@ -254,60 +355,169 @@ test.describe('touch targets', () => {
 
   for (const [route, ready] of POPUP_SURFACES) {
     test(`controls inside menus and dialogs on ${route} are at least 44×44 on touch`, async ({ page }) => {
-      const small: string[] = []
-      const panels: string[] = []
-      const opened: string[] = []
-      const skipped: string[] = []
-      await boot(page, route, ready)
-      await quiesce(page)
-      let count = await tagTriggers(page)
-      expect(count, `${route}: trigger cap of ${TRIGGER_CAP} would hide triggers`).toBeLessThan(TRIGGER_CAP)
-      const baseline = new Set((await measure(page)).bad)
-      for (let i = 0; i < count; i += 1) {
-        let trigger = page.locator(`[data-touch-trigger="${i}"]`)
-        if ((await trigger.count()) !== 1) {
-          // A re-render replaced it, or measure() opened a <details> that hid it: start clean.
-          await boot(page, route, ready)
-          count = await tagTriggers(page)
-          trigger = page.locator(`[data-touch-trigger="${i}"]`)
-        }
-        const label = (await trigger.first().evaluate((el) => (el.getAttribute('aria-label') || el.textContent || '')
-          .trim().replace(/\s+/g, ' ').slice(0, 40)).catch(() => '')) || `#${i}`
-        const name = `${route} › ${label}`
-        await quiesce(page)
-        const before = await page.evaluate(() => document.getElementsByTagName('*').length)
-        try {
-          await trigger.click({ timeout: 2000 })
-        } catch (err) {
-          skipped.push(`${name}: ${String(err)}`)
-          await boot(page, route, ready)
-          count = await tagTriggers(page)
-          continue
-        }
-        if (!(await settled(page, before))) continue // nothing opened
-        opened.push(name)
-        const found = await measure(page)
-        for (const f of found.bad) if (!baseline.has(f)) small.push(`${name}: ${f}`)
-        const p = await panelProblems(page)
-        for (const m of p.out) panels.push(`${name}: ${m}`)
-        await page.keyboard.press('Escape')
-        // Escape leaves forms open on Settings, and a trigger may navigate: start those clean.
-        if (route.startsWith('/settings') || new URL(page.url()).pathname !== route) {
-          await boot(page, route, ready)
-          count = await tagTriggers(page)
-        }
-      }
-      for (const known of KNOWN_TRIGGERS[route] ?? []) {
-        expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened on ${route}; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
-      }
-      expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED[route] ?? 0)
+      const { small, panels } = await checkPopupSurface(page, route, ready)
       expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
       expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
     })
   }
 
+  /**
+   * #2274's regression: on /settings/workspaces the New workspace button and
+   * every row's actions menu live in a card behind `workspacesLoaded`. Until
+   * GET /api/workspaces answers, the page shows a SkeletonLoader that
+   * satisfies `.settings-main` and animation quiescence - quiesce only waits
+   * for the element count and document height to stop changing, so a stable
+   * skeleton passes while the fetch is in flight. Tagging then found the
+   * notifications bell and nothing else, and the known-trigger check failed
+   * with `trigger "New workspace" never opened` - CI's failure.
+   *
+   * The response is gated, not delayed, and every gate is released from a
+   * finally: the first walk is bounded at its readiness wait and has to reject
+   * there without enumerating; the second walk is the real one, and a later
+   * reload is gated separately to show it cannot re-tag until its own release.
+   * Only then does the walk reach New workspace, open it, and pass every
+   * existing per-trigger assertion.
+   */
+  test('#2274: New workspace is reached when /api/workspaces is still pending at boot', async ({ page }) => {
+    const route = '/settings/workspaces'
+    // One gate per boot, created before that boot navigates. A request captures
+    // the gate current when it starts, so a later boot can neither release an
+    // earlier document's fetch nor be released by it.
+    const gateReleases = new Map<number, () => void>()
+    let gate: Promise<void> = Promise.resolve()
+    const holdNextFetch = (boot: number) => {
+      let release!: () => void
+      gate = new Promise<void>((resolve) => { release = resolve })
+      gateReleases.set(boot, release)
+    }
+    const releaseGate = (boot: number) => {
+      const release = gateReleases.get(boot)
+      if (!release) throw new Error(`no held /api/workspaces request for boot ${boot}`)
+      gateReleases.delete(boot)
+      release()
+    }
+    const releaseEveryGate = () => {
+      gateReleases.forEach((release) => release())
+      gateReleases.clear()
+    }
+    let intercepted = 0
+    let interceptedBeforeBoot = 0
+    await page.route('**/api/workspaces', async (r) => {
+      intercepted += 1
+      const thisBoot = gate
+      await thisBoot
+      await r.continue()
+    })
+
+    let enumerated = 0
+    const countEnumeration: PopupWalkOptions['onEnumerate'] = (count) => {
+      expect(count, 'an enumeration always tags at least one trigger').toBeGreaterThan(0)
+      enumerated += 1
+    }
+    const expectLoadingCard = async (where: string) => {
+      await expect(page.getByRole('status', { name: 'Loading workspaces' }), `${where}: the skeleton is on screen`)
+        .toBeVisible()
+      await expect(page.locator(WORKSPACES_READY), `${where}: no workspace row before the response`).toHaveCount(0)
+      await expect(page.locator('[data-touch-trigger]'), `${where}: nothing is tagged yet`).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'New workspace' }), `${where}: the card is not rendered yet`)
+        .toHaveCount(0)
+    }
+    // The seam runs before the readiness wait; its boot's request must already
+    // be intercepted, or "still loading" would be an accident of ordering.
+    const expectBootFetchHeld = async (where: string) => {
+      await expect.poll(() => intercepted, `${where}: the boot's fetch is intercepted`)
+        .toBeGreaterThan(interceptedBeforeBoot)
+    }
+
+    // First walk: the readiness wait itself is the block. The seam runs once
+    // the document is up and before the ready selector can pass; the walk is
+    // then bounded so the test observes it cannot get past that point.
+    const blocked = checkPopupSurface(page, route, WORKSPACES_READY, {
+      readyTimeout: 1000,
+      onEnumerate: countEnumeration,
+      beforeNavigate: async (boot) => {
+        holdNextFetch(boot)
+        interceptedBeforeBoot = intercepted
+      },
+      beforeReady: async (boot) => {
+        if (boot !== 1) return
+        await expectBootFetchHeld('blocked boot')
+        await expectLoadingCard('blocked boot')
+      },
+    })
+    let rejection: Error | null = null
+    try {
+      rejection = await blocked.then(() => null, (err: Error) => err)
+      expect(rejection, 'the walk must not get past readiness while the response is gated').not.toBeNull()
+      expect(rejection!.message, 'the walk blocked on the workspace readiness selector').toContain(WORKSPACES_READY)
+      expect(enumerated, 'the blocked walk never reached enumeration').toBe(0)
+    } finally {
+      releaseEveryGate()
+    }
+    // The released response renders the card, so the second walk starts from a
+    // page whose held request has actually been answered.
+    await expect(page.locator(WORKSPACES_READY).first(), 'the released response renders the card').toBeVisible()
+
+    // Second walk: every boot is gated again. Boot 1 shows the delayed
+    // readiness and is released at its seam. Boot 2 is a reload after the first
+    // popup; its response stays held while the boot's own readiness wait is
+    // running, which is observed from outside before it is released.
+    enumerated = 0
+    let reloadIsWaiting!: () => void
+    const reloadWait = new Promise<void>((resolve) => { reloadIsWaiting = resolve })
+    const walk = checkPopupSurface(page, route, WORKSPACES_READY, {
+      onEnumerate: countEnumeration,
+      onReadyWait: (boot) => { if (boot === 2) reloadIsWaiting() },
+      beforeNavigate: async (boot) => {
+        holdNextFetch(boot)
+        interceptedBeforeBoot = intercepted
+      },
+      beforeReady: async (boot) => {
+        await expectBootFetchHeld(`boot ${boot}`)
+        if (boot === 1) {
+          await expectLoadingCard('first boot of the walk')
+          releaseGate(boot)
+        } else if (boot === 2) {
+          // A fresh document: the previous document's tags are gone. The
+          // response stays gated here; the release happens below, only after
+          // the boot's readiness wait has been observed to make no progress.
+          await expectLoadingCard('reload after the first popup')
+        } else {
+          releaseGate(boot)
+        }
+      },
+    })
+    try {
+      // The walk is now inside boot 2's readiness wait with its response held.
+      const stage = await Promise.race([
+        reloadWait.then(() => 'reload-waiting'),
+        walk.then(() => 'finished', () => 'failed'),
+      ])
+      expect(stage, 'the walk reached the reload readiness wait').toBe('reload-waiting')
+
+      // Explicit observation: while that wait is active the readiness selector
+      // cannot pass, so the walk cannot enumerate.
+      const stillLoading = await expect(page.locator(WORKSPACES_READY).first())
+        .toBeVisible({ timeout: 1000 })
+        .then(() => null, (err: Error) => err)
+      expect(stillLoading, 'the readiness selector cannot pass while the reload is held').not.toBeNull()
+      await expect(page.locator('[data-touch-trigger]'), 'the reload has not re-tagged').toHaveCount(0)
+      expect(enumerated, 'no enumeration while the reload is held').toBe(1)
+
+      // Release the held reload and the walk resumes at that same wait.
+      releaseGate(2)
+      const { small, panels, opened } = await walk
+      expect(opened.some((o) => o.includes('New workspace')), 'New workspace actually opened').toBe(true)
+      expect(enumerated, 'the walk enumerated again after the gated reload').toBeGreaterThanOrEqual(2)
+      expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
+      expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
+    } finally {
+      releaseEveryGate()
+    }
+  })
+
   test('the workspace reorder handle and Move up / Move down are at least 44×44 on touch', async ({ page }) => {
-    await boot(page, '/settings/workspaces', '.settings-main')
+    await boot(page, '/settings/workspaces', WORKSPACES_READY)
     const handle = page.locator('[data-workspace-handle="beta"]')
     await expect(handle).toBeVisible()
     const box = await handle.boundingBox()

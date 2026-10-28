@@ -2080,12 +2080,12 @@ export const useProjectStore = defineStore('projects', () => {
         if (typeof document === 'undefined' || document.visibilityState === 'visible') {
           void markRead(bootChatId)
         }
-        const history = bootChatId === initialChatId && initialHistory
-          ? initialHistory
-          : loadMessages(bootChatId, { waitForSettledReply: !isArchivedChat(bootChatId) })
-        void history.then(() => {
-          if (activeChatId.value === bootChatId && !isArchivedChat(bootChatId)) connectWs(bootChatId)
-        })
+        // The socket opens before history resolves: an engine-started turn's
+        // buffered user_echo is the only source of its user row until then.
+        if (!isArchivedChat(bootChatId)) connectWs(bootChatId)
+        if (!(bootChatId === initialChatId && initialHistory)) {
+          void loadMessages(bootChatId, { waitForSettledReply: !isArchivedChat(bootChatId) })
+        }
       }
       connectEventsWs()
       checkPendingTarget()
@@ -4228,9 +4228,11 @@ export const useProjectStore = defineStore('projects', () => {
       if (!opts?.skipHistory) await loadMessages(chatId)
       return
     }
-    if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
-    void loadSubagents(chatId)
+    // Attach the socket before history: an engine-started turn's buffered
+    // user_echo must reach the page even while /messages is still pending.
     connectWs(chatId)
+    void loadSubagents(chatId)
+    if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
   }
 
   // Set by the open Settings workspace editor so a switch away from unsaved
