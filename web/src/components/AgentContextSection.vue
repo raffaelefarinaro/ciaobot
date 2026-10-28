@@ -32,7 +32,7 @@
     <summary class="agent-context-summary">
       <svg class="agent-context-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
       <span class="agent-context-summary-label">Always loaded</span>
-      <span v-if="loadedTokens" class="agent-context-meta">{{ formatTokens(loadedTokens) }} tokens</span>
+      <span v-if="loadedTokens && totalComplete" class="agent-context-meta">{{ formatTokens(loadedTokens) }} tokens</span>
     </summary>
     <div class="rail-list">
       <div v-if="systemPrompt" class="rail-item agent-context-row agent-context-system">
@@ -54,6 +54,13 @@
           <pre class="agent-context-system-text" tabindex="0">{{ systemPrompt }}</pre>
         </div>
       </div>
+      <div v-else-if="systemPromptState === 'failed'" class="rail-item agent-context-row agent-context-error agent-context-system-error" role="status">
+        <span class="agent-context-row-top">
+          <span class="agent-context-name">Ciaobot system prompt</span>
+          <button type="button" class="agent-context-link" @click="retryNow(loadSystemPrompt)">Retry</button>
+        </span>
+        <small>Could not be read just now</small>
+      </div>
       <button
         v-if="guide.path"
         type="button"
@@ -70,7 +77,7 @@
       <div v-else-if="guide.error" class="rail-item agent-context-row agent-context-error" role="status">
         <span class="agent-context-row-top">
           <span class="agent-context-name">Workspace guide</span>
-          <button type="button" class="agent-context-link" @click="loadGuide">Retry</button>
+          <button type="button" class="agent-context-link" @click="retryNow(loadGuide)">Retry</button>
         </span>
         <small>Could not be read just now: {{ guide.error }}</small>
       </div>
@@ -134,17 +141,42 @@ const emit = defineEmits<{ 'open-file': [path: string]; compact: [] }>()
 const usageLabelId = useId()
 
 const guide = ref<WorkspaceGuide>({ path: '', content: '', error: '' })
+const guideLoading = ref(true)
 let guideSeq = 0
 // A failed read (network, non-404) keeps its error so the row says the guide
 // is unreadable rather than disappearing as if the workspace had none.
 async function loadGuide() {
   const workspace = props.project?.workspace
   const seq = ++guideSeq
-  if (!workspace) { guide.value = { path: '', content: '', error: '' }; return }
+  clearRetryTimer()
+  if (!workspace) { guide.value = { path: '', content: '', error: '' }; guideLoading.value = false; settle(); return }
+  guideLoading.value = true
   const result = await fetchWorkspaceGuide(workspace)
-  if (seq === guideSeq) guide.value = result
+  if (seq !== guideSeq) return
+  guide.value = result
+  guideLoading.value = false
+  settle()
 }
-watch(() => props.project?.workspace, loadGuide, { immediate: true })
+
+// A read that fails while the engine is cold (right after a restart) retries on
+// its own with a bounded backoff. One timer re-runs whichever parts failed.
+const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000]
+let retryTimer: ReturnType<typeof setTimeout> | undefined
+let retryAttempt = 0
+let disposed = false
+function clearRetryTimer() { clearTimeout(retryTimer); retryTimer = undefined }
+const guideFailed = computed(() => !guideLoading.value && !guide.value.path && !!guide.value.error)
+function settle() {
+  if (disposed || retryTimer) return
+  if (!guideFailed.value && systemPromptState.value !== 'failed') return
+  if (retryAttempt >= RETRY_DELAYS_MS.length) return
+  retryTimer = setTimeout(() => {
+    retryTimer = undefined
+    if (systemPromptState.value === 'failed') void loadSystemPrompt()
+    if (guideFailed.value) void loadGuide()
+  }, RETRY_DELAYS_MS[retryAttempt++])
+}
+function retryNow(load: () => Promise<void>) { retryAttempt = 0; void load() }
 const guideName = computed(() => guide.value.path.split('/').pop() || 'AGENTS.md')
 const guideTokens = computed(() => tokensFor(guide.value.content.length))
 
@@ -197,13 +229,25 @@ function onLoadedToggle(event: Event) {
 }
 watch(() => props.revealKey, (key) => { if (key) loadedOpen.value = true })
 
-// Ciaobot's own prompt is static per engine: fetched once, and a failed fetch
-// hides the row (it is reference, not a user file).
+// Ciaobot's own prompt is static per engine. A failed read shows an error row
+// and retries; it is not treated as "no prompt".
 const systemPrompt = ref('')
+const systemPromptState = ref<'loading' | 'ok' | 'failed'>('loading')
 const systemPromptOpen = ref(false)
 const systemPromptId = useId()
 const systemPromptTokens = computed(() => tokensFor(systemPrompt.value.length))
-onMounted(async () => { systemPrompt.value = await fetchSystemPrompt() })
+let promptSeq = 0
+async function loadSystemPrompt() {
+  const seq = ++promptSeq
+  clearRetryTimer()
+  const text = await fetchSystemPrompt()
+  if (seq !== promptSeq) return
+  systemPrompt.value = text ?? ''
+  systemPromptState.value = text === null ? 'failed' : 'ok'
+  settle()
+}
+onMounted(loadSystemPrompt)
+watch(() => props.project?.workspace, () => { retryAttempt = 0; void loadGuide() }, { immediate: true })
 const copied = ref(false)
 let copyTimer: ReturnType<typeof setTimeout> | undefined
 async function copySystemPrompt() {
@@ -212,8 +256,10 @@ async function copySystemPrompt() {
   clearTimeout(copyTimer)
   copyTimer = setTimeout(() => { copied.value = false }, 1500)
 }
-onBeforeUnmount(() => clearTimeout(copyTimer))
+onBeforeUnmount(() => { clearTimeout(copyTimer); clearRetryTimer(); disposed = true })
 
+// Never show a partial number as if it were the whole.
+const totalComplete = computed(() => systemPromptState.value === 'ok' && !guideLoading.value && !guide.value.error)
 const loadedTokens = computed(() => {
   let total = guide.value.path ? guideTokens.value : 0
   if (systemPrompt.value) total += systemPromptTokens.value
