@@ -105,9 +105,9 @@ export function isPlainLeftClick(event: MouseEvent): boolean {
  * and can veto the navigation — a dialog that has to close out of the way
  * and may be refused by its own unsaved-changes confirm.
  *
- * A task link opens as a peek over the current view, with the URL unchanged,
- * so the chat stays put. On the board's own routes it navigates as before,
- * since the board already shows that task in its editor.
+ * A task link opens the board's task editor over the current view, with the URL
+ * unchanged, so the chat stays put. On the board's own routes it navigates as
+ * before, since the board already shows that task in its editor.
  */
 export function handleAppLinkClick(event: MouseEvent, before?: () => Promise<boolean>): boolean {
   const target = event.target as HTMLElement | null

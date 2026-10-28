@@ -292,10 +292,28 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', body_font: 'system', theme: null, font_scale: null, custom_colors: {}, revision: 'a0' }, handover: {}, workspaceOrder: null, chatPatches: new Map(), removedChats: new Set(), tasksByWorkspace: null, taskPatches: new Map(), taskWrites: 0, schedulePatches: new Map(), removedSchedules: new Set(), actions: null, writes: [], projects: null }
     sessions.set(id, state)
   }
   return state
+}
+
+/**
+ * One task row, with whatever this spec wrote to it.
+ *
+ * The overlay spec edits a title and reopens the task, so a PATCH has to be
+ * visible to the next read of the list and of the record. Every other spec
+ * writes no task and keeps the row it already asserts.
+ */
+function sessionTask(state, row) {
+  return { ...row, ...(state.taskPatches.get(row.id) ?? {}) }
+}
+
+/** The row a detail read answers with: the session's list first, then the fixture task. */
+function findSessionTask(state, id) {
+  const rows = Object.values(state.tasksByWorkspace ?? {}).flat()
+  const row = rows.find(entry => entry.id === id) ?? { ...TASK, id }
+  return sessionTask(state, row)
 }
 
 // ── The suggested command ───────────────────────────────────────────────
@@ -557,9 +575,9 @@ const GET_ROUTES = {
   '/api/housekeeping': (req) => ({ actions: sessionOf(req).actions ?? [] }),
   '/api/tasks': (req, url) => {
     const state = sessionOf(req)
-    if (!state.tasksByWorkspace) return { workspace: WORKSPACES[0].name, tasks: [TASK] }
+    if (!state.tasksByWorkspace) return { workspace: WORKSPACES[0].name, tasks: [sessionTask(state, TASK)] }
     const workspace = url.searchParams.get('workspace') || WORKSPACES[0].name
-    return { workspace, tasks: state.tasksByWorkspace[workspace] ?? [] }
+    return { workspace, tasks: (state.tasksByWorkspace[workspace] ?? []).map(row => sessionTask(state, row)) }
   },
   // "After this update" is a second, per-workspace question, so it carries a
   // query string and cannot live in the exact-path table. A spec that needs the
@@ -711,7 +729,11 @@ const GET_PATTERNS = [
   [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
   // One chat's row, with this session's suggested command on it.
   [/^\/api\/chats\/[^/]+$/, (req, url) => chatDetail(sessionOf(req), decodeURIComponent(url.pathname.split('/')[3] || ''))],
-  [/^\/api\/tasks\/[0-9a-f]{32}$/, () => ({ workspace: WORKSPACES[0].name, task: { ...TASK, body: 'Find his comment and draft a reply.' } })],
+  [/^\/api\/tasks\/[0-9a-f]{32}$/, (req, url) => {
+    const id = url.pathname.split('/').pop()
+    const row = findSessionTask(sessionOf(req), id)
+    return { workspace: WORKSPACES[0].name, task: { ...row, body: row.body ?? 'Find his comment and draft a reply.' } }
+  }],
   // The receipt behind a settled verification's accept, so the History card's
   // Undo is the real affordance a `note_apply` carries rather than an
   // assertion about one.
@@ -1046,6 +1068,27 @@ const server = http.createServer(async (req, res) => {
         const answer = dismissOffer(sessionOf(req), chatId, body)
         return sendJson(res, answer.body, answer.status)
       }
+    }
+    // A task write answers with the record it stored, at a new revision, so a
+    // spec can close the overlay, reopen the task and see what it typed. Only
+    // the fields the route accepts are merged; the overlay's own close is a
+    // PATCH of the title.
+    const taskPatch = req.method === 'PATCH' ? /^\/api\/tasks\/([0-9a-f]{32})$/.exec(pathname) : null
+    if (taskPatch) {
+      const state = sessionOf(req)
+      const id = taskPatch[1]
+      const patch = Object.fromEntries(
+        ['title', 'status', 'project_id', 'due', 'assignee', 'body']
+          .filter(key => body && body[key] !== undefined)
+          .map(key => [key, body[key]]),
+      )
+      state.taskPatches.set(id, {
+        ...state.taskPatches.get(id),
+        ...patch,
+        revision: (state.taskWrites += 1).toString(16).padStart(64, '0'),
+      })
+      const row = findSessionTask(state, id)
+      return sendJson(res, { workspace: WORKSPACES[0].name, task: { ...row, body: row.body ?? 'Find his comment and draft a reply.' } })
     }
     const write = WRITE_ROUTES[pathname]
     return sendJson(res, write ? write(body) : { ok: true })

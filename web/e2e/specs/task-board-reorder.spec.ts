@@ -134,7 +134,7 @@ test.describe('placing cards with the mouse', () => {
 
   test('reorders within a lane, persists once and keeps the order across a reload', async ({ page }) => {
     const sent = await open(page, 'task-reorder-within')
-    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
     // Drop the last card on the first one's upper half: it lands first.
     await dragGrip(page, 'Send the invites', page.locator('.task-card', { hasText: 'Plan the offsite' }), -15)
     await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
@@ -146,7 +146,7 @@ test.describe('placing cards with the mouse', () => {
 
     await page.reload()
     await expect(page.locator('.task-card').first()).toBeVisible()
-    expect(await titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
   })
 
   test('moves a card across lanes in one PATCH with its placement', async ({ page }) => {
@@ -188,6 +188,9 @@ test.describe('placing cards with the mouse', () => {
       status: 'in_progress',
       placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
     })
+    // Polled: the write landing is not the same thing as the board having
+    // re-rendered the card it moved, and a bare read here caught the lane a
+    // frame before the move painted.
     await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
   })
 
@@ -204,7 +207,7 @@ test.describe('placing cards with the mouse', () => {
     await page.mouse.up()
     await expect(page.locator('.drag-overlay')).toHaveCount(0)
     expect(sent).toHaveLength(0)
-    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
   })
 
   test('drags from the card text, and a plain press on the card still opens the editor', async ({ page }) => {
@@ -317,8 +320,8 @@ test.describe('placing cards with the mouse', () => {
 
     await expect(page.locator('.drag-overlay')).toHaveCount(0)
     expect(sent).toHaveLength(0)
-    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
-    expect(await titles(page, 'In progress')).toEqual(['Draft the agenda'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Draft the agenda'])
     await page.evaluate(() => document.querySelector('.e2e-cover')?.remove())
   })
 })
@@ -355,7 +358,7 @@ test.describe('lane drop areas', () => {
     await dragSurfaceTo(page, 'Plan the offsite', { x: column.x + 100, y: board.y - 20 })
     await expect(page.locator('.drag-overlay')).toHaveCount(0)
     expect(sent).toHaveLength(0)
-    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
     await expect(page.getByRole('status').filter({ hasText: 'Move cancelled' })).toHaveCount(1)
   })
 })
@@ -483,7 +486,7 @@ test.describe('placing cards on a narrow, scrolled board', () => {
 
     await expect(page.locator('.drag-overlay')).toHaveCount(0)
     expect(sent).toHaveLength(0)
-    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
     await expect(page.getByRole('status').filter({ hasText: 'Move cancelled' })).toHaveCount(1)
   })
 })
