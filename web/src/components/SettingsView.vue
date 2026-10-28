@@ -2733,9 +2733,9 @@ watch(() => projectStore.workspaceRegistryRevision, () => {
 })
 
 watch(() => projectStore.activeWorkspace, () => {
-  // "Settings ↑" and Create and open land at the top. A hash (#file-access,
-  // #workspace-name) does its own scrolling.
-  if (currentTab.value === 'workspace' && !route.hash) bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
+  // "Settings ↑" and Create and open land at the top. Only a File access deep
+  // link keeps its own scroll target; every other switch returns to the top.
+  if (currentTab.value === 'workspace' && route.hash !== '#file-access') bodyEl.value?.scrollTo({ top: 0, behavior: 'auto' })
   // Asset refs hold one workspace's data, so invalidate cached scope keys:
   // returning to an earlier root must never show a different root's rows.
   for (const key of tabLoads.keys()) {

@@ -100,7 +100,7 @@
             :aria-label="`Settings for workspace ${form.name}`"
             @click="openWorkspaceSettings(form.name)"
           >Settings &uarr;</button>
-          <span v-else class="workspace-row-current">Current</span>
+          <span v-else class="workspace-row-current" aria-label="Current workspace">Current</span>
           <DropdownMenuRoot
             :open="settingsMenu === `ws:${form.name}`"
             :modal="false"

@@ -165,6 +165,7 @@ describe('Settings > All workspaces', () => {
     try {
       const active = rowFor(wrapper, 'personal')
       expect(active.get('.workspace-row-current').text()).toBe('Current')
+      expect(active.get('.workspace-row-current').attributes('aria-label')).toBe('Current workspace')
       expect(active.find('[aria-label="Settings for workspace personal"]').exists()).toBe(false)
       const other = rowFor(wrapper, 'work')
       expect(other.get('[aria-label="Settings for workspace work"]').text()).toBe('Settings \u2191')
@@ -176,6 +177,19 @@ describe('Settings > All workspaces', () => {
 
   it('Settings \u2191 scrolls the pane to the top', async () => {
     const { wrapper } = await mountManage()
+    try {
+      const scrollTo = vi.fn()
+      ;(wrapper.get('.pane-body').element as HTMLElement).scrollTo = scrollTo as never
+      await wrapper.get('[aria-label="Settings for workspace work"]').trigger('click')
+      await flushPromises()
+      expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 0 }))
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each(['#new-workspace', '#workspace-name'])('Settings \u2191 scrolls to the top even when the page carries %s', async (hash) => {
+    const { wrapper } = await mountManage(`/settings/workspace${hash}`)
     try {
       const scrollTo = vi.fn()
       ;(wrapper.get('.pane-body').element as HTMLElement).scrollTo = scrollTo as never
