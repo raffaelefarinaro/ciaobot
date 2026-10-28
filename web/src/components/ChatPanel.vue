@@ -4568,8 +4568,9 @@ watch(
     prevStreaming = streaming
     prevStreamingChatId = store.activeChatId
     if (justFinished) {
-      if (liveTraceReading.value && (!isNearBottom.value || !liveBodyAtBottom.value)) {
-        // The reader scrolled away from the bottom: hold the finished trace
+      if (liveTraceReading.value && (!isNearBottom.value || (liveTraceOpen.value && !liveBodyAtBottom.value))) {
+        // The reader scrolled away from the bottom (of the transcript, or of
+        // the live body while it is still open): hold the finished trace
         // open until they come back. A reader at the bottom, or one who only
         // expanded the live trace, gets the collapsed turn and the landing on
         // the reply.

@@ -744,6 +744,24 @@ describe('ChatPanel live trace', () => {
     expect(wrapper.get('.trace-block').classes()).toContain('open')
   })
 
+  it('collapses the finished trace when the reader scrolled up in the live body and then closed it', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel(true, true)
+    store.streamingText['chat-1'] = 'working on it'
+    await flushPromises()
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    const body = wrapper.get('.trace-block.live .trace-body').element
+    stubMetrics(body, { scrollHeight: 900, clientHeight: 300, scrollTop: 600 })
+    body.dispatchEvent(new Event('scroll'))
+    stubMetrics(body, { scrollHeight: 900, clientHeight: 300, scrollTop: 100 })
+    body.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
+
+    await finishTurn(store)
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
   it('ignores a growth-only scroll inside the live trace body', async () => {
     const { wrapper, store } = await streamingPanel(true, true)
     store.streamingText['chat-1'] = 'working on it'
