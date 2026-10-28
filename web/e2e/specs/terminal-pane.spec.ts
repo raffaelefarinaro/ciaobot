@@ -188,6 +188,9 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   // in already has one, and a second would be a frame of its own.
   expect(await pane.evaluate(el => getComputedStyle(el).boxShadow)).toBe('none')
 
+  // The tile slides in (chat-tile-in); boxes read on different frames of it
+  // disagree by up to the slide's 12px, so measure once it has settled.
+  await tile.evaluate(el => Promise.all(el.getAnimations({ subtree: true }).map(a => a.finished)))
   // Close sits top right of the header, beside the title, as the pinned
   // file tile's does — not on a row of its own under it.
   const headBox = (await pane.locator('.tp-head').boundingBox())!
