@@ -15,6 +15,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import TaskBoardView from '../TaskBoardView.vue'
+import TaskWorkspaceSurface from '../TaskWorkspaceSurface.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskBoardStore } from '../../stores/taskBoard'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
@@ -285,6 +286,15 @@ describe('TaskBoardView', () => {
     document.body.innerHTML = ''
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('mounts the shared surface and forwards its sidebar request', async () => {
+    const wrapper = await mountBoard()
+    expect(wrapper.findComponent(TaskWorkspaceSurface).exists()).toBe(true)
+
+    await wrapper.get('.header-hamburger').trigger('click')
+    expect(wrapper.emitted('open-sidebar')).toHaveLength(1)
+    wrapper.unmount()
   })
 
   it('re-reads when the app-wide task signals refresh for this workspace', async () => {
