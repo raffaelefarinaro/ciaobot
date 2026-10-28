@@ -27,4 +27,9 @@ describe('shared button styles', () => {
   it('the warning hint uses full-contrast text', () => {
     expect(rule('.hint--warn')).toMatch(/color:\s*var\(--fg\);/)
   })
+
+  it('a pressed small primary stays accent and hover skips disabled', () => {
+    expect(css).toMatch(/\n\.btn-primary\.btn-small:active:not\(:disabled\) \{\s*background:\s*var\(--accent-strong\);\s*\}/)
+    expect(css).toContain('\n.btn-primary:hover:not(:disabled) {')
+  })
 })

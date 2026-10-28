@@ -579,6 +579,7 @@ a:not(.btn-small, .btn-primary, .btn-chip, .btn-icon):hover {
   border: 1px solid var(--accent);
 }
 .btn-primary.btn-small:hover:not(:disabled) { border-color: var(--accent-strong); }
+.btn-primary.btn-small:active:not(:disabled) { background: var(--accent-strong); }
 .btn-primary.btn-small:disabled { border-color: var(--bg3); }
 
 /* Compact control (30×30 layout) with a full --touch hit area. Padding expands
