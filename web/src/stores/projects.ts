@@ -954,9 +954,9 @@ export const useProjectStore = defineStore('projects', () => {
     // started; leaving it set would route this resend into the local queue
     // (no server stream will ever drain it) instead of starting a real turn.
     clearStreamingState(chatId)
-    // The optimistic bubble from the lost send is gone with the history
-    // reload, so this re-renders it fresh; a successful delivery clears the
-    // tracking via the echoed user_echo. Empty comment buckets: the original
+    // The resend reuses the surviving optimistic bubble (found by send id)
+    // and pushes a fresh one only when a reload dropped it; a successful
+    // delivery clears the tracking via the echoed user_echo. Empty comment buckets: the original
     // send already consumed them via consumePreparedAttachments.
     // The same send id rides on: this is the same logical send, so the
     // engine can recognise it instead of running a second turn for it. The
@@ -5545,17 +5545,25 @@ export const useProjectStore = defineStore('projects', () => {
     if (wasDeferred) dropDeferredSend(chatId, deferredEntry)
     if (!wasDeferred || !settlePendingSendBubble(chatId, deferredEntry, sendId)) {
       const msgs = messages.value[chatId] || []
-      msgs.push({
-        role: 'user',
-        content: composed,
-        timestamp: new Date().toISOString(),
-        images: imageRefs,
-        // A deliberate retry is tagged, so the bubble says what the turn is.
-        origin,
-        // The id marks this bubble as the client's own optimistic copy, so
-        // the server's copy of the same turn is never mistaken for it.
-        send_id: sendId,
-      })
+      // A recovery resend reuses the send id and the original optimistic
+      // bubble survives a history reload, so a second push would render the
+      // turn twice.
+      const held = msgs.some(
+        m => m.role === 'user' && m.turn_index == null && typeof m.i !== 'number' && m.send_id === sendId,
+      )
+      if (!held) {
+        msgs.push({
+          role: 'user',
+          content: composed,
+          timestamp: new Date().toISOString(),
+          images: imageRefs,
+          // A deliberate retry is tagged, so the bubble says what the turn is.
+          origin,
+          // The id marks this bubble as the client's own optimistic copy, so
+          // the server's copy of the same turn is never mistaken for it.
+          send_id: sendId,
+        })
+      }
       messages.value[chatId] = msgs
     }
     // Persist immediately so the user's own message survives app close even

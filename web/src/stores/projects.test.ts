@@ -817,7 +817,49 @@ describe('unacknowledged send recovery', () => {
       // The retry is itself still tracked (attempt 1), not reset.
       expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.attempts).toBe(1)
       // And the user bubble is back.
-      expect(store.messages[chatId]?.some(m => m.role === 'user' && m.content === 'lost in suspension')).toBe(true)
+      expect(store.messages[chatId]?.filter(m => m.role === 'user' && m.content === 'lost in suspension')).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a recovery resend of a lost send leaves one bubble', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-one-bubble'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'try now', turn_index: 13, i: 0 },
+            { role: 'assistant', content: 'The usage limit has been reached', i: 1 },
+          ],
+          total: 2,
+          offset: 0,
+          limit: 50,
+          hasMore: false,
+          nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    await store.loadMessages(chatId)
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'continue')
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+
+      const frames = sentMessageFrames()
+      expect(frames).toHaveLength(2)
+      expect(JSON.parse(frames[1]).send_id).toBe(JSON.parse(frames[0]).send_id)
+      expect(
+        store.messages[chatId]?.filter(m => m.role === 'user').map(m => m.content),
+      ).toEqual(['try now', 'continue'])
     } finally {
       vi.useRealTimers()
     }
