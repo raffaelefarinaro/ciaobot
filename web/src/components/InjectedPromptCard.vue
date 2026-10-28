@@ -42,6 +42,7 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   webhook: 'comment',
   update_task: 'spark',
   retry: 'activity',
+  error: 'activity',
 }
 
 const summary = computed(() => summarizeInjectedPrompt(props.prompt, props.chatTitle))
@@ -80,6 +81,9 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
     </div>
 
     <p v-if="!open && summary.hint" :id="hintId" class="injected-card-hint">{{ summary.hint }}</p>
+
+    <!-- Recovery actions stay reachable while the card is collapsed. -->
+    <div v-if="$slots.actions" class="injected-card-actions"><slot name="actions" /></div>
 
     <div v-if="open" :id="bodyId" class="injected-card-body">
       <template v-if="prompt.kind === 'background_run'">
@@ -176,6 +180,12 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
           <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
           <div class="injected-card-prose" tabindex="0" role="region" aria-label="Original request" v-html="md(raw)"></div>
         </details>
+      </template>
+
+      <template v-else-if="prompt.kind === 'error'">
+        <p class="injected-card-note">{{ prompt.copy }}</p>
+        <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
+        <div class="injected-card-prose" tabindex="0" role="region" aria-label="Error message" v-html="md(prompt.text)"></div>
       </template>
 
       <template v-if="hasRawToggle">
@@ -300,6 +310,8 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.injected-card-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; }
+.injected-card-actions :slotted(.retry-btn) { margin-top: 0; }
 .injected-card-log { margin: 4px 0 0; }
 .injected-card-prose { max-height: 320px; overflow: auto; margin-top: 8px; line-height: 1.5; }
 .injected-card-prose :deep(> :first-child) { margin-top: 0; }
@@ -365,6 +377,7 @@ pre {
   .injected-card-link {
     min-height: var(--touch);
   }
+  .injected-card-actions :slotted(button) { min-height: var(--touch); }
   .injected-card-link { display: inline-flex; align-items: center; }
   .injected-card-original > summary { min-height: var(--touch); padding: 12px 0; }
 }

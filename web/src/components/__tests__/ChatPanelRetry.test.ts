@@ -409,6 +409,93 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
+  it('draws an error as a collapsed notice card', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      {
+        role: 'assistant',
+        content: 'you have reached your weekly usage limit, upgrade for higher limits',
+        timestamp: '2026-10-11T18:01:01Z',
+        is_error: true,
+      },
+    ]
+    await flushPromises()
+
+    const card = wrapper.get('.injected-card--error')
+    expect(card.get('.injected-card-kind').text()).toBe('Usage limit reached')
+    expect(card.get('.injected-card-hint').text()).toContain('weekly usage limit')
+    expect(wrapper.find('.message.assistant').exists()).toBe(false)
+    expect(wrapper.find('.error-attribution').exists()).toBe(false)
+    expect(wrapper.find('[data-msg-role="assistant"]').exists()).toBe(true)
+    expect(card.find('.injected-card-body').exists()).toBe(false)
+    await card.get('.injected-card-toggle').trigger('click')
+    expect(card.get('.injected-card-note').text()).toContain('usage limit')
+    wrapper.unmount()
+  })
+
+  it('draws a system error as the same notice card', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hi', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'system', content: 'Error: connection refused', timestamp: '2026-10-11T18:01:01Z' },
+    ]
+    await flushPromises()
+    expect(wrapper.get('.injected-card--error .injected-card-hint').text()).toBe('connection refused')
+    expect(wrapper.find('.message.system').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('hides Retry once a later message exists', async () => {
+    const { wrapper, store } = await mountPanel()
+    const limit = 'you have reached your weekly usage limit, upgrade for higher limits'
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: limit, timestamp: '2026-10-11T18:01:01Z', is_error: true },
+    ]
+    await flushPromises()
+    expect(wrapper.findAll('.retry-btn').map(b => b.text())).toEqual(['Retry', 'Retry every hour'])
+
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      { role: 'assistant', content: limit, timestamp: '2026-10-11T18:01:01Z', is_error: true },
+      { role: 'user', content: 'continue', timestamp: '2026-10-11T18:02:00Z' },
+      { role: 'assistant', content: 'ok', timestamp: '2026-10-11T18:02:01Z' },
+    ]
+    await flushPromises()
+    expect(wrapper.findAll('.retry-btn')).toEqual([])
+    expect(wrapper.text()).not.toContain('Retry every hour')
+    wrapper.unmount()
+  })
+
+  it('keeps Fix this error and drops sign-in steps once a later message exists', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Hi', timestamp: '2026-10-05T15:44:00Z' },
+      { role: 'assistant', content: 'Error: connection refused', timestamp: '2026-10-05T15:44:01Z', is_error: true },
+      { role: 'user', content: 'again', timestamp: '2026-10-05T15:45:00Z' },
+    ]
+    await flushPromises()
+    expect(wrapper.findAll('.retry-btn').map(b => b.text())).toEqual(['Fix this error'])
+
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Summarise my inbox', timestamp: '2026-10-05T15:44:00Z' },
+      {
+        role: 'assistant',
+        content: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+        timestamp: '2026-10-05T15:44:01Z',
+        is_error: true,
+      },
+    ]
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'ProviderSignInHint' }).exists()).toBe(true)
+    store.messages['chat-1'].push({ role: 'user', content: 'continue', timestamp: '2026-10-05T15:45:00Z' })
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'ProviderSignInHint' }).exists()).toBe(false)
+    expect(wrapper.findAll('.retry-btn')).toEqual([])
+    wrapper.unmount()
+  })
+
   it('falls back to a fix chat when there is no turn to retry hourly', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
@@ -1099,7 +1186,7 @@ describe('ChatPanel retry turn rendering', () => {
     // The retried turn is a notice, not another bubble.
     const notice = wrapper.get('.injected-card--retry')
     expect(notice.attributes('aria-label')).toBe('Retry started')
-    expect(wrapper.findAll('.injected-prompt-wrap')).toHaveLength(1)
+    expect(wrapper.findAll('.injected-card--retry')).toHaveLength(1)
     // Collapsed by default: the repeated request is not read by accident.
     expect(wrapper.find('.injected-card--retry .injected-card-body').exists()).toBe(false)
 
@@ -1156,9 +1243,10 @@ describe('ChatPanel retry turn rendering', () => {
     await flushPromises()
 
     const retryBtns = wrapper.findAll('.retry-btn').filter(b => b.text() === 'Retry')
-    expect(retryBtns).toHaveLength(2)
+    // Only the last error offers Retry; the earlier one has later messages.
+    expect(retryBtns).toHaveLength(1)
     // The retry under the notice that follows it: the notice is in between.
-    await retryBtns[1]!.trigger('click')
+    await retryBtns[0]!.trigger('click')
     await flushPromises()
 
     expect(sendMessage).toHaveBeenCalledTimes(1)

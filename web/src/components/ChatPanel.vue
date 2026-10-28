@@ -316,15 +316,63 @@
             </div>
           </div>
         </div>
+        <!-- A failed turn: the compact notice card, never a bubble. Both an
+             assistant error and an `Error:` system row land here. The resend
+             actions give way once any later item exists; see errorBubbleAction. -->
+        <div
+          v-else-if="(item.kind === 'assistant' && item.msg.is_error) || (item.kind === 'system' && isErrorMsg(item.msg.content))"
+          class="message-wrap injected-prompt-wrap"
+          :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-err-${i}`"
+          :data-msg-index="i"
+          :data-msg-role="item.kind"
+        >
+          <InjectedPromptCard
+            :prompt="errorNoticePrompt(item.msg.content)"
+            :raw="item.msg.content"
+            :timestamp="item.msg.timestamp"
+            :chat-title="chat.title"
+            :known-paths="knownFilePaths"
+          >
+            <template #actions>
+              <div class="error-actions">
+                <button
+                  v-if="lastUserBefore(i) && !hasLaterItem(i)"
+                  class="retry-btn"
+                  @click="retryFromError(i)"
+                >Retry</button>
+                <!-- See errorBubbleAction for which fix a known error gets. -->
+                <button
+                  v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
+                  class="retry-btn fix-btn"
+                  @click="retryHourlyFromError(i)"
+                >Retry every hour</button>
+                <button
+                  v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
+                  class="retry-btn fix-btn"
+                  :disabled="store.isStreaming"
+                  @click="openRecoveryPicker(i)"
+                >Switch model</button>
+                <button
+                  v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
+                  class="retry-btn fix-btn"
+                  @click="openFixChat(i)"
+                >Fix this error</button>
+              </div>
+              <ProviderSignInHint
+                v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !hasLaterItem(i) && !chat.archived"
+                :provider="chat.provider"
+                action-label="Retry"
+                :action-disabled="store.isStreaming"
+                @action="retryFromError(i)"
+              />
+            </template>
+          </InjectedPromptCard>
+        </div>
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
           <div class="message-row">
-            <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
+            <div class="message assistant" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
-              <div v-if="item.msg.is_error" class="error-attribution" role="status">
-                <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
-                <span>{{ classifyError(item.msg.content).copy }}</span>
-              </div>
             </div>
             <!-- The reply's own footer: Outputs, Copy, Fork, and the turn's
                  facts. The row always takes its height; Copy, Fork and the
@@ -376,7 +424,6 @@
                 <span>{{ copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy' }}</span>
               </button>
               <button
-                v-if="!item.msg.is_error"
                 type="button"
                 class="message-action-btn"
                 :class="{ 'message-action-btn--busy': forkLoadingKey === `assistant-${i}` }"
@@ -402,37 +449,6 @@
               </div>
             </div>
           </div>
-          <div v-if="item.msg.is_error" class="error-actions">
-            <button
-              v-if="lastUserBefore(i)"
-              class="retry-btn"
-              @click="retryFromError(i)"
-            >Retry</button>
-            <!-- See errorBubbleAction for which fix a known error gets. -->
-            <button
-              v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
-              class="retry-btn fix-btn"
-              @click="retryHourlyFromError(i)"
-            >Retry every hour</button>
-            <button
-              v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
-              class="retry-btn fix-btn"
-              :disabled="store.isStreaming"
-              @click="openRecoveryPicker(i)"
-            >Switch model</button>
-            <button
-              v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
-              class="retry-btn fix-btn"
-              @click="openFixChat(i)"
-            >Fix this error</button>
-          </div>
-          <ProviderSignInHint
-            v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !chat.archived"
-            :provider="chat.provider"
-            action-label="Retry"
-            :action-disabled="store.isStreaming"
-            @action="retryFromError(i)"
-          />
         </div>
         <!-- System message (errors, etc) -->
         <!-- A background shell the provider ran itself: the same card as a
@@ -455,41 +471,6 @@
         </div>
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
-          <div v-if="isErrorMsg(item.msg.content)" class="error-attribution" role="status">
-            <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
-            <span>{{ classifyError(item.msg.content).copy }}</span>
-          </div>
-          <div v-if="isErrorMsg(item.msg.content)" class="error-actions">
-            <button
-              v-if="lastUserBefore(i)"
-              class="retry-btn"
-              @click="retryFromError(i)"
-            >Retry</button>
-            <!-- See errorBubbleAction for which fix a known error gets. -->
-            <button
-              v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
-              class="retry-btn fix-btn"
-              @click="retryHourlyFromError(i)"
-            >Retry every hour</button>
-            <button
-              v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
-              class="retry-btn fix-btn"
-              :disabled="store.isStreaming"
-              @click="openRecoveryPicker(i)"
-            >Switch model</button>
-            <button
-              v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
-              class="retry-btn fix-btn"
-              @click="openFixChat(i)"
-            >Fix this error</button>
-          </div>
-          <ProviderSignInHint
-            v-if="isProviderAuthError(item.msg.content) && lastUserBefore(i) && !chat.archived"
-            :provider="chat.provider"
-            action-label="Retry"
-            :action-disabled="store.isStreaming"
-            @action="retryFromError(i)"
-          />
         </div>
       </template>
       </template>
@@ -1489,7 +1470,7 @@ import type { TaskAttemptActionResponse } from '../lib/types'
 import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import InjectedPromptCard from './InjectedPromptCard.vue'
-import { parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText } from '../lib/filePaths'
 import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
@@ -1497,7 +1478,7 @@ import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackg
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
-import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
+import { errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
 import ShellRows from './ShellRows.vue'
@@ -4760,6 +4741,11 @@ function lastUserBefore(errorIdx: number): { text: string; images: string[] } | 
   }
   return null
 }
+// A later item of any kind (user, assistant, system, trace) means the chat
+// moved on, so resending the failed turn would run it out of order.
+function hasLaterItem(errorIdx: number): boolean {
+  return errorIdx < renderItems.value.length - 1
+}
 function retryFromError(errorIdx: number) {
   if (chat.value.archived) return
   const prior = lastUserBefore(errorIdx)
@@ -4788,13 +4774,15 @@ function retryFromError(errorIdx: number) {
 // A known error gets its own fix instead of a diagnosis chat: a usage limit
 // retries hourly until it resets (nothing while a retry is armed, the retry
 // card owns it), a missing or unsuitable model opens the model picker, and a
-// signed-out provider gets the sign-in steps under the bubble. When that fix
-// cannot run here (archived chat, no prior turn to resend), the bubble falls
-// back to the "Fix this error" chat rather than offering nothing.
+// signed-out provider gets the sign-in steps under the notice. When that fix
+// cannot run here (archived chat, no prior turn to resend), the notice falls
+// back to the "Fix this error" chat rather than offering nothing. A later
+// message supersedes the resend actions; "Fix this error" stays.
 function errorBubbleAction(errorIdx: number, content: string): 'retry-hourly' | 'switch-model' | 'fix' | null {
   const action = errorQuickAction(content)
   if (action === 'fix') return 'fix'
   if (chat.value.archived) return 'fix'
+  if (hasLaterItem(errorIdx)) return null
   if (action === 'switch-model') return 'switch-model'
   if (!lastUserBefore(errorIdx)) return 'fix'
   if (action === 'sign-in') return null
@@ -6103,10 +6091,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   50% { opacity: 0.35; }
 }
 
-.message.assistant.error {
-  border-color: var(--error);
-}
-
 .message.streaming {
   border-color: var(--accent);
 }
@@ -6138,21 +6122,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   flex-wrap: wrap;
 }
 
-.error-attribution {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: baseline;
-  margin-top: 8px;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.4;
-}
-
-.error-attribution-label {
-  color: var(--error);
-  font-weight: 600;
-}
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 

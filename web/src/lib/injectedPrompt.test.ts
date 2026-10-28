@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseInjectedPrompt, summarizeInjectedPrompt } from './injectedPrompt'
+import { errorNoticePrompt, parseInjectedPrompt, summarizeInjectedPrompt } from './injectedPrompt'
 import type { InjectedPrompt } from './injectedPrompt'
 
 const D = '—'
@@ -395,5 +395,24 @@ describe('summarizeInjectedPrompt', () => {
     expect(summarizeInjectedPrompt({ kind: 'retry' })).toEqual({
       label: 'Retry started', facts: 'Same request · new attempt', tone: null,
     })
+  })
+
+  it('summarizes an error notice', () => {
+    const quota = errorNoticePrompt('you have reached your weekly usage limit, upgrade for higher limits')
+    expect(quota).toMatchObject({ kind: 'error', label: 'Usage limit reached' })
+    const summary = summarizeInjectedPrompt(quota)
+    expect(summary.label).toBe('Usage limit reached')
+    expect(summary.facts).toBe('')
+    expect(summary.tone).toBeNull()
+    expect(summary.hint).toBe('you have reached your weekly usage limit, upgrade for higher limits')
+
+    // Leading "Error:" is dropped, only the first non-empty line is kept.
+    const multi = errorNoticePrompt('Error:\n\n  connection refused\nstack line two')
+    expect(summarizeInjectedPrompt(multi).hint).toBe('connection refused')
+
+    // Clipped at 200 characters with an ellipsis.
+    const long = errorNoticePrompt(`Error: ${'x'.repeat(300)}`)
+    const hint = summarizeInjectedPrompt(long).hint!
+    expect(hint).toBe(`${'x'.repeat(200)}…`)
   })
 })

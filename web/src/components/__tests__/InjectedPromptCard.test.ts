@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import { mount, RouterLinkStub } from '@vue/test-utils'
 import InjectedPromptCard from '../InjectedPromptCard.vue'
+import { errorNoticePrompt } from '../../lib/injectedPrompt'
 import type { InjectedPrompt } from '../../lib/injectedPrompt'
 
 const runPrompt: InjectedPrompt = {
@@ -287,5 +288,27 @@ describe('InjectedPromptCard', () => {
     expect(prose.attributes('tabindex')).toBe('0')
     expect(prose.attributes('role')).toBe('region')
     expect(prose.attributes('aria-label')).toBe('Injected request')
+  })
+
+  it('renders the actions slot while collapsed, and the cause when expanded', async () => {
+    const prompt = errorNoticePrompt('Error: connection refused')
+    const wrapper = mount(InjectedPromptCard, {
+      props: { prompt, raw: 'Error: connection refused' },
+      slots: { actions: '<button class="retry-btn">Retry</button>' },
+      global: { stubs: { RouterLink: RouterLinkStub } },
+    })
+    expect(wrapper.find('.injected-card-body').exists()).toBe(false)
+    expect(wrapper.get('.injected-card-actions .retry-btn').text()).toBe('Retry')
+    expect(wrapper.get('.injected-card-hint').text()).toBe('connection refused')
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toBe((prompt as { copy: string }).copy)
+    expect(wrapper.get('.injected-card-prose').attributes('aria-label')).toBe('Error message')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+    expect(wrapper.find('.retry-btn').exists()).toBe(true)
+  })
+
+  it('draws no actions row without the slot', () => {
+    const wrapper = mountCard({ prompt: runPrompt, raw: '' })
+    expect(wrapper.find('.injected-card-actions').exists()).toBe(false)
   })
 })
