@@ -3,6 +3,7 @@
 // typed records for InjectedPromptCard.
 // Pure: no state and no Vue imports. The formats mirror the Python builders
 // named next to each pattern; change them together.
+import { classifyError } from './errorAttribution'
 import type { TurnOrigin } from './types'
 
 export type RunVerdict = 'ok' | 'cancelled' | 'failed'
@@ -25,6 +26,7 @@ export type InjectedPrompt =
   | { kind: 'webhook'; instructions: string; event: string }
   | { kind: 'update_task' }
   | { kind: 'retry' }
+  | { kind: 'error'; label: string; copy: string; text: string }
 
 // Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
 export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\./
@@ -186,6 +188,20 @@ export function parseInjectedPrompt(content: string | null | undefined, origin?:
   }
 }
 
+/** A failed turn's error, drawn as a notice labelled with its cause. */
+export function errorNoticePrompt(text: string): InjectedPrompt {
+  const { label, copy } = classifyError(text)
+  return { kind: 'error', label, copy, text }
+}
+
+const ERROR_HINT_MAX = 200
+
+/** The provider's own message as one line: no leading `Error:`, first non-empty line, clipped. */
+function errorHint(text: string): string {
+  const line = text.replace(/^\s*Error:/, '').split('\n').map(l => l.trim()).find(Boolean) ?? ''
+  return line.length > ERROR_HINT_MAX ? `${line.slice(0, ERROR_HINT_MAX)}…` : line
+}
+
 /** `hint` is the failure line shown while the card is collapsed. */
 export interface InjectedSummary { label: string; facts: string; tone: RunVerdict | null; hint?: string }
 
@@ -251,5 +267,7 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Update task', facts: chatTitle ?? '', tone: null }
     case 'retry':
       return { label: 'Retry started', facts: 'Same request · new attempt', tone: null }
+    case 'error':
+      return { label: prompt.label, facts: '', tone: null, hint: errorHint(prompt.text) }
   }
 }
