@@ -53,6 +53,8 @@ from ciao.terminal_sessions import (
     TERMINAL_MIN_ROWS,
     TerminalSessionError,
     TerminalSessionManager,
+    _READER_IDLE_S,
+    _READER_MIN_IDLE_S,
 )
 
 #: Bytes a terminal really produces: a NUL, an invalid UTF-8 sequence,
@@ -1710,6 +1712,52 @@ async def test_the_reader_stops_when_the_session_is_closed(
     assert reader.done()
     # The shell was closed once, and the reader did not close it too.
     assert factory.process.close_count == 1
+
+    await manager.shutdown()
+
+
+async def test_the_reader_polls_quickly_after_output_and_backs_off_while_quiet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A busy terminal is polled fast; a quiet one backs off to the cap."""
+    script: list[bytes | None] = [b"a"] + [None] * 6 + [b"b", None, b""]
+
+    class ScriptedProcess(FakeProcess):
+        def read(self, size: int = TERMINAL_READ_BYTES) -> bytes | None:
+            return script.pop(0) if script else b""
+
+    class ScriptedFactory(FakeFactory):
+        def __call__(self, *, cwd: Path, cols: int = 80, rows: int = 24):
+            process = ScriptedProcess(pid=4_001)
+            self.processes.append(process)
+            return process
+
+    # Only the reader task's sleeps are recorded; every other caller
+    # (the sweeper, the flusher, the test's own waits) sleeps for real.
+    real_sleep = asyncio.sleep
+    delays: list[float] = []
+
+    async def recording_sleep(delay: float, *args, **kwargs):
+        task = asyncio.current_task()
+        if task is not None and task.get_name().startswith("terminal-reader-"):
+            if delay > 0:
+                delays.append(delay)
+            return await real_sleep(0)
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr("ciao.terminal_sessions.asyncio.sleep", recording_sleep)
+
+    manager = _manager(ScriptedFactory())
+    info = await manager.create(tmp_path, "chat", "chat-1")
+    await _wait_until(
+        lambda: manager.get(info.session_id).exited, what="the shell to end"
+    )
+
+    assert delays == pytest.approx(
+        [_READER_MIN_IDLE_S * 2**n for n in range(5)]
+        + [_READER_IDLE_S, _READER_MIN_IDLE_S]
+    )
+    assert _READER_MIN_IDLE_S * 2**4 < _READER_IDLE_S
 
     await manager.shutdown()
 

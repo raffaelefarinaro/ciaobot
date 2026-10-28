@@ -395,7 +395,10 @@ onBeforeUnmount(() => {
           <span class="tp-status-item">{{ platformLabel }}</span>
         </p>
       </div>
-      <button ref="closeButtonEl" type="button" class="btn-icon tp-close" title="Close terminal" aria-label="Close" @click="closePane">×</button>
+      <!-- Close sits top right, where the pinned file tile keeps its own. -->
+      <button ref="closeButtonEl" type="button" class="btn-icon tp-close" title="Close terminal" aria-label="Close" @click="closePane">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+      </button>
     </header>
 
     <p class="tp-warning">
@@ -688,12 +691,6 @@ onBeforeUnmount(() => {
   height: auto;
   min-height: 0;
   padding-bottom: var(--safe-bottom);
-}
-/* The terminal title and engine details wrap in narrow drawers and tiles. */
-.terminal-pane--drawer .tp-head,
-.terminal-pane--tile .tp-head {
-  flex-direction: column;
-  align-items: stretch;
 }
 @media (pointer: coarse) {
   .tp-keys { display: flex; }

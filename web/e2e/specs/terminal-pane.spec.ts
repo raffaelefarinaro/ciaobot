@@ -188,6 +188,16 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   // in already has one, and a second would be a frame of its own.
   expect(await pane.evaluate(el => getComputedStyle(el).boxShadow)).toBe('none')
 
+  // Close sits top right of the header, beside the title, as the pinned
+  // file tile's does — not on a row of its own under it.
+  const headBox = (await pane.locator('.tp-head').boundingBox())!
+  const titleBox = (await pane.locator('.tp-title').boundingBox())!
+  const closeBox = (await pane.locator('.tp-close').boundingBox())!
+  expect(closeBox.x).toBeGreaterThan(titleBox.x + titleBox.width)
+  expect(headBox.x + headBox.width - (closeBox.x + closeBox.width)).toBeLessThanOrEqual(16)
+  expect(closeBox.y).toBeLessThan(titleBox.y + titleBox.height)
+  await pane.locator('.tp-head').screenshot({ path: test.info().outputPath('terminal-head.png') })
+
   // The divider between the chat and the tile, and it is a separator.
   const divider = page.locator('.chat-split-resizer')
   await expect(divider).toBeVisible()
