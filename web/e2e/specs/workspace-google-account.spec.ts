@@ -60,7 +60,7 @@ test.describe('workspace google account', () => {
     // A bare digit with focus on a dialog button must not switch workspace
     // (ChatLayout keeps the digit shortcuts inert while Settings is open).
     const before = await activeWorkspaceButton(page).textContent()
-    await dialog.getByRole('button', { name: 'Cancel' }).focus()
+    await dialog.locator('.gws-connect-foot').getByRole('button', { name: 'Close' }).focus()
     await page.keyboard.press('2')
     await expect(activeWorkspaceButton(page)).toHaveText(before ?? '')
 
