@@ -98,6 +98,10 @@ const SEND_BUFFER_MAX_BYTES = 256 * 1024
 const PING_INTERVAL_MS = 15_000
 /** Silence after which the connection is treated as stalled, in milliseconds. */
 const WATCHDOG_MS = 30_000
+/** A renderer that has not finished one write in this long has stopped drawing. */
+const RENDER_STALL_MS = 5000
+const RENDER_STALL_MESSAGE =
+  'The terminal view stopped drawing, so this session was disconnected. Close and reopen the terminal to try again.'
 /** How long the engine may take to answer the attach with a ready frame. */
 const READY_TIMEOUT_MS = 5000
 /**
@@ -296,6 +300,8 @@ export const useTerminalStore = defineStore('terminal', () => {
     writing: boolean
     /** The end of the bytes the in-flight write carries, if there is one. */
     inflightEnd: number | null
+    /** When the in-flight write started (`Date.now()`), if there is one. */
+    inflightSince: number | null
     /** A clear this surface owes, and the offset it clears back to. */
     pendingReset: number | null
     /** True while this surface is the one on show. */
@@ -323,6 +329,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       queued: 0,
       writing: false,
       inflightEnd: null,
+      inflightSince: null,
       pendingReset: null,
       attached: false,
     }
@@ -443,7 +450,8 @@ export const useTerminalStore = defineStore('terminal', () => {
    * The renderer writes asynchronously, so the bytes it has not taken yet
    * wait in the surface's own queue. The queue is bounded: past a megabyte
    * the client is slower than the shell, and the socket is closed rather
-   * than allowed to grow.
+   * than allowed to grow. A write that stays in flight for RENDER_STALL_MS
+   * on the visible surface fails the store: the renderer stopped drawing.
    */
   async function drain(surface: Surface): Promise<void> {
     if (surface.writing) return
@@ -458,15 +466,29 @@ export const useTerminalStore = defineStore('terminal', () => {
         // The bytes stay counted while they are on their way to the screen:
         // the write in flight is part of what the client is holding.
         surface.inflightEnd = chunk.nextOffset
+        surface.inflightSince = Date.now()
         if (surface.pendingReset !== null) applyReset(surface, surface.pendingReset)
+        const stallTimer = scheduleTimer(() => {
+          if (
+            surface.writing &&
+            surface.inflightEnd === chunk.nextOffset &&
+            surface.attached &&
+            visible.value
+          ) {
+            fail(RENDER_STALL_MESSAGE)
+          }
+        }, RENDER_STALL_MS)
         try {
           await surface.view.write(chunk.bytes)
+          cancelTimer(stallTimer)
         } catch {
+          cancelTimer(stallTimer)
           // A failed write belongs to the surface that asked for it. A
           // surface that is not on show, or a pane that is hidden, is not
           // the store's to answer for: the successor keeps its own state
           // and the user is not looking at a screen that is not there.
           surface.inflightEnd = null
+          surface.inflightSince = null
           surface.queued -= chunk.bytes.length
           if (surface.attached && visible.value) {
             fail('The terminal view could not be written to.')
@@ -474,6 +496,7 @@ export const useTerminalStore = defineStore('terminal', () => {
           return
         }
         surface.inflightEnd = null
+        surface.inflightSince = null
         surface.queued -= chunk.bytes.length
         // The renderer took the bytes, so the surface's screen holds them.
         // The acknowledgement belongs to the surface, not to the socket.
@@ -486,6 +509,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
     } finally {
       surface.inflightEnd = null
+      surface.inflightSince = null
       // A reset is an operation on the physical screen, not merely this
       // session's cursor. It must finish before this drain releases the
       // renderer to another session; otherwise the old reset can erase a
@@ -511,7 +535,15 @@ export const useTerminalStore = defineStore('terminal', () => {
       // The shell is outrunning the screen. The stream is broken, so it is
       // not retried: a new connection would replay the same output into the
       // same slow screen.
-      fail('The shell is producing output faster than the terminal can show it.')
+      // A write that has been stuck for the stall window means the view
+      // stopped drawing, which is not the shell's fault.
+      const stalled =
+        surface.inflightSince !== null && Date.now() - surface.inflightSince >= RENDER_STALL_MS
+      fail(
+        stalled
+          ? RENDER_STALL_MESSAGE
+          : 'The shell is producing output faster than the terminal can show it.',
+      )
       return
     }
     surface.queued += bytes.length
