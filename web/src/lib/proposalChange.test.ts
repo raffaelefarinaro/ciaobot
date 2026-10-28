@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changeFor } from './proposalChange'
+import { changeFor, displayDestination } from './proposalChange'
 import type { ProposalPreview, ProposalRow } from './types'
 
 function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
@@ -39,7 +39,7 @@ describe('changeFor', () => {
   it('reads an append to an existing file as adding a line, and to an empty one as a new note', () => {
     const learnings = { action: 'append_learnings', destination: 'Workspace/Learnings.md', separator: '\n' }
     expect(changeFor(row({ kind: 'learnings' }), preview({ ...learnings, before: '## Active\n' })))
-      .toMatchObject({ type: 'add', verb: 'Add line', qualifier: '' })
+      .toMatchObject({ type: 'add', verb: 'Add to Learnings.md', qualifier: '' })
     expect(changeFor(row({ kind: 'learnings' }), preview({ ...learnings, before: '' })).type).toBe('new')
   })
 
@@ -166,5 +166,18 @@ describe('changeFor', () => {
     expect(changeFor(row({ kind: 'review' }), undefined, { canAccept: false, fallbackQualifier: 'Needs you' }))
       .toMatchObject({ type: 'decide', qualifier: 'Needs you' })
     expect(changeFor(row(), undefined).type).toBe('pending')
+  })
+})
+
+describe('displayDestination', () => {
+  it('keeps the last two segments of an absolute path', () => {
+    expect(displayDestination('/Users/me/repos/stazionesmart/AGENTS.md')).toBe('stazionesmart/AGENTS.md')
+    expect(displayDestination('~/notes/Projects/Ciao.md')).toBe('Projects/Ciao.md')
+    expect(displayDestination('C:\\dev\\repo\\AGENTS.md')).toBe('repo/AGENTS.md')
+  })
+
+  it('leaves a relative destination unchanged', () => {
+    expect(displayDestination('work/AGENTS.md')).toBe('work/AGENTS.md')
+    expect(displayDestination('ciao:profile')).toBe('ciao:profile')
   })
 })

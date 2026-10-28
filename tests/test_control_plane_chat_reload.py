@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import AgentPrincipal, CiaoControlPlane, ControlPlaneError
+from ciao.provider_service import ProviderService
+from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -93,6 +96,27 @@ async def test_busy_chat_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ControlPlaneError) as exc:
         plane.chat_reload(_principal(chat.chat_id, project.project_id), chat.chat_id)
     assert exc.value.code == "chat_busy"
+
+
+async def test_chat_reload_own_opencode_chat_not_blocked_by_foreground_shell(
+    tmp_path: Path,
+) -> None:
+    pcm, _plane, project = _setup(tmp_path)
+    chat = pcm.create_chat(project.project_id, title="own")
+    provider = OpencodeProvider(tmp_path)
+    service = ProviderService(pcm._config)
+    service._provider = provider
+    pcm._providers[chat.chat_id] = service
+    fixture = Path(__file__).parent / "fixtures" / "opencode" / "foreground_shell_turn.jsonl"
+    for line in fixture.read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        provider._track_background_event(event, "ses_fgshell_parent")
+        if event["type"] == "session.tool.progress":
+            break
+    else:
+        raise AssertionError("fixture has no session.tool.progress")
+
+    assert pcm.provider_reload_blocked(chat.chat_id) is False
 
 
 async def test_another_idle_chat_has_its_provider_popped(tmp_path: Path) -> None:

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { boot, isolate, quiesce } from '../support/app'
+import { boot, isolate, quiesce, releasePointerInSameTask } from '../support/app'
 
 const READY = '.project-header'
 const NOTES = 'alpha-notes'
@@ -84,6 +84,38 @@ test.describe('sidebar project reordering', () => {
     expect(await rowOrder(page)).toEqual(['alpha-general', ...order])
   })
 
+  test('a fast release above a project lands before it when the drawn placeholder is stale', async ({ page }) => {
+    const requests: Array<Record<string, unknown>> = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/projects/reorder')) {
+        requests.push(request.postDataJSON())
+      }
+    })
+    const group = page.locator('[data-project-id="filler-02"]')
+    await group.locator('.project-header').hover()
+    const grip = (await group.locator('.drag-grip').boundingBox())!
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2)
+    await page.mouse.down()
+    // Activate at the source slot, so the preview has drawn its placeholder there.
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 12, { steps: 3 })
+    await expect(page.locator('.drag-overlay')).toBeVisible()
+    await expect(page.locator('.project-list > .drag-placeholder')).toHaveCount(1)
+
+    // Move above Notes and release in one task: the drawn placeholder is still
+    // at the old slot while targetAt recomputes for the new one.
+    const notes = (await page.locator(`[data-project-id="${NOTES}"]`).boundingBox())!
+    await releasePointerInSameTask(page.locator('.project-list'), {
+      x: notes.x + notes.width / 2,
+      y: notes.y + 8,
+    })
+    await page.mouse.up()
+
+    await expect.poll(() => requests.length).toBe(1)
+    const expected = ['filler-02', NOTES, 'filler-01', ...FILLERS.slice(2)]
+    expect(requests[0]!.order).toEqual(expected)
+    expect(await rowOrder(page)).toEqual(['alpha-general', ...expected])
+  })
+
   test('an expanded group moves as one and Escape cancels with no request', async ({ page }) => {
     let posted = 0
     page.on('request', (request) => {
@@ -110,6 +142,40 @@ test.describe('sidebar project reordering', () => {
     await page.mouse.up()
     expect(posted).toBe(0)
     expect((await rowOrder(page)).slice(0, 2)).toEqual(['alpha-general', NOTES])
+  })
+
+  test('a cover over the list blocks a drop through it', async ({ page }) => {
+    let posted = 0
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/projects/reorder')) posted += 1
+    })
+    const group = page.locator(`[data-project-id="${NOTES}"]`)
+    await group.locator('.project-header').hover()
+    const box = (await group.locator('.drag-grip').boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + 40, box.y + 120, { steps: 8 })
+    await expect(page.locator('.drag-overlay')).toBeVisible()
+
+    // Something opens over the sidebar while the row is picked up.
+    await page.evaluate(() => {
+      const cover = document.createElement('div')
+      cover.className = 'e2e-cover'
+      Object.assign(cover.style, {
+        position: 'fixed', top: '0', left: '0', width: '320px', height: '100vh',
+        zIndex: '2000', background: 'rgb(0 0 0 / 20%)',
+      })
+      document.body.append(cover)
+    })
+    const target = page.locator('[data-project-id="filler-01"] .project-header')
+    const at = (await target.boundingBox())!
+    await page.mouse.move(at.x + 20, at.y + 5, { steps: 8 })
+    await page.mouse.up()
+
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+    expect(posted).toBe(0)
+    expect((await rowOrder(page)).slice(0, 2)).toEqual(['alpha-general', NOTES])
+    await page.evaluate(() => document.querySelector('.e2e-cover')?.remove())
   })
 
   test('a chat can still be dropped onto another project header', async ({ page }) => {

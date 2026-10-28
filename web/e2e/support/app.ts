@@ -22,6 +22,20 @@ export const BOOTED = 'text=alpha first conversation'
 /** The chat composer; the readiness signal for a `/chat/...` route. */
 export const COMPOSER = 'textarea.chat-input'
 
+export interface BootOptions {
+  /** Awaited before navigation, so a test can set up state for this load. */
+  beforeNavigate?: () => Promise<void>
+  /**
+   * Awaited after navigation and before the readiness wait. The seam a test
+   * uses to inspect a surface that is still loading, or to hold it there.
+   */
+  beforeReady?: () => Promise<void>
+  /** Called in the same turn the readiness wait starts, after `beforeReady`. */
+  onReadyWait?: () => void
+  /** Bound on the readiness wait, so a test can prove that it blocks. */
+  readyTimeout?: number
+}
+
 /**
  * Load a route and wait until the app has finished booting.
  *
@@ -29,14 +43,54 @@ export const COMPOSER = 'textarea.chat-input'
  * because a fixed wait is how a browser suite becomes both slow and flaky on a
  * loaded CI runner.
  */
-export async function boot(page: Page, path = '/', ready: string = BOOTED): Promise<void> {
+export async function boot(
+  page: Page,
+  path = '/',
+  ready: string = BOOTED,
+  options: BootOptions = {},
+): Promise<void> {
+  await options.beforeNavigate?.()
   await page.goto(path)
-  await expect(page.locator(ready).first()).toBeVisible()
+  await options.beforeReady?.()
+  options.onReadyWait?.()
+  await expect(page.locator(ready).first())
+    .toBeVisible(options.readyTimeout === undefined ? undefined : { timeout: options.readyTimeout })
 }
 
 /** The current workspace scope control at the top of the sidebar. */
 export function activeWorkspaceButton(page: Page) {
   return page.locator('.workspace-scope-trigger').first()
+}
+
+/**
+ * Finish an active pointer drag with a destination move and release in the same
+ * JavaScript task, before Vue can flush the preview. The caller must already
+ * have pressed and activated the drag with real mouse events; this keeps the
+ * browser's layout and hit testing while forcing the pending-render seam.
+ */
+export async function releasePointerInSameTask(
+  root: Locator,
+  point: { x: number; y: number },
+  pointerId = 1,
+): Promise<void> {
+  await root.evaluate(
+    (el, arg) => {
+      const init: PointerEventInit = {
+        pointerId: arg.pointerId,
+        isPrimary: true,
+        pointerType: 'mouse',
+        button: 0,
+        buttons: 1,
+        clientX: arg.point.x,
+        clientY: arg.point.y,
+        bubbles: true,
+        cancelable: true,
+      }
+      el.dispatchEvent(new PointerEvent('pointermove', init))
+      el.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }))
+    },
+    { point, pointerId },
+  )
 }
 
 /**

@@ -1,5 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from '@playwright/test'
-import { boot, isolate } from '../support/app'
+import { boot, isolate, releasePointerInSameTask } from '../support/app'
 
 /**
  * Placing cards on the board: the grip's pointer drag within and across lanes,
@@ -106,6 +106,29 @@ async function dragGrip(page: Page, title: string, target: Locator, dy = 0) {
   await page.mouse.up()
 }
 
+/**
+ * Press the card's own text (not the grip), move in steps so the engine
+ * activates, and release at `point`.
+ */
+async function dragSurfaceTo(page: Page, title: string, point: { x: number; y: number }) {
+  const text = page.locator('.task-card', { hasText: title }).locator('.task-title')
+  const box = (await text.boundingBox())!
+  // Near the line's left edge, which is plain text for these fixtures; a link
+  // would own its own press.
+  const from = { x: box.x + 4, y: box.y + box.height / 2 }
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  await page.mouse.move(from.x, from.y + 12, { steps: 3 })
+  await page.mouse.move(point.x, point.y, { steps: 12 })
+  await page.mouse.up()
+}
+
+/** The middle of a card, useful as the target of a drag. */
+async function cardCentre(target: Locator) {
+  const box = (await target.boundingBox())!
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+}
+
 test.describe('placing cards with the mouse', () => {
   test.use({ viewport: { width: 1440, height: 900 } })
 
@@ -138,6 +161,36 @@ test.describe('placing cards with the mouse', () => {
     await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Send the invites'])
   })
 
+  test('a fast release above a card lands before it even when its lane has not rendered', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-fast-seam')
+    const source = page.locator('.task-card', { hasText: 'Plan the offsite' })
+    const draft = page.locator('.task-card', { hasText: 'Draft the agenda' })
+    await source.hover()
+    const grip = (await source.locator('.drag-grip').boundingBox())!
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2)
+    await page.mouse.down()
+    // Activate inside To do and stay there: In progress has drawn no placeholder.
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 12, { steps: 3 })
+    await expect(page.locator('.drag-overlay')).toHaveCount(1)
+    await expect(lane(page, 'In progress').locator('.drag-placeholder')).toHaveCount(0)
+
+    // Destination move and release share one task. The release is clearly above
+    // Draft's midpoint, so it must land before Draft with no preview to read.
+    const target = (await draft.boundingBox())!
+    await releasePointerInSameTask(page.locator('.task-lanes'), {
+      x: target.x + target.width / 2,
+      y: target.y + 8,
+    })
+    await page.mouse.up()
+
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0]!.body).toMatchObject({
+      status: 'in_progress',
+      placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
+    })
+    expect(await titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
+  })
+
   test('Escape cancels a drag without a request', async ({ page }) => {
     const sent = await open(page, 'task-reorder-escape')
     const card = page.locator('.task-card', { hasText: 'Plan the offsite' })
@@ -152,6 +205,158 @@ test.describe('placing cards with the mouse', () => {
     await expect(page.locator('.drag-overlay')).toHaveCount(0)
     expect(sent).toHaveLength(0)
     expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+  })
+
+  test('drags from the card text, and a plain press on the card still opens the editor', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-surface')
+    const before = await cardCentre(page.locator('.task-card', { hasText: 'Plan the offsite' }))
+    await dragSurfaceTo(page, 'Send the invites', { x: before.x, y: before.y - 15 })
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.path).toBe(`/api/tasks/${'3'.repeat(32)}/order`)
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+
+    // A press that does not travel is the card's own click, not a drag.
+    await page.locator('.task-card', { hasText: 'Book the venue' }).locator('.task-title').click()
+    await expect(page.locator('#task-detail-name')).toBeVisible()
+    expect(sent).toHaveLength(1)
+  })
+
+  test('a single move into another lane picks the card up there', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-single-move-lane')
+    const text = page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.task-title')
+    const box = (await text.boundingBox())!
+    const target = await cardCentre(page.locator('.task-card', { hasText: 'Review the budget' }))
+    await page.mouse.move(box.x + 4, box.y + box.height / 2)
+    await page.mouse.down()
+    // One move, no steps: the first pointermove is already over another lane.
+    await page.mouse.move(target.x, target.y - 20)
+    await expect(page.locator('.drag-overlay')).toHaveCount(1)
+    expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('')
+    await page.mouse.up()
+
+    await expect.poll(() => titles(page, 'In review')).toEqual(['Plan the offsite', 'Review the budget'])
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.body).toMatchObject({
+      status: 'in_review',
+      placement: { before_id: '5'.repeat(32), after_id: null, expected_order_version: 1 },
+    })
+  })
+
+  test('a single move outside the board still picks the card up, so the drag can continue', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-single-move-outside')
+    const text = page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.task-title')
+    const box = (await text.boundingBox())!
+    const target = await cardCentre(page.locator('.task-card', { hasText: 'Draft the agenda' }))
+    await page.mouse.move(box.x + 4, box.y + box.height / 2)
+    await page.mouse.down()
+    // A single move straight out of the board leaves no root pointermove to
+    // read, because the surface press captures only after the threshold.
+    await page.mouse.move(60, target.y)
+    await expect(page.locator('.drag-overlay')).toHaveCount(1)
+    expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('')
+    // Captured by now, so the rest of the drag tracks and lands normally. The
+    // release is clearly above Draft's midpoint: exactly on it is a tie that
+    // subpixel pointer rounding can decide either way.
+    await page.mouse.move(target.x, target.y - 10, { steps: 8 })
+    await page.mouse.up()
+
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.body).toMatchObject({
+      status: 'in_progress',
+      placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
+    })
+  })
+
+  test('a pen-style capture transfer from the card to the board does not cancel the drag', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-capture-transfer')
+    await page.evaluate(() => {
+      const card = [...document.querySelectorAll<HTMLElement>('.task-card')]
+        .find((el) => el.textContent?.includes('Send the invites'))!
+      // A pen implicitly captures the card it pressed. Transferring that capture
+      // to the board as the drag activates reports the card's release here.
+      card.addEventListener('pointerdown', (e) => card.setPointerCapture((e as PointerEvent).pointerId))
+      const lost: string[] = []
+      ;(window as unknown as { __lost: string[] }).__lost = lost
+      document.addEventListener('lostpointercapture', (e) => {
+        lost.push((e.target as HTMLElement).className)
+      }, true)
+    })
+    const before = await cardCentre(page.locator('.task-card', { hasText: 'Plan the offsite' }))
+    await dragSurfaceTo(page, 'Send the invites', { x: before.x, y: before.y - 15 })
+
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+    expect(sent).toHaveLength(1)
+    // The transfer really did fire on the card; the drag survived it.
+    const lost = await page.evaluate(() => (window as unknown as { __lost: string[] }).__lost)
+    expect(lost.some((cls) => cls.includes('task-card'))).toBe(true)
+  })
+
+  test('a drop through an overlay does not move the card', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-overlay')
+    const text = page.locator('.task-card', { hasText: 'Send the invites' }).locator('.task-title')
+    const box = (await text.boundingBox())!
+    await page.mouse.move(box.x + 4, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(box.x + 4, box.y + box.height / 2 + 12, { steps: 3 })
+    await expect(page.locator('.drag-overlay')).toHaveCount(1)
+
+    // Something opens over the board while the card is being moved.
+    await page.evaluate(() => {
+      const cover = document.createElement('div')
+      cover.className = 'e2e-cover'
+      Object.assign(cover.style, {
+        position: 'fixed', inset: '0', zIndex: '2000', background: 'rgb(0 0 0 / 20%)',
+      })
+      document.body.append(cover)
+    })
+    const target = await cardCentre(page.locator('.task-card', { hasText: 'Draft the agenda' }))
+    await page.mouse.move(target.x, target.y, { steps: 8 })
+    await page.mouse.up()
+
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+    expect(sent).toHaveLength(0)
+    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    expect(await titles(page, 'In progress')).toEqual(['Draft the agenda'])
+    await page.evaluate(() => document.querySelector('.e2e-cover')?.remove())
+  })
+})
+
+test.describe('lane drop areas', () => {
+  test.use({ viewport: { width: 1440, height: 900 } })
+
+  test('a short lane reaches the board foot and accepts a drop under its last card', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-lane-height')
+    const board = (await page.locator('.task-lanes').boundingBox())!
+    const short = lane(page, 'In review')
+    const shortBox = (await short.boundingBox())!
+    const last = (await short.locator('.task-card').last().boundingBox())!
+    // Every lane is as tall as the board, not just as its own last card.
+    expect(Math.abs(shortBox.y + shortBox.height - (board.y + board.height))).toBeLessThanOrEqual(32)
+    expect(shortBox.y + shortBox.height - (last.y + last.height)).toBeGreaterThan(100)
+
+    await dragSurfaceTo(page, 'Plan the offsite', {
+      x: shortBox.x + shortBox.width / 2,
+      y: shortBox.y + shortBox.height - 16,
+    })
+    await expect.poll(() => titles(page, 'In review')).toEqual(['Review the budget', 'Plan the offsite'])
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.body).toMatchObject({
+      status: 'in_review',
+      placement: { before_id: null, after_id: '5'.repeat(32), expected_order_version: 1 },
+    })
+  })
+
+  test('a release outside the board cancels with no write', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-outside')
+    const board = (await page.locator('.task-lanes').boundingBox())!
+    const column = (await lane(page, 'To do').boundingBox())!
+    await dragSurfaceTo(page, 'Plan the offsite', { x: column.x + 100, y: board.y - 20 })
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+    expect(sent).toHaveLength(0)
+    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect(page.getByRole('status').filter({ hasText: 'Move cancelled' })).toHaveCount(1)
   })
 })
 
@@ -248,6 +453,39 @@ test.describe('placing cards on a narrow, scrolled board', () => {
     // The page itself never scrolls sideways.
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   })
+
+  test('a lane clipped by the board edge is not a drop target', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-clipped-lane')
+    await page.locator('.task-lanes').evaluate(el => { el.scrollLeft = 0 })
+    const setup = await page.evaluate(() => {
+      const board = document.querySelector('.task-lanes')!.getBoundingClientRect()
+      const lane = [...document.querySelectorAll<HTMLElement>('.task-lane')].find((el) => {
+        const rect = el.getBoundingClientRect()
+        return rect.left < board.right - 1 && rect.right > board.right + 40
+      })
+      if (!lane) return null
+      const rect = lane.getBoundingClientRect()
+      return {
+        board: { left: board.left, right: board.right },
+        lane: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, status: lane.dataset.lane },
+      }
+    })
+    expect(setup, 'a lane must sit partly past the board’s right edge').not.toBeNull()
+    // The point is inside the lane's own rect but past the board's visible edge,
+    // so only the un-clipped bounding box would call it a target.
+    const x = setup!.board.right + 12
+    const y = Math.min(setup!.lane.top + 320, setup!.lane.bottom - 20)
+    expect(x).toBeLessThan(700)
+    expect(x).toBeGreaterThan(setup!.lane.left)
+    expect(x).toBeLessThan(setup!.lane.right)
+
+    await dragSurfaceTo(page, 'Plan the offsite', { x, y })
+
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+    expect(sent).toHaveLength(0)
+    expect(await titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect(page.getByRole('status').filter({ hasText: 'Move cancelled' })).toHaveCount(1)
+  })
 })
 
 test.describe('placing cards by touch', () => {
@@ -275,5 +513,29 @@ test.describe('placing cards by touch', () => {
     await touch('touchEnd', 0, 0)
     await expect.poll(() => sent.length).toBe(1)
     await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+  })
+
+  test('a swipe on the card text scrolls the board instead of dragging', async ({ page, context }) => {
+    const sent = await open(page, 'task-reorder-touch-scroll')
+    const board = page.locator('.task-lanes')
+    const boardBox = (await board.boundingBox())!
+    const text = page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.task-title')
+    const box = (await text.boundingBox())!
+    const before = await board.evaluate(el => el.scrollLeft)
+    const y = box.y + box.height / 2
+    const startX = Math.min(box.x + box.width / 2, boardBox.x + boardBox.width - 40)
+
+    const cdp = await context.newCDPSession(page)
+    const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', x: number) =>
+      cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] })
+    await touch('touchStart', startX)
+    for (let step = 1; step <= 12; step++) await touch('touchMove', startX - step * 12)
+    await touch('touchEnd', 0)
+
+    // The horizontal pan belongs to the board, not to the card's drag surface.
+    await expect.poll(() => board.evaluate(el => el.scrollLeft)).toBeGreaterThan(before)
+    await expect(page.locator('.drag-overlay')).toHaveCount(0)
+    expect(sent).toHaveLength(0)
+    await expect(page.locator('#task-detail-name')).toHaveCount(0)
   })
 })
