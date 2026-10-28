@@ -227,7 +227,7 @@ Long or implementation-oriented content must not dominate a mobile page. Collaps
 
 Hierarchy comes primarily from tonal layers, one-pixel borders, and spacing. Cards sit on the page background; inputs may use the deeper canvas; modals and popovers use the elevated surface. Use stronger borders for focus and separation before adding shadows.
 
-Shadows are reserved for content that genuinely floats above another interaction layer: mobile drawers, menus, modals, and toasts. Keep them soft and dark. The normal application surface stays clean; CRT grain is reserved for startup, update, and native terminal surfaces where it carries product meaning. Visible thin scrollbars remain available in bounded data regions so scrollability never becomes an invisible assumption. The chat footer's turn-facts strip is the single exception: it scrolls sideways without drawing a bar, because a scrollbar under a reply reads as a rule across the transcript rather than as an affordance.
+Shadows are reserved for content that genuinely floats above another interaction layer: mobile drawers, menus, modals, and toasts. Toasts sit above the page but under an open dialog; they return on top when it closes. Keep them soft and dark. The normal application surface stays clean; CRT grain is reserved for startup, update, and native terminal surfaces where it carries product meaning. Visible thin scrollbars remain available in bounded data regions so scrollability never becomes an invisible assumption. The chat footer's turn-facts strip is the single exception: it scrolls sideways without drawing a bar, because a scrollbar under a reply reads as a rule across the transcript rather than as an affordance.
 
 ## Shapes
 
