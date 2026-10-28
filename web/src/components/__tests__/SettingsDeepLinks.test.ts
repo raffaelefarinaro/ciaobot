@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-// File access links (`/settings/workspaces?workspace=NAME#file-access`) switch
+// File access links (`/settings/workspace?workspace=NAME#file-access`) switch
 // the active workspace to NAME and land on Workspace > Overview with the File
 // access selector focused. Following one is navigation: it never chooses a
 // value and never writes. Leaving a workspace with unsaved edits asks first.
@@ -72,7 +72,6 @@ vi.mock('../../lib/push', () => ({
 }))
 
 const Stub = defineComponent({ render: () => h('div') })
-const WORKSPACES = '/settings/workspaces'
 const OVERVIEW = '/settings/workspace'
 
 function response(): WorkspacesResponse {
@@ -103,7 +102,7 @@ function response(): WorkspacesResponse {
 }
 
 function target(name: string): string {
-  return `${WORKSPACES}?workspace=${name}#file-access`
+  return `${OVERVIEW}?workspace=${name}#file-access`
 }
 
 async function settle(): Promise<void> {
@@ -113,7 +112,7 @@ async function settle(): Promise<void> {
   await nextTick()
 }
 
-async function mountSettings(path = WORKSPACES): Promise<{
+async function mountSettings(path = OVERVIEW): Promise<{
   wrapper: VueWrapper
   router: Router
 }> {
@@ -227,6 +226,21 @@ describe('Settings > Workspace File access deep link', () => {
     }
   })
 
+  it("a File access link opened directly focuses the NAMED workspace's select, not the previously active one", async () => {
+    const { wrapper, router } = await mountSettings(`${OVERVIEW}?workspace=work#file-access`)
+    try {
+      await settle()
+
+      expect(await activeWorkspace()).toBe('work')
+      expect(document.activeElement?.id).toBe('workspace-file-access-work')
+      expect(fsSelect(wrapper, 'personal').exists()).toBe(false)
+      expect(router.currentRoute.value.fullPath).toBe(`${OVERVIEW}#file-access`)
+      await expectNoWrites()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('scrolls the File access field row, not the card header, from the pane top', async () => {
     const { wrapper, router } = await mountSettings(target('work'))
     try {
@@ -267,7 +281,7 @@ describe('Settings > Workspace File access deep link', () => {
 
       await router.push(target('work'))
       await nextTick()
-      expect(router.currentRoute.value.path).toBe(WORKSPACES)
+      expect(router.currentRoute.value.path).toBe(OVERVIEW)
       expect(await activeWorkspace()).toBe('personal')
 
       state.defer = false
@@ -332,7 +346,7 @@ describe('Settings > Workspace File access deep link', () => {
       await fsSelect(wrapper, 'work').setValue('workspace')
       await nextTick()
 
-      await router.push(WORKSPACES)
+      await router.push(OVERVIEW)
       await settle()
       await router.push(target('work'))
       await settle()
@@ -362,7 +376,7 @@ describe('Settings > Workspace File access deep link', () => {
       await settle()
 
       expect(await activeWorkspace()).toBe('personal')
-      expect(router.currentRoute.value.path).toBe(WORKSPACES)
+      expect(router.currentRoute.value.path).toBe(OVERVIEW)
       const status = wrapper.find('.workspace-link-status')
       expect(status.exists()).toBe(true)
       expect(status.text()).toContain('personal')
@@ -438,11 +452,11 @@ describe('Settings > Workspace File access deep link', () => {
     try {
       await settle()
       for (const path of [
-        WORKSPACES,
-        `${WORKSPACES}?workspace=work`,
-        `${WORKSPACES}?workspace=work#other`,
-        `${WORKSPACES}?workspace=work&action=save#file-access`,
-        `${WORKSPACES}?workspace=work&workspace=personal#file-access`,
+        OVERVIEW,
+        `${OVERVIEW}?workspace=work`,
+        `${OVERVIEW}?workspace=work#other`,
+        `${OVERVIEW}?workspace=work&action=save#file-access`,
+        `${OVERVIEW}?workspace=work&workspace=personal#file-access`,
         `/settings/providers?workspace=work#file-access`,
       ]) {
         await router.push(path)
@@ -463,7 +477,7 @@ describe('Settings > Workspace File access deep link', () => {
     try {
       await settle()
 
-      expect(router.currentRoute.value.path).toBe(WORKSPACES)
+      expect(router.currentRoute.value.path).toBe(OVERVIEW)
       expect(await activeWorkspace()).toBe('personal')
       const status = wrapper.find('.workspace-link-status')
       expect(status.exists()).toBe(true)
@@ -472,7 +486,7 @@ describe('Settings > Workspace File access deep link', () => {
       expect(scrollTo).not.toHaveBeenCalled()
       await expectNoWrites()
 
-      await router.push(WORKSPACES)
+      await router.push(OVERVIEW)
       await settle()
       expect(wrapper.find('.workspace-link-status').exists()).toBe(false)
     } finally {
@@ -488,7 +502,7 @@ describe('Settings > Workspace File access deep link', () => {
 
       expect(wrapper.text()).toContain('Failed to load workspaces: boom')
       expect(wrapper.find('.workspace-link-status').exists()).toBe(false)
-      expect(router.currentRoute.value.path).toBe(WORKSPACES)
+      expect(router.currentRoute.value.path).toBe(OVERVIEW)
       await expectNoWrites()
     } finally {
       wrapper.unmount()

@@ -35,7 +35,6 @@ const PAGES = [
   '/settings',
   '/settings/home',
   '/settings/workspace',
-  '/settings/workspaces',
   '/settings/providers',
   '/settings/skills',
   '/settings/subagents',
@@ -78,15 +77,15 @@ describe('isAppRouteHref', () => {
       // shorter spelling of the same destination.
       '/settings#install-app',
       '/settings/providers#chat-providers',
-      '/settings/workspaces#new-workspace',
+      '/settings/workspace#new-workspace',
     ]) {
       expect(isAppRouteHref(href), href).toBe(true)
     }
   })
 
-  it('still treats /settings/workspaces as an app link', () => {
-    expect(isAppRouteHref('/settings/workspaces')).toBe(true)
-    expect(isAppRouteHref('/settings/workspaces#new-workspace')).toBe(true)
+  it('no longer treats /settings/workspaces as an app link', () => {
+    expect(isAppRouteHref('/settings/workspaces')).toBe(false)
+    expect(isAppRouteHref('/settings/workspaces#new-workspace')).toBe(false)
   })
 
   it('knows a task address by its full record id only', () => {
@@ -116,7 +115,7 @@ describe('isAppRouteHref', () => {
       '/settings/models#chat-providers',
       '/settings?tab=models',
       '/settings/providers?effort=high',
-      '/settings/workspaces#install-app',
+      '/settings/workspace#install-app',
       '/settings/home#new-workspace',
       '/memory/review#top',
       '/settings/../api/x',
@@ -131,7 +130,7 @@ describe('isAppRouteHref', () => {
 // File access control and never acts on it. Only an exact name the engine
 // accepts is a target; every extra parameter or other fragment is not.
 function workspaceTarget(name: string): string {
-  return `/settings/workspaces?workspace=${name}#file-access`
+  return `/settings/workspace?workspace=${name}#file-access`
 }
 
 describe('a workspace File access link', () => {
@@ -158,18 +157,19 @@ describe('a workspace File access link', () => {
 
   it('rejects extra parameters, other fragments and other pages', () => {
     for (const href of [
-      '/settings/workspaces?workspace=personal&action=save#file-access',
-      '/settings/workspaces?workspace=personal&workspace=work#file-access',
-      '/settings/workspaces?workspace=personal#file-access&action=save',
-      '/settings/workspaces?workspace=personal#file_access',
-      '/settings/workspaces?workspace=personal#file-access/',
-      '/settings/workspaces?workspace=personal',
-      '/settings/workspaces#file-access',
-      '/settings/workspaces/?workspace=personal#file-access',
+      '/settings/workspace?workspace=personal&action=save#file-access',
+      '/settings/workspace?workspace=personal&workspace=work#file-access',
+      '/settings/workspace?workspace=personal#file-access&action=save',
+      '/settings/workspace?workspace=personal#file_access',
+      '/settings/workspace?workspace=personal#file-access/',
+      '/settings/workspace?workspace=personal',
+      '/settings/workspace#file-access',
+      '/settings/workspace/?workspace=personal#file-access',
       '/settings/providers?workspace=personal#file-access',
-      `https://example.com/settings/workspaces?workspace=personal#file-access`,
-      `//example.com/settings/workspaces?workspace=personal#file-access`,
-      '/settings/workspaces?workspace=../api/x#file-access',
+      `https://example.com/settings/workspace?workspace=personal#file-access`,
+      `//example.com/settings/workspace?workspace=personal#file-access`,
+      '/settings/workspace?workspace=../api/x#file-access',
+      '/settings/workspaces?workspace=personal#file-access',
     ]) {
       expect(parseWorkspaceFileAccessHref(href), href).toBeNull()
       expect(isAppRouteHref(href), href).toBe(false)
@@ -268,11 +268,11 @@ describe('handleAppLinkClick', () => {
   })
 
   it('routes a click on a settings link in place, anchor and all', async () => {
-    const a = anchor('/settings/workspaces#new-workspace')
+    const a = anchor('/settings/workspace#new-workspace')
     const event = click(a.querySelector('strong')!)
     expect(handleAppLinkClick(event)).toBe(true)
     expect(event.defaultPrevented).toBe(true)
-    await vi.waitFor(() => expect(push).toHaveBeenCalledWith('/settings/workspaces#new-workspace'))
+    await vi.waitFor(() => expect(push).toHaveBeenCalledWith('/settings/workspace#new-workspace'))
   })
 
   it('routes a click on a workspace File access link in place', async () => {
@@ -307,7 +307,7 @@ describe('handleAppLinkClick', () => {
       { altKey: true },
       { button: 1 },
     ]) {
-      const event = click(anchor('/settings/workspaces'), init)
+      const event = click(anchor('/settings/workspace'), init)
       expect(handleAppLinkClick(event), JSON.stringify(init)).toBe(false)
       expect(event.defaultPrevented).toBe(false)
     }
@@ -347,8 +347,8 @@ describe('handleAppLinkClick', () => {
       order.push(href)
       return undefined
     })
-    expect(handleAppLinkClick(click(anchor('/settings/workspaces')), before)).toBe(true)
-    await vi.waitFor(() => expect(push).toHaveBeenCalledWith('/settings/workspaces'))
-    expect(order).toEqual(['closed', '/settings/workspaces'])
+    expect(handleAppLinkClick(click(anchor('/settings/workspace')), before)).toBe(true)
+    await vi.waitFor(() => expect(push).toHaveBeenCalledWith('/settings/workspace'))
+    expect(order).toEqual(['closed', '/settings/workspace'])
   })
 })

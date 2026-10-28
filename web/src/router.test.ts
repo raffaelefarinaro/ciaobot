@@ -28,9 +28,9 @@ describe('router', () => {
 
   it('leaves the other settings tabs on the generic tab route', async () => {
     const router = makeRouter()
-    await router.push('/settings/workspaces')
+    await router.push('/settings/skills')
     expect(router.currentRoute.value.name).toBe('settings-tab')
-    expect(router.currentRoute.value.params.tab).toBe('workspaces')
+    expect(router.currentRoute.value.params.tab).toBe('skills')
   })
   it('routes each memory section and sends the old proposals address to To decide', async () => {
     const router = makeRouter()

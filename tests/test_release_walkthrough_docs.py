@@ -89,13 +89,12 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
     text = _flow(SETTINGS_TASK)
     lowered = text.lower()
 
-    # All seven supported routes, including the default.
+    # All supported routes, including the default.
     for route in (
         "`/settings`",
         "`/settings/appearance`",
         "`/settings/access`",
         "`/settings/advanced`",
-        "`/settings/workspaces`",
         "`/settings/providers`",
         "`/settings/skills`",
         "`/settings/subagents`",

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-// Settings > Manage workspaces (/settings/workspaces): every workspace as a
-// boxed row, the short New workspace form and the Archived list. Editing lives on a workspace's Overview.
+// Settings > All workspaces (the last card of /settings/workspace): every
+// workspace as a boxed row, the short New workspace form and the Archived list.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -83,7 +83,7 @@ function registry(names: string[]): WorkspacesResponse {
   } as WorkspacesResponse
 }
 
-async function mountManage(path = '/settings/workspaces') {
+async function mountManage(path = '/settings/workspace') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
@@ -120,7 +120,7 @@ async function openMenu(row: ReturnType<typeof rowFor>) {
   return row.findAll('.settings-menu-item')
 }
 
-describe('Settings > Manage workspaces', () => {
+describe('Settings > All workspaces', () => {
   beforeEach(async () => {
     localStorage.clear()
     document.body.innerHTML = ''
@@ -148,7 +148,7 @@ describe('Settings > Manage workspaces', () => {
     }
   })
 
-  it('Settings link switches to that workspace and opens its Overview', async () => {
+  it('Settings link switches to that workspace and stays on this page', async () => {
     const { wrapper, router, store } = await mountManage()
     try {
       await wrapper.get('[aria-label="Settings for workspace work"]').trigger('click')
@@ -160,13 +160,66 @@ describe('Settings > Manage workspaces', () => {
     }
   })
 
+  it("the active workspace's row shows Current and no Settings link", async () => {
+    const { wrapper } = await mountManage()
+    try {
+      const active = rowFor(wrapper, 'personal')
+      expect(active.get('.workspace-row-current').text()).toBe('Current')
+      expect(active.get('.workspace-row-current').attributes('aria-label')).toBe('Current workspace')
+      expect(active.find('[aria-label="Settings for workspace personal"]').exists()).toBe(false)
+      const other = rowFor(wrapper, 'work')
+      expect(other.get('[aria-label="Settings for workspace work"]').text()).toBe('Settings \u2191')
+      expect(other.find('.workspace-row-current').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('Settings \u2191 scrolls the pane to the top', async () => {
+    const { wrapper } = await mountManage()
+    try {
+      const scrollTo = vi.fn()
+      ;(wrapper.get('.pane-body').element as HTMLElement).scrollTo = scrollTo as never
+      await wrapper.get('[aria-label="Settings for workspace work"]').trigger('click')
+      await flushPromises()
+      expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 0 }))
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each(['#new-workspace', '#workspace-name'])('Settings \u2191 scrolls to the top even when the page carries %s', async (hash) => {
+    const { wrapper } = await mountManage(`/settings/workspace${hash}`)
+    try {
+      const scrollTo = vi.fn()
+      ;(wrapper.get('.pane-body').element as HTMLElement).scrollTo = scrollTo as never
+      await wrapper.get('[aria-label="Settings for workspace work"]').trigger('click')
+      await flushPromises()
+      expect(scrollTo).toHaveBeenCalledWith(expect.objectContaining({ top: 0 }))
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it("renders the active workspace's cards above the list", async () => {
+    const { wrapper } = await mountManage()
+    try {
+      const titles = wrapper.findAll('.card .section-title').map(t => t.text())
+      expect(titles[0]).toBe('Workspace')
+      expect(titles[titles.length - 1]).toBe('All workspaces')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('stays on the page when the switch is declined', async () => {
     const { wrapper, router, store } = await mountManage()
     try {
       vi.spyOn(store, 'switchWorkspace').mockResolvedValue(false)
       await wrapper.get('[aria-label="Settings for workspace work"]').trigger('click')
       await flushPromises()
-      expect(router.currentRoute.value.path).toBe('/settings/workspaces')
+      expect(router.currentRoute.value.path).toBe('/settings/workspace')
+      expect(store.activeWorkspace).toBe('personal')
     } finally {
       wrapper.unmount()
     }
@@ -199,6 +252,7 @@ describe('Settings > Manage workspaces', () => {
       expect(store.activeWorkspace).toBe('work')
       expect(router.currentRoute.value.path).toBe('/settings/workspace')
       expect(router.currentRoute.value.hash).toBe('#workspace-name')
+      expect(document.activeElement?.id).toBe('workspace-name-input')
     } finally {
       wrapper.unmount()
     }
@@ -212,7 +266,7 @@ describe('Settings > Manage workspaces', () => {
       const panel = wrapper.get('#new-workspace')
       const labels = panel.findAll('.ws-label').map(l => l.text())
       expect(labels).toEqual(['Name', 'Accent color', 'Agent CLI/Runtime', 'File access'])
-      expect(panel.text()).toContain("new workspace's Overview")
+      expect(panel.text()).toContain('in the cards above, once the new workspace is open')
       expect(panel.findAll('button').map(b => b.text())).toContain('Create and open')
     } finally {
       wrapper.unmount()
@@ -263,7 +317,7 @@ describe('Settings > Manage workspaces', () => {
       await panel.findAll('button').find(b => b.text() === 'Create and open')!.trigger('click')
       await flushPromises()
 
-      expect(router.currentRoute.value.path).toBe('/settings/workspaces')
+      expect(router.currentRoute.value.path).toBe('/settings/workspace')
       expect(wrapper.get('.workspace-link-status').text())
         .toBe('Created "side"; your unsaved changes to "personal" were kept.')
       expect(wrapper.find('.action-result--error').exists()).toBe(false)
@@ -285,7 +339,7 @@ describe('Settings > Manage workspaces', () => {
       await panel.findAll('button').find(b => b.text() === 'Create and open')!.trigger('click')
       await flushPromises()
 
-      expect(router.currentRoute.value.path).toBe('/settings/workspaces')
+      expect(router.currentRoute.value.path).toBe('/settings/workspace')
       expect(wrapper.get('.action-result--error').text()).toContain('name taken')
       expect(store.activeWorkspace).toBe(before)
     } finally {
@@ -317,7 +371,7 @@ describe('Settings > Manage workspaces', () => {
   })
 
   it('#new-workspace opens and focuses the form', async () => {
-    const { wrapper } = await mountManage('/settings/workspaces#new-workspace')
+    const { wrapper } = await mountManage('/settings/workspace#new-workspace')
     try {
       await flushPromises()
       await nextTick()
@@ -329,7 +383,7 @@ describe('Settings > Manage workspaces', () => {
   })
 })
 
-describe('Settings > Manage workspaces > reorder', () => {
+describe('Settings > All workspaces > reorder', () => {
   beforeEach(async () => {
     localStorage.clear()
     document.body.innerHTML = ''
@@ -549,7 +603,7 @@ describe('Settings > Manage workspaces > reorder', () => {
   it('a successful move keeps an unrelated error on the page', async () => {
     const { wrapper } = await mountManage()
     try {
-      const admin = wrapper.findComponent({ name: 'SettingsManageWorkspaces' })
+      const admin = wrapper.findComponent({ name: 'SettingsAllWorkspaces' })
       expect(admin.exists()).toBe(true)
       ;(admin.vm as unknown as { workspacesResult: string }).workspacesResult = 'Error: something else'
       await nextTick()

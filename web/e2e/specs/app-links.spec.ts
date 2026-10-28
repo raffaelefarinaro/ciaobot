@@ -21,7 +21,7 @@ async function transcriptWithSettingsLink(page: import('@playwright/test').Page)
     { role: 'user', content: 'Where do I add a workspace?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
     {
       role: 'assistant',
-      content: 'Open [Workspaces](/settings/workspaces), then choose **New workspace**.',
+      content: 'Open [Workspace settings](/settings/workspace), then choose **New workspace**.',
       sent_at: '2026-01-01T09:50:20Z',
       duration_ms: 20000,
       effective_model: 'synthetic-model',
@@ -40,17 +40,17 @@ test.describe('an app page link in a chat reply', () => {
     await transcriptWithSettingsLink(page)
     await boot(page, CHAT, COMPOSER)
 
-    const link = page.locator('.message-wrap.assistant a', { hasText: 'Workspaces' })
-    await expect(link).toHaveAttribute('href', '/settings/workspaces')
+    const link = page.locator('.message-wrap.assistant a', { hasText: 'Workspace settings' })
+    await expect(link).toHaveAttribute('href', '/settings/workspace')
     await expect(link).not.toHaveAttribute('target', /.*/)
     await page.locator(COMPOSER).fill(DRAFT)
     // A full page load would clear this marker; routing in place keeps it.
     await page.evaluate(() => { (window as unknown as { __kept?: boolean }).__kept = true })
 
     await link.click()
-    await expect(page).toHaveURL(/\/settings\/workspaces$/)
+    await expect(page).toHaveURL(/\/settings\/workspace$/)
     await expect(page.locator(SETTINGS)).toBeVisible()
-    await expect(page.locator('.page-tag')).toHaveText('Manage workspaces')
+    await expect(page.locator('.page-tag')).toContainText('Overview')
     expect(await page.evaluate(() => (window as unknown as { __kept?: boolean }).__kept)).toBe(true)
     expect(context.pages()).toHaveLength(1)
     await page.screenshot({ path: testInfo.outputPath('desktop-settings.png'), fullPage: true })
@@ -86,7 +86,7 @@ test.describe('an app page link in a chat reply', () => {
     await transcriptWithSettingsLink(page)
     await boot(page, CHAT, COMPOSER)
 
-    const link = page.locator('.message-wrap.assistant a', { hasText: 'Workspaces' })
+    const link = page.locator('.message-wrap.assistant a', { hasText: 'Workspace settings' })
     await page.locator(COMPOSER).fill(DRAFT)
     // An Enter activation is a click with no pointer detail; it must route in
     // place exactly like a tap, not fall through to the browser.
@@ -94,7 +94,7 @@ test.describe('an app page link in a chat reply', () => {
     await expect(link).toBeFocused()
     await page.keyboard.press('Enter')
 
-    await expect(page).toHaveURL(/\/settings\/workspaces$/)
+    await expect(page).toHaveURL(/\/settings\/workspace$/)
     await expect(page.locator(SETTINGS)).toBeVisible()
     expect(context.pages()).toHaveLength(1)
     const settingsOverflow = await horizontalOverflow(page)

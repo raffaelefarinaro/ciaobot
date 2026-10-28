@@ -585,7 +585,7 @@ describe('component mount smoke', () => {
 
   it('SettingsView renders configured workspace providers', async () => {
     const router = makeRouter()
-    await router.push('/settings/workspaces')
+    await router.push('/settings/workspace')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {

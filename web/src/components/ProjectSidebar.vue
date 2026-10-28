@@ -119,15 +119,7 @@
               <span class="workspace-scope-name">Workspace settings</span>
             </router-link>
             <router-link
-              to="/settings/workspaces"
-              role="menuitem"
-              class="workspace-scope-option workspace-scope-link"
-              @click="workspaceScopeOpen = false"
-            >
-              <span class="workspace-scope-name">Manage workspaces</span>
-            </router-link>
-            <router-link
-              to="/settings/workspaces#new-workspace"
+              to="/settings/workspace#new-workspace"
               role="menuitem"
               class="workspace-scope-option workspace-scope-new"
               @click="workspaceScopeOpen = false"
@@ -255,7 +247,7 @@
             <span class="nav-item-label" aria-hidden="true">Tasks</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
-               (/settings/providers, /settings/workspaces, ...) and none of them match
+               (/settings/providers, ...) and none of them match
                the /settings record, so active-class left this item inactive on
                nearly every settings page - and with it the label collapsed. The
                sibling links already key off mode for the same reason. -->

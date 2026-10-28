@@ -1,4 +1,5 @@
 <template>
+  <p v-if="workspaceLinkStatus" class="hint hint--warn workspace-link-status" role="status">{{ workspaceLinkStatus }}</p>
   <div v-if="!workspacesLoaded" class="card"><SkeletonLoader label="Loading workspace" :count="3" /></div>
   <div v-else-if="workspacesError" class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
   <template v-else-if="form">
@@ -94,7 +95,7 @@
       <div class="settings-card-header">
         <p class="section-title">Archive this workspace</p>
         <p class="hint">
-          Archiving removes it from the sidebar; nothing is deleted and you can restore it from Manage workspaces.
+          Archiving removes it from the sidebar; nothing is deleted and you can restore it from Archived workspaces further down this page.
         </p>
       </div>
       <div class="action-row settings-actions">
@@ -137,6 +138,7 @@ const {
   workspacesError,
   workspacesSaving,
   workspacesResult,
+  workspaceLinkStatus,
   archivingWorkspace,
   workspaceNameDraft,
   workspaceLinkTarget,
@@ -151,6 +153,7 @@ const {
 <style scoped src="./settingsPanels.css"></style>
 
 <style scoped>
+.workspace-link-status { margin: var(--space-2) 0; }
 .overview-title {
   display: flex;
   align-items: center;

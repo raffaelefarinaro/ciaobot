@@ -43,7 +43,7 @@ function row(
 }
 
 const BACKUP_HREF = '/settings'
-const SETTINGS_HREF = '/settings/workspaces'
+const SETTINGS_HREF = '/settings/workspace'
 const AUTOMATIONS_HREF = '/automations'
 
 async function loadSummary(): Promise<void> {

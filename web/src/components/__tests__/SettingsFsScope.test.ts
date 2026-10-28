@@ -87,7 +87,7 @@ function workspaces(
   }
 }
 
-async function mountWorkspacesTab(path = '/settings/workspaces') {
+async function mountWorkspacesTab(path = '/settings/workspace') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],

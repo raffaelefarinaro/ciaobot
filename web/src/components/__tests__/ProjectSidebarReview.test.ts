@@ -144,26 +144,27 @@ describe('ProjectSidebar review section', () => {
     expect(wrapper.find('.workspace-scope-menu .sidebar-keycap').exists()).toBe(false)
     const create = wrapper.get('.workspace-scope-new')
     expect(create.text()).toContain('New workspace')
-    expect(create.attributes('href')).toBe('/settings/workspaces#new-workspace')
+    expect(create.attributes('href')).toBe('/settings/workspace#new-workspace')
   })
 
-  it('lists Workspace settings, Manage workspaces and New workspace after the options', async () => {
+  it('lists Workspace settings and New workspace after the options', async () => {
     const wrapper = await mountSidebar()
     await wrapper.get('.workspace-scope-trigger').trigger('click')
     const menu = wrapper.get('.workspace-scope-menu')
     const items = menu.findAll('[role="menuitem"]')
-    expect(items.slice(-3).map(i => i.text().replace(/^\+\s*/, ''))).toEqual(
-      ['Workspace settings', 'Manage workspaces', 'New workspace'],
+    expect(items.slice(-2).map(i => i.text().replace(/^\+\s*/, ''))).toEqual(
+      ['Workspace settings', 'New workspace'],
     )
-    expect(items.slice(-3).map(i => i.attributes('href'))).toEqual(
-      ['/settings/workspace', '/settings/workspaces', '/settings/workspaces#new-workspace'],
+    expect(items.slice(-2).map(i => i.attributes('href'))).toEqual(
+      ['/settings/workspace', '/settings/workspace#new-workspace'],
     )
-    // A separator sits between the workspace options and the three entries.
+    expect(items.map(i => i.text())).not.toContain('Manage workspaces')
+    // A separator sits between the workspace options and the two entries.
     const children = Array.from(menu.element.children)
     const separator = children.findIndex(el => el.getAttribute('role') === 'separator')
     expect(separator).toBeGreaterThan(0)
-    expect(children[separator + 1]).toBe(items[items.length - 3].element)
-    expect(children[separator - 1]).toBe(items[items.length - 4].element)
+    expect(children[separator + 1]).toBe(items[items.length - 2].element)
+    expect(children[separator - 1]).toBe(items[items.length - 3].element)
     wrapper.unmount()
   })
 
@@ -180,7 +181,7 @@ describe('ProjectSidebar review section', () => {
     expect(items[items.length - 1].text()).toContain('New workspace')
     await menu.trigger('keydown', { key: 'ArrowUp' })
     expect(document.activeElement).toBe(items[items.length - 2].element)
-    expect(items[items.length - 2].text()).toBe('Manage workspaces')
+    expect(items[items.length - 2].text()).toBe('Workspace settings')
     await menu.trigger('keydown', { key: 'End' })
     await menu.trigger('keydown', { key: 'ArrowDown' })
     expect(document.activeElement).toBe(items[0].element)
@@ -195,9 +196,9 @@ describe('ProjectSidebar review section', () => {
   it('choosing a settings entry closes the menu', async () => {
     const wrapper = await mountSidebar()
     await wrapper.get('.workspace-scope-trigger').trigger('click')
-    const manage = wrapper.findAll('[role="menuitem"]').find(i => i.text() === 'Manage workspaces')
-    expect(manage).toBeTruthy()
-    await manage!.trigger('click')
+    const settings = wrapper.findAll('[role="menuitem"]').find(i => i.text() === 'Workspace settings')
+    expect(settings).toBeTruthy()
+    await settings!.trigger('click')
     await nextTick()
     expect(wrapper.find('.workspace-scope-menu').exists()).toBe(false)
     wrapper.unmount()
