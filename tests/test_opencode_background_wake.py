@@ -1,8 +1,10 @@
 """OpenCode 2 runs follow-up executions of its own after background work (#1391).
 
-The two fixtures are sanitized 2.0.27 captures: a background shell and a
-background subagent that finish after the foreground turn ended. They pin which
-execution a foreground turn owns and what `drain_events` streams afterwards.
+`background_shell_wake.jsonl` and `background_subagent_wake.jsonl` are sanitized
+2.0.27 captures: a background shell and a background subagent that finish after
+the foreground turn ended. They pin which execution a foreground turn owns and
+what `drain_events` streams afterwards. `foreground_shell_turn.jsonl` is a
+sanitized 2.2.0 capture of a foreground shell call (#2272).
 """
 
 from __future__ import annotations
@@ -194,6 +196,59 @@ async def _drain(provider: OpencodeProvider) -> list:
 
 
 # ── foreground turns ─────────────────────────────────────────────────────
+
+
+def test_foreground_shell_is_not_background_work(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    session = "ses_fgshell_parent"
+    seen_progress = False
+    for line in _fixture_lines("foreground_shell_turn.jsonl"):
+        event = json.loads(line)
+        provider._track_background_event(event, session)
+        if event["type"] == "session.tool.progress":
+            seen_progress = True
+            assert provider.background_work_outstanding is False
+            assert provider._background_shells == set()
+    assert seen_progress
+    assert provider._background_shells == set()
+    assert provider._foreground_shells == set()
+
+
+def test_foreground_shell_moved_to_background_counts(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    session = "ses_fgshell_parent"
+
+    def track(line: str) -> None:
+        provider._track_background_event(json.loads(line), session)
+
+    track(_event(
+        "shell.created",
+        info={"id": "sh_slow", "command": "sleep 99", "metadata": {"sessionID": session}},
+    ))
+    track(_event(
+        "session.tool.progress", sessionID=session, id="call_slow",
+        metadata={"shellID": "sh_slow"},
+    ))
+    assert provider.background_work_outstanding is False
+    track(_event(
+        "session.tool.success", sessionID=session, id="call_slow",
+        metadata={"status": "running", "shellID": "sh_slow"},
+    ))
+    assert provider.background_work_outstanding is True
+    assert provider._background_shells == {"sh_slow"}
+    track(_event("shell.exited", id="sh_slow", exit=0, status="exited"))
+    assert provider.background_work_outstanding is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_excludes_running_foreground_shell(tmp_path, monkeypatch):
+    provider = OpencodeProvider(tmp_path)
+    _attach_live(provider, object(), SHELL_SESSION)
+    provider._foreground_shells = {"sh_fg"}
+    _script(monkeypatch, provider, shells=[{"sh_fg", "sh_bg"}])
+
+    assert await provider.refresh_background_shells() == 1
+    assert provider._background_shells == {"sh_bg"}
 
 
 @pytest.mark.asyncio

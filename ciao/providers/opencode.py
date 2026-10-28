@@ -1748,6 +1748,8 @@ class OpencodeProvider(BaseSDKProvider):
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
         # reconciles replace it wholesale (#1391).
         self._background_shells: set[str] = set()
+        # Shells of foreground tool calls still running; OpenCode 2 runs every shell call as a Shell.
+        self._foreground_shells: set[str] = set()
         # Command of each shell seen in `shell.created`, for the composer's
         # process list. A shell found only by `GET /api/shell` has no entry.
         self._shell_commands: dict[str, str] = {}
@@ -1951,7 +1953,10 @@ class OpencodeProvider(BaseSDKProvider):
 
         Runs before the session filter: ``shell.*`` events carry no top-level
         ``sessionID``, and a child's ``session.created`` and terminal events
-        carry the child's id.
+        carry the child's id. ``session.tool.progress`` and
+        ``session.tool.success`` do carry it and name their shell in
+        ``metadata.shellID``: OpenCode 2 runs every shell call as a Shell, so
+        only a call it reports as still running counts as background work.
         """
         self._last_activity = time.monotonic()
         kind = str(event.get("type") or "")
@@ -1976,9 +1981,29 @@ class OpencodeProvider(BaseSDKProvider):
             shell_id = str(props.get("id") or "")
             self._shell_commands.pop(shell_id, None)
             self._shell_started.pop(shell_id, None)
+            self._foreground_shells.discard(shell_id)
             if shell_id in self._background_shells:
                 self._background_shells.discard(shell_id)
                 changed = True
+        elif kind in {"session.tool.progress", "session.tool.success"}:
+            metadata = props.get("metadata")
+            shell_id = str(metadata.get("shellID") or "") if isinstance(metadata, Mapping) else ""
+            if shell_id and str(props.get("sessionID") or "") == session_id:
+                if kind == "session.tool.progress":
+                    self._foreground_shells.add(shell_id)
+                    if shell_id in self._background_shells:
+                        self._background_shells.discard(shell_id)
+                        changed = True
+                elif (
+                    isinstance(metadata, Mapping)
+                    and metadata.get("status") == "running"
+                    and shell_id in self._shell_commands
+                ):
+                    # OpenCode moved the call to the background; an exited
+                    # shell has lost its command entry and stays out.
+                    self._foreground_shells.discard(shell_id)
+                    self._background_shells.add(shell_id)
+                    changed = True
         elif kind == "session.created":
             child_id = str(props.get("sessionID") or "")
             parent_id = str(props.get("parentID") or "")
@@ -2034,6 +2059,7 @@ class OpencodeProvider(BaseSDKProvider):
             shells = await _read_running_shells(client, session_id)
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             return len(self._background_shells)
+        shells = shells - self._foreground_shells
         if shells != self._background_shells:
             self._replace_background_shells(shells)
             self._background_changed.set()
@@ -2202,6 +2228,7 @@ class OpencodeProvider(BaseSDKProvider):
             active = await _read_active_sessions(client)
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
             return True
+        shells = shells - self._foreground_shells
         self._replace_background_shells(shells)
         self._set_background_children(active, session_id)
         return not shells and not self._background_children and session_id not in active
@@ -2690,6 +2717,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._tool_calls.clear()
         self._settled_tool_ids.clear()
         self._background_shells.clear()
+        self._foreground_shells.clear()
         self._shell_commands.clear()
         self._shell_started.clear()
         self._background_children.clear()
