@@ -92,7 +92,34 @@ import {
 } from '../lib/taskBoard'
 import type { Task, TaskAttempt, TaskDetail, TaskStatus, TaskUpdate } from '../lib/types'
 
-const emit = defineEmits<{ 'open-sidebar': [] }>()
+/**
+ * `board` is the `/tasks` pane. `overlay` is the same editor, and only the
+ * editor, mounted over another screen by a host that names the task: no board
+ * chrome, no address change, and a close the host awaits. No caller uses
+ * `overlay` yet; the task-link host that mounts it is the next slice.
+ */
+const props = withDefaults(defineProps<{
+  mode?: 'board' | 'overlay'
+  taskId?: string
+}>(), {
+  mode: 'board',
+  taskId: '',
+})
+
+const emit = defineEmits<{
+  'open-sidebar': []
+  /**
+   * Overlay host: the editor closed while this surface stays mounted. The
+   * delegation preview is the case that does this — it is opened after the
+   * editor closes, because two modal sheets on one layer would draw the later
+   * one behind the earlier.
+   */
+  'detail-close': []
+  /** Overlay host: the surface is finished and should be unmounted. */
+  close: []
+}>()
+
+const overlay = computed(() => props.mode === 'overlay')
 
 const projectStore = useProjectStore()
 const board = useTaskBoardStore()
@@ -151,6 +178,10 @@ const unreadable = computed(() => invalidTaskRows(board.rows))
 const counts = computed(() => statusCounts(tasks.value))
 const openCount = computed(() => openTaskCount(tasks.value))
 
+/** The newest board read this surface started, and the workspace it was for. */
+let boardRead: Promise<void> = Promise.resolve()
+let boardReadWorkspace = ''
+
 /**
  * Re-read the board: on mount, on a workspace switch, and after a refused write.
  *
@@ -159,9 +190,14 @@ const openCount = computed(() => openTaskCount(tasks.value))
  * the rows stay on screen and only `loading` is set. The same call is the way
  * out of a 409 — the write was refused precisely because the record moved on, so
  * re-reading is the only correct next step.
+ *
+ * The returned promise is the read itself. Overlay mode awaits it to locate its
+ * task against a fresh list, not the rows a previous visit left in the store.
  */
-function load() {
-  void board.reload(workspace.value)
+function load(): Promise<void> {
+  boardReadWorkspace = workspace.value
+  boardRead = board.reload(workspace.value)
+  return boardRead
 }
 
 /**
@@ -208,6 +244,10 @@ watch(workspace, () => {
   // holding. `resetDelegate` closes it either way, and the late answer is dropped
   // by the store's own `drawingWorkspace` guard.
   resetDelegate()
+  // An overlay's task belongs to the workspace being left. It finishes here
+  // whether the editor or only a nested sheet was open, rather than resolving
+  // the same id against a workspace that never had it.
+  if (overlay.value) finishOverlayClose()
   load()
 })
 
@@ -813,7 +853,11 @@ async function openDelegate(task: Task, mode?: DelegateMode) {
 
 function closeDelegate() {
   if (delegateBusy.value) return
+  const task = delegateTask.value
   resetDelegate()
+  // An overlay has no board to return to: the editor the preview was opened
+  // from is reopened, so cancelling a hand-over leaves the user where they were.
+  if (overlay.value && task && !overlayClosed.value) openDetail(task)
 }
 
 /**
@@ -867,6 +911,9 @@ async function submitDelegate() {
     delegateBusy.value = false
     openAttemptChat(task)
     resetDelegate()
+    // The preview was the last thing this overlay drew. Without this the host
+    // would keep a mounted, invisible surface after the chat opened.
+    if (overlay.value) finishOverlayClose()
     return
   }
   if (delegateMode.value === 'resume' && task.attempt_id) {
@@ -1221,6 +1268,15 @@ function resetResolution() {
 async function submitResolution() {
   const task = resolutionTask.value
   if (!task || resolutionBusy.value) return
+  // A completion closes the editor behind this sheet. If the editor holds a
+  // title that cannot be saved, completing would leave a closed-on-arrival
+  // guard behind it: refuse before writing, not after. (Board mode keeps its
+  // existing close rule.)
+  if (overlay.value && detailOpen.value && detailId.value === task.id && !detailValid.value) {
+    resolutionError.value = INVALID_TITLE_CLOSE
+    refuseCloseForTitle()
+    return
+  }
   // Completion's note is optional; edit-resolution keeps the draft exactly as
   // typed, including an empty or whitespace-only note.
   const text = resolutionMode.value === 'complete' && !resolutionDraft.value.trim()
@@ -1400,6 +1456,43 @@ async function reviewTaskResolution(task: Task) {
 const detailOpen = ref(false)
 /** A status write the server refused, said beside the control that made it. */
 const statusError = ref('')
+/**
+ * Why the editor refused to close. A blank title cannot be saved, so every
+ * close that is not a workspace-switch discard keeps the form — and this is
+ * what says so instead of letting the draft disappear.
+ */
+const detailCloseError = ref('')
+/**
+ * The stored record body this editor's description draft is based on, and the
+ * revision it was read at.
+ *
+ * The board's `described` slot is dropped whenever the row's revision moves on,
+ * so it cannot answer "is this draft dirty?" — an edit typed against an older
+ * revision would read as clean and be unmounted. These stay with the editor,
+ * independent of the row, and are what a write reconciles against before it is
+ * allowed to replace prose.
+ */
+const detailBodyBase = ref('')
+const detailBodyBaseRevision = ref('')
+/** A body save that could not be made safe: conflict, stale read, or no progress. */
+const detailBodyError = ref('')
+/** The error above is a description conflict the user can resolve by choosing their text. */
+const detailBodyConflict = ref(false)
+/**
+ * The editor's clean baseline for the fields a Save writes, held independently
+ * of the board row.
+ *
+ * The row can vanish (the task was deleted in another tab) while the editor is
+ * open. Comparing the form to a missing row would read every draft as clean and
+ * let a close or replacement throw it away, so dirtiness is measured here.
+ */
+const detailBaseTitle = ref('')
+const detailBaseDue = ref('')
+const detailBaseProject = ref('')
+/** The record disappeared under this open editor while it still holds a draft. */
+const detailRecordError = ref('')
+/** What the last "Copy draft" did, said politely beside it. */
+const draftCopyStatus = ref('')
 const detailEl = ref<HTMLElement | null>(null)
 const detailTitleField = ref<HTMLTextAreaElement | null>(null)
 const detailSaving = ref(false)
@@ -1473,11 +1566,26 @@ const detailFocusActive = computed(
 
 useModalFocus(detailEl, detailFocusActive, {
   initialFocus: detailTitleField,
-  onEscape: () => { if (pendingConfirm.value || detailSaving.value) return; void closeDetail() },
+  onEscape: () => { if (pendingConfirm.value || detailSaving.value) return; void requestDetailClose() },
 })
 
 /** The row a dialog is editing, or undefined once it has been deleted. */
 const detailTask = computed(() => tasks.value.find((task) => task.id === detailId.value) ?? null)
+
+/**
+ * Whether the description conflict can be settled with the action offered
+ * beside it: it needs the record on disk, current at the row's revision, to
+ * rebase the draft onto.
+ */
+const bodyConflictResolvable = computed(
+  () => detailBodyConflict.value && Boolean(heldDescription(detailTask.value)),
+)
+
+// A record that reappears (a refresh brought it back, or the deletion was
+// undone) is writable again; the missing-record alert has served its purpose.
+watch(detailTask, (task) => {
+  if (task && detailRecordError.value) detailRecordError.value = ''
+})
 
 /**
  * Whether this dialog is offering the description, and may therefore write it.
@@ -1487,7 +1595,15 @@ const detailTask = computed(() => tasks.value.find((task) => task.id === detailI
  * keeps the field absent, which is what stops a Save from clearing prose nobody
  * was shown.
  */
-const detailDescribed = computed(() => Boolean(heldDescription(detailTask.value)))
+/**
+ * Whether this editor holds a description base to show and edit.
+ *
+ * Independent of the row's revision: the description on screen is the draft the
+ * editor read, and the board dropping its slot because the record moved on must
+ * not make the field disappear (and take the visible draft with it). A write
+ * reconciles that base before it is allowed to replace anything.
+ */
+const detailDescribed = computed(() => Boolean(detailBodyBaseRevision.value))
 
 /** The open task's read, when it is the record at the row's revision: resolution, history, log. */
 const detailHeld = computed(() => heldDescription(detailTask.value))
@@ -1498,6 +1614,31 @@ const resolutionEditLabel = computed(() =>
 )
 
 const detailValid = computed(() => detailForm.title.trim() !== '')
+
+/**
+ * Refuse a close that would drop an unsaveable title.
+ *
+ * The editor has no Save button, so closing is what commits a draft; a blank
+ * title has nothing to write, and every close (the × or Escape, the internal
+ * close before a sheet, a host replacement) must leave the form as typed and
+ * say why rather than discard it. Used by the central close guard below and by
+ * `requestClose` before it touches any nested sheet.
+ */
+const INVALID_TITLE_CLOSE = 'Add a title before closing. This task stays open so the draft is not lost.'
+/**
+ * The description moved on disk under a draft this editor still holds. The
+ * draft is never replaced or dropped: the user is told the two diverged and
+ * can copy their text or reopen the task to compare before saving.
+ */
+const BODY_CONFLICT = 'This task\'s description changed on disk while you were editing. Your text is still in the editor — reopen the task to compare the two before saving, or copy it first.'
+/** A write reported success but the draft still differs: do not unmount it. */
+const BODY_SAVE_INCOMPLETE = 'This task could not be saved completely. Your text is still in the editor; try again before closing.'
+/** The row was deleted elsewhere while this editor held a draft. */
+const MISSING_RECORD = 'This task was removed from the board while you were editing. Your draft is still here — copy it before closing or replacing this task.'
+
+function refuseCloseForTitle(): void {
+  detailCloseError.value = INVALID_TITLE_CLOSE
+}
 
 /**
  * The editor's delegation summary, read off the row it is editing.
@@ -1552,7 +1693,30 @@ async function loadDescription(taskId: string) {
   if (seq !== descriptionSeq || !detailOpen.value || detailId.value !== taskId) return
   if (read) {
     descriptionState.value = 'idle'
-    detailForm.body = splitTaskLog(read.body).description
+    const cleanBefore = detailForm.body === splitTaskLog(detailBodyBase.value).description
+    const fresh = splitTaskLog(read.body).description
+    if (cleanBefore) {
+      // Nothing typed: the read is simply the description to show and the base
+      // a later edit will be composed against.
+      detailForm.body = fresh
+      detailBodyBase.value = read.body
+      detailBodyBaseRevision.value = read.revision
+      detailBodyError.value = ''
+      detailBodyConflict.value = false
+    } else if (fresh === splitTaskLog(detailBodyBase.value).description) {
+      // The draft is based on the prose still on disk; only the revision or the
+      // engine's log moved, so rebase without touching the text.
+      detailBodyBase.value = read.body
+      detailBodyBaseRevision.value = read.revision
+      detailBodyError.value = ''
+      detailBodyConflict.value = false
+    } else {
+      // Someone changed the description under an unsaved draft. Keep the draft
+      // and the base it was written against; a write must refuse rather than
+      // replace prose nobody here saw.
+      detailBodyError.value = BODY_CONFLICT
+      detailBodyConflict.value = true
+    }
     return
   }
   // No answer: either the read was refused, or the board was told something newer
@@ -1589,17 +1753,132 @@ function openDetail(task: Task) {
   detailForm.due = task.due
   detailForm.project_id = ownProject(task.project_id)
   detailForm.body = held ? splitTaskLog(held.body).description : ''
+  detailBodyBase.value = held ? held.body : ''
+  detailBodyBaseRevision.value = held ? held.revision : ''
+  detailBodyError.value = ''
+  detailBodyConflict.value = false
+  detailBaseTitle.value = task.title.trim()
+  detailBaseDue.value = task.due || ''
+  detailBaseProject.value = ownProject(task.project_id)
+  detailRecordError.value = ''
+  draftCopyStatus.value = ''
+  detailCloseError.value = ''
   savedAt.value = 0
   reviewNote.value = ''
   editingBody.value = false
   detailOpen.value = true
-  syncTaskAddress(task.id)
+  if (!overlay.value) syncTaskAddress(task.id)
   void loadDescription(task.id)
   if (task.attempt_state) {
     // Re-read on every open: a turn may have reported since the last read.
     board.invalidateAttempts()
     void board.ensureAttempts(workspace.value, task.id)
   }
+}
+
+/** The fields a Save can write, compared across an awaited write. */
+function detailDraft() {
+  return {
+    title: detailForm.title,
+    body: detailForm.body,
+    due: detailForm.due,
+    project_id: detailForm.project_id,
+  }
+}
+
+function detailDraftMoved(snapshot: ReturnType<typeof detailDraft>): boolean {
+  return detailForm.title !== snapshot.title
+    || detailForm.body !== snapshot.body
+    || detailForm.due !== snapshot.due
+    || detailForm.project_id !== snapshot.project_id
+}
+
+/** A save that reported success but left text unwritten: keep the editor open. */
+function refuseIncompleteClose(): null {
+  detailBodyConflict.value = false
+  detailBodyError.value = BODY_SAVE_INCOMPLETE
+  return null
+}
+
+/** How many times a close may write edits that arrived during the previous write. */
+const MAX_CLOSE_WRITES = 4
+
+/**
+ * Write everything the editor holds and close it, without telling the host.
+ *
+ * The fields stay editable while a write is in flight, so this cannot trust
+ * the snapshot it took before the first PATCH: a title or body typed — or
+ * blanked — during the wait must be written or refused rather than unmounted.
+ * It rechecks validity and the draft's own base after every write and repeats
+ * while the form keeps moving, bounded so a stream of edits cannot spin.
+ *
+ * In an overlay the editor may only close on a **verified clean** draft. A
+ * successful-looking answer that leaves the draft exactly where it was is not
+ * proof the body was written, so it refuses with an actionable sentence rather
+ * than unmounting text. The board keeps its own close rule and closes after the
+ * same bounded attempts.
+ *
+ * Resolves the id of the task that closed, or `null` when the editor stays open:
+ * a blank title, a stale description conflict, an incomplete save, a gesture
+ * already writing, or a save the server refused. `requestClose` uses this to
+ * commit the editor before it touches a nested sheet's draft.
+ */
+async function closeDetailNow(options: { discard?: boolean } = {}): Promise<string | null> {
+  if (options.discard) {
+    cancelAutosave()
+  } else {
+    // The board row vanished under an open editor. A draft cannot be written to
+    // a record that is gone, and it must not be recreated; keep it and say so.
+    if (!detailTask.value && hasUnsavedEdits()) {
+      detailRecordError.value = MISSING_RECORD
+      return null
+    }
+    for (let attempt = 0; ; attempt++) {
+      // The title can go blank while the previous write is in flight.
+      if (overlay.value && !detailValid.value) {
+        refuseCloseForTitle()
+        return null
+      }
+      if (!hasUnsavedEdits() && !autosaving.value) break
+      if (detailSaving.value) return null
+      if (attempt >= MAX_CLOSE_WRITES) {
+        if (overlay.value) return refuseIncompleteClose()
+        break
+      }
+      const snapshot = detailDraft()
+      const closing = detailId.value
+      if (!(await flushDetail())) return null
+      if (detailId.value !== closing) return null
+      if (!hasUnsavedEdits() && !autosaving.value) break
+      if (!detailDraftMoved(snapshot)) {
+        // A write that reports success and leaves the draft untouched did not
+        // write the text this editor still holds; unmounting would lose it.
+        if (overlay.value) return refuseIncompleteClose()
+        break
+      }
+    }
+    cancelAutosave()
+    // Belt and braces: an overlay never closes over a draft it has not seen
+    // written, even if every write above claimed success.
+    if (overlay.value && hasUnsavedEdits()) return refuseIncompleteClose()
+  }
+  const closed = detailId.value
+  detailOpen.value = false
+  detailId.value = ''
+  detailCloseError.value = ''
+  detailBodyError.value = ''
+  detailBodyConflict.value = false
+  detailBodyBase.value = ''
+  detailBodyBaseRevision.value = ''
+  detailBaseTitle.value = ''
+  detailBaseDue.value = ''
+  detailBaseProject.value = ''
+  detailRecordError.value = ''
+  draftCopyStatus.value = ''
+  descriptionState.value = 'idle'
+  descriptionSeq++
+  board.clearError()
+  return closed
 }
 
 /**
@@ -1609,28 +1888,21 @@ function openDetail(task: Task) {
  * closing would leave the user believing an edit landed that did not.
  * `discard` is the workspace switch, where a pending edit belongs to the
  * workspace being left and must not be written into the one arrived at.
+ * `internal` is the close this surface performs while it stays mounted (the
+ * delegation preview); it is not a closure the host may unmount on.
  */
-async function closeDetail(options: { discard?: boolean } = {}) {
+async function closeDetail(options: { discard?: boolean; internal?: boolean } = {}) {
   if (!detailOpen.value) return
-  if (options.discard || (!hasUnsavedEdits() && !autosaving.value)) {
-    // Nothing to write: close now, so a dialog opened straight after is not
-    // closed by this one finishing late.
-    cancelAutosave()
-  } else {
-    if (detailSaving.value) return
-    const closing = detailId.value
-    if (!(await flushDetail())) return
-    if (detailId.value !== closing) return
-  }
-  const closed = detailId.value
-  detailOpen.value = false
-  detailId.value = ''
-  descriptionState.value = 'idle'
-  descriptionSeq++
-  board.clearError()
+  const closed = await closeDetailNow(options)
+  if (closed === null) return
   // Only the address of the task that closed: one the user navigated to
   // while this dialog was still open is theirs to keep.
   if (routeTaskId.value === closed) syncTaskAddress('')
+  if (!overlay.value) return
+  // The host decides whether this ends the overlay: a delegation preview
+  // follows in its own sheet, so that close is not a final one.
+  if (options.internal) emit('detail-close')
+  else finishOverlayClose()
 }
 
 // ── Address ───────────────────────────────────────────────────────────────
@@ -1656,6 +1928,9 @@ const routeTaskId = computed(() => {
 const missingTaskId = ref('')
 
 function syncTaskAddress(taskId: string): void {
+  // An overlay is hosted over a screen the user is on; naming its task in that
+  // screen's address would navigate the host out from under itself.
+  if (overlay.value) return
   if (!router || routeTaskId.value === taskId) return
   void router.replace(taskId ? { name: 'task-detail', params: { taskId } } : { name: 'tasks' })
 }
@@ -1663,6 +1938,9 @@ function syncTaskAddress(taskId: string): void {
 watch(
   [routeTaskId, () => board.loadedWorkspace, tasks, () => board.loading],
   async () => {
+    // The route watcher owns the board's address; overlay mode has its own
+    // task prop and must not open or drop anything because the host navigated.
+    if (overlay.value) return
     const id = routeTaskId.value
     if (!id || board.loadedWorkspace !== workspace.value) return
     if (detailOpen.value && detailId.value === id) return
@@ -1686,6 +1964,217 @@ watch(
   { immediate: true },
 )
 
+// ── Overlay lifecycle ──────────────────────────────────────────────────────
+//
+// An overlay is the same surface with the board removed: the host names one
+// task, and the surface resolves it against a fresh read of the active
+// workspace before opening the editor. Its states are siblings, never a dialog
+// wrapped around the editor, so exactly one modal sheet is active at a time.
+// The address belongs to the host and is never touched.
+
+/** The overlay's own read state; the editor itself is the fourth, `open`. */
+type OverlayState = 'loading' | 'failed' | 'missing' | 'open'
+const overlayState = ref<OverlayState>('loading')
+/** The host has been told this surface is finished; it renders nothing after. */
+const overlayClosed = ref(false)
+const overlayStatusEl = ref<HTMLElement | null>(null)
+/** Ticket for the newest task this overlay has resolved; older answers are dropped. */
+let overlaySeq = 0
+
+const overlayStatusShown = computed(
+  () => overlay.value && !overlayClosed.value && overlayState.value !== 'open' && !detailOpen.value,
+)
+
+/**
+ * The loading/failed/missing sheet owns the keyboard only while it is what is
+ * drawn; during the delegation preview the surface is still `open` with the
+ * editor closed, and that preview's own trap holds Escape.
+ */
+const overlayStatusFocusActive = overlayStatusShown
+
+useModalFocus(overlayStatusEl, overlayStatusFocusActive, {
+  onEscape: () => { void requestClose() },
+})
+
+const overlayStateTitle = computed(() => {
+  if (overlayState.value === 'failed') return 'Could not load task'
+  if (overlayState.value === 'missing') return 'Task not found'
+  return 'Task'
+})
+
+/** Tell the host the surface is done, once. */
+function finishOverlayClose(): void {
+  if (!overlay.value || overlayClosed.value) return
+  overlayClosed.value = true
+  // A read still in flight must not open an editor over a surface that closed.
+  overlaySeq++
+  emit('close')
+}
+
+/**
+ * The host asking to close, awaited.
+ *
+ * A pending or invalid draft is never dropped: a blank title cannot be saved,
+ * and a refused save leaves the server's sentence on screen. A gesture in
+ * flight (a write, a delete confirm, a delegation) refuses too rather than
+ * letting its answer land on a surface that is gone. The editor is committed
+ * first and only then are the sheets above it closed, so a rejected save leaves
+ * their drafts in place. The board is not an overlay and has no host waiting on
+ * this, so board mode answers false.
+ */
+async function requestClose(): Promise<boolean> {
+  if (!overlay.value) return false
+  if (overlayClosed.value) return true
+  if (pendingConfirm.value) return false
+  if (detailSaving.value || resolutionBusy.value || delegateBusy.value) return false
+  // Commit the editor first and only then drop a sheet above it: a refused or
+  // re-edited save leaves the editor open, so a completion note must still be
+  // there. Closing the sheets first was how a rejected save ate that note.
+  if (detailOpen.value) {
+    const closed = await closeDetailNow()
+    if (closed === null) return false
+  }
+  if (resolutionOpen.value) resetResolution()
+  if (delegateOpen.value) resetDelegate()
+  finishOverlayClose()
+  return true
+}
+
+/** A sheet's own close gesture: final in an overlay, the board's close otherwise. */
+async function requestDetailClose(): Promise<void> {
+  if (overlay.value) {
+    await requestClose()
+    return
+  }
+  await closeDetail()
+}
+
+/** Retry the overlay's read after a failed one. */
+function retryOverlay(): void {
+  if (!overlay.value || overlayClosed.value) return
+  overlayState.value = 'loading'
+  load()
+  void resolveOverlayTask()
+}
+
+/** One replacement pass at a time; a second request asks for another round. */
+let overlayResolving = false
+let overlayResolveAgain = false
+
+/**
+ * Serialize overlay resolution.
+ *
+ * A host can replace `taskId` again while the previous task's editor is still
+ * saving. Letting a second pass run beside that close would advance the ticket
+ * the first pass needs and leave neither task on screen; instead the second
+ * request asks the running pass for another round, and that round reads the
+ * host's latest id.
+ */
+async function resolveOverlayTask(): Promise<void> {
+  if (!overlay.value || overlayClosed.value) return
+  if (overlayResolving) {
+    overlayResolveAgain = true
+    return
+  }
+  overlayResolving = true
+  try {
+    do {
+      overlayResolveAgain = false
+      await resolveOverlayOnce()
+    } while (overlayResolveAgain && !overlayClosed.value)
+  } finally {
+    overlayResolving = false
+  }
+}
+
+/**
+ * Locate the host's task against a fresh board read, then open the editor.
+ *
+ * `boardRead` is awaited rather than `loading` watched, so a task created since
+ * the last visit is not called missing before the read that would carry it has
+ * answered. A failed read is its own state instead of an editor drawn over rows
+ * from an older visit. An editor already showing another task is closed first,
+ * writing what it holds; a refused write leaves it open and this request is
+ * abandoned rather than dropping the draft.
+ */
+async function resolveOverlayOnce(): Promise<void> {
+  if (!overlay.value || overlayClosed.value) return
+  const seq = ++overlaySeq
+  let id = props.taskId
+  let forWorkspace = workspace.value
+  if (!id) {
+    overlayState.value = 'missing'
+    return
+  }
+  if (detailOpen.value && detailId.value === id) {
+    overlayState.value = 'open'
+    return
+  }
+  // A sheet that owns a draft or an in-flight gesture keeps the surface on its
+  // old task. A board refresh must not disturb it, and a changed `taskId` waits
+  // here until that sheet closes — the watch below reruns then, so a host
+  // replacement is deferred rather than silently dropped or raced against the
+  // sheet's internal close.
+  if (delegateOpen.value || resolutionOpen.value) return
+  // The editor is briefly closed between that internal close and the sheet it
+  // opens; that gap is not a new task to resolve.
+  if (overlayState.value === 'open' && !detailOpen.value) return
+  if (detailOpen.value) {
+    await closeDetail({ internal: true })
+    if (seq !== overlaySeq || overlayClosed.value) return
+    if (detailOpen.value) return
+    // The editor is gone. The host may have named another task while it was
+    // saving; resolve that one in this pass rather than opening the id this
+    // pass began with (or stopping with nothing drawn).
+    overlayState.value = 'loading'
+    id = props.taskId
+    forWorkspace = workspace.value
+    if (!id) {
+      overlayState.value = 'missing'
+      return
+    }
+  }
+  overlayState.value = 'loading'
+  const read = boardReadWorkspace === forWorkspace ? boardRead : load()
+  await read
+  if (
+    seq !== overlaySeq
+    || overlayClosed.value
+    || forWorkspace !== workspace.value
+    || props.taskId !== id
+  ) return
+  // A failed refresh is not an empty board, and the overlay has no stale rows
+  // to keep: the only honest answer is that it could not read the task.
+  if (board.loadError || board.loadedWorkspace !== forWorkspace) {
+    overlayState.value = 'failed'
+    return
+  }
+  const task = tasks.value.find((entry) => entry.id === id)
+  if (!task) {
+    overlayState.value = 'missing'
+    return
+  }
+  overlayState.value = 'open'
+  openDetail(task)
+}
+
+watch(
+  [
+    () => props.taskId,
+    workspace,
+    () => board.loadedWorkspace,
+    tasks,
+    () => board.loading,
+    // A sheet closing is what makes a deferred host replacement safe to apply.
+    // `detailOpen` is deliberately absent: the close just below changes it, and
+    // observing it would invalidate the replacement mid-flight.
+    delegateOpen,
+    resolutionOpen,
+  ],
+  () => { void resolveOverlayTask() },
+  { immediate: true },
+)
+
 /**
  * The editor's status control is a move, written the moment it is pressed.
  *
@@ -1703,10 +2192,15 @@ watch(
  * to the chat.
  */
 async function delegateFromDetail(task: Task) {
-  await closeDetail()
+  const openChat = delegateModeFor(task) === 'open_chat'
+  // In an overlay this is an internal close when a preview follows in its own
+  // sheet: the host must keep the surface mounted for it. Open chat has no
+  // preview — it ends this surface with the navigation, so its close is final.
+  await closeDetail({ internal: overlay.value && !openChat })
   if (detailOpen.value) return
-  if (delegateModeFor(task) === 'open_chat') {
+  if (openChat) {
     openAttemptChat(task)
+    if (overlay.value) finishOverlayClose()
     return
   }
   void openDelegate(task)
@@ -1763,14 +2257,14 @@ function onStatusKeydown(event: KeyboardEvent) {
  * project was deleted underneath the board. Nothing changed and no description
  * was read means there is nothing to send at all.
  */
-function detailChanges(task: Task): TaskChanges {
+function detailChanges(): TaskChanges {
   const changes: TaskChanges = {}
   const title = detailForm.title.trim()
-  if (title !== task.title) changes.title = title
+  if (title !== detailBaseTitle.value) changes.title = title
   const due = detailForm.due || null
-  if ((due ?? '') !== (task.due || '')) changes.due = due
+  if ((due ?? '') !== detailBaseDue.value) changes.due = due
   const project = detailForm.project_id || null
-  if ((project ?? '') !== ownProject(task.project_id)) changes.project_id = project
+  if ((project ?? '') !== detailBaseProject.value) changes.project_id = project
   return changes
 }
 
@@ -1810,20 +2304,37 @@ function scheduleAutosave() {
 }
 
 /**
- * The body a save would write: the edited description with the engine's log,
- * as the record holds it, put back after it.
+ * Whether the description field holds text this editor has not written.
+ *
+ * Measured against the editor's own base, not the board's `described` slot: the
+ * slot is dropped when the row's revision moves on, and a draft typed before
+ * that move is still a draft.
  */
-function composedBody(stored: string): string {
-  return joinTaskLog(detailForm.body, splitTaskLog(stored).log)
+function bodyDraftDirty(): boolean {
+  return Boolean(detailBodyBaseRevision.value)
+    && detailForm.body !== splitTaskLog(detailBodyBase.value).description
 }
 
-/** Whether the editor holds anything the record does not. */
+/**
+ * Whether the editor holds anything its last clean baseline does not.
+ *
+ * Deliberately independent of `detailTask`: the record can be removed from the
+ * board in another tab or by the CLI while this editor is open, and a missing
+ * row must not make a typed title, date, project or description look clean.
+ */
 function hasUnsavedEdits(): boolean {
-  const task = detailTask.value
-  if (!task) return false
-  if (Object.keys(detailChanges(task)).length) return true
-  const held = heldDescription(task)
-  return Boolean(held) && held!.body !== composedBody(held!.body)
+  if (!detailOpen.value) return false
+  if (detailForm.title.trim() !== detailBaseTitle.value) return true
+  if ((detailForm.due || '') !== detailBaseDue.value) return true
+  if ((detailForm.project_id || '') !== detailBaseProject.value) return true
+  return bodyDraftDirty()
+}
+
+/** Make the form's current values the clean baseline (only with no write pending). */
+function captureDetailBaseline(): void {
+  detailBaseTitle.value = detailForm.title.trim()
+  detailBaseDue.value = detailForm.due || ''
+  detailBaseProject.value = detailForm.project_id || ''
 }
 
 /**
@@ -1843,7 +2354,11 @@ async function flushDetail(): Promise<boolean> {
 // form equal to the record, so the write they schedule finds nothing to send.
 watch(
   () => [detailForm.title, detailForm.body],
-  () => scheduleAutosave(),
+  () => {
+    // A title the editor can save is no longer a reason to refuse a close.
+    if (detailForm.title.trim()) detailCloseError.value = ''
+    scheduleAutosave()
+  },
 )
 watch(
   () => [detailForm.due, detailForm.project_id],
@@ -1858,43 +2373,134 @@ onBeforeUnmount(() => {
 const autosaving = ref(false)
 
 /**
- * Write the fields this editor changed. `false` only when the server refused.
+ * The record body a dirty draft may be written against, now.
  *
+ * Fast path: the board's description slot is the row's current record, so its
+ * log is the one to preserve and its revision the one to present. When the row
+ * has moved on — and the slot was therefore dropped — read the record again. If
+ * the description is still the prose the draft was based on, only the revision
+ * or the engine's log moved, and the draft can be rebased onto it; if the prose
+ * changed, refuse, because writing would erase a description this editor never
+ * showed.
+ */
+type BodyBase = { ok: true; stored: string; revision: string } | { ok: false }
+
+async function bodyWriteBase(task: Task, workspace: string): Promise<BodyBase> {
+  const baseDescription = splitTaskLog(detailBodyBase.value).description
+  const held = heldDescription(task)
+  if (held) {
+    if (splitTaskLog(held.body).description !== baseDescription) return { ok: false }
+    // Same prose at the record's current revision: the draft may follow it.
+    detailBodyBase.value = held.body
+    detailBodyBaseRevision.value = held.revision
+    return { ok: true, stored: held.body, revision: held.revision }
+  }
+  const read = await board.get(workspace, task.id)
+  const revision = board.revisionOf(task.id)
+  if (!read || !revision) return { ok: false }
+  if (splitTaskLog(read.body).description !== baseDescription) return { ok: false }
+  detailBodyBase.value = read.body
+  detailBodyBaseRevision.value = read.revision
+  return { ok: true, stored: read.body, revision }
+}
+
+/**
+ * Write the fields this editor changed. `false` when the server refused or the
+ * description cannot be written safely.
+ *
+ * The body rides only when the editor's own draft differs from its base, and it
+ * is composed against a base verified at the revision being written — never
+ * against whatever the board's slot happens to hold after the row moved on.
  * Nothing is written back into the form from the answer: the user may have
- * typed on while it was in flight, and the row the store adopted is what the
- * next comparison runs against.
+ * typed on while it was in flight.
  */
 async function saveDetail(): Promise<boolean> {
+  if (!detailOpen.value) return true
   const task = detailTask.value
-  if (!detailOpen.value || !task || !detailValid.value) return true
-  // The revision is read first and the slot asked about *it* below:
-  // `revisionOf` drops a slot that disagrees with the row, so the two questions
-  // have to be about the same instant or the answer is about a different one.
-  const revision = board.revisionOf(task.id)
-  const changes = detailChanges(task)
-  // `body` rides only when this dialog showed the prose and it is the record at
-  // that revision: a description read for an earlier revision is not something
-  // this dialog may write (its body is not what the row says is on disk, so
-  // sending it erases whatever replaced it, and the newer revision going out
-  // means no 409 stands in the way), an unread one is omitted rather than sent
-  // empty, and an unedited one needs no write at all.
-  const held = heldDescription(task)
-  const body = held && held.revision === revision && held.body !== composedBody(held.body)
-    ? composedBody(held.body)
-    : undefined
-  if (!Object.keys(changes).length && body === undefined) return true
+  // The row can disappear while the editor is open (another tab, `ciao task`,
+  // an agent). There is no record to patch: never recreate one from a draft.
+  // A dirty draft is refused so the close/replacement cannot drop it; a clean
+  // one has nothing to write and may proceed.
+  if (!task) {
+    if (hasUnsavedEdits()) {
+      detailRecordError.value = MISSING_RECORD
+      return false
+    }
+    return true
+  }
+  if (!detailValid.value) return true
+  // Every request below is made for the workspace this editor opened in. A
+  // workspace switch closes the editor with `discard`; this guard keeps a read
+  // that lands after it from sending the old task to the new workspace.
+  const originWorkspace = workspace.value
+  const closing = detailId.value
+  const changes = detailChanges()
+  const dirtyBody = bodyDraftDirty()
+  if (!dirtyBody && !Object.keys(changes).length) {
+    // The form already matches the record: this is the clean baseline, whatever
+    // an earlier row update did to the fields behind the editor.
+    captureDetailBaseline()
+    detailBodyError.value = ''
+    detailBodyConflict.value = false
+    return true
+  }
+  let revision = board.revisionOf(task.id)
+  if (!revision) {
+    detailBodyConflict.value = false
+    detailBodyError.value = BODY_SAVE_INCOMPLETE
+    return false
+  }
+  let body: string | undefined
+  if (dirtyBody) {
+    const base = await bodyWriteBase(task, originWorkspace)
+    if (workspace.value !== originWorkspace || !detailOpen.value || detailId.value !== closing) return true
+    if (!base.ok) {
+      detailBodyConflict.value = true
+      detailBodyError.value = BODY_CONFLICT
+      return false
+    }
+    body = joinTaskLog(detailForm.body, splitTaskLog(base.stored).log)
+    revision = base.revision
+  }
+  // Recomputed after the read above: the row may have been adopted at a newer
+  // revision while the base was verified. The write still presents that
+  // revision, and a later move is the server's 409.
+  const currentChanges = detailChanges()
+  if (!Object.keys(currentChanges).length && body === undefined) {
+    captureDetailBaseline()
+    return true
+  }
+  // The values this PATCH carries, captured now. If a field moves while it is
+  // in flight, the form differs from this snapshot and stays dirty afterwards.
+  const written = {
+    title: detailForm.title.trim(),
+    due: detailForm.due || '',
+    project_id: detailForm.project_id || '',
+  }
   autosaving.value = true
   const saved = await board.update(
-    workspace.value,
+    originWorkspace,
     task.id,
     revision,
-    changes,
+    currentChanges,
     body,
   )
   autosaving.value = false
+  if (workspace.value !== originWorkspace || !detailOpen.value || detailId.value !== closing) return true
   if (!saved) {
     load()
     return false
+  }
+  detailBaseTitle.value = written.title
+  detailBaseDue.value = written.due
+  detailBaseProject.value = written.project_id
+  if (body !== undefined && saved.revision) {
+    // The next comparison is against what the server stored for this write,
+    // not the base it replaced.
+    detailBodyBase.value = saved.body
+    detailBodyBaseRevision.value = saved.revision
+    detailBodyError.value = ''
+    detailBodyConflict.value = false
   }
   savedAt.value = Date.now()
   board.clearError()
@@ -1928,6 +2534,76 @@ function retryDescription() {
 }
 
 /**
+ * Copy the editor's draft as plain text.
+ *
+ * The way out when the record was deleted underneath the editor: a close and a
+ * replacement are refused while a draft exists, so the text must be copyable
+ * before the user leaves. One real button, and its outcome in a polite live
+ * region rather than a transient toast.
+ */
+async function copyDetailDraft(): Promise<void> {
+  const status = TASK_STATUS_OPTIONS.find((option) => option.status === detailForm.status)?.label
+    ?? detailForm.status
+  const text = [
+    detailForm.title.trim() || '(no title)',
+    '',
+    detailForm.body,
+    '',
+    `Status: ${status}`,
+    `Project: ${projectName(detailForm.project_id)}`,
+    `Due: ${detailForm.due || 'None'}`,
+  ].join('\n')
+  draftCopyStatus.value = ''
+  try {
+    // No legacy path: the Clipboard API is the browser's copy contract. A
+    // refusal is reported, and the text stays selectable in the editor.
+    await navigator.clipboard.writeText(text)
+    draftCopyStatus.value = 'Draft copied.'
+  } catch {
+    draftCopyStatus.value = 'Could not copy the draft. Select the text in the editor to copy it.'
+  }
+}
+
+/** Deliberately abandon an unsavable draft only after an explicit confirmation. */
+async function discardMissingDraft(): Promise<void> {
+  if (!detailOpen.value || detailTask.value || !hasUnsavedEdits() || detailSaving.value || autosaving.value) return
+  const id = detailId.value
+  const origin = workspace.value
+  const confirmed = await askConfirm(
+    'This task no longer exists. Discard your unsaved draft? This cannot be undone.',
+    { title: 'Discard draft', confirmLabel: 'Discard draft', destructive: true },
+  )
+  if (!confirmed || !detailOpen.value || detailId.value !== id || workspace.value !== origin || detailTask.value) return
+  const replacing = overlay.value && Boolean(props.taskId) && props.taskId !== id
+  if (replacing) {
+    await closeDetail({ discard: true, internal: true })
+    overlayState.value = 'loading'
+    void resolveOverlayTask()
+  } else {
+    await closeDetail({ discard: true })
+  }
+}
+
+/**
+ * Resolve a description conflict in the user's favour.
+ *
+ * The alert's action, not an automatic fallback: it rebases the draft onto the
+ * record on disk while keeping the user's text as the difference, so the next
+ * write stores that text and deliberately replaces the prose this editor never
+ * showed. Without a choice, a refused close would leave the editor with no way
+ * out that keeps the draft.
+ */
+function overwriteWithMyText(): void {
+  const held = heldDescription(detailTask.value)
+  if (!held) return
+  detailBodyBase.value = held.body
+  detailBodyBaseRevision.value = held.revision
+  detailBodyError.value = ''
+  detailBodyConflict.value = false
+  void flushDetail()
+}
+
+/**
  * The description as it reads, shown until the user presses Edit.
  *
  * `renderUserMarkdown`, not `renderMarkdown`: a task body is prose the user
@@ -1937,17 +2613,23 @@ function retryDescription() {
 const bodyPreview = computed(() => renderUserMarkdown(detailForm.body))
 
 const today = localDateKey()
+
+// The host's awaited close. Exposed rather than emitted because it answers
+// whether the surface actually closed: a refused save keeps it open.
+defineExpose({ requestClose })
 </script>
 
 <template>
-  <div ref="paneEl" class="task-view">
-    <PaneHeader page-tag="Tasks" @open-sidebar="emit('open-sidebar')">
+  <div ref="paneEl" class="task-view" :class="{ 'task-view--overlay': overlay }">
+    <!-- Board chrome belongs to the route. An overlay draws only the editor
+         and the sheets it opens, over whatever screen the host is showing. -->
+    <PaneHeader v-if="!overlay" page-tag="Tasks" @open-sidebar="emit('open-sidebar')">
       <template #actions>
         <button type="button" class="btn-primary btn-small task-new" @click="openCreate">New task</button>
       </template>
     </PaneHeader>
 
-    <div class="page-grid page-grid--single">
+    <div v-if="!overlay" class="page-grid page-grid--single">
       <div class="page-main">
         <!-- The filters sit outside the load branches: they describe what the
              board holds, not whether it has answered yet, so they are never the
@@ -2332,7 +3014,7 @@ const today = localDateKey()
     </div>
 
     <!-- Create -->
-    <div v-if="createOpen" class="modal-backdrop" @click.self="closeCreate">
+    <div v-if="!overlay && createOpen" class="modal-backdrop" @click.self="closeCreate">
       <div
         ref="createEl"
         class="modal-sheet task-sheet"
@@ -2511,10 +3193,46 @@ const today = localDateKey()
       </div>
     </div>
 
+    <!-- Overlay states. One sheet at a time: the editor below is not wrapped in
+         another dialog, it replaces this one once the task is located. -->
+    <div
+      v-if="overlayStatusShown"
+      class="modal-backdrop task-detail-backdrop"
+      @click.self="requestClose()"
+    >
+      <div
+        ref="overlayStatusEl"
+        class="modal-sheet task-sheet task-overlay-state"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-overlay-state-title"
+      >
+        <header class="task-sheet-head">
+          <h3 id="task-overlay-state-title">{{ overlayStateTitle }}</h3>
+          <button type="button" class="btn-icon" aria-label="Close" @click="requestClose()">×</button>
+        </header>
+        <div class="task-form">
+          <p v-if="overlayState === 'loading'" class="hint" role="status">Loading task…</p>
+          <template v-else-if="overlayState === 'failed'">
+            <p class="task-failed-text" role="alert">{{ board.loadError || 'Could not load tasks.' }}</p>
+            <div class="form-actions">
+              <button type="button" class="btn-small" @click="retryOverlay">Retry</button>
+            </div>
+          </template>
+          <template v-else>
+            <p class="hint">
+              This task is not on the {{ workspace }} board. It may have been deleted,
+              or it belongs to another workspace.
+            </p>
+          </template>
+        </div>
+      </div>
+    </div>
+
     <!-- Detail. Nearly the whole window: the title and description are what the
          user came to read, so they get the width, and the fields that place the
          task (status, project, due) sit in a side column beside them. -->
-    <div v-if="detailOpen" class="modal-backdrop task-detail-backdrop" @click.self="closeDetail()">
+    <div v-if="detailOpen" class="modal-backdrop task-detail-backdrop" @click.self="requestDetailClose()">
       <div
         ref="detailEl"
         class="modal-sheet task-sheet task-detail-sheet"
@@ -2541,7 +3259,7 @@ const today = localDateKey()
             :disabled="detailSaving"
             @click="deleteTask"
           >Delete</button>
-          <button type="button" class="btn-icon" aria-label="Close" @click="closeDetail()">×</button>
+          <button type="button" class="btn-icon" aria-label="Close" @click="requestDetailClose()">×</button>
         </header>
 
         <form class="task-form task-detail-form" novalidate @submit.prevent="flushDetail">
@@ -2559,6 +3277,15 @@ const today = localDateKey()
               @keydown.enter.prevent="detailTitleField?.blur()"
               @blur="flushDetail"
             ></textarea>
+            <p v-if="detailCloseError" class="task-action-error" role="alert">{{ detailCloseError }}</p>
+            <!-- The record vanished under the editor: the draft cannot be saved
+                 anywhere, but it can be copied before the user leaves. -->
+            <p v-if="detailRecordError" class="task-action-error" role="alert">
+              <span>{{ detailRecordError }}</span>
+              <button type="button" class="btn-chip task-chip" @click="copyDetailDraft">Copy draft</button>
+              <button type="button" class="btn-chip task-chip" @click="discardMissingDraft">Discard draft</button>
+              <span v-if="draftCopyStatus" class="hint" role="status" aria-live="polite">{{ draftCopyStatus }}</span>
+            </p>
           </div>
 
           <aside class="task-detail-side" aria-label="Task details">
@@ -2643,6 +3370,15 @@ const today = localDateKey()
               This board could not read this task's description, so it will not
               overwrite it.
               <button type="button" class="btn-chip task-chip" @click="retryDescription">Retry</button>
+            </p>
+            <p v-if="detailBodyError" class="task-action-error" role="alert">
+              <span>{{ detailBodyError }}</span>
+              <button
+                v-if="bodyConflictResolvable"
+                type="button"
+                class="btn-chip task-chip"
+                @click="overwriteWithMyText"
+              >Overwrite with my text</button>
             </p>
           </div>
 
@@ -2963,6 +3699,11 @@ const today = localDateKey()
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
 }
+/* An overlay host owns the layout. This surface contributes only its modal
+   backdrops and sheets, so its root must not claim the host pane or scroll it. */
+.task-view--overlay { display: contents; }
+/* The overlay's own read states: a compact sheet, not the editor's window. */
+.task-overlay-state { width: min(28rem, 100%); }
 /* The main column fills the scrollport, so a board shorter than the pane can
    still use the space under its rows as drop targets. */
 .task-view .page-main {

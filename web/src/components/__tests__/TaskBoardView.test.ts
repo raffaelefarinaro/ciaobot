@@ -1148,7 +1148,12 @@ describe('TaskBoardView', () => {
 
   it('writes a pending edit on close, and stays open when the write is refused', async () => {
     const wrapper = await mountBoard()
-    apiGet.mockResolvedValue(detailAnswer(task(), ''))
+    // List reads must keep answering: a refused close re-reads the board.
+    apiGet.mockImplementation((url: string) => Promise.resolve(
+      url.includes('/api/tasks?')
+        ? { workspace: 'personal', tasks: BOARD }
+        : detailAnswer(task(), ''),
+    ))
     apiPatch.mockRejectedValueOnce(Object.assign(new Error('HTTP 409'), {
       payload: { error: { code: 'task_revision_conflict', message: 'that task changed on disk', retryable: true } },
     }))
