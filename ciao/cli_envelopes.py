@@ -91,8 +91,6 @@ CONTROL_SLASH_PREFIXES = ("/model", "/mode")
 # don't render a literal "No response requested." bubble after every interrupt.
 NO_RESPONSE_SENTINEL = "No response requested."
 
-COMPACT_SUMMARY_PREFIX = "This session is being continued from a previous conversation"
-
 _CONTEXT_BLOCK_RE = re.compile(
     r"^\[CIAO_CONTEXT_BEGIN\]\n.*?\n\[CIAO_CONTEXT_END\]\n\n",
     re.DOTALL,
@@ -189,17 +187,14 @@ def _flag_on(value: object, name: str) -> bool:
 
 
 def is_compact_summary(
-    record: object = None, content: str = "", *, flagged: bool = False
+    record: object = None, *, flagged: bool = False
 ) -> bool:
     """True when ``record`` is a CLI post-compaction recap.
 
-    ``isCompactSummary`` is authoritative when present. The prefix remains a
-    fallback for records written before the CLI stamped them. The record may
-    be a raw JSONL dictionary or an SDK message object.
+    ``isCompactSummary`` is the only reliable distinction. A text prefix alone
+    is ambiguous because a person can type or quote the same words. The record
+    may be a raw JSONL dictionary or an SDK message object.
     """
-    if isinstance(record, str) and not content:
-        content = record
-        record = None
     if flagged or _flag_on(record, "isCompactSummary"):
         return True
     inner = (
@@ -209,7 +204,7 @@ def is_compact_summary(
     )
     if _flag_on(inner, "isCompactSummary"):
         return True
-    return content.lstrip().startswith(COMPACT_SUMMARY_PREFIX)
+    return False
 
 
 def _leading_task_notification_matches(content: str) -> list[re.Match[str]]:

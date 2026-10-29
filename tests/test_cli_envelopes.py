@@ -65,7 +65,6 @@ def test_no_module_defines_its_own_copy_of_the_shared_constants() -> None:
         "CONTROL_SLASH_PREFIXES",
         "NO_RESPONSE_SENTINEL",
         "INTERRUPTED_REQUEST_RE",
-        "COMPACT_SUMMARY_PREFIX",
     }
     assert shared <= _module_level_names(REPO_ROOT / "ciao" / "cli_envelopes.py")
 
@@ -90,6 +89,26 @@ def test_both_readers_share_one_envelope_predicate() -> None:
         transcript_service._is_interrupted_request_sentinel
         is cli_envelopes.is_interrupted_request_sentinel
     )
+
+
+def test_compaction_prefix_without_metadata_is_ordinary_user_text() -> None:
+    text = "This session is being continued from a previous conversation. I wrote this myself."
+    record = {"type": "user", "message": {"role": "user", "content": text}}
+
+    assert not cli_envelopes.is_compact_summary(record)
+
+
+def test_compaction_summary_requires_authoritative_record_flag() -> None:
+    record = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": "A recap whose wording does not match the old prefix.",
+            "isCompactSummary": True,
+        },
+    }
+
+    assert cli_envelopes.is_compact_summary(record)
 
 
 # ------------------------------------------------- anchoring and greediness
