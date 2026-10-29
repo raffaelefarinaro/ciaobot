@@ -156,9 +156,7 @@ this file; the gates are the ones under Verification.
 - PR target is `develop`. `Closes #N` does not auto-close on a develop merge;
   close issues explicitly: "Merged into develop via #<PR> (<sha>). Ships in the
   next release."
-- The repo is registered in Orca; loop state lives in
-  `~/orca/workspaces/ciaobot/plans/`. Branch prefix:
-  `raffaelefarinaro/issue-<N>-<slug>`.
+- Branch prefix: `raffaelefarinaro/issue-<N>-<slug>`.
 - Gates run from a worktree with the main checkout's venv, which is an
   editable install of `~/repos/ciaobot`: always set `PYTHONPATH=$PWD`
   (`PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto tests/`).

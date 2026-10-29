@@ -1623,7 +1623,6 @@ def _lift_compact_summary_flags(
             except OSError:
                 return messages
     flagged: set[str] = set()
-    flagged_contents: set[str] = set()
     for line in lines:
         try:
             entry = json.loads(line)
@@ -1637,18 +1636,12 @@ def _lift_compact_summary_flags(
         )
         if entry.get("isCompactSummary") or flagged_on_message:
             flagged.add(entry["uuid"])
-            payload = entry.get("message")
-            if isinstance(payload, dict) and isinstance(payload.get("content"), str):
-                flagged_contents.add(payload["content"])
     if not flagged:
         return messages
     for message in messages:
         uuid = getattr(message, "uuid", "")
         payload = getattr(message, "message", None)
-        content = payload.get("content") if isinstance(payload, dict) else None
-        if uuid not in flagged and not (
-            not uuid and isinstance(content, str) and content in flagged_contents
-        ):
+        if uuid not in flagged:
             continue
         if isinstance(payload, dict):
             payload["isCompactSummary"] = True

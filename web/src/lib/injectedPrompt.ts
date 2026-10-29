@@ -19,6 +19,7 @@ export interface BackgroundRunEntry {
 export interface LostCliTask { type: string; description: string; taskId: string; command: string }
 export interface ScheduleCommandOutcome { command: string; exitCode: number | null; timedOut: boolean; output: string }
 export type InjectedPrompt =
+  | { kind: 'compaction'; text: string }
   | { kind: 'background_run'; count: number; runs: BackgroundRunEntry[] }
   | { kind: 'cli_task_wake'; count: number; tasks: LostCliTask[] }
   | { kind: 'schedule'; command: ScheduleCommandOutcome | null; prompt: string }
@@ -179,6 +180,7 @@ export function parseInjectedPrompt(content: string | null | undefined, origin?:
     if (origin === 'cli_task_wake') return null
   }
   switch (origin as TurnOrigin | string | undefined) {
+    case 'compaction': return { kind: 'compaction', text: content }
     case 'schedule': return parseSchedule(content)
     case 'task_resume': return parseTaskResume(content)
     case 'webhook': return parseWebhook(content)
@@ -222,6 +224,7 @@ const TONE_ORDER: RunVerdict[] = ['failed', 'cancelled', 'ok']
 
 export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: string): InjectedSummary {
   switch (prompt.kind) {
+    case 'compaction': return { label: 'Context compacted', facts: 'Conversation summary available', tone: null }
     case 'background_run': {
       const label = prompt.count === 1 ? 'Background run finished' : `${prompt.count} background runs finished`
       const runs = prompt.runs

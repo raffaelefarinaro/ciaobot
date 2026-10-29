@@ -29,6 +29,17 @@ function mountCard(props: Record<string, unknown>) {
 }
 
 describe('InjectedPromptCard', () => {
+  it('keeps a compaction summary collapsed and exposes it in a named scrollable region', async () => {
+    const wrapper = mountCard({ prompt: { kind: 'compaction', text: '**Summary** of the conversation' }, raw: '' })
+    const toggle = wrapper.get('.injected-card-toggle')
+    expect(toggle.text()).toContain('Context compacted')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.text()).not.toContain('Summary of the conversation')
+    await toggle.trigger('click')
+    const summary = wrapper.get('[aria-label="Conversation summary"]')
+    expect(summary.text()).toBe('Summary of the conversation')
+    expect(summary.attributes('tabindex')).toBe('0')
+  })
   it('is collapsed by default and expands with aria-expanded', async () => {
     const wrapper = mountCard({ prompt: runPrompt, raw: '=== raw' })
     const toggle = wrapper.get('.injected-card-toggle')

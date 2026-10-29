@@ -390,7 +390,7 @@ export interface ChatRetryInfo {
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
 export type TurnOrigin =
   | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
-  | 'task_resume' | 'webhook' | 'update_task'
+  | 'task_resume' | 'webhook' | 'update_task' | 'compaction'
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'

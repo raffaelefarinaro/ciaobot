@@ -99,11 +99,63 @@ async def test_messages_stitches_history_across_session_rotation(
 
     response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
     payload = response.body.decode()
+    rows = json.loads(payload)
 
     old_pos = payload.index("what should we build first")
     new_pos = payload.index("continuing: backend is done")
     assert old_pos < new_pos, payload
     assert '"content":"let\'s start with the backend"' in payload
+    assert not any(row.get("origin") == "compaction" for row in rows)
+    assert any(
+        row.get("role") == "user"
+        and row.get("content") == "This session is being continued from a previous conversation"
+        for row in rows
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "recap",
+    [
+        "  No response requested.  ",
+        " <task-notification>\n<task-id>agent-1</task-id>\n</task-notification> ",
+    ],
+)
+async def test_flagged_compaction_precedes_user_filters_and_keeps_turn_indices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recap: str
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Compaction ordering", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="compaction-ordering")
+    chat.session_id = "sess-compact"
+    pcm._save()
+
+    compact = SimpleNamespace(
+        type="user",
+        uuid="compact-summary",
+        message={"role": "user", "content": recap, "isCompactSummary": True},
+    )
+    fake_sdk = SimpleNamespace(
+        get_session_messages=lambda _session_id, directory=None: [
+            compact,
+            _Msg("user", "next human turn"),
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    rows = json.loads(response.body)
+
+    assert {
+        "role": "system",
+        "content": recap,
+        "origin": "compaction",
+    } in rows
+    assert not any(row.get("content") == recap and row.get("role") == "user" for row in rows)
+    human_rows = [row for row in rows if row.get("role") == "user"]
+    assert [(row["content"], row["turn_index"]) for row in human_rows] == [
+        ("next human turn", 0)
+    ]
 
 
 @pytest.mark.asyncio
@@ -249,6 +301,7 @@ async def test_get_session_messages_full_traverses_logical_parent_uuid(
     assert "pre-compact answer" in payload
     assert "A continuation recap with a different opening." in payload
     assert "post-compact answer" in payload
+    assert '"origin":"compaction"' in payload
 
     # Verify positions: pre-compact < summary < post-compact
     pos_pre = payload.index("pre-compact question")
@@ -329,6 +382,36 @@ async def test_flagged_compact_recap_is_hidden_on_the_sdk_fallback_path(
         row.get("role") == "system" and row.get("content") == "A recap with a new opening."
         for row in rows
     )
+
+
+def test_compaction_metadata_is_lifted_by_uuid_not_duplicate_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import claude_agent_sdk._internal.sessions as sdk_sessions
+    import ciao.transcripts as transcripts
+
+    raw = json.dumps({
+        "type": "user",
+        "uuid": "flagged",
+        "isCompactSummary": True,
+        "message": {"role": "user", "content": "same recap text"},
+    })
+    monkeypatch.setattr(sdk_sessions, "_read_session_file", lambda *_args: raw)
+    messages = [
+        SimpleNamespace(
+            type="user", uuid="flagged",
+            message={"role": "user", "content": "same recap text"},
+        ),
+        SimpleNamespace(
+            type="user", uuid="",
+            message={"role": "user", "content": "same recap text"},
+        ),
+    ]
+
+    transcripts._lift_compact_summary_flags(messages, "session", str(tmp_path))
+
+    assert messages[0].message.get("isCompactSummary") is True
+    assert "isCompactSummary" not in messages[1].message
 
 
 

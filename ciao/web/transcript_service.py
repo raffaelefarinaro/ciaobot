@@ -1727,6 +1727,12 @@ async def _assemble_chat_messages(
             continue
 
         content = _extract_text_content(m.message)
+        # The SDK marks compaction recaps explicitly. Handle them before
+        # context stripping and synthetic-user filters: recap text is opaque
+        # summary content, not a user turn, even if it resembles a CLI marker.
+        if m.type == "user" and cli_envelopes.is_compact_summary(m):
+            result.append({"role": "system", "content": content, "origin": "compaction"})
+            continue
         if m.type == "user":
             content = _strip_injected_context(content)
         content = content.strip()
@@ -1794,9 +1800,6 @@ async def _assemble_chat_messages(
             # same rule, so the two turn counters stay aligned.
             if subagent_tracking.is_synthesis_nudge(content):
                 result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
-                continue
-            if cli_envelopes.is_compact_summary(m, content):
-                result.append({"role": "system", "content": content})
                 continue
         entry: dict = {
             "role": m.type,
