@@ -137,13 +137,14 @@ _CONTEXT_USAGE_TIMEOUT_S = 3.0
 # leaves the CLI without its claude.ai connectors for its whole life and the
 # model never sees them. A spawn that shows no ``claude.ai `` MCP row within
 # the deadline, on an account that has shown them before, is respawned on the
-# next turn.
+# next turn. "Has shown them before" is a marker file under the runtime root,
+# so it survives engine restarts; a chat that exhausts its retries deletes it,
+# so an account that lost its connectors stops being retried.
 _CLAUDEAI_CATALOG_DEADLINE_S = 30.0
 _CLAUDEAI_CATALOG_POLL_S = 2.0
 _CLAUDEAI_CATALOG_MAX_RETRIES = 2
 _CLAUDEAI_PREFIX = "claude.ai "
-# Set once any spawn in this engine has shown a claude.ai row.
-_claudeai_catalog_seen = False
+_CLAUDEAI_SEEN_MARKER = "claudeai_connectors_seen"
 CLAUDEAI_CATALOG_RETRY_NOTICE = (
     "claude.ai connectors didn't load: Claude Code's connector list request "
     "timed out. Ciaobot will restart the session on your next message to retry."
@@ -717,6 +718,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._claudeai_catalog_retries = 0
         self._claudeai_watch: asyncio.Task[None] | None = None
         self._claudeai_expected = False
+        self._claudeai_seen_marker = runtime_root / _CLAUDEAI_SEEN_MARKER
         self._claudeai_respawn_notice_pending = False
         self._claudeai_gave_up_notice_pending = False
         self._turn_status_sink: Callable[[str], None] | None = None
@@ -837,7 +839,6 @@ class ClaudeProvider(BaseSDKProvider):
 
     async def _watch_claudeai_catalog(self, client: ClaudeSDKClient) -> None:
         """Wait for claude.ai MCP rows after a spawn; flag the catalog missing if none show."""
-        global _claudeai_catalog_seen
         started = time.monotonic()
         try:
             while time.monotonic() - started < _CLAUDEAI_CATALOG_DEADLINE_S:
@@ -848,12 +849,13 @@ class ClaudeProvider(BaseSDKProvider):
                 except (asyncio.TimeoutError, ValueError, *_CLAUDE_OP_ERRORS):
                     states = {}
                 if any(name.startswith(_CLAUDEAI_PREFIX) for name in states):
-                    _claudeai_catalog_seen = True
+                    self._claudeai_seen_marker.parent.mkdir(parents=True, exist_ok=True)
+                    self._claudeai_seen_marker.touch()
                     self._claudeai_catalog_retries = 0
                     self._claudeai_gave_up_notice_pending = False
                     return
                 await asyncio.sleep(_CLAUDEAI_CATALOG_POLL_S)
-            if not _claudeai_catalog_seen:
+            if not self._claudeai_seen_marker.exists():
                 return
             self._claudeai_catalog_missing = True
             logger.warning(
@@ -867,6 +869,8 @@ class ClaudeProvider(BaseSDKProvider):
                 if self._claudeai_catalog_retries < _CLAUDEAI_CATALOG_MAX_RETRIES
                 else CLAUDEAI_CATALOG_GAVE_UP_NOTICE
             )
+            if notice == CLAUDEAI_CATALOG_GAVE_UP_NOTICE:
+                self._claudeai_seen_marker.unlink(missing_ok=True)
             if self._turn_status_sink is not None:
                 self._turn_status_sink(notice)
             elif notice == CLAUDEAI_CATALOG_GAVE_UP_NOTICE:
