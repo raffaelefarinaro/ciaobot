@@ -5,6 +5,7 @@ import {
   insertionIndex,
   moveAnnouncement,
   previewEntries,
+  settledOrder,
 } from './dragSort'
 
 const slots = (heights: number[], gap = 0) => {
@@ -53,6 +54,15 @@ describe('dragSort', () => {
     expect(previewEntries(ids, 'b', -3)).toEqual([ph, item('a'), item('b'), item('c')])
   })
 
+  it('settledOrder moves the dragged item to its target and clamps the index', () => {
+    expect(settledOrder(['a', 'b', 'c'], 'a', 2)).toEqual(['b', 'c', 'a'])
+    expect(settledOrder(['a', 'b', 'c'], 'c', 0)).toEqual(['c', 'a', 'b'])
+    expect(settledOrder(['a', 'b', 'c'], 'b', 1)).toEqual(['a', 'b', 'c'])
+    expect(settledOrder(['b', 'c'], 'a', 1)).toEqual(['b', 'a', 'c'])
+    expect(settledOrder(['a', 'b', 'c'], 'a', 99)).toEqual(['b', 'c', 'a'])
+    expect(settledOrder(['a', 'b', 'c'], 'a', -3)).toEqual(['a', 'b', 'c'])
+  })
+
   it('autoScrollStep is zero in the middle, ramps near each edge, is capped at max, and handles degenerate boxes', () => {
     const box = { start: 0, end: 400 }
     expect(autoScrollStep(box, 200)).toBe(0)
@@ -87,9 +97,6 @@ describe('dragSort', () => {
   it('moveAnnouncement strings', () => {
     expect(moveAnnouncement('pickup', 'Ship it', 'To do', 2, 5)).toBe(
       'Picked up Ship it, position 2 of 5 in To do.',
-    )
-    expect(moveAnnouncement('move', 'Ship it', 'In progress', 3, 5)).toBe(
-      'Ship it, position 3 of 5 in In progress.',
     )
     expect(moveAnnouncement('drop', 'Ship it', 'In progress', 3, 5)).toBe(
       'Dropped Ship it at position 3 of 5 in In progress.',

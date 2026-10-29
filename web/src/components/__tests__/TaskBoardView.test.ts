@@ -159,7 +159,8 @@ function layOutBoard() {
       let top = LANE_HEAD
       for (const sibling of [...this.parentElement!.children]) {
         if (sibling === this) break
-        top += (sibling.classList.contains('drag-source') ? 0 : CARD_HEIGHT) + CARD_GAP
+        // A collapsed source also cancels its following row gap.
+        top += sibling.classList.contains('drag-source') ? 0 : CARD_HEIGHT + CARD_GAP
       }
       return rectOf(laneIndexOf(lane) * LANE_STEP, top, 310, this.classList.contains('drag-source') ? 0 : CARD_HEIGHT)
     }
@@ -194,13 +195,13 @@ function dropPoint(laneIndex: number, index: number) {
 
 const boardRoot = () => document.querySelector<HTMLElement>('.task-lanes')!
 
-/** Press a card's grip and move far enough to pick it up. */
+/** Press a card's own text and move far enough to pick it up. */
 async function pickUp(wrapper: ReturnType<typeof mount>, title: string) {
   layOutBoard()
-  const grip = card(wrapper, title).get('.drag-grip').element as HTMLElement
   const at = card(wrapper, title).element.getBoundingClientRect()
-  grip.dispatchEvent(pointer('pointerdown', at.left + 10, at.top + 10))
-  boardRoot().dispatchEvent(pointer('pointermove', at.left + 10, at.top + 24))
+  const text = card(wrapper, title).get('.task-title').element
+  text.dispatchEvent(pointer('pointerdown', at.left + 20, at.top + 10))
+  boardRoot().dispatchEvent(pointer('pointermove', at.left + 20, at.top + 24))
   await nextTick()
 }
 
@@ -508,8 +509,8 @@ describe('TaskBoardView', () => {
     const review = lanes(wrapper).find(lane => lane.get('.task-lane-label').text() === 'In review')!
     expect(review.text()).toContain('Wait on a key')
     expect(card(wrapper, 'Wait on a key').find('.task-status-badge').exists()).toBe(false)
-    // The lanes stay side by side at every width, so the grip holds at a narrow pane.
-    expect(card(wrapper, 'Wait on a key').get('.drag-grip').attributes('aria-label')).toBe('Reorder Wait on a key')
+    // The lanes stay side by side at every width, and reordering lives in the card menu.
+    expect(card(wrapper, 'Wait on a key').get('.task-more').attributes('aria-label')).toBe('Actions for Wait on a key')
     expect(card(wrapper, 'Wait on a key').attributes('draggable')).toBeUndefined()
     wrapper.unmount()
   })
@@ -1849,7 +1850,7 @@ describe('TaskBoardView', () => {
         .toEqual(['To do', 'In progress', 'In review', 'Done'])
       expect(wrapper.findAll('.task-lanes')).toHaveLength(1)
       expect(wrapper.findAll('.task-card')).toHaveLength(4)
-      expect(wrapper.findAll('.task-card').every(card => card.find('.drag-grip').exists())).toBe(true)
+      expect(wrapper.findAll('.task-card').every(card => card.find('.task-more').exists())).toBe(true)
       expect(wrapper.get('.task-open').attributes('aria-keyshortcuts')).toBe('Shift+ArrowLeft Shift+ArrowRight')
       // …and picking a status is how the list narrows.
       await wrapper.findAll('.task-chip').find((c) => c.text().startsWith('Done'))!.trigger('click')
@@ -1992,9 +1993,10 @@ describe('TaskBoardView', () => {
   async function menuItems(wrapper: ReturnType<typeof mount>, title: string) {
     await card(wrapper, title).get('.task-more').trigger('click')
     await flushPromises()
-    // The attempt gestures; Move up / Move down are on every card and have their own tests.
+    // The attempt gestures; the card's Move actions are on every card and have
+    // their own tests.
     return [...document.body.querySelectorAll<HTMLElement>('[data-reka-menu-content] [role="menuitem"]')]
-      .filter((el) => el.textContent !== 'Move up' && el.textContent !== 'Move down')
+      .filter((el) => !['Move up', 'Move down', 'Move…'].includes(el.textContent ?? ''))
   }
 
   /** Close an open card menu the way a click outside does. */
@@ -3282,10 +3284,9 @@ describe('TaskBoardView', () => {
       payload: { error: { code, message: 'stale', retryable: true } },
     })
     const boardReads = () => apiGet.mock.calls.filter((c) => String(c[0]).startsWith('/api/tasks?')).length
-    const grip = (wrapper: ReturnType<typeof mount>, title: string) => card(wrapper, title).get('.drag-grip')
     const key = (k: string, init: KeyboardEventInit = {}) => ({ key: k, ...init })
 
-    /** Press the card's own text (not its grip) and move far enough to pick it up. */
+    /** Press the card's own text and move far enough to pick it up. */
     async function pickUpSurface(wrapper: ReturnType<typeof mount>, title: string) {
       layOutBoard()
       const at = card(wrapper, title).element.getBoundingClientRect()
@@ -3308,7 +3309,7 @@ describe('TaskBoardView', () => {
 
     beforeEach(() => layOutBoard())
 
-    it('reorders within a lane by dragging the grip and persists once via the order route', async () => {
+    it('reorders within a lane by dragging the card surface and persists once via the order route', async () => {
       const wrapper = await mountPlaced()
       expect(cardTitles(wrapper, 0)).toEqual(['Alpha', 'Bravo', 'Charlie'])
       apiPost.mockResolvedValueOnce(placed('c', { ...SEQUENCES, backlog: ['c', 'a', 'b'] }))
@@ -3347,6 +3348,44 @@ describe('TaskBoardView', () => {
       expect(boardRoot().style.getPropertyValue('--drag-item-height')).toBe('40px')
       await release(-500, -500)
       expect(apiPatch).not.toHaveBeenCalled()
+      wrapper.unmount()
+    })
+
+    it('a released drop hands the card its target slot at once and keeps neighbours still', async () => {
+      const wrapper = await mountPlaced()
+      let answer!: (value: unknown) => void
+      apiPost.mockReturnValueOnce(new Promise((resolve) => { answer = resolve }))
+
+      // The last card above the first: the move that replayed its neighbours.
+      await pickUp(wrapper, 'Charlie')
+      const at = dropPoint(0, 0)
+      await dragTo(at.x, at.y)
+      await nextTick()
+      expect(wrapper.findAll('.drag-placeholder')).toHaveLength(1)
+      const alphaBefore = card(wrapper, 'Alpha').element.getBoundingClientRect().top
+
+      boardRoot().dispatchEvent(pointer('pointerup', at.x, at.y))
+      await nextTick()
+      await nextTick()
+
+      // The write is still in flight. The overlay and the placeholder are gone,
+      // the card is visible in its target slot, and the neighbour has not moved.
+      expect(apiPost).toHaveBeenCalledTimes(1)
+      expect(document.querySelector('.drag-overlay')).toBeNull()
+      expect(wrapper.findAll('.drag-placeholder')).toHaveLength(0)
+      expect(card(wrapper, 'Charlie').classes()).not.toContain('drag-source')
+      expect(lanes(wrapper)[0]!.get('.task-cards').classes()).toContain('drag-settling')
+      expect(cardTitles(wrapper, 0)).toEqual(['Charlie', 'Alpha', 'Bravo'])
+      expect(card(wrapper, 'Alpha').element.getBoundingClientRect().top).toBe(alphaBefore)
+
+      answer(placed('c', { ...SEQUENCES, backlog: ['c', 'a', 'b'] }))
+      await flushPromises()
+      await nextTick()
+
+      // The acknowledged order is the one already drawn: nothing left to move.
+      expect(lanes(wrapper)[0]!.get('.task-cards').classes()).not.toContain('drag-settling')
+      expect(cardTitles(wrapper, 0)).toEqual(['Charlie', 'Alpha', 'Bravo'])
+      expect(card(wrapper, 'Alpha').element.getBoundingClientRect().top).toBe(alphaBefore)
       wrapper.unmount()
     })
 
@@ -3523,7 +3562,7 @@ describe('TaskBoardView', () => {
       wrapper.unmount()
     })
 
-    it('reorders from the card surface, not only from its grip', async () => {
+    it('reorders from the card surface, not from a status control', async () => {
       const wrapper = await mountPlaced()
       apiPost.mockResolvedValueOnce(placed('c', { ...SEQUENCES, backlog: ['c', 'a', 'b'] }))
 
@@ -3597,7 +3636,7 @@ describe('TaskBoardView', () => {
       await flushPromises()
       expect(document.querySelector('.drag-overlay')).toBeNull()
       const items = await openMenu(wrapper, 'Alpha')
-      expect(items.map((el) => el.textContent)).toEqual(['Move up', 'Move down'])
+      expect(items.map((el) => el.textContent)).toEqual(['Move up', 'Move down', 'Move…'])
       await closeAnyMenu()
 
       // The Done checkbox: same guard, and its own click still completes.
@@ -3634,7 +3673,7 @@ describe('TaskBoardView', () => {
     it('Move up and Move down menu items work and are disabled at the ends', async () => {
       const wrapper = await mountPlaced()
       let items = await openMenu(wrapper, 'Alpha')
-      expect(items.map((el) => el.textContent)).toEqual(['Move up', 'Move down'])
+      expect(items.map((el) => el.textContent)).toEqual(['Move up', 'Move down', 'Move…'])
       expect(byLabel(items, 'Move up').getAttribute('aria-disabled')).toBe('true')
       expect(byLabel(items, 'Move down').getAttribute('aria-disabled')).not.toBe('true')
       await closeAnyMenu()
@@ -3666,203 +3705,336 @@ describe('TaskBoardView', () => {
       wrapper.unmount()
     })
 
-    it('a deferred save failure does not take focus back from the card the user moved to', async () => {
-      const wrapper = await mountPlaced()
-      let fail!: (error: Error) => void
-      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
-      const handle = grip(wrapper, 'Alpha')
-      ;(handle.element as HTMLElement).focus()
-      await handle.trigger('keydown', key(' '))
+    /** Open the card menu and choose Move…, landing on the move dialog. */
+    async function openMoveDialog(wrapper: ReturnType<typeof mount>, title: string) {
+      const items = await openMenu(wrapper, title)
+      byLabel(items, 'Move…').click()
+      await flushPromises()
       await nextTick()
-      await grip(wrapper, 'Alpha').trigger('keydown', key('ArrowDown'))
-      await nextTick()
-      await grip(wrapper, 'Alpha').trigger('keydown', key('Enter'))
+    }
 
-      // While the write is in flight the user moves to another card.
-      const other = card(wrapper, 'Bravo').get('.task-open').element as HTMLElement
+    it('Move… places a card across lanes at a chosen position in one write', async () => {
+      const wrapper = await mountPlaced()
+      apiPatch.mockResolvedValueOnce(
+        placed('a', { ...SEQUENCES, backlog: ['b', 'c'], in_progress: ['a', 'd', 'e'] }, 'in_progress'),
+      )
+
+      await openMoveDialog(wrapper, 'Alpha')
+      expect(wrapper.find('.task-move-sheet').exists()).toBe(true)
+      const lane = wrapper.get<HTMLSelectElement>('#task-move-lane')
+      expect(document.activeElement).toBe(lane.element)
+      expect(lane.element.value).toBe('backlog')
+      await lane.setValue('in_progress')
+      await nextTick()
+
+      const position = wrapper.get<HTMLSelectElement>('#task-move-position')
+      expect([...position.element.options].map((option) => option.textContent))
+        .toEqual(['Top', 'After Delta', 'After Echo'])
+      await position.setValue('0')
+      await wrapper.get('.task-move-sheet form').trigger('submit')
+      await flushPromises()
+      await nextTick()
+
+      expect(apiPatch).toHaveBeenCalledTimes(1)
+      expect(apiPatch).toHaveBeenCalledWith('/api/tasks/a', {
+        workspace: 'personal',
+        expected_revision: REVISION,
+        status: 'in_progress',
+        placement: { before_id: 'd', after_id: null, expected_order_version: 7 },
+      })
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(cardTitles(wrapper, 1)).toEqual(['Alpha', 'Delta', 'Echo'])
+      expect(liveText(wrapper)).toBe('Dropped Alpha at position 1 of 3 in In progress.')
+      expect(wrapper.find('.task-move-sheet').exists()).toBe(false)
+      // The menu action owns focus: it comes back to the card's trigger, now in
+      // its new lane, after the acknowledged order renders.
+      expect(document.activeElement).toBe(card(wrapper, 'Alpha').get('.task-more').element)
+      wrapper.unmount()
+    })
+
+    it('Escape closes Move… without a write and returns focus to its trigger', async () => {
+      const wrapper = await mountPlaced()
+      const trigger = card(wrapper, 'Alpha').get('.task-more').element
+      await openMoveDialog(wrapper, 'Alpha')
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape', bubbles: true, cancelable: true,
+      }))
+      await flushPromises()
+      await nextTick()
+
+      expect(wrapper.find('.task-move-sheet').exists()).toBe(false)
+      expect(apiPatch).not.toHaveBeenCalled()
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(document.activeElement).toBe(trigger)
+      expect(liveText(wrapper)).not.toContain('Dropped')
+      wrapper.unmount()
+    })
+
+    it('a deferred Move… success does not take focus back from another control', async () => {
+      const wrapper = await mountPlaced()
+      let answer!: (value: unknown) => void
+      apiPatch.mockReturnValueOnce(new Promise((resolve) => { answer = resolve }))
+      await openMoveDialog(wrapper, 'Alpha')
+      await wrapper.get<HTMLSelectElement>('#task-move-lane').setValue('in_progress')
+      await nextTick()
+      await wrapper.get('.task-move-sheet form').trigger('submit')
+      await nextTick()
+
+      const other = wrapper.get('.task-new').element as HTMLElement
+      await nextTick()
       other.focus()
       expect(document.activeElement).toBe(other)
+      answer(placed('a', { ...SEQUENCES, backlog: ['b', 'c'], in_progress: ['a', 'd', 'e'] }, 'in_progress'))
+      await flushPromises()
+      await nextTick()
+
+      expect(document.activeElement).toBe(other)
+      expect(cardTitles(wrapper, 1)).toEqual(['Alpha', 'Delta', 'Echo'])
+      expect(document.activeElement).not.toBe(card(wrapper, 'Alpha').get('.task-more').element)
+      wrapper.unmount()
+    })
+
+    it('a deferred Move… failure rolls back and does not take focus from where the user moved', async () => {
+      const wrapper = await mountPlaced()
+      let fail!: (error: Error) => void
+      apiPatch.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+      await openMoveDialog(wrapper, 'Alpha')
+      await wrapper.get<HTMLSelectElement>('#task-move-lane').setValue('in_progress')
+      await nextTick()
+      await wrapper.get('.task-move-sheet form').trigger('submit')
+      await nextTick()
+
+      const other = wrapper.get('.task-new').element as HTMLElement
+      // The dialog's background inert boundary has been restored before a real
+      // user could focus another control.
+      await nextTick()
+      other.focus()
+      expect(document.activeElement).toBe(other)
+      fail(new Error('disk full'))
+      await flushPromises()
+      await nextTick()
+
+      expect(liveText(wrapper)).toBe('Could not save the new order.')
+      expect(cardTitles(wrapper, 1)).toEqual(['Delta', 'Echo'])
+      expect(document.activeElement).toBe(other)
+      expect(document.activeElement).not.toBe(card(wrapper, 'Alpha').get('.task-more').element)
+      wrapper.unmount()
+    })
+
+    it('a deferred Move… failure returns focus to the card trigger when the user stayed', async () => {
+      const wrapper = await mountPlaced()
+      let fail!: (error: Error) => void
+      apiPatch.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+      await openMoveDialog(wrapper, 'Alpha')
+      await wrapper.get<HTMLSelectElement>('#task-move-lane').setValue('in_progress')
+      await nextTick()
+      await wrapper.get('.task-move-sheet form').trigger('submit')
+      await nextTick()
+      const trigger = card(wrapper, 'Alpha').get('.task-more').element
+      await nextTick()
+      expect(document.activeElement).toBe(trigger)
 
       fail(new Error('disk full'))
       await flushPromises()
       await nextTick()
 
       expect(liveText(wrapper)).toBe('Could not save the new order.')
+      expect(cardTitles(wrapper, 1)).toEqual(['Delta', 'Echo'])
+      expect(document.activeElement).toBe(trigger)
+      wrapper.unmount()
+    })
+
+    it('an unmount while Move… is pending focuses and announces nothing afterwards', async () => {
+      const wrapper = await mountPlaced()
+      let answer!: (value: unknown) => void
+      apiPatch.mockReturnValueOnce(new Promise((resolve) => { answer = resolve }))
+      await openMoveDialog(wrapper, 'Alpha')
+      await wrapper.get<HTMLSelectElement>('#task-move-lane').setValue('in_progress')
+      await nextTick()
+      await wrapper.get('.task-move-sheet form').trigger('submit')
+      await nextTick()
+      const live = liveText(wrapper)
+      wrapper.unmount()
+
+      answer(placed('a', { ...SEQUENCES, backlog: ['b', 'c'], in_progress: ['a', 'd', 'e'] }, 'in_progress'))
+      await flushPromises()
+      await nextTick()
+
+      expect(document.activeElement).toBe(document.body)
+      expect(live).not.toContain('Dropped')
+    })
+
+    it('Move… offers collapsed Done and completes with an append, not a placement', async () => {
+      localStorage.removeItem('ciao.tasks.doneShown')
+      const wrapper = await mountPlaced()
+      apiPost.mockResolvedValueOnce(
+        placed('a', { ...SEQUENCES, backlog: ['b', 'c'], done: ['g', 'h', 'a'] }, 'done'),
+      )
+      await openMoveDialog(wrapper, 'Alpha')
+
+      const lane = wrapper.get<HTMLSelectElement>('#task-move-lane')
+      expect([...lane.element.options].map((option) => option.textContent))
+        .toEqual(['To do', 'In progress', 'In review', 'Done'])
+      await lane.setValue('done')
+      await nextTick()
+      const position = wrapper.get<HTMLSelectElement>('#task-move-position')
+      expect([...position.element.options].map((option) => option.textContent))
+        .toEqual(['Appends when completed'])
+      expect(wrapper.get('.task-move-sheet').text()).toContain('appends to Done')
+
+      await wrapper.get('.task-move-sheet form').trigger('submit')
+      await flushPromises()
+      await nextTick()
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(apiPatch).not.toHaveBeenCalled()
+      expect(wrapper.find('.task-resolution-sheet').exists()).toBe(true)
+
+      await wrapper.get('.task-resolution-sheet form').trigger('submit')
+      await flushPromises()
+      expect(apiPost).toHaveBeenCalledTimes(1)
+      expect(apiPost).toHaveBeenCalledWith('/api/tasks/a/complete', {
+        workspace: 'personal', expected_revision: REVISION, resolution: '',
+      })
+      wrapper.unmount()
+    })
+
+    it('Move… into the open Done lane carries the chosen position into the completion', async () => {
+      const wrapper = await mountPlaced()
+      apiPost.mockResolvedValueOnce(
+        placed('a', { ...SEQUENCES, backlog: ['b', 'c'], done: ['g', 'a', 'h'] }, 'done'),
+      )
+      await openMoveDialog(wrapper, 'Alpha')
+      await wrapper.get<HTMLSelectElement>('#task-move-lane').setValue('done')
+      await nextTick()
+      const position = wrapper.get<HTMLSelectElement>('#task-move-position')
+      expect([...position.element.options].map((option) => option.textContent))
+        .toEqual(['Top', 'After Golf', 'After Hotel'])
+      await position.setValue('1')
+
+      await wrapper.get('.task-move-sheet form').trigger('submit')
+      await flushPromises()
+      expect(apiPost).not.toHaveBeenCalled()
+      await wrapper.get('.task-resolution-sheet form').trigger('submit')
+      await flushPromises()
+      expect(apiPost).toHaveBeenCalledWith('/api/tasks/a/complete', {
+        workspace: 'personal',
+        expected_revision: REVISION,
+        resolution: '',
+        placement: { before_id: 'h', after_id: null, expected_order_version: 7 },
+      })
+      wrapper.unmount()
+    })
+
+    it('Move… can place into a lane the status filter has hidden', async () => {
+      const wrapper = await mountPlaced()
+      apiPatch.mockResolvedValueOnce(
+        placed('a', { ...SEQUENCES, backlog: ['b', 'c'], in_progress: ['d', 'a', 'e'] }, 'in_progress'),
+      )
+      await wrapper.findAll('.task-chip').find((chip) => chip.text().startsWith('To do'))!.trigger('click')
+      await nextTick()
+      expect(lanes(wrapper)).toHaveLength(1)
+
+      await openMoveDialog(wrapper, 'Alpha')
+      const lane = wrapper.get<HTMLSelectElement>('#task-move-lane')
+      expect([...lane.element.options].map((option) => option.textContent))
+        .toEqual(['To do', 'In progress', 'In review', 'Done'])
+      await lane.setValue('in_progress')
+      await nextTick()
+      const position = wrapper.get<HTMLSelectElement>('#task-move-position')
+      expect([...position.element.options].map((option) => option.textContent))
+        .toEqual(['Top', 'After Delta', 'After Echo'])
+      await position.setValue('1')
+      await wrapper.get('.task-move-sheet form').trigger('submit')
+      await flushPromises()
+      await nextTick()
+
+      expect(apiPatch).toHaveBeenCalledTimes(1)
+      expect(apiPatch).toHaveBeenCalledWith('/api/tasks/a', {
+        workspace: 'personal',
+        expected_revision: REVISION,
+        status: 'in_progress',
+        placement: { before_id: 'e', after_id: null, expected_order_version: 7 },
+      })
+      // The destination lane is not drawn under the filter, but the announcement
+      // must still name In progress, not fall back to another status.
+      expect(liveText(wrapper)).toBe('Dropped Alpha at position 2 of 3 in In progress.')
+      await wrapper.findAll('.task-chip').find((chip) => chip.text().startsWith('All'))!.trigger('click')
+      await nextTick()
+      expect(cardTitles(wrapper, 1)).toEqual(['Delta', 'Alpha', 'Echo'])
+      wrapper.unmount()
+    })
+
+    it('closes Move… when its task disappears and releases the modal trap', async () => {
+      const wrapper = await mountPlaced()
+      const store = useTaskBoardStore()
+      await openMoveDialog(wrapper, 'Alpha')
+      store.rows = store.rows.filter((row) => row.id !== 'a')
+      await nextTick()
+      await flushPromises()
+
+      expect(wrapper.find('.task-move-sheet').exists()).toBe(false)
+      const other = wrapper.get('.task-new').element as HTMLElement
+      other.focus()
       expect(document.activeElement).toBe(other)
       wrapper.unmount()
     })
 
-    it('a cancelled deferred failure does not restore focus to its card', async () => {
-      const { createMemoryHistory, createRouter } = await import('vue-router')
-      const router = createRouter({
-        history: createMemoryHistory(),
-        routes: [{ path: '/:pathMatch(.*)*', component: { template: '<div />' } }],
-      })
-      await router.push('/tasks')
-      await router.isReady()
-      apiGet.mockImplementation((url: string) =>
-        Promise.resolve(
-          url.includes('/api/tasks?')
-            ? { workspace: 'personal', tasks: PLACED, order: orderPayload() }
-            : {},
-        ),
-      )
-      const wrapper = mount(TaskBoardView, { attachTo: document.body, global: { plugins: [router] } })
-      await flushPromises()
-      await nextTick()
-      layOutBoard()
-
-      let fail!: (error: Error) => void
-      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
-      const handle = grip(wrapper, 'Alpha')
-      ;(handle.element as HTMLElement).focus()
-      await handle.trigger('keydown', key(' '))
-      await nextTick()
-      await grip(wrapper, 'Alpha').trigger('keydown', key('ArrowDown'))
-      await nextTick()
-      await grip(wrapper, 'Alpha').trigger('keydown', key('Enter'))
-
-      // Navigation cancels the drag while the write is still in flight.
-      await router.push('/elsewhere')
-      await nextTick()
-      expect(wrapper.find('.drag-lifted').exists()).toBe(false)
-      ;(document.activeElement as HTMLElement).blur()
-      expect(document.activeElement).toBe(document.body)
-
-      fail(new Error('disk full'))
-      await flushPromises()
-      await nextTick()
-      expect(document.activeElement).toBe(document.body)
-      wrapper.unmount()
-    })
-
-    it('a deferred pointer failure restores the grip after its focused row remounts', async () => {
+    it('closes Move… on a workspace switch and releases the modal trap', async () => {
       const wrapper = await mountPlaced()
-      let fail!: (error: Error) => void
-      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
-
-      const handle = grip(wrapper, 'Alpha').element as HTMLElement
-      handle.focus()
-      await pickUp(wrapper, 'Alpha')
-      const at = dropPoint(0, 1)
-      await dragTo(at.x, at.y)
-      expect(wrapper.findAll('.drag-placeholder')).toHaveLength(1)
-      expect(document.activeElement).toBe(handle)
-
-      // The placeholder re-render replaces the focused grip and focus falls to
-      // the document.
-      const fresh = handle.cloneNode(true) as HTMLElement
-      handle.replaceWith(fresh)
-      expect(handle.isConnected).toBe(false)
-      expect(document.activeElement).toBe(document.body)
-
-      boardRoot().dispatchEvent(pointer('pointerup', at.x, at.y))
-      await flushPromises()
-      fail(new Error('disk full'))
-      await flushPromises()
+      const projects = useProjectStore()
+      await openMoveDialog(wrapper, 'Alpha')
+      projects.activeWorkspace = 'other'
       await nextTick()
+      await flushPromises()
 
-      expect(document.activeElement).toBe(grip(wrapper, 'Alpha').element)
-      expect(document.activeElement).toBe(fresh)
+      expect(wrapper.find('.task-move-sheet').exists()).toBe(false)
+      const other = wrapper.get('.task-new').element as HTMLElement
+      other.focus()
+      expect(document.activeElement).toBe(other)
       wrapper.unmount()
     })
 
-    it('a deferred pointer failure does not restore the grip after navigation', async () => {
-      const { createMemoryHistory, createRouter } = await import('vue-router')
-      const router = createRouter({
-        history: createMemoryHistory(),
-        routes: [{ path: '/:pathMatch(.*)*', component: { template: '<div />' } }],
-      })
-      await router.push('/tasks')
-      await router.isReady()
-      apiGet.mockImplementation((url: string) =>
-        Promise.resolve(
-          url.includes('/api/tasks?')
-            ? { workspace: 'personal', tasks: PLACED, order: orderPayload() }
-            : {},
-        ),
-      )
-      const wrapper = mount(TaskBoardView, { attachTo: document.body, global: { plugins: [router] } })
-      await flushPromises()
-      await nextTick()
-      layOutBoard()
-
-      let fail!: (error: Error) => void
-      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
-      const handle = grip(wrapper, 'Alpha').element as HTMLElement
-      handle.focus()
-      await pickUp(wrapper, 'Alpha')
-      const at = dropPoint(0, 1)
-      await dragTo(at.x, at.y)
-      expect(wrapper.findAll('.drag-placeholder')).toHaveLength(1)
-      const fresh = handle.cloneNode(true) as HTMLElement
-      handle.replaceWith(fresh)
-      expect(handle.isConnected).toBe(false)
-      expect(document.activeElement).toBe(document.body)
-
-      boardRoot().dispatchEvent(pointer('pointerup', at.x, at.y))
-      await flushPromises()
-      await router.push('/elsewhere')
-      await nextTick()
-
-      fail(new Error('disk full'))
-      await flushPromises()
-      await nextTick()
-      expect(document.activeElement).toBe(document.body)
-      expect(document.activeElement).not.toBe(fresh)
-      wrapper.unmount()
-    })
-
-    it('a deferred pointer failure does not restore the grip after focus moved away', async () => {
+    it('does not write a Move… confirmation if the workspace switches before the next tick', async () => {
       const wrapper = await mountPlaced()
-      let fail!: (error: Error) => void
-      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+      const projects = useProjectStore()
+      await openMoveDialog(wrapper, 'Alpha')
+      await wrapper.get<HTMLSelectElement>('#task-move-lane').setValue('in_progress')
+      await nextTick()
 
-      await pickUp(wrapper, 'Charlie')
-      const at = dropPoint(0, 0)
-      await dragTo(at.x, at.y)
-      boardRoot().dispatchEvent(pointer('pointerup', at.x, at.y))
-      await flushPromises()
-      ;(document.activeElement as HTMLElement).blur()
-      expect(document.activeElement).toBe(document.body)
-
-      fail(new Error('disk full'))
+      const pending = wrapper.get('.task-move-sheet form').trigger('submit')
+      projects.activeWorkspace = 'other'
+      await pending
       await flushPromises()
       await nextTick()
-      expect(document.activeElement).toBe(document.body)
+
+      expect(apiPatch).not.toHaveBeenCalled()
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(wrapper.find('.task-move-sheet').exists()).toBe(false)
       wrapper.unmount()
     })
 
-    it('a deferred menu failure does not restore the grip after focus moved away', async () => {
+    it('does not write a Move… confirmation if its task vanishes before the next tick', async () => {
       const wrapper = await mountPlaced()
-      let fail!: (error: Error) => void
-      apiPost.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject }))
+      const store = useTaskBoardStore()
+      await openMoveDialog(wrapper, 'Alpha')
+      await wrapper.get<HTMLSelectElement>('#task-move-lane').setValue('in_progress')
+      await nextTick()
 
-      const items = await openMenu(wrapper, 'Bravo')
-      byLabel(items, 'Move up').click()
-      await flushPromises()
-      // Menu close owns restoration to its trigger; the engine must not move
-      // that focus to the grip when the deferred write fails.
-      await new Promise((resolve) => setTimeout(resolve, 0))
-      const trigger = card(wrapper, 'Bravo').get('.task-more').element as HTMLElement
-      expect(document.activeElement).toBe(trigger)
-
-      fail(new Error('disk full'))
+      const pending = wrapper.get('.task-move-sheet form').trigger('submit')
+      store.rows = store.rows.filter((row) => row.id !== 'a')
+      await pending
       await flushPromises()
       await nextTick()
-      expect(liveText(wrapper)).toBe('Could not save the new order.')
-      expect(document.activeElement).toBe(trigger)
-      expect(document.activeElement).not.toBe(grip(wrapper, 'Bravo').element)
+
+      expect(apiPatch).not.toHaveBeenCalled()
+      expect(apiPost).not.toHaveBeenCalled()
       wrapper.unmount()
     })
 
-    it('save failure shows the error, reloads and keeps focus on the handle', async () => {
+    it('save failure shows the error, reloads and restores the saved order', async () => {
       const wrapper = await mountPlaced()
       apiPost.mockRejectedValueOnce(new Error('disk full'))
       const reads = boardReads()
-      // A real pointer press focuses the grip; the failed write must leave that
-      // focus where it is.
-      ;(grip(wrapper, 'Charlie').element as HTMLElement).focus()
 
       await dragCardTo(wrapper, 'Charlie', 0, 0)
       await nextTick()
@@ -3871,7 +4043,6 @@ describe('TaskBoardView', () => {
       expect(boardReads()).toBe(reads + 1)
       expect(liveText(wrapper)).toBe('Could not save the new order.')
       expect(cardTitles(wrapper, 0)).toEqual(['Alpha', 'Bravo', 'Charlie'])
-      expect(document.activeElement).toBe(grip(wrapper, 'Charlie').element)
       wrapper.unmount()
     })
 
@@ -3913,39 +4084,6 @@ describe('TaskBoardView', () => {
       wrapper.unmount()
     })
 
-    it('keyboard pickup, Arrow, drop commits; Shift+Arrow still moves one lane', async () => {
-      const wrapper = await mountPlaced()
-      apiPost.mockResolvedValueOnce(placed('a', { ...SEQUENCES, backlog: ['b', 'a', 'c'] }))
-      const handle = grip(wrapper, 'Alpha')
-      ;(handle.element as HTMLElement).focus()
-      await handle.trigger('keydown', key(' '))
-      await nextTick()
-      // The row stays visible and is marked picked up; no overlay, no placeholder.
-      expect(card(wrapper, 'Alpha').classes()).toContain('drag-lifted')
-      expect(document.querySelector('.drag-overlay')).toBeNull()
-      await grip(wrapper, 'Alpha').trigger('keydown', key('ArrowDown'))
-      await nextTick()
-      expect(cardTitles(wrapper, 0)).toEqual(['Bravo', 'Alpha', 'Charlie'])
-      expect(apiPost).not.toHaveBeenCalled()
-      await grip(wrapper, 'Alpha').trigger('keydown', key('Enter'))
-      await flushPromises()
-      await nextTick()
-      expect(apiPost).toHaveBeenCalledTimes(1)
-      expect(apiPost).toHaveBeenCalledWith('/api/tasks/a/order', {
-        workspace: 'personal', before_id: 'c', after_id: null, expected_order_version: 7,
-      })
-
-      // Shift+Arrow on the title is the old one-lane move, with no placement.
-      apiPatch.mockResolvedValueOnce(placed('b', { ...SEQUENCES, backlog: ['a', 'c'], in_progress: ['d', 'e', 'b'] }, 'in_progress', 9))
-      await card(wrapper, 'Bravo').get('.task-open').trigger('keydown', key('ArrowRight', { shiftKey: true }))
-      await flushPromises()
-      expect(apiPatch).toHaveBeenCalledTimes(1)
-      expect(apiPatch).toHaveBeenCalledWith('/api/tasks/b', {
-        workspace: 'personal', expected_revision: REVISION, status: 'in_progress',
-      })
-      wrapper.unmount()
-    })
-
     it('reordering a done card does not call complete', async () => {
       const wrapper = await mountPlaced()
       apiPost.mockResolvedValueOnce(placed('h', { ...SEQUENCES, done: ['h', 'g'] }, 'done'))
@@ -3962,45 +4100,13 @@ describe('TaskBoardView', () => {
       wrapper.unmount()
     })
 
-    it('live region announces pickup, move, drop, cancel, failure', async () => {
-      const wrapper = await mountPlaced()
-      apiPost.mockResolvedValueOnce(placed('a', { ...SEQUENCES, backlog: ['b', 'a', 'c'] }))
-      expect(wrapper.find('[role="status"][aria-live="polite"]').exists()).toBe(true)
-
-      await grip(wrapper, 'Alpha').trigger('keydown', key(' '))
-      await nextTick()
-      expect(liveText(wrapper)).toBe('Picked up Alpha, position 1 of 3 in To do.')
-      await grip(wrapper, 'Alpha').trigger('keydown', key('ArrowDown'))
-      expect(liveText(wrapper)).toBe('Alpha, position 2 of 3 in To do.')
-      await grip(wrapper, 'Alpha').trigger('keydown', key('Enter'))
-      await flushPromises()
-      expect(liveText(wrapper)).toBe('Dropped Alpha at position 2 of 3 in To do.')
-
-      await grip(wrapper, 'Alpha').trigger('keydown', key(' '))
-      await nextTick()
-      await grip(wrapper, 'Alpha').trigger('keydown', key('Escape'))
-      await flushPromises()
-      expect(liveText(wrapper)).toBe('Move cancelled. Alpha is back at position 2 of 3 in To do.')
-
-      apiPost.mockRejectedValueOnce(new Error('disk full'))
-      await grip(wrapper, 'Alpha').trigger('keydown', key(' '))
-      await nextTick()
-      await grip(wrapper, 'Alpha').trigger('keydown', key('ArrowUp'))
-      await grip(wrapper, 'Alpha').trigger('keydown', key('Enter'))
-      await flushPromises()
-      expect(liveText(wrapper)).toBe('Could not save the new order.')
-      wrapper.unmount()
-    })
-
     it('shows an unreadable order file as a notice, disables placement, and keeps status moves', async () => {
       const wrapper = await mountPlaced({ order_error: 'Could not read Workspace/task-order.json' })
       const notice = wrapper.get('.task-order-notice')
       expect(notice.text()).toBe('Could not read Workspace/task-order.json')
       expect(notice.classes()).toContain('task-action-error')
 
-      const handle = grip(wrapper, 'Alpha')
-      expect(handle.attributes('disabled')).toBeDefined()
-      expect(handle.attributes('title')).toBe('Could not read Workspace/task-order.json')
+      // The surface press cannot start a move while placement is disabled.
       await pickUp(wrapper, 'Alpha')
       expect(document.querySelector('.drag-overlay')).toBeNull()
 

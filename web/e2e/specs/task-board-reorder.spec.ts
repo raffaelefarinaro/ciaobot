@@ -2,11 +2,13 @@ import { devices, expect, test, type Locator, type Page } from '@playwright/test
 import { boot, isolate, releasePointerInSameTask } from '../support/app'
 
 /**
- * Placing cards on the board: the grip's pointer drag within and across lanes,
- * the order surviving a reload, a narrow scrolled board, the keyboard flow and a
- * touch drag. Geometry, hit testing and pointer capture only exist in a real
- * browser, so the gestures are driven here; the writes are held by a stateful
- * stand-in for the engine's `/api/tasks` routes.
+ * Placing cards on the board: the card surface's pointer drag within and across
+ * lanes, the menu's Move up / Move down and Move… (Column + Position) keyboard and
+ * touch placement, the order surviving a reload, a narrow scrolled board, and
+ * touch scrolling. Geometry, hit testing
+ * and pointer capture only exist in a real browser, so the gestures are driven
+ * here; the writes are held by a stateful stand-in for the engine's
+ * `/api/tasks` routes.
  */
 const NOW = new Date()
 const BASE = {
@@ -30,14 +32,21 @@ const TASKS = [
 
 interface Sent { path: string; body: Record<string, unknown> }
 
+interface Hold {
+  /** Keep a POST /order answer in flight until the test releases it. */
+  order?: Promise<void>
+  /** Keep a cross-lane PATCH answer in flight until the test releases it. */
+  patch?: Promise<void>
+}
+
 /**
  * The engine's task routes, kept in memory so a reload reads what a write left:
  * a list with the order, `POST /order`, and `PATCH` with a placement.
  *
- * `holdOrder` lets a test keep an order write in flight while it moves focus,
- * then release it. It is per call, so no gate survives into another test.
+ * A `hold` lets a test keep one write in flight, then release it. It is per
+ * call, so no gate survives into another test.
  */
-async function serve(page: Page, holdOrder?: Promise<void>): Promise<Sent[]> {
+async function serve(page: Page, hold: Hold = {}): Promise<Sent[]> {
   const rows = TASKS.map(t => ({ ...t }))
   const sequences: Record<Status, string[]> = {
     backlog: rows.filter(t => t.status === 'backlog').map(t => t.id),
@@ -60,7 +69,7 @@ async function serve(page: Page, holdOrder?: Promise<void>): Promise<Sent[]> {
     json: { workspace: 'alpha', tasks: rows, order: order() },
   }))
   await page.route(/\/api\/tasks\/(\d{32})\/order$/, async route => {
-    await holdOrder
+    await hold.order
     const body = route.request().postDataJSON() as Record<string, unknown>
     const id = /tasks\/(\d{32})/.exec(route.request().url())![1]!
     sent.push({ path: `/api/tasks/${id}/order`, body })
@@ -70,6 +79,7 @@ async function serve(page: Page, holdOrder?: Promise<void>): Promise<Sent[]> {
   })
   await page.route(/\/api\/tasks\/(\d{32})$/, async route => {
     if (route.request().method() !== 'PATCH') return route.fallback()
+    await hold.patch
     const body = route.request().postDataJSON() as Record<string, unknown>
     const id = /tasks\/(\d{32})/.exec(route.request().url())![1]!
     sent.push({ path: `/api/tasks/${id}`, body })
@@ -82,9 +92,9 @@ async function serve(page: Page, holdOrder?: Promise<void>): Promise<Sent[]> {
   return sent
 }
 
-async function open(page: Page, id: string, holdOrder?: Promise<void>): Promise<Sent[]> {
+async function open(page: Page, id: string, hold: Hold = {}): Promise<Sent[]> {
   await isolate(page, id)
-  const sent = await serve(page, holdOrder)
+  const sent = await serve(page, hold)
   await boot(page, '/tasks', '.task-card')
   return sent
 }
@@ -92,23 +102,71 @@ async function open(page: Page, id: string, holdOrder?: Promise<void>): Promise<
 const lane = (page: Page, name: string) => page.locator('.task-lanes').getByRole('region', { name, exact: true })
 const titles = (page: Page, name: string) => lane(page, name).locator('.task-card .task-open').allTextContents()
 
-/** Hold the grip, move in steps so the engine activates, and release `dy` below the target's middle. */
-async function dragGrip(page: Page, title: string, target: Locator, dy = 0) {
-  const card = page.locator('.task-card', { hasText: title })
-  await card.hover()
-  const grip = (await card.locator('.drag-grip').boundingBox())!
-  const from = { x: grip.x + grip.width / 2, y: grip.y + grip.height / 2 }
-  await page.mouse.move(from.x, from.y)
+test('repro: settled neighbours remain in place after drop', async ({ page }) => {
+  const sent = await open(page, 'drag-drop-settled')
+  const source = page.locator('.task-card', { hasText: 'Send the invites' }).locator('.task-title')
+  const neighbour = page.locator('.task-card', { hasText: 'Plan the offsite' })
+  const start = (await source.boundingBox())!
+  const target = (await neighbour.boundingBox())!
+  await page.mouse.move(start.x + 4, start.y + start.height / 2)
   await page.mouse.down()
-  await page.mouse.move(from.x, from.y + 12, { steps: 3 })
-  const to = (await target.boundingBox())!
-  await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2 + dy, { steps: 12 })
+  await page.mouse.move(start.x + 4, start.y + start.height / 2 + 12)
+  await page.mouse.move(target.x + target.width / 2, target.y + 8, { steps: 10 })
+  await expect(page.locator('.drag-placeholder')).toHaveCount(1)
+
+  // Wait for the preview to stop moving on its own (the in-drag FLIP), not for a
+  // fixed number of milliseconds. This is the settled state the report saw.
+  await page.evaluate(async () => {
+    const running = () => document.getAnimations().some((a) => a.playState === 'running')
+    while (running()) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  })
+  const before = (await neighbour.boundingBox())!.y
+
+  // Sample the neighbour every frame from the release until well after the
+  // 120 ms move class would have finished. The report measured once at 30 ms;
+  // a replay can also land a frame later, so every frame is checked.
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __drop: { released: number; samples: Array<[number, number]> }
+    }
+    w.__drop = { released: 0, samples: [] }
+    document.addEventListener('pointerup', () => { w.__drop.released = performance.now() }, { capture: true, once: true })
+    const tick = () => {
+      // Look the card up each frame: a remount is still the same neighbour.
+      const card = [...document.querySelectorAll<HTMLElement>('.task-card')]
+        .find((el) => el.textContent?.includes('Plan the offsite'))
+      w.__drop.samples.push([performance.now(), card?.getBoundingClientRect().top ?? Number.NaN])
+      const after = w.__drop.released
+        ? w.__drop.samples.filter(([t]) => t >= w.__drop.released).length
+        : 0
+      if (after < 40) requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+  })
   await page.mouse.up()
-}
+  await page.waitForFunction(() => {
+    const w = window as unknown as { __drop: { released: number; samples: Array<[number, number]> } }
+    return w.__drop.released > 0 &&
+      w.__drop.samples.filter(([t]) => t >= w.__drop.released).length >= 30
+  }, null, { polling: 'raf', timeout: 5_000 })
+
+  const drop = await page.evaluate(() => (window as unknown as {
+    __drop: { released: number; samples: Array<[number, number]> }
+  }).__drop)
+  const afterRelease = drop.samples.filter(([at]) => at >= drop.released)
+  expect(afterRelease.length).toBeGreaterThanOrEqual(30)
+  const farthest = Math.max(...afterRelease.map(([, y]) => Math.abs(y - before)))
+  expect(farthest).toBeLessThan(3)
+
+  // And the move really landed: one write, and the new order on screen.
+  await expect.poll(() => sent.length).toBe(1)
+  await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+  await expect(page.locator('.drag-placeholder')).toHaveCount(0)
+})
 
 /**
- * Press the card's own text (not the grip), move in steps so the engine
- * activates, and release at `point`.
+ * Press the card's own text, move in steps so the engine activates, and release
+ * at `point`.
  */
 async function dragSurfaceTo(page: Page, title: string, point: { x: number; y: number }) {
   const text = page.locator('.task-card', { hasText: title }).locator('.task-title')
@@ -121,6 +179,12 @@ async function dragSurfaceTo(page: Page, title: string, point: { x: number; y: n
   await page.mouse.move(from.x, from.y + 12, { steps: 3 })
   await page.mouse.move(point.x, point.y, { steps: 12 })
   await page.mouse.up()
+}
+
+/** Drag a card by its text and release `dy` below the target's middle. */
+async function dragSurfaceToCard(page: Page, title: string, target: Locator, dy = 0) {
+  const to = (await target.boundingBox())!
+  await dragSurfaceTo(page, title, { x: to.x + to.width / 2, y: to.y + to.height / 2 + dy })
 }
 
 /** The middle of a card, useful as the target of a drag. */
@@ -136,7 +200,7 @@ test.describe('placing cards with the mouse', () => {
     const sent = await open(page, 'task-reorder-within')
     await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
     // Drop the last card on the first one's upper half: it lands first.
-    await dragGrip(page, 'Send the invites', page.locator('.task-card', { hasText: 'Plan the offsite' }), -15)
+    await dragSurfaceToCard(page, 'Send the invites', page.locator('.task-card', { hasText: 'Plan the offsite' }), -15)
     await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
     expect(sent).toHaveLength(1)
     expect(sent[0]!.path).toBe(`/api/tasks/${'3'.repeat(32)}/order`)
@@ -151,7 +215,7 @@ test.describe('placing cards with the mouse', () => {
 
   test('moves a card across lanes in one PATCH with its placement', async ({ page }) => {
     const sent = await open(page, 'task-reorder-across')
-    await dragGrip(page, 'Plan the offsite', page.locator('.task-card', { hasText: 'Draft the agenda' }), -15)
+    await dragSurfaceToCard(page, 'Plan the offsite', page.locator('.task-card', { hasText: 'Draft the agenda' }), -15)
     await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
     expect(sent).toHaveLength(1)
     expect(sent[0]!.body).toMatchObject({
@@ -165,12 +229,11 @@ test.describe('placing cards with the mouse', () => {
     const sent = await open(page, 'task-reorder-fast-seam')
     const source = page.locator('.task-card', { hasText: 'Plan the offsite' })
     const draft = page.locator('.task-card', { hasText: 'Draft the agenda' })
-    await source.hover()
-    const grip = (await source.locator('.drag-grip').boundingBox())!
-    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2)
+    const from = (await source.locator('.task-title').boundingBox())!
+    await page.mouse.move(from.x + 4, from.y + from.height / 2)
     await page.mouse.down()
     // Activate inside To do and stay there: In progress has drawn no placeholder.
-    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 12, { steps: 3 })
+    await page.mouse.move(from.x + 4, from.y + from.height / 2 + 12, { steps: 3 })
     await expect(page.locator('.drag-overlay')).toHaveCount(1)
     await expect(lane(page, 'In progress').locator('.drag-placeholder')).toHaveCount(0)
 
@@ -194,14 +257,195 @@ test.describe('placing cards with the mouse', () => {
     await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
   })
 
+  test('a cross-lane drop holds both lanes still over a delayed order write', async ({ page }) => {
+    let answerPatch!: () => void
+    const patchHeld = new Promise<void>((resolve) => { answerPatch = resolve })
+    const sent = await open(page, 'task-reorder-cross-lane-settled', { patch: patchHeld })
+    const source = page.locator('.task-card', { hasText: 'Plan the offsite' })
+    const destNeighbour = page.locator('.task-card', { hasText: 'Draft the agenda' })
+    const start = (await source.locator('.task-title').boundingBox())!
+    const target = (await destNeighbour.boundingBox())!
+    await page.mouse.move(start.x + 4, start.y + start.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(start.x + 4, start.y + start.height / 2 + 12, { steps: 3 })
+    await page.mouse.move(target.x + target.width / 2, target.y + 8, { steps: 10 })
+    await expect(page.locator('.drag-placeholder')).toHaveCount(1)
+
+    // Let the in-drag move finish, then record both lanes in their previewed
+    // positions. The destination lane makes room; the source lane closes up.
+    await page.evaluate(async () => {
+      const running = () => document.getAnimations().some((a) => a.playState === 'running')
+      while (running()) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    })
+    const before = await page.evaluate(() => {
+      const top = (text: string) => [...document.querySelectorAll<HTMLElement>('.task-card')]
+        .find((el) => el.textContent?.includes(text))?.getBoundingClientRect().top ?? Number.NaN
+      return { source: top('Book the venue'), dest: top('Draft the agenda') }
+    })
+
+    // Sample both lanes every frame from the release, across the late answer.
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __drop: { released: number; samples: Array<[number, number, number]> }
+      }
+      w.__drop = { released: 0, samples: [] }
+      document.addEventListener('pointerup', () => {
+        w.__drop.released = performance.now()
+      }, { capture: true, once: true })
+      const top = (text: string) => [...document.querySelectorAll<HTMLElement>('.task-card')]
+        .find((el) => el.textContent?.includes(text))?.getBoundingClientRect().top ?? Number.NaN
+      const tick = () => {
+        w.__drop.samples.push([performance.now(), top('Book the venue'), top('Draft the agenda')])
+        const after = w.__drop.released
+          ? w.__drop.samples.filter(([t]) => t >= w.__drop.released).length
+          : 0
+        if (after < 40) requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+    await page.mouse.up()
+
+    // Keep the answer in flight while the first frames land, then let it answer
+    // in the middle of the sample. Both halves must be still.
+    await page.waitForFunction(() => {
+      const w = window as unknown as {
+        __drop: { released: number; samples: Array<[number, number, number]> }
+      }
+      return w.__drop.released > 0 &&
+        w.__drop.samples.filter(([t]) => t >= w.__drop.released).length >= 6
+    }, null, { polling: 'raf', timeout: 5_000 })
+    answerPatch()
+    await page.waitForFunction(() => {
+      const w = window as unknown as {
+        __drop: { released: number; samples: Array<[number, number, number]> }
+      }
+      return w.__drop.released > 0 &&
+        w.__drop.samples.filter(([t]) => t >= w.__drop.released).length >= 40
+    }, null, { polling: 'raf', timeout: 5_000 })
+
+    const drop = await page.evaluate(() => (window as unknown as {
+      __drop: { released: number; samples: Array<[number, number, number]> }
+    }).__drop)
+    const afterRelease = drop.samples.filter(([at]) => at >= drop.released)
+    expect(afterRelease.length).toBeGreaterThanOrEqual(40)
+    const sourceDrift = Math.max(...afterRelease.map(([, y]) => Math.abs(y - before.source)))
+    const destDrift = Math.max(...afterRelease.map(([, , y]) => Math.abs(y - before.dest)))
+    expect(sourceDrift).toBeLessThan(3)
+    expect(destDrift).toBeLessThan(3)
+
+    await expect.poll(() => sent.length).toBe(1)
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Send the invites'])
+    await expect(page.locator('.drag-placeholder')).toHaveCount(0)
+  })
+
+  test('a refused cross-lane drop returns the card to its lane', async ({ page }) => {
+    let answer!: () => void
+    const held = new Promise<void>((resolve) => { answer = resolve })
+    await open(page, 'task-reorder-cross-lane-fail')
+    // Answer the held PATCH with the board's refusal instead of the fixture's
+    // success; this route is registered after the fixture's and wins.
+    await page.route(/\/api\/tasks\/(\d{32})$/, async (route) => {
+      if (route.request().method() !== 'PATCH') return route.fallback()
+      await held
+      await route.fulfill({
+        status: 409,
+        json: { workspace: 'alpha', error: { code: 'task_order_conflict', message: 'The board changed.' } },
+      })
+    })
+    await dragSurfaceToCard(page, 'Plan the offsite', page.locator('.task-card', { hasText: 'Draft the agenda' }), -15)
+
+    // The preview slot is already the destination while the write is in flight.
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Send the invites'])
+
+    answer()
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Draft the agenda'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect(page.locator('.task-action-error')).toContainText('The board changed')
+  })
+
+  test('a delayed Move… success keeps focus on the moved card when the user stayed', async ({ page }) => {
+    let answerPatch!: () => void
+    const patchHeld = new Promise<void>((resolve) => { answerPatch = resolve })
+    const sent = await open(page, 'task-move-dialog-delay-success', { patch: patchHeld })
+    const trigger = page.locator('.task-card', { hasText: 'Book the venue' })
+      .getByRole('button', { name: /^Actions for/ })
+    await trigger.click()
+    await page.getByRole('menuitem', { name: 'Move…' }).click()
+    await page.getByLabel('Column').selectOption('in_progress')
+    await page.getByRole('button', { name: 'Move', exact: true }).click()
+    await expect(page.locator('.task-move-sheet')).toHaveCount(0)
+    // The action owns the trigger while the answer is late.
+    await expect(trigger).toBeFocused()
+
+    answerPatch()
+    await expect.poll(() => sent.length).toBe(1)
+    await expect(page.locator('.task-lane[data-lane="in_progress"] .task-card', { hasText: 'Book the venue' })
+      .getByRole('button', { name: /^Actions for/ })).toBeFocused()
+  })
+
+  test('a delayed Move… success does not take focus from a control the user moved to', async ({ page }) => {
+    let answerPatch!: () => void
+    const patchHeld = new Promise<void>((resolve) => { answerPatch = resolve })
+    const sent = await open(page, 'task-move-dialog-delay-focus', { patch: patchHeld })
+    const trigger = page.locator('.task-card', { hasText: 'Book the venue' })
+      .getByRole('button', { name: /^Actions for/ })
+    await trigger.click()
+    await page.getByRole('menuitem', { name: 'Move…' }).click()
+    await page.getByLabel('Column').selectOption('in_progress')
+    await page.getByRole('button', { name: 'Move', exact: true }).click()
+    await expect(page.locator('.task-move-sheet')).toHaveCount(0)
+
+    const other = page.getByRole('button', { name: 'New task' })
+    await other.focus()
+    await expect(other).toBeFocused()
+    answerPatch()
+    await expect.poll(() => sent.length).toBe(1)
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Book the venue', 'Draft the agenda'])
+    await expect(other).toBeFocused()
+    await expect(page.locator('.task-lane[data-lane="in_progress"] .task-card', { hasText: 'Book the venue' })
+      .getByRole('button', { name: /^Actions for/ })).not.toBeFocused()
+  })
+
+  test('a delayed Move… failure rolls back and keeps the user\'s focus', async ({ page }) => {
+    let releasePatch!: () => void
+    const patchHeld = new Promise<void>((resolve) => { releasePatch = resolve })
+    const sent = await open(page, 'task-move-dialog-delay-failure')
+    // Answer the held PATCH with a refusal; registered after the fixture's route.
+    await page.route(/\/api\/tasks\/(\d{32})$/, async (route) => {
+      if (route.request().method() !== 'PATCH') return route.fallback()
+      await patchHeld
+      await route.fulfill({
+        status: 409,
+        json: { workspace: 'alpha', error: { code: 'task_order_conflict', message: 'The board changed.' } },
+      })
+    })
+    const trigger = page.locator('.task-card', { hasText: 'Book the venue' })
+      .getByRole('button', { name: /^Actions for/ })
+    await trigger.click()
+    await page.getByRole('menuitem', { name: 'Move…' }).click()
+    await page.getByLabel('Column').selectOption('in_progress')
+    await page.getByRole('button', { name: 'Move', exact: true }).click()
+    await expect(page.locator('.task-move-sheet')).toHaveCount(0)
+
+    const other = page.getByRole('button', { name: 'New task' })
+    await other.focus()
+    releasePatch()
+    await expect(page.locator('.task-action-error')).toContainText('The board changed')
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Draft the agenda'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Book the venue', 'Send the invites'])
+    await expect(other).toBeFocused()
+    void sent
+  })
+
   test('Escape cancels a drag without a request', async ({ page }) => {
     const sent = await open(page, 'task-reorder-escape')
-    const card = page.locator('.task-card', { hasText: 'Plan the offsite' })
-    await card.hover()
-    const grip = (await card.locator('.drag-grip').boundingBox())!
-    await page.mouse.move(grip.x + 8, grip.y + 8)
+    const text = page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.task-title')
+    const box = (await text.boundingBox())!
+    await page.mouse.move(box.x + 4, box.y + box.height / 2)
     await page.mouse.down()
-    await page.mouse.move(grip.x + 8, grip.y + 60, { steps: 4 })
+    await page.mouse.move(box.x + 4, box.y + box.height / 2 + 60, { steps: 4 })
     await expect(page.locator('.drag-overlay')).toHaveCount(1)
     await page.keyboard.press('Escape')
     await page.mouse.up()
@@ -363,74 +607,80 @@ test.describe('lane drop areas', () => {
   })
 })
 
-test.describe('the grip on a fine pointer', () => {
-  test.use({ viewport: { width: 1440, height: 900 } })
-
-  test('is hidden at rest, shown on hover and focus, and the hovered card is not dimmed', async ({ page }) => {
-    await open(page, 'task-reorder-hover')
-    const card = page.locator('.task-card', { hasText: 'Plan the offsite' })
-    const opacity = (loc: Locator) => loc.evaluate(el => getComputedStyle(el).opacity)
-    await page.mouse.move(0, 0)
-    await expect.poll(() => opacity(card.locator('.drag-grip'))).toBe('0')
-
-    await card.hover()
-    await expect.poll(() => opacity(card.locator('.drag-grip'))).toBe('1')
-    // The card and every ancestor up to the board draw at full strength.
-    const dimmed = await card.evaluate(el => {
-      const out: string[] = []
-      for (let e: Element | null = el; e && !e.classList.contains('task-lanes'); e = e.parentElement) {
-        if (getComputedStyle(e).opacity !== '1') out.push(`${e.className}: ${getComputedStyle(e).opacity}`)
-      }
-      return out
-    })
-    expect(dimmed).toEqual([])
-
-    await page.mouse.move(0, 0)
-    await expect.poll(() => opacity(card.locator('.drag-grip'))).toBe('0')
-    await card.locator('.task-open').focus()
-    await expect.poll(() => opacity(card.locator('.drag-grip'))).toBe('1')
-  })
-})
-
 test.describe('placing cards by keyboard', () => {
   test.use({ viewport: { width: 1440, height: 900 } })
 
-  test('Space picks a card up, the arrows move it, Enter drops it, and Shift+Arrow still changes lane', async ({ page }) => {
-    let releaseOrder!: () => void
-    const orderHeld = new Promise<void>((resolve) => { releaseOrder = resolve })
-    const sent = await open(page, 'task-reorder-keyboard', orderHeld)
-    const grip = page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.drag-grip')
-    await grip.focus()
-    await page.keyboard.press('Space')
-    await expect(page.getByRole('status').filter({ hasText: 'Picked up Plan the offsite' })).toHaveCount(1)
-    await page.keyboard.press('ArrowDown')
-    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Plan the offsite', 'Send the invites'])
+  /** Open the card menu with the keyboard and choose Move… . */
+  async function openMoveDialogByKeyboard(page: Page, title: string) {
+    const trigger = page.locator('.task-card', { hasText: title })
+      .getByRole('button', { name: /^Actions for/ })
+    await trigger.focus()
+    await page.keyboard.press('Enter')
+    const moveItem = page.getByRole('menuitem', { name: 'Move…' })
+    await expect(moveItem).toBeVisible()
+    // Move up, Move down, then Move… are the reorder actions.
+    for (let step = 0; step < 3; step += 1) {
+      if (await moveItem.evaluate((el) => el === document.activeElement)) break
+      await page.keyboard.press('ArrowDown')
+    }
+    await expect(moveItem).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('dialog', { name: `Move ${title}` })).toBeVisible()
+    return trigger
+  }
+
+  test('the Move… dialog places a card across lanes with the keyboard in one write', async ({ page }) => {
+    const sent = await open(page, 'task-move-dialog-keyboard')
+    await openMoveDialogByKeyboard(page, 'Plan the offsite')
+    const lane = page.getByLabel('Column')
+    await expect(lane).toBeFocused()
+    // A native select: choose the option while it holds keyboard focus, then keep
+    // the rest of the flow on the keyboard (Tab to the position list and confirm).
+    await lane.selectOption('in_progress')
+    await expect(lane).toHaveValue('in_progress')
+    await page.keyboard.press('Tab')
+    const position = page.getByLabel('Position')
+    await expect(position).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(page.getByRole('button', { name: 'Move', exact: true })).toBeFocused()
     await page.keyboard.press('Enter')
 
-    // Move to another card while the order write is still in flight. The drop's
-    // deferred focus restoration must not pull focus back to the first grip.
-    const second = page.locator('.task-card', { hasText: 'Send the invites' }).locator('.task-open')
-    try {
-      await second.focus()
-      await expect(second).toBeFocused()
-    } finally {
-      releaseOrder()
-    }
-    // Wait on the board actually adopting the saved order, not on a request
-    // count or on the old grip already holding focus: the preview disappears
-    // only once the write has settled.
-    await expect(page.locator('.drag-lifted')).toHaveCount(0)
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0]!.path).toBe(`/api/tasks/${'1'.repeat(32)}`)
+    expect(sent[0]!.body).toMatchObject({
+      status: 'in_progress',
+      placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
+    })
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Plan the offsite', 'Draft the agenda'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Send the invites'])
+    await expect(page.getByRole('status')
+      .filter({ hasText: 'Dropped Plan the offsite at position 1 of 2 in In progress.' }))
+      .toHaveCount(1)
+    await expect(page.locator('.task-card', { hasText: 'Plan the offsite' })
+      .getByRole('button', { name: /^Actions for/ })).toBeFocused()
+  })
+
+  test('Escape closes the Move… dialog without a write and returns focus to its trigger', async ({ page }) => {
+    const sent = await open(page, 'task-move-dialog-escape')
+    const trigger = await openMoveDialogByKeyboard(page, 'Plan the offsite')
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog', { name: 'Move Plan the offsite' })).toHaveCount(0)
+    await expect(trigger).toBeFocused()
+    expect(sent).toHaveLength(0)
+  })
+
+  test('the card menu reorders with the keyboard and returns focus to its trigger', async ({ page }) => {
+    const sent = await open(page, 'task-reorder-keyboard-menu')
+    const trigger = page.locator('.task-card', { hasText: 'Book the venue' })
+      .getByRole('button', { name: /^Actions for/ })
+    await trigger.focus()
+    await page.keyboard.press('Enter')
+    const moveUp = page.getByRole('menuitem', { name: 'Move up' })
+    await expect(moveUp).toBeFocused()
+    await page.keyboard.press('Enter')
     await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Plan the offsite', 'Send the invites'])
     expect(sent).toHaveLength(1)
-    await expect(second).toBeFocused()
-
-    // The old one-lane move, with no placement.
-    await page.keyboard.press('Shift+ArrowRight')
-    await expect.poll(() => titles(page, 'In progress')).toContain('Send the invites')
-    expect(sent).toHaveLength(2)
-    expect(sent[1]!.path).toBe(`/api/tasks/${'3'.repeat(32)}`)
-    expect(sent[1]!.body).toMatchObject({ status: 'in_progress' })
-    expect(sent[1]!.body).not.toHaveProperty('placement')
+    await expect(trigger).toBeFocused()
   })
 
   test('Move up and Move down in the card menu reorder it', async ({ page }) => {
@@ -447,10 +697,10 @@ test.describe('placing cards by keyboard', () => {
 test.describe('placing cards on a narrow, scrolled board', () => {
   test.use({ viewport: { width: 700, height: 800 } })
 
-  test('drops into a lane that was scrolled into view, with the grip target large enough', async ({ page }) => {
+  test('drops into a lane that was scrolled into view', async ({ page }) => {
     const sent = await open(page, 'task-reorder-narrow')
     await page.locator('.task-lanes').evaluate(el => { el.scrollLeft = 320 })
-    await dragGrip(page, 'Draft the agenda', page.locator('.task-card', { hasText: 'Review the budget' }), -15)
+    await dragSurfaceToCard(page, 'Draft the agenda', page.locator('.task-card', { hasText: 'Review the budget' }), -15)
     await expect.poll(() => titles(page, 'In review')).toEqual(['Draft the agenda', 'Review the budget'])
     expect(sent).toHaveLength(1)
     // The page itself never scrolls sideways.
@@ -495,27 +745,61 @@ test.describe('placing cards by touch', () => {
   const { defaultBrowserType: _ignored, ...iphone } = devices['iPhone 13']
   test.use(iphone)
 
-  test('the grip is a 44px target and a touch drag reorders', async ({ page, context }) => {
+  test('the card menu reorders by touch, at 44px targets', async ({ page }) => {
     const sent = await open(page, 'task-reorder-touch')
-    const card = page.locator('.task-card', { hasText: 'Send the invites' })
-    const grip = card.locator('.drag-grip')
-    const hit = (await grip.boundingBox())!
+    const trigger = page.locator('.task-card', { hasText: 'Book the venue' })
+      .getByRole('button', { name: /^Actions for/ })
+    const hit = (await trigger.boundingBox())!
     expect(hit.width).toBeGreaterThanOrEqual(44)
     expect(hit.height).toBeGreaterThanOrEqual(44)
 
-    const cdp = await context.newCDPSession(page)
-    const box = (await grip.boundingBox())!
-    const target = (await page.locator('.task-card', { hasText: 'Plan the offsite' }).boundingBox())!
-    const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
-    const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', x: number, y: number) =>
-      cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] })
-    await touch('touchStart', start.x, start.y)
-    for (let step = 1; step <= 10; step++) {
-      await touch('touchMove', start.x, start.y + (target.y + 4 - start.y) * (step / 10))
-    }
-    await touch('touchEnd', 0, 0)
+    await trigger.tap()
+    const moveUp = page.getByRole('menuitem', { name: 'Move up' })
+    await expect(moveUp).toBeVisible()
+    const item = (await moveUp.boundingBox())!
+    expect(item.height).toBeGreaterThanOrEqual(44)
+    await moveUp.tap()
+
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Book the venue', 'Plan the offsite', 'Send the invites'])
+    expect(sent).toHaveLength(1)
+  })
+
+  test('the card menu places a card across lanes by touch, at 44px targets', async ({ page }) => {
+    const sent = await open(page, 'task-move-dialog-touch')
+    const trigger = page.locator('.task-card', { hasText: 'Book the venue' })
+      .getByRole('button', { name: /^Actions for/ })
+    const triggerBox = (await trigger.boundingBox())!
+    expect(triggerBox.width).toBeGreaterThanOrEqual(44)
+    expect(triggerBox.height).toBeGreaterThanOrEqual(44)
+    await trigger.tap()
+
+    const moveItem = page.getByRole('menuitem', { name: 'Move…' })
+    await expect(moveItem).toBeVisible()
+    const itemBox = (await moveItem.boundingBox())!
+    expect(itemBox.height).toBeGreaterThanOrEqual(44)
+    await moveItem.tap()
+
+    const lane = page.getByLabel('Column')
+    const laneBox = (await lane.boundingBox())!
+    expect(laneBox.height).toBeGreaterThanOrEqual(44)
+    await lane.selectOption('in_progress')
+    const position = page.getByLabel('Position')
+    const positionBox = (await position.boundingBox())!
+    expect(positionBox.height).toBeGreaterThanOrEqual(44)
+    await position.selectOption('0')
+    const move = page.getByRole('button', { name: 'Move', exact: true })
+    const moveBox = (await move.boundingBox())!
+    expect(moveBox.height).toBeGreaterThanOrEqual(44)
+    await move.tap()
+
     await expect.poll(() => sent.length).toBe(1)
-    await expect.poll(() => titles(page, 'To do')).toEqual(['Send the invites', 'Plan the offsite', 'Book the venue'])
+    expect(sent[0]!.path).toBe(`/api/tasks/${'2'.repeat(32)}`)
+    expect(sent[0]!.body).toMatchObject({
+      status: 'in_progress',
+      placement: { before_id: '4'.repeat(32), after_id: null, expected_order_version: 1 },
+    })
+    await expect.poll(() => titles(page, 'In progress')).toEqual(['Book the venue', 'Draft the agenda'])
+    await expect.poll(() => titles(page, 'To do')).toEqual(['Plan the offsite', 'Send the invites'])
   })
 
   test('a swipe on the card text scrolls the board instead of dragging', async ({ page, context }) => {

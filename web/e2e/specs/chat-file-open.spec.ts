@@ -84,7 +84,7 @@ test('Home loads chat and file code only when the user needs it', async ({ page 
   // bytes without it and this build measures 263,694, so the inbox costs about
   // 6.1 KB. None of it is optional (the bell count must work on every page,
   // and the row view is already a lazy chunk), which leaves roughly 6 KB of
-  // headroom. The shared drag engine (useDragSort, DragGrip) that the sidebar
+  // headroom. The shared drag engine (useDragSort) that the sidebar
   // mounts on every page then took the build from 263,694 to 270,564 (#2079),
   // so the budget moved to 280,000. Raise only with a measurement, not to
   // silence a regression.

@@ -611,6 +611,7 @@
           tag="div"
           name="drag-reorder"
           class="project-list"
+          :class="{ 'drag-settling': projectDrag.settling.value }"
         >
           <!-- One element per entry, never a fragment: TransitionGroup moves
                its direct children, and the placeholder shares that shape. -->
@@ -620,7 +621,6 @@
             :class="project ? {
               'project-group': true,
               'drag-source': projectDrag.isSource(project.project_id),
-              'drag-lifted': projectDrag.isLifted(project.project_id),
             } : 'drag-placeholder'"
             :data-project-id="project?.project_id"
             :aria-hidden="project ? undefined : 'true'"
@@ -637,17 +637,11 @@
                   'is-system': project.is_auto,
                   'drag-over': isDragOverProject(project),
                 }"
-                :data-drag-row="isReorderable(project) ? '' : undefined"
+                v-bind="isReorderable(project) ? projectDrag.surfaceHandlers(project.project_id, PROJECTS_SCOPE) : {}"
                 @dragover.prevent="onProjectDragOver(project)"
                 @drop.prevent="onProjectDrop(project)"
                 @contextmenu.prevent="openProjectMenuAt($event, project)"
               >
-                <DragGrip
-                  v-if="isReorderable(project)"
-                  :id="project.project_id"
-                  :label="`Reorder ${project.name}`"
-                  v-bind="projectDrag.gripHandlers(project.project_id, PROJECTS_SCOPE)"
-                />
                 <button
                   type="button"
                   class="project-icon"
@@ -660,6 +654,7 @@
                   type="button"
                   class="project-name"
                   :data-workspace-color="colorForProject(project.workspace)"
+                  :data-drag-primary="isReorderable(project) ? '' : undefined"
                   v-if="editingProject !== project.project_id"
                   @click="openProject(project.project_id)"
                   title="Open project page"
@@ -734,6 +729,7 @@
                   :collision-padding="8"
                   :position-strategy="'fixed'"
                   :update-position-strategy="'always'"
+                  @close-auto-focus="onProjectMenuCloseAutoFocus"
                 >
                   <DropdownMenuItem as-child>
                     <button @click="startEditProject(project.project_id)">Rename</button>
@@ -742,7 +738,7 @@
                     <DropdownMenuItem as-child :disabled="projectPosition(project.project_id) <= 0">
                       <button
                         :disabled="projectPosition(project.project_id) <= 0"
-                        @click="void projectDrag.move(project.project_id, PROJECTS_SCOPE, 'up')"
+                        @click="moveProjectFromMenu(project, 'up')"
                       >Move up</button>
                     </DropdownMenuItem>
                     <DropdownMenuItem
@@ -751,7 +747,7 @@
                     >
                       <button
                         :disabled="projectPosition(project.project_id) >= reorderableIds.length - 1"
-                        @click="void projectDrag.move(project.project_id, PROJECTS_SCOPE, 'down')"
+                        @click="moveProjectFromMenu(project, 'down')"
                       >Move down</button>
                     </DropdownMenuItem>
                   </template>
@@ -998,8 +994,8 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
-import DragGrip from './DragGrip.vue'
 import { useDragSort, type DragCommit } from '../composables/useDragSort'
+import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
 import ActivityGlyph from './ActivityGlyph.vue'
 import TaskGlyph from './TaskGlyph.vue'
 import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
@@ -1490,6 +1486,7 @@ function contextReference(event: MouseEvent): MenuReference {
 
 function onProjectMenuOpenChange(projectId: string, nextOpen: boolean): void {
   if (nextOpen) {
+    projectMenuAction = false
     projectMenu.value = projectId
     return
   }
@@ -1596,10 +1593,11 @@ function selectChat(chatId: string) {
 }
 
 // ── Drag-to-reorder projects ──────────────────────────────────────────────
-// Projects are sorted by the pointer + keyboard engine (useDragSort) through
-// their grip. General and the auto-managed projects are pinned: no grip, not in
-// the engine's list, rendered first. Chats still move between projects with
-// native HTML drag and drop.
+// Projects are sorted by the pointer engine (useDragSort) through their header
+// surface, with Move up / Move down in the menu as the keyboard and touch path.
+// General and the auto-managed projects are pinned: they cannot start a drag,
+// are not in the engine's list, and render first. Chats still move between
+// projects with native HTML drag and drop.
 const PROJECTS_SCOPE = 'projects'
 const dragChatId = ref<string | null>(null)
 const dragChatProjectId = ref<string | null>(null)
@@ -1626,6 +1624,39 @@ function projectGroupEl(projectId: string): HTMLElement | null {
   const groups = projectListRoot.value?.querySelectorAll<HTMLElement>('[data-project-id]') ?? []
   for (const group of groups) if (group.dataset.projectId === projectId) return group
   return null
+}
+
+function projectActionsTrigger(id: string): HTMLElement | null {
+  return projectGroupEl(id)?.querySelector<HTMLElement>('.project-actions-btn') ?? null
+}
+
+const projectMenuFocus = useMenuFocusReturn()
+/**
+ * True while a Move action owns its own focus return. Reka would otherwise put
+ * focus back on the trigger a tick later, racing the write and stealing focus.
+ */
+let projectMenuAction = false
+
+function onProjectMenuCloseAutoFocus(event: Event): void {
+  // The flag stays set until this menu next opens, so every close-auto-focus a
+  // Move action can produce is prevented, not just the first one.
+  if (projectMenuAction) event.preventDefault()
+}
+
+/**
+ * The project menu's Move up / Move down. The menu closes on the item's click and
+ * focus falls to the document; return it to the row's actions trigger after the
+ * write, unless the user has focused or pressed elsewhere in the meantime.
+ */
+function moveProjectFromMenu(project: ProjectInfo, direction: 'up' | 'down'): void {
+  projectMenuAction = true
+  const action = projectMenuFocus.arm(projectActionsTrigger(project.project_id))
+  void projectDrag.move(project.project_id, PROJECTS_SCOPE, direction).then(async () => {
+    // Let the menu finish closing before deciding where focus is; a move refused
+    // by another in-flight write settles on the same tick as the click.
+    await nextTick()
+    await action.restore(() => projectActionsTrigger(project.project_id))
+  })
 }
 
 async function commitProjectOrder(commit: DragCommit): Promise<boolean> {
@@ -2439,17 +2470,6 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Fine pointers take prototype A's 36px row. The header's controls keep their
    44px boxes (negative margins); only the row's own padding shrinks. */
-/* The grip sits in the row on a coarse pointer; a pinned row has none, so a
-   spacer of the grip's width (and the flex gap after it) keeps its chevron and
-   name aligned with the rows that do. */
-@media (pointer: coarse) {
-  .project-header.is-system::before {
-    content: '';
-    flex: none;
-    width: 20px;
-  }
-}
-
 @media (pointer: fine) {
   .project-header {
     min-height: 36px;
@@ -2479,29 +2499,15 @@ async function confirmDeleteChat(chatId: string) {
   .project-list .chat-item {
     min-height: 36px;
   }
-
-  /* The grip floats over the header's leading edge instead of taking a slot,
-     so an idle name keeps the width it had. It only shows on hover or focus,
-     where it sits beside the chevron's glyph rather than on it. */
-  .project-header {
-    position: relative;
-  }
-
-  .project-header .drag-grip {
-    position: absolute;
-    left: 0;
-    top: 50%;
-    z-index: 1;
-    transform: translateY(-50%);
-  }
 }
 
 /* A chat dragged over a project header draws an accent line where it will land.
-   Project reordering is the grip's (useDragSort): the source group collapses
-   while the overlay stands in for it, and the placeholder holds its height. */
+   Project reordering is useDragSort's: the source group collapses while the
+   overlay stands in for it, and the placeholder holds its height. The group's
+   row gap is cancelled with it, so the rows below already sit where they land. */
 .drag-source {
   height: 0;
-  margin: 0;
+  margin: 0 0 -6px;
   padding: 0;
   border: 0;
   overflow: hidden;
@@ -2512,12 +2518,13 @@ async function confirmDeleteChat(chatId: string) {
   border: 1px dashed var(--border-strong);
   border-radius: 7px;
 }
+/* The commit handoff (useDragSort `settling`): the group takes its target slot
+   as the placeholder leaves, so it vanishes rather than fading (no one-frame
+   gap) and the commit-time FLIP does not replay the move. */
+.drag-placeholder.drag-reorder-leave-active { display: none; }
+.project-list.drag-settling .drag-reorder-move { transition: none; }
 .drag-reorder-move {
   transition: transform 120ms var(--ease);
-}
-.project-group.drag-lifted {
-  outline: 1px solid var(--border-strong);
-  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 38%);
 }
 .project-group.drag-overlay {
   max-height: 60vh;

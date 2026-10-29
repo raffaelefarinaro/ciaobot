@@ -9,7 +9,7 @@ export interface DragSlot {
 
 export type PreviewEntry = { kind: 'item'; id: string } | { kind: 'placeholder' }
 
-export type MoveAnnouncementKind = 'pickup' | 'move' | 'drop' | 'cancel' | 'fail'
+export type MoveAnnouncementKind = 'pickup' | 'drop' | 'cancel' | 'fail'
 
 /** How many slots have their vertical midpoint above `pointerY`, so the result
  * is in `[0, slots.length]`. `slots` are the non-dragged items in layout order,
@@ -45,6 +45,20 @@ export function previewEntries(
   return entries
 }
 
+/** `ids` without the dragged item, with it inserted at `index` (clamped). The
+ * order the view draws once a drop has settled into the card it will keep, so
+ * releasing does not leave a dashed hole or a collapsed row behind. */
+export function settledOrder(
+  ids: readonly string[],
+  draggedId: string,
+  index: number,
+): string[] {
+  const rest = ids.filter((id) => id !== draggedId)
+  const target = Math.min(Math.max(Math.trunc(index) || 0, 0), rest.length)
+  rest.splice(target, 0, draggedId)
+  return rest
+}
+
 /** Signed px/frame for one axis: zero away from the edges of `box` (and
  * outside it), a quadratic ramp inside the `edge` band up to `max`. Negative
  * near `start`, positive near `end`. A band wider than half the box shrinks to
@@ -76,7 +90,6 @@ const ANNOUNCEMENTS: Record<
   (label: string, scope: string, position: number, total: number) => string
 > = {
   pickup: (label, scope, p, t) => `Picked up ${label}, position ${p} of ${t} in ${scope}.`,
-  move: (label, scope, p, t) => `${label}, position ${p} of ${t} in ${scope}.`,
   drop: (label, scope, p, t) => `Dropped ${label} at position ${p} of ${t} in ${scope}.`,
   cancel: (label, scope, p, t) =>
     `Move cancelled. ${label} is back at position ${p} of ${t} in ${scope}.`,

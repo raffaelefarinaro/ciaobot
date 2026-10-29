@@ -917,7 +917,7 @@ describe('ProjectSidebar accessible context menus', () => {
   it('exposes the same menu through the 44px keyboard/touch action trigger', async () => {
     const wrapper = await mountSidebar()
     const trigger = wrapper.get<HTMLButtonElement>('[aria-label="Chat actions"]')
-    trigger.element.focus()
+    ;(trigger.element as HTMLElement).focus()
     await trigger.trigger('click')
     await flushPromises()
 
@@ -1199,15 +1199,13 @@ describe('ProjectSidebar project ordering', () => {
     })
   }
 
-  const grip = (id: string) =>
-    document.body.querySelector<HTMLElement>(`.project-list [data-drag-handle="${id}"]`)!
   const order = () =>
     Array.from(document.body.querySelectorAll<HTMLElement>('.project-list > [data-project-id]'))
       .map(el => el.dataset.projectId)
   const live = () => document.body.querySelector('[role="status"][aria-live="polite"].sr-only')!.textContent
 
-  async function drag(id: string, ys: number[], release = true) {
-    grip(id).dispatchEvent(pointer('pointerdown', 50))
+  async function dragFrom(from: HTMLElement, ys: number[], release = true) {
+    from.dispatchEvent(pointer('pointerdown', 50))
     const list = document.body.querySelector('.project-list')!
     for (const y of ys) {
       list.dispatchEvent(pointer('pointermove', y))
@@ -1216,20 +1214,109 @@ describe('ProjectSidebar project ordering', () => {
     if (release) list.dispatchEvent(pointer('pointerup', ys[ys.length - 1]))
   }
 
+  async function drag(id: string, ys: number[], release = true) {
+    const name = document.body.querySelector<HTMLElement>(
+      `[data-project-id="${id}"] .project-name`,
+    )!
+    await dragFrom(name, ys, release)
+  }
+
   async function setup() {
     const wrapper = await mountSidebar()
     const list = layOut(wrapper)
     return { wrapper, list }
   }
 
-  it('drags a project by its grip and commits one reorder call with expected_order', async () => {
+  it('drags a project by its header surface and commits one reorder call with expected_order', async () => {
     const store = useProjectStore()
     const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
     const { wrapper } = await setup()
-    await drag('p-a', [60, 200])
+    const header = wrapper.get('[data-project-id="p-a"] .project-header')
+    await dragFrom(header.element as HTMLElement, [60, 200])
     await flushPromises()
     expect(reorder).toHaveBeenCalledTimes(1)
     expect(reorder).toHaveBeenCalledWith(['p-b', 'p-c', 'p-a'], ['p-a', 'p-b', 'p-c'])
+    wrapper.unmount()
+  })
+
+  it('drags a project by its header name and commits one reorder call', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper } = await setup()
+    const name = wrapper.get('[data-project-id="p-a"] .project-name')
+    await dragFrom(name.element as HTMLElement, [60, 200])
+    await flushPromises()
+    expect(reorder).toHaveBeenCalledTimes(1)
+    expect(reorder).toHaveBeenCalledWith(['p-b', 'p-c', 'p-a'], ['p-a', 'p-b', 'p-c'])
+    // The press was a drag, not opening the project.
+    expect(wrapper.emitted('chat-selected')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('a short press on the project name is still a click that opens the project', async () => {
+    const { wrapper, list } = await setup()
+    const name = wrapper.get('[data-project-id="p-a"] .project-name')
+    name.element.dispatchEvent(pointer('pointerdown', 50))
+    // Below the engine's threshold: no overlay, and the release ends the press.
+    list.dispatchEvent(pointer('pointermove', 52))
+    await nextTick()
+    expect(document.body.querySelector('.drag-overlay')).toBeNull()
+    list.dispatchEvent(pointer('pointerup', 52))
+    await name.trigger('click')
+    expect(wrapper.emitted('chat-selected')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('General and auto project headers never start a reorder from their name', async () => {
+    const store = useProjectStore()
+    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
+    const { wrapper } = await setup()
+    const name = wrapper.get('[data-project-id="p-gen"] .project-name')
+    expect(name.attributes('data-drag-primary')).toBeUndefined()
+    await dragFrom(name.element as HTMLElement, [60, 200])
+    await flushPromises()
+    expect(reorder).not.toHaveBeenCalled()
+    expect(order()).toEqual(['p-gen', 'p-a', 'p-b', 'p-c'])
+    wrapper.unmount()
+  })
+
+  it('a released project drop shows the group at its target at once, without a gap', async () => {
+    const store = useProjectStore()
+    let answer!: (result: { ok: true }) => void
+    const pending = new Promise<{ ok: true }>((resolve) => { answer = resolve })
+    vi.spyOn(store, 'reorderProjects').mockImplementationOnce((ids) => {
+      // The store applies the new slots before the write answers, as it does.
+      ids.forEach((id, i) => {
+        const project = store.projects.find((p) => p.project_id === id)
+        if (project) project.order = i + 1
+      })
+      return pending
+    })
+    const { wrapper, list } = await setup()
+    const name = wrapper.get('[data-project-id="p-a"] .project-name')
+    await dragFrom(name.element as HTMLElement, [60, 200], false)
+    expect(list.querySelector('.drag-placeholder')).not.toBeNull()
+    expect(list.getAttribute('class')).not.toContain('drag-settling')
+
+    list.dispatchEvent(pointer('pointerup', 200))
+    await nextTick()
+    await nextTick()
+
+    // The write is still in flight: the group owns its slot, the dashed hole is
+    // gone and the list is not allowed to animate a second move.
+    expect(list.getAttribute('class')).toContain('drag-settling')
+    expect(list.querySelector('.drag-placeholder')).toBeNull()
+    expect(document.body.querySelector('.drag-overlay')).toBeNull()
+    expect(wrapper.get('[data-project-id="p-a"]').classes()).not.toContain('drag-source')
+    expect(order()).toEqual(['p-gen', 'p-b', 'p-c', 'p-a'])
+
+    answer({ ok: true })
+    await flushPromises()
+    await nextTick()
+    expect(list.getAttribute('class')).not.toContain('drag-settling')
+    expect(order()).toEqual(['p-gen', 'p-b', 'p-c', 'p-a'])
+    // The pointer never pressed a handle, so focus stays where it was.
+    expect(document.activeElement).toBe(document.body)
     wrapper.unmount()
   })
 
@@ -1243,12 +1330,11 @@ describe('ProjectSidebar project ordering', () => {
     wrapper.unmount()
   })
 
-  it('General and auto projects have no grip and are never displaced; dropping above them clamps to the first reorderable slot', async () => {
+  it('General and auto projects never reorder and are never displaced; dropping above them clamps to the first reorderable slot', async () => {
     const store = useProjectStore()
     const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
     const { wrapper } = await setup()
-    expect(grip('p-gen')).toBeNull()
-    expect(wrapper.get('[data-project-id="p-gen"] .project-header').attributes('data-drag-row')).toBeUndefined()
+    expect(wrapper.get('[data-project-id="p-gen"] .project-name').attributes('data-drag-primary')).toBeUndefined()
     await drag('p-c', [150, 5], false)
     expect(order()[0]).toBe('p-gen')
     document.body.querySelector('.project-list')!.dispatchEvent(pointer('pointerup', 5))
@@ -1307,251 +1393,6 @@ describe('ProjectSidebar project ordering', () => {
     wrapper.unmount()
   })
 
-  it('keyboard pickup, arrow down, drop commits; Escape cancels; focus stays on the grip', async () => {
-    const store = useProjectStore()
-    const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
-    const { wrapper } = await setup()
-    const key = (k: string) => grip('p-a').dispatchEvent(
-      new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }),
-    )
-    grip('p-a').focus()
-    key(' ')
-    await nextTick()
-    key('ArrowDown')
-    await nextTick()
-    expect(order()).toEqual(['p-gen', 'p-b', 'p-a', 'p-c'])
-    expect(wrapper.get('[data-project-id="p-a"]').classes()).toContain('drag-lifted')
-    key('Escape')
-    await flushPromises()
-    expect(order()).toEqual(['p-gen', 'p-a', 'p-b', 'p-c'])
-    expect(reorder).not.toHaveBeenCalled()
-    key('Enter')
-    await nextTick()
-    key('ArrowDown')
-    await nextTick()
-    key(' ')
-    await flushPromises()
-    expect(reorder).toHaveBeenCalledTimes(1)
-    expect(reorder).toHaveBeenCalledWith(['p-b', 'p-a', 'p-c'], ['p-a', 'p-b', 'p-c'])
-    expect(document.activeElement).toBe(grip('p-a'))
-    wrapper.unmount()
-  })
-
-  it('a deferred failed reorder keeps focus on the project the user moved to', async () => {
-    const store = useProjectStore()
-    let answer!: (result: { ok: false; conflict: boolean; message: string }) => void
-    const pending = new Promise<{ ok: false; conflict: boolean; message: string }>((resolve) => {
-      answer = resolve
-    })
-    const reorder = vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
-    const { wrapper } = await setup()
-    const key = (id: string, k: string) => grip(id).dispatchEvent(
-      new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }),
-    )
-    grip('p-a').focus()
-    key('p-a', ' ')
-    await nextTick()
-    key('p-a', 'ArrowDown')
-    await nextTick()
-    key('p-a', 'Enter')
-
-    // While the write is in flight the user moves to another project's grip.
-    grip('p-c').focus()
-    expect(document.activeElement).toBe(grip('p-c'))
-
-    answer({ ok: false, conflict: true, message: 'stale' })
-    await flushPromises()
-    await nextTick()
-
-    expect(reorder).toHaveBeenCalledTimes(1)
-    expect(document.activeElement).toBe(grip('p-c'))
-    expect(live()).toContain('Could not save the project order.')
-    wrapper.unmount()
-  })
-
-  it('a cancelled deferred failure does not restore focus to its project', async () => {
-    const store = useProjectStore()
-    let answer!: (result: { ok: false; conflict: boolean; message: string }) => void
-    const pending = new Promise<{ ok: false; conflict: boolean; message: string }>((resolve) => {
-      answer = resolve
-    })
-    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
-    const { wrapper } = await setup()
-    const key = (id: string, k: string) => grip(id).dispatchEvent(
-      new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }),
-    )
-    grip('p-a').focus()
-    key('p-a', ' ')
-    await nextTick()
-    key('p-a', 'ArrowDown')
-    await nextTick()
-    key('p-a', 'Enter')
-
-    // The order changed elsewhere while the write is in flight.
-    store.projectOrderEpoch += 1
-    await nextTick()
-    ;(document.activeElement as HTMLElement).blur()
-    expect(document.activeElement).toBe(document.body)
-
-    answer({ ok: false, conflict: true, message: 'stale' })
-    await flushPromises()
-    await nextTick()
-    expect(document.activeElement).toBe(document.body)
-    wrapper.unmount()
-  })
-
-  it('a deferred failure does not steal focus from a newer project drag', async () => {
-    const store = useProjectStore()
-    let answer!: (result: { ok: false; conflict: boolean; message: string }) => void
-    const pending = new Promise<{ ok: false; conflict: boolean; message: string }>((resolve) => {
-      answer = resolve
-    })
-    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
-    const { wrapper } = await setup()
-    const key = (id: string, k: string) => grip(id).dispatchEvent(
-      new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }),
-    )
-    grip('p-a').focus()
-    key('p-a', ' ')
-    await nextTick()
-    key('p-a', 'ArrowDown')
-    await nextTick()
-    key('p-a', 'Enter')
-
-    store.projectOrderEpoch += 1
-    await nextTick()
-    ;(document.activeElement as HTMLElement).blur()
-    // A pointer drag on another project is the current interaction.
-    await drag('p-c', [60, 200], false)
-    expect(document.body.querySelector('.drag-overlay')).not.toBeNull()
-    expect(document.activeElement).toBe(document.body)
-
-    answer({ ok: false, conflict: true, message: 'stale' })
-    await flushPromises()
-    await nextTick()
-    expect(document.body.querySelector('.drag-overlay')).not.toBeNull()
-    expect(document.activeElement).toBe(document.body)
-    wrapper.unmount()
-  })
-
-  it('a deferred pointer failure restores the project grip after its focused row remounts', async () => {
-    const store = useProjectStore()
-    let answer!: (result: { ok: false; conflict: boolean; message: string }) => void
-    const pending = new Promise<{ ok: false; conflict: boolean; message: string }>((resolve) => {
-      answer = resolve
-    })
-    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
-    const { wrapper, list } = await setup()
-
-    const handle = grip('p-a')
-    handle.focus()
-    await drag('p-a', [60, 200], false)
-    expect(list.querySelector('.drag-placeholder')).not.toBeNull()
-    expect(document.activeElement).toBe(handle)
-
-    // The placeholder re-render replaces the focused grip and focus falls to
-    // the document.
-    const fresh = handle.cloneNode(true) as HTMLElement
-    handle.replaceWith(fresh)
-    expect(handle.isConnected).toBe(false)
-    expect(document.activeElement).toBe(document.body)
-
-    list.dispatchEvent(pointer('pointerup', 200))
-    await flushPromises()
-    answer({ ok: false, conflict: true, message: 'stale' })
-    await flushPromises()
-    await nextTick()
-
-    expect(document.activeElement).toBe(grip('p-a'))
-    expect(document.activeElement).toBe(fresh)
-    wrapper.unmount()
-  })
-
-  it('a deferred pointer failure does not restore the project grip after navigation', async () => {
-    const store = useProjectStore()
-    let answer!: (result: { ok: false; conflict: boolean; message: string }) => void
-    const pending = new Promise<{ ok: false; conflict: boolean; message: string }>((resolve) => {
-      answer = resolve
-    })
-    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
-    const { wrapper, list } = await setup()
-
-    const handle = grip('p-a')
-    handle.focus()
-    await drag('p-a', [60, 200], false)
-    expect(list.querySelector('.drag-placeholder')).not.toBeNull()
-    const fresh = handle.cloneNode(true) as HTMLElement
-    handle.replaceWith(fresh)
-    expect(handle.isConnected).toBe(false)
-    expect(document.activeElement).toBe(document.body)
-
-    list.dispatchEvent(pointer('pointerup', 200))
-    await flushPromises()
-    store.projectOrderEpoch += 1
-    await nextTick()
-
-    answer({ ok: false, conflict: true, message: 'stale' })
-    await flushPromises()
-    await nextTick()
-    expect(document.activeElement).toBe(document.body)
-    expect(document.activeElement).not.toBe(fresh)
-    wrapper.unmount()
-  })
-
-  it('a deferred pointer failure does not restore the project grip after focus moved away', async () => {
-    const store = useProjectStore()
-    let answer!: (result: { ok: false; conflict: boolean; message: string }) => void
-    const pending = new Promise<{ ok: false; conflict: boolean; message: string }>((resolve) => {
-      answer = resolve
-    })
-    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
-    const { wrapper } = await setup()
-
-    await drag('p-c', [150, 5])
-    await flushPromises()
-    ;(document.activeElement as HTMLElement).blur()
-    expect(document.activeElement).toBe(document.body)
-
-    answer({ ok: false, conflict: true, message: 'stale' })
-    await flushPromises()
-    await nextTick()
-    expect(document.activeElement).toBe(document.body)
-    expect(live()).toContain('Could not save the project order.')
-    wrapper.unmount()
-  })
-
-  it('a deferred menu failure does not restore the project grip after focus moved away', async () => {
-    const store = useProjectStore()
-    let answer!: (result: { ok: false; conflict: boolean; message: string }) => void
-    const pending = new Promise<{ ok: false; conflict: boolean; message: string }>((resolve) => {
-      answer = resolve
-    })
-    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
-    const { wrapper } = await setup()
-    const openMenu = async (id: string) => {
-      wrapper.get(`[data-project-id="${id}"] .project-header`).element.dispatchEvent(
-        new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }),
-      )
-      await flushPromises()
-    }
-    const item = (name: string) =>
-      Array.from(document.body.querySelectorAll<HTMLButtonElement>('[data-reka-menu-content] button'))
-        .find(button => button.textContent?.trim() === name)
-
-    await openMenu('p-b')
-    item('Move up')!.click()
-    await flushPromises()
-    ;(document.activeElement as HTMLElement).blur()
-    expect(document.activeElement).toBe(document.body)
-
-    answer({ ok: false, conflict: true, message: 'stale' })
-    await flushPromises()
-    await nextTick()
-    expect(document.activeElement).toBe(document.body)
-    expect(live()).toContain('Could not save the project order.')
-    wrapper.unmount()
-  })
-
   it('Move up and Move down menu items work and are disabled at the boundaries for reorderable projects, and absent for pinned ones', async () => {
     const store = useProjectStore()
     const reorder = vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: true })
@@ -1584,19 +1425,158 @@ describe('ProjectSidebar project ordering', () => {
     wrapper.unmount()
   })
 
-  it('failed save restores order, announces, and keeps focus', async () => {
+  /** Open the project menu through the row's actions trigger and return it. */
+  async function openActions(wrapper: ReturnType<typeof mount>, id: string) {
+    const trigger = wrapper.get(`[data-project-id="${id}"] .project-actions-btn`)
+    ;(trigger.element as HTMLElement).focus()
+    await trigger.trigger('click')
+    await flushPromises()
+    const item = (name: string) =>
+      Array.from(document.body.querySelectorAll<HTMLButtonElement>('[data-reka-menu-content] button'))
+        .find(b => b.textContent?.trim() === name)!
+    return { trigger, item }
+  }
+
+  it('a deferred menu move returns focus to the project trigger when the user stayed', async () => {
+    const store = useProjectStore()
+    let answer!: (result: { ok: true }) => void
+    const pending = new Promise<{ ok: true }>((resolve) => { answer = resolve })
+    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
+    const { wrapper } = await setup()
+    const { trigger, item } = await openActions(wrapper, 'p-a')
+    item('Move down').click()
+    await flushPromises()
+
+    answer({ ok: true })
+    await flushPromises()
+    await nextTick()
+
+    expect(document.activeElement).toBe(trigger.element)
+    wrapper.unmount()
+  })
+
+  it('a deferred menu success does not take focus from another control', async () => {
+    const store = useProjectStore()
+    let answer!: (result: { ok: true }) => void
+    const pending = new Promise<{ ok: true }>((resolve) => { answer = resolve })
+    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
+    const { wrapper } = await setup()
+    const { item } = await openActions(wrapper, 'p-a')
+    item('Move down').click()
+    await flushPromises()
+
+    const other = wrapper.get('[data-project-id="p-b"] .project-actions-btn').element as HTMLElement
+    other.focus()
+    expect(document.activeElement).toBe(other)
+    answer({ ok: true })
+    await flushPromises()
+    await nextTick()
+
+    expect(document.activeElement).toBe(other)
+    wrapper.unmount()
+  })
+
+  it('a deferred menu failure rolls back, announces, and keeps the user\'s focus', async () => {
+    const store = useProjectStore()
+    let answer!: (result: { ok: false; conflict: false; message: string }) => void
+    const pending = new Promise<{ ok: false; conflict: false; message: string }>((resolve) => {
+      answer = resolve
+    })
+    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
+    vi.spyOn(store, 'pushErrorToast').mockReturnValue({} as ReturnType<typeof store.pushErrorToast>)
+    const { wrapper } = await setup()
+    const { item } = await openActions(wrapper, 'p-a')
+    item('Move down').click()
+    await flushPromises()
+
+    const other = wrapper.get('[data-project-id="p-b"] .project-actions-btn').element as HTMLElement
+    other.focus()
+    answer({ ok: false, conflict: false, message: 'Disk full.' })
+    await flushPromises()
+    await nextTick()
+
+    expect(live()).toBe('Could not save the project order. Disk full.')
+    expect(document.activeElement).toBe(other)
+    wrapper.unmount()
+  })
+
+  it('a press elsewhere during a deferred menu move prevents focus returning', async () => {
+    const store = useProjectStore()
+    let answer!: (result: { ok: true }) => void
+    const pending = new Promise<{ ok: true }>((resolve) => { answer = resolve })
+    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
+    const { wrapper } = await setup()
+    const { trigger, item } = await openActions(wrapper, 'p-a')
+    item('Move down').click()
+    await flushPromises()
+    expect(document.activeElement).not.toBe(trigger.element)
+
+    // A press on a non-focusable part of the list is a deliberate move away even
+    // though the browser leaves focus where it was.
+    document.body.querySelector('.project-list')!.dispatchEvent(
+      new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+    )
+    answer({ ok: true })
+    await flushPromises()
+    await nextTick()
+
+    expect(document.activeElement).not.toBe(trigger.element)
+    wrapper.unmount()
+  })
+
+  it('an unmount while a menu move is pending focuses nothing afterwards', async () => {
+    const store = useProjectStore()
+    let answer!: (result: { ok: true }) => void
+    const pending = new Promise<{ ok: true }>((resolve) => { answer = resolve })
+    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
+    const { wrapper } = await setup()
+    const { trigger, item } = await openActions(wrapper, 'p-a')
+    item('Move down').click()
+    await flushPromises()
+    wrapper.unmount()
+
+    answer({ ok: true })
+    await flushPromises()
+    await nextTick()
+
+    expect(document.activeElement).toBe(document.body)
+    expect(trigger.element.isConnected).toBe(false)
+  })
+
+  it('an earlier project move cannot reclaim focus after a later action', async () => {
+    const store = useProjectStore()
+    let answer!: (result: { ok: true }) => void
+    const pending = new Promise<{ ok: true }>((resolve) => { answer = resolve })
+    vi.spyOn(store, 'reorderProjects').mockReturnValueOnce(pending)
+    const { wrapper } = await setup()
+
+    const first = await openActions(wrapper, 'p-a')
+    const firstTrigger = first.trigger.element
+    first.item('Move down').click()
+    await flushPromises()
+    // A second action supersedes the first's focus watch. Its own move is refused
+    // while the first write is in flight, but the first must not later pull focus.
+    const second = await openActions(wrapper, 'p-b')
+    second.item('Move up').click()
+    await flushPromises()
+
+    answer({ ok: true })
+    await flushPromises()
+    await nextTick()
+    expect(document.activeElement).not.toBe(firstTrigger)
+    wrapper.unmount()
+  })
+
+  it('a failed save restores the order and announces it', async () => {
     const store = useProjectStore()
     vi.spyOn(store, 'reorderProjects').mockResolvedValue({ ok: false, conflict: false, message: 'Disk full.' })
     const toast = vi.spyOn(store, 'pushErrorToast').mockReturnValue({} as ReturnType<typeof store.pushErrorToast>)
     const { wrapper } = await setup()
-    // A real pointer press focuses the grip; a failed write leaves it there.
-    grip('p-a').focus()
     await drag('p-a', [60, 200])
     await flushPromises()
     expect(order()).toEqual(['p-gen', 'p-a', 'p-b', 'p-c'])
     expect(live()).toBe('Could not save the project order. Disk full.')
     expect(toast).toHaveBeenCalledWith('Could not save the project order', 'Disk full.')
-    expect(document.activeElement).toBe(grip('p-a'))
     wrapper.unmount()
   })
 
