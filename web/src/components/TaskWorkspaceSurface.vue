@@ -9,9 +9,10 @@
  *
  * Four fixed columns — To do, In progress, In review, Done — side by side at every
  * width. A narrow pane scrolls them sideways inside the board; the page itself does
- * not scroll sideways. A card is placed by its grip (`useDragSort`: pointer, touch and
- * Space/Enter pickup with the arrow keys), by Move up / Move down in its menu, or moved
- * one lane over with Shift+←/→ while its title has focus, at any width. A drop writes
+ * not scroll sideways. A card is placed by dragging its own surface (`useDragSort`),
+ * by Move up / Move down or Move… in its menu, or moved one lane over with Shift+←/→
+ * while its title has focus, at any width. Move… is the keyboard and touch path to a
+ * cross-lane positional move: a column and a landing row, in one write. A drop writes
  * once: a same-lane move is a reorder, a cross-lane move one status change with its
  * placement, and a drop on Done opens the resolution sheet and writes nothing until it
  * is confirmed. The editor's status control stays the path for a plain status change: a
@@ -50,9 +51,9 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, 
 import { routeLocationKey, routerKey } from 'vue-router'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
-import DragGrip from './DragGrip.vue'
 import { useDragSort, type DragCommit, type DragScope } from '../composables/useDragSort'
 import { canStep, placementAnchors, type PlacementAnchors } from '../lib/taskOrder'
+import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
 import { useTaskBoardStore, type TaskChanges } from '../stores/taskBoard'
@@ -449,10 +450,10 @@ async function moveTo(task: Task, next: TaskStatus, anchors?: PlacementAnchors |
 
 // ── Placing a card ────────────────────────────────────────────────────────
 //
-// One engine (`useDragSort`) serves the grip's pointer and keyboard drags and the
-// menu's Move up / Move down. Each drawn lane is a scope; with Done collapsed its
-// tab is one more, append-only. A gesture ends in `commitDrag`: one write, which
-// the store serialises and rolls back, never a local reorder.
+// One engine (`useDragSort`) serves the pointer drag and the menu's Move up / Move
+// down / Move… actions. Each drawn lane is a scope; with Done collapsed its tab is
+// one more, append-only. A gesture ends in `commitDrag`: one write, which the store
+// serialises and rolls back, never a local reorder.
 
 /** The collapsed Done tab's scope, where a drop completes the card and appends. It shares the
  *  id of the Done lane, which is never drawn at the same time. */
@@ -474,8 +475,17 @@ function setLaneEl(status: string, el: unknown): void {
 
 const taskById = computed(() => new Map(tasks.value.map((task) => [task.id, task])))
 
+/**
+ * The ordered ids of a status. A rendered lane uses its drawn order; a destination
+ * hidden by the status filter still gets its full filtered list, so the menu
+ * placement's index and the commit anchors are read from the same rows. Done is
+ * append-only when it is not drawn, so its positions are unused there.
+ */
 function laneIds(status: string): string[] {
-  return lanes.value.find((lane) => lane.status === status)?.tasks.map((task) => task.id) ?? []
+  const drawn = lanes.value.find((lane) => lane.status === status)
+  if (drawn) return drawn.tasks.map((task) => task.id)
+  return taskLanes(filtered.value, { status: status as TaskStatus, order: board.order })
+    .find((lane) => lane.status === status)?.tasks.map((task) => task.id) ?? []
 }
 
 function dragScopes(): DragScope[] {
@@ -528,9 +538,11 @@ const drag = useDragSort({
   itemEl: (id) => lanesEl.value?.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"]`) ?? null,
   canDrag: () => !board.saving && !board.orderError && !resolutionOpen.value && !busyTaskId.value,
   label: (id) => taskById.value.get(id)?.title ?? 'task',
-  scopeLabel: (scope) => lanes.value.find((lane) => lane.status === scope)?.label ?? 'Done',
+  // Labels come from the fixed status options, not the drawn lanes: a menu
+  // placement can target a lane the status filter has hidden, and the live
+  // announcement must name that destination.
+  scopeLabel: (scope) => TASK_STATUS_OPTIONS.find((option) => option.status === scope)?.label ?? scope,
   onCommit: commitDrag,
-  get horizontalScopes() { return columnsShown.value },
 })
 
 const liveMessage = computed(() => placementMessage.value || drag.announcement.value)
@@ -551,13 +563,199 @@ function stepDisabled(task: Task, direction: -1 | 1): boolean {
   return Boolean(board.orderError) || board.saving || !canStep(laneIds(task.status), task.id, direction)
 }
 
+/**
+ * The card's actions trigger: the row's menu opener and the place a menu action
+ * returns focus to. A cross-lane write remounts it in another lane, and the old
+ * row can still be leaving, so prefer the acknowledged lane and fall back to the
+ * only row when the write failed and nothing moved.
+ */
+function cardActionsTrigger(id: string, lane?: string): HTMLElement | null {
+  if (lane) {
+    const scoped = lanesEl.value?.querySelector<HTMLElement>(
+      `.task-lane[data-lane="${CSS.escape(lane)}"] [data-task-id="${CSS.escape(id)}"] .task-more`,
+    )
+    if (scoped) return scoped
+  }
+  return lanesEl.value?.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"] .task-more`) ?? null
+}
+
+const menuFocus = useMenuFocusReturn()
+/**
+ * True while an action that owns its own focus return closes the card menu.
+ * Reka would otherwise put focus back on the trigger a tick later, racing the
+ * action's write and stealing focus from wherever the user has moved.
+ */
+let cardMenuAction = false
+
+function onCardMenuOpen(nextOpen: boolean): void {
+  // A fresh menu is a fresh focus contract; the previous Move action is done.
+  if (nextOpen) cardMenuAction = false
+}
+
+function onCardMenuCloseAutoFocus(event: Event): void {
+  if (cardMenuAction) event.preventDefault()
+}
+
+/**
+ * The card menu's Move up / Move down. The menu closes on the item's click and
+ * focus falls to the document; return it to the card's actions trigger after
+ * the write, unless the user has focused or pressed elsewhere in the meantime.
+ */
 function stepTask(task: Task, direction: 'up' | 'down'): void {
-  void drag.move(task.id, task.status, direction)
+  cardMenuAction = true
+  const action = menuFocus.arm(cardActionsTrigger(task.id))
+  void drag.move(task.id, task.status, direction).then(async () => {
+    // Let the menu finish closing before deciding where focus is; a refused
+    // move can settle on the same tick as the click that asked for it.
+    await nextTick()
+    await action.restore(() => cardActionsTrigger(task.id))
+  })
+}
+
+/**
+ * The card menu's Move… action: a dialog for a cross-lane positional move. It is
+ * the keyboard and touch path to the placement a pointer drag makes, in one
+ * write, and it keeps the menu's focus contract on close.
+ */
+const moveOpen = ref(false)
+const moveEl = ref<HTMLElement | null>(null)
+const moveLaneField = ref<HTMLSelectElement | null>(null)
+const moveTaskId = ref<string | null>(null)
+/** The dialog's continuation is void once the dialog, task or workspace moves. */
+let moveAlive = true
+let moveConfirmEpoch = 0
+function invalidateMoveConfirm(): void {
+  moveConfirmEpoch += 1
+}
+const moveLane = ref('')
+const movePosition = ref(0)
+const moveTask = computed(() =>
+  moveTaskId.value ? (taskById.value.get(moveTaskId.value) ?? null) : null,
+)
+const moveLanes = computed(() =>
+  TASK_STATUS_OPTIONS.map(({ status, label }) => ({ status, label })),
+)
+/** Insertion points in the chosen lane, expressed as the rows they follow. */
+/** Done not drawn (collapsed or filtered away) appends when the completion is confirmed. */
+const moveDoneAppends = computed(
+  () => moveLane.value === 'done' && !boardLanes.value.some((lane) => lane.status === 'done'),
+)
+const movePositions = computed<Array<{ index: number; label: string }>>(() => {
+  const task = moveTask.value
+  if (!task || !moveLane.value) return []
+  if (moveDoneAppends.value) return [{ index: 0, label: 'Appends when completed' }]
+  const others = laneIds(moveLane.value).filter((id) => id !== task.id)
+  return [
+    { index: 0, label: 'Top' },
+    ...others.map((id, i) => ({
+      index: i + 1,
+      label: `After ${taskById.value.get(id)?.title ?? 'task'}`,
+    })),
+  ]
+})
+
+function moveDisabled(task: Task): boolean {
+  return Boolean(orderNotice.value) || board.saving || resolutionOpen.value || busyTaskId.value === task.id
+}
+
+/**
+ * Close the sheet without moving focus when the row or workspace it describes is
+ * gone. `useModalFocus` then releases its focus trap and inert boundary; keeping
+ * `moveOpen` true over a v-if-unmounted sheet would leave both armed.
+ */
+function resetMove(): void {
+  if (!moveOpen.value) return
+  invalidateMoveConfirm()
+  moveOpen.value = false
+  moveTaskId.value = null
+}
+
+watch(moveTask, (task) => {
+  if (!task && moveOpen.value) resetMove()
+})
+watch(workspace, () => {
+  if (moveOpen.value) resetMove()
+})
+
+/** Suppress the lane watcher while openMove seeds the card's current position. */
+let seedingMoveLane = false
+watch(moveLane, () => {
+  if (!moveOpen.value || seedingMoveLane) return
+  // A different column has a different set of landing rows; start at its top.
+  movePosition.value = 0
+})
+
+useModalFocus(moveEl, moveOpen, {
+  initialFocus: moveLaneField,
+  onEscape: () => { void closeMove() },
+  restoreFocus: false,
+})
+
+function openMove(task: Task): void {
+  cardMenuAction = true
+  invalidateMoveConfirm()
+  moveTaskId.value = task.id
+  seedingMoveLane = true
+  moveLane.value = task.status
+  movePosition.value = Math.max(0, laneIds(task.status).indexOf(task.id))
+  moveOpen.value = true
+  void nextTick(() => { seedingMoveLane = false })
+}
+
+/**
+ * Close the sheet and give focus back to the card's actions trigger.
+ *
+ * The board sits behind the modal's inert boundary until `useModalFocus`'s close
+ * watcher runs; an inert subtree cannot take focus, so the return waits for that
+ * next tick rather than focusing into a dead element. The watch is armed first,
+ * so a focus or press the user makes during that tick wins over the return.
+ */
+async function closeMove(): Promise<void> {
+  if (!moveOpen.value) return
+  const trigger = cardActionsTrigger(moveTaskId.value ?? '')
+  const action = menuFocus.arm(trigger)
+  moveOpen.value = false
+  await action.restore(() => trigger)
+}
+
+async function confirmMove(): Promise<void> {
+  const task = moveTask.value
+  if (!task || !moveOpen.value) return
+  const lane = moveLane.value
+  const index = movePosition.value
+  const trigger = cardActionsTrigger(task.id)
+  const workspaceAtConfirm = workspace.value
+  const epoch = ++moveConfirmEpoch
+  // Arm before closing: the close's next tick and the write are both watched,
+  // and a press or focus elsewhere in either window is the user's choice.
+  const action = menuFocus.arm(trigger)
+  moveOpen.value = false
+  await nextTick()
+  // The board or the task may have changed under the confirmation in that tick.
+  // Never dispatch a placement against a different workspace or a vanished task.
+  if (
+    !moveAlive
+    || epoch !== moveConfirmEpoch
+    || workspace.value !== workspaceAtConfirm
+    || moveTask.value?.id !== task.id
+  ) {
+    action.cancel()
+    return
+  }
+  if (!action.departed()) trigger?.focus()
+  void drag.place(task.id, task.status, lane, index).then(() =>
+    action.restore(() => cardActionsTrigger(task.id, lane)),
+  )
 }
 
 // A drag is a preview of the list it was started on; when that list changes under
-// it, or the user leaves, it ends without a write.
-onBeforeUnmount(() => drag.cancel())
+// it, or the user leaves, it ends without a write. A confirmed Move… dialog must
+// not write after its surface is gone either.
+onBeforeUnmount(() => {
+  moveAlive = false
+  invalidateMoveConfirm()
+  drag.cancel()
+})
 watch([() => board.remoteChangeEpoch, () => taskSignals.tasks], () => {
   if (!drag.drag.value || placing) return
   drag.cancel()
@@ -2727,7 +2925,7 @@ defineExpose({ requestClose })
           </section>
 
           <!-- The order file could not be read: cards keep their status moves but
-               cannot be placed, and the grips and Move up / Move down say why. -->
+               cannot be placed, and the menu's Move actions say why. -->
           <p v-if="orderNotice" class="task-action-error task-order-notice" role="status">{{ orderNotice }}</p>
 
           <!-- 4 · a filter hides a non-empty set. -->
@@ -2788,7 +2986,13 @@ defineExpose({ requestClose })
                    The card is also its own drag surface: the engine ignores a press
                    that starts on a link, button or field, so only the card's text and
                    padding pick it up. -->
-              <TransitionGroup v-else tag="ul" name="drag-reorder" class="task-cards">
+              <TransitionGroup
+                v-else
+                tag="ul"
+                name="drag-reorder"
+                class="task-cards"
+                :class="{ 'drag-settling': drag.settling.value }"
+              >
                 <li
                   v-for="{ task } in laneEntries(lane.status)"
                   :key="task?.id ?? 'drag-placeholder'"
@@ -2796,10 +3000,8 @@ defineExpose({ requestClose })
                     'task-card': true,
                     'task-card--done': task.status === 'done',
                     'drag-source': drag.isSource(task.id),
-                    'drag-lifted': drag.isLifted(task.id),
                   } : 'drag-placeholder'"
                   :data-task-id="task?.id"
-                  :data-drag-row="task ? '' : undefined"
                   :aria-hidden="task ? undefined : 'true'"
                   v-bind="task ? drag.surfaceHandlers(task.id, task.status) : {}"
                   @click="task && openDetail(task)"
@@ -2849,15 +3051,10 @@ defineExpose({ requestClose })
                       @keydown="onCardKeydown(task, $event)"
                     >{{ task.title }}</button>
                     <!-- The run-managing gestures live in a menu, so the card never
-                         sets Stop or Detach beside the way to open its chat. -->
-                    <DragGrip
-                      :id="task.id"
-                      :label="`Reorder ${task.title}`"
-                      :disabled="Boolean(orderNotice)"
-                      :title="orderNotice || undefined"
-                      v-bind="drag.gripHandlers(task.id, task.status)"
-                    />
-                    <DropdownMenuRoot :modal="false">
+                         sets Stop or Detach beside the way to open its chat. The menu's
+                         Move up / Move down are also the keyboard and touch reorder
+                         path: there is no drag handle. -->
+                    <DropdownMenuRoot :modal="false" @update:open="onCardMenuOpen">
                       <DropdownMenuTrigger as-child>
                         <button
                           type="button"
@@ -2874,6 +3071,7 @@ defineExpose({ requestClose })
                           :side-offset="4"
                           :collision-padding="8"
                           position-strategy="fixed"
+                          @close-auto-focus="onCardMenuCloseAutoFocus"
                         >
                           <DropdownMenuItem v-if="task.chat_id" as-child>
                             <button type="button" :disabled="busyTaskId === task.id" @click.stop="openAttemptChat(task)">Open chat</button>
@@ -2911,6 +3109,15 @@ defineExpose({ requestClose })
                               :title="orderNotice || undefined"
                               @click.stop="stepTask(task, 'down')"
                             >Move down</button>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem as-child :disabled="moveDisabled(task)">
+                            <button
+                              type="button"
+                              :disabled="moveDisabled(task)"
+                              :aria-disabled="moveDisabled(task)"
+                              :title="orderNotice || undefined"
+                              @click.stop="openMove(task)"
+                            >Move…</button>
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenuPortal>
@@ -3628,6 +3835,46 @@ defineExpose({ requestClose })
       </div>
     </div>
 
+    <!-- Move sheet: choose a column and the row to land after. One write carries
+         the status and the placement, and Escape closes without one. -->
+    <div v-if="moveOpen && moveTask" class="modal-backdrop" @click.self="closeMove">
+      <div
+        ref="moveEl"
+        class="modal-sheet task-sheet task-move-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-move-title"
+      >
+        <header class="task-sheet-head">
+          <h3 id="task-move-title">Move {{ moveTask.title }}</h3>
+          <button type="button" class="btn-icon" aria-label="Close" @click="closeMove">×</button>
+        </header>
+        <form class="task-form" novalidate @submit.prevent="confirmMove">
+          <div class="form-group">
+            <label for="task-move-lane">Column</label>
+            <select id="task-move-lane" ref="moveLaneField" v-model="moveLane">
+              <option v-for="lane in moveLanes" :key="lane.status" :value="lane.status">{{ lane.label }}</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="task-move-position">Position</label>
+            <select id="task-move-position" v-model.number="movePosition">
+              <option v-for="position in movePositions" :key="position.index" :value="position.index">{{ position.label }}</option>
+            </select>
+            <p v-if="moveLane === 'done'" class="hint" role="note">
+              {{ moveDoneAppends
+                ? 'This opens the completion sheet; the completed card appends to Done.'
+                : 'This opens the completion sheet; the chosen position is saved with the confirmation.' }}
+            </p>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary">Move</button>
+            <button type="button" class="btn-small" @click="closeMove">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- Resolution sheet: one completion action, with an optional note. Cancel posts nothing. -->
     <div v-if="resolutionOpen && resolutionTask" class="modal-backdrop" @click.self="closeResolution">
       <div
@@ -4006,23 +4253,13 @@ defineExpose({ requestClose })
   --task-check-center: 8px;
 }
 .task-card:hover { border-color: var(--border-strong); }
-/* The grip sits in the head before the actions menu. It lines up with the title's
-   first line; on touch its box is the full 44px target, drawn over the title's end
-   so the head's width is the same as with a small one. */
-.task-card .drag-grip { margin-top: 8px; }
-@media (pointer: coarse) {
-  .task-card .drag-grip {
-    width: var(--touch);
-    height: var(--touch);
-    margin: 0 0 0 calc(20px - var(--touch));
-  }
-  .task-card .drag-grip::after { display: none; }
-}
 /* The picked-up card: the engine collapses it while its overlay stands in, and
-   the placeholder holds the drop position at the card's height. */
+   the placeholder holds the drop position at the card's height. Its following
+   row gap is cancelled too, so the cards below it already sit where they will
+   land and a drop does not close a gap. */
 .task-card.drag-source {
   height: 0;
-  margin: 0;
+  margin: 0 0 calc(-1 * var(--space-2));
   padding: 0;
   border: 0;
   overflow: hidden;
@@ -4033,12 +4270,13 @@ defineExpose({ requestClose })
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
 }
+/* Releasing a drop hands the placeholder's slot to the real card in the same
+   render (useDragSort `settling`): it vanishes rather than fading, so its
+   one-frame leave never opens a gap, and the commit-time FLIP does not replay
+   the move the card already made. */
+.drag-placeholder.drag-reorder-leave-active { display: none; }
+.task-cards.drag-settling .drag-reorder-move { transition: none; }
 .drag-reorder-move { transition: transform 120ms var(--ease); }
-/* A card picked up by keyboard stays in place, outlined and lifted like an open menu. */
-.task-card.drag-lifted {
-  outline: 1px solid var(--border-strong);
-  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 38%);
-}
 /* The overlay is a clone of the card in <body>; the engine styles its position. */
 .task-card.drag-overlay { cursor: grabbing; }
 @media (prefers-reduced-motion: reduce) {
@@ -4355,6 +4593,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 
 /* ── Dialogs ───────────────────────────────────────────────────────────── */
 .task-sheet { padding: 0; }
+.task-move-sheet { max-width: 28rem; }
 .task-form textarea {
   width: 100%;
   min-width: 0;
@@ -4663,7 +4902,9 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   .task-resolution .task-chip,
   .task-resolution-sheet .btn-primary,
   .task-resolution-sheet .btn-small,
-  .task-resolution-sheet .task-chip { min-height: var(--touch); }
+  .task-resolution-sheet .task-chip,
+  .task-move-sheet .btn-primary,
+  .task-move-sheet .btn-small { min-height: var(--touch); }
 }
 /* ── Task editor ─────────────────────────────────────────────────────────
    Nearly the whole window. The main column carries the title, description,

@@ -1,6 +1,6 @@
-// Shared pointer + keyboard drag-sort engine. One engine serves the task lanes
-// (several scopes side by side) and single-scope lists such as the project
-// sidebar. It persists nothing: `onCommit` is a callback.
+// Shared pointer drag-sort engine. One engine serves the task lanes (several
+// scopes side by side) and single-scope lists such as the project sidebar. It
+// persists nothing: `onCommit` is a callback.
 //
 // Rendering contract for the views that use it:
 // - Render `entriesFor(scopeId)` instead of the raw list. An `item` entry is the
@@ -9,12 +9,8 @@
 // - In a pointer drag the source row stays mounted. While `isSource(id)` is
 //   true it carries the class `drag-source`, which collapses it (`height: 0;
 //   margin: 0; padding: 0; border: 0; overflow: hidden; opacity: 0`) but keeps
-//   it in the DOM; the overlay stands in for it.
-// - In a keyboard drag there is no overlay and no placeholder: the row itself
-//   stays visible and `entriesFor` moves it to its preview position (and
-//   between scopes). `isSource` is false then; `isLifted(id)` is true instead.
-//   Views style the lifted row as picked up: the `--border-strong` outline plus
-//   the open-menu elevation, keeping its focus ring visible.
+//   it in the DOM; the overlay stands in for it. Its following row gap is
+//   cancelled too, so the rows after it already sit where they will land.
 // - Wrap each list in `<TransitionGroup name="drag-reorder">` so neighbours
 //   animate with Vue's FLIP move class: `.drag-reorder-move { transition:
 //   transform 120ms var(--ease) }`, and `none` under `prefers-reduced-motion:
@@ -26,24 +22,32 @@
 // - The dragged overlay is a clone of the source appended to `document.body`
 //   (`aria-hidden`, `inert`, `pointer-events: none`, class `drag-overlay`) and
 //   uses the open-menu elevation. The views need no styling for it.
-// - Every grip carries `data-drag-handle="<id>"` (DragGrip does) and
-//   `touch-action: none`; nothing else on the row does. Spread
-//   `gripHandlers(id, scopeId)` onto it with `v-bind`.
-// - A row that should also be draggable from its own surface spreads
-//   `surfaceHandlers(id, scopeId)` onto the row. That path is pointer-only and
-//   ignores presses that start on an interactive descendant, so a link, button
-//   or form control keeps its gesture. Touch stays with the grip, which lets a
-//   swipe on the surface scroll the board. The click that follows an activated
-//   drag is swallowed, so a drag never doubles as a click on the row.
-// - Menu "Move up/down" items call `move(id, scopeId, direction)`, which runs
-//   the same commit and announcement path as a drop.
+// - There is no drag handle. A row spreads `surfaceHandlers(id, scopeId)` onto
+//   itself and a fine pointer drags its own content. That path ignores presses
+//   that start on an interactive descendant, so a link, button or form control
+//   keeps its gesture; a row's primary control (the project name) can opt in
+//   with `data-drag-primary`, where a press that does not travel is still its
+//   click and a drag swallows the click it would have ended on. Touch is not a
+//   surface drag, so a swipe still scrolls.
+// - Keyboard and touch reorder through the row's menu: its Move up / Move down
+//   items call `move(id, scopeId, direction)`, which runs the same commit,
+//   rollback and announcement path as a drop. The view returns focus to the
+//   menu trigger; the engine itself never moves focus.
+// - Releasing a pointer drag does not tear the preview down: the card takes the
+//   placeholder's slot at once (`settledOrder`), `isSource` turns false, and
+//   `settling` stays true until the write resolves. Views put the
+//   `drag-settling` class on their list over that period, which suspends the FLIP
+//   move that would replay the drop; they also hide a leaving placeholder
+//   (`.drag-placeholder.drag-reorder-leave-active { display: none }`) so its
+//   one-frame leave cannot open a gap. Normal in-drag movement animates as
+//   before, and a refused write restores the saved order with the animation
+//   back.
 // - Bind `announcement` to an sr-only `role="status" aria-live="polite"` region.
 // - Call `cancel()` on navigation, workspace change or a remote update of the
 //   list being dragged. It ends the drag silently.
 
 import {
   getCurrentScope,
-  nextTick,
   onScopeDispose,
   ref,
   shallowRef,
@@ -56,6 +60,7 @@ import {
   insertionIndex,
   moveAnnouncement,
   previewEntries,
+  settledOrder,
   type DragSlot,
   type MoveAnnouncementKind,
   type PreviewEntry,
@@ -84,10 +89,9 @@ export interface DragState {
   /** Empty while the pointer is outside every valid scope. */
   toScope: string
   index: number
-  mode: 'pointer' | 'keyboard'
 }
 
-export type MoveDirection = 'up' | 'down' | 'left' | 'right'
+export type MoveDirection = 'up' | 'down'
 
 export interface UseDragSortOptions {
   /** Stable container; pointer capture lives here. */
@@ -104,23 +108,20 @@ export interface UseDragSortOptions {
   /** Persist once; false means it failed. */
   onCommit: (commit: DragCommit) => Promise<boolean> | boolean
   onCancel?: () => void
-  /** Lanes side by side: left/right change scope. */
-  horizontalScopes?: boolean
   threshold?: number
 }
 
+/**
+ * A surface press captures the pointer only once it clears the threshold:
+ * capturing on pointerdown would retarget the plain click that should open the
+ * row to the root element instead.
+ */
 interface Pending {
   id: string
   scopeId: string
   pointerId: number
   startX: number
   startY: number
-  /**
-   * A surface press captures only once it clears the threshold: capturing on
-   * pointerdown would retarget the plain click that should open the row to the
-   * root element instead.
-   */
-  deferCapture: boolean
 }
 
 interface Session {
@@ -143,14 +144,20 @@ const HEIGHT_VAR = '--drag-item-height'
 /**
  * Controls that own the press they receive. A surface drag must not take a
  * press from a link, button or form control inside the row: their click is the
- * action the user asked for. The grip is listed too, though it has its own
- * pointer path, so a delegated press on it can never reach the surface.
+ * action the user asked for.
  */
 const OWN_GESTURE =
-  'a[href], button, input, select, textarea, label, [contenteditable="true"], [role="button"], [role="menuitem"], [data-drag-handle]'
+  'a[href], button, input, select, textarea, label, [contenteditable="true"], [role="button"], [role="menuitem"]'
 
-function isOwnGesture(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest(OWN_GESTURE) !== null
+/**
+ * A row's primary control can also start a surface drag. The press is still the
+ * control's click until it clears the threshold; a drag then swallows that
+ * click. A nested link or button inside the primary keeps its own gesture.
+ */
+const PRIMARY_GESTURE = '[data-drag-primary]'
+
+function ownGesture(target: EventTarget | null): Element | null {
+  return target instanceof Element ? target.closest(OWN_GESTURE) : null
 }
 
 function translateY(el: HTMLElement): number {
@@ -197,20 +204,6 @@ function renderedSlotIndex(
   return count
 }
 
-/**
- * Whether focus still belongs to the dragged item with `id`: on its grip, or
- * nowhere.
- *
- * A missing/body focus is a remount or a blur, not a decision to leave the drag,
- * so keyboard restoration is still wanted then. Any other active element is the
- * user's own navigation, and a deferred restore must not take it back.
- */
-function focusStaysOnDragHandle(id: string): boolean {
-  const active = document.activeElement
-  if (!active || active === document.body || active === document.documentElement) return true
-  return active instanceof HTMLElement && active.dataset.dragHandle === id
-}
-
 function scrollersOf(...starts: Array<HTMLElement | null>): HTMLElement[] {
   const found = new Set<HTMLElement>()
   for (const start of starts) {
@@ -225,31 +218,28 @@ function scrollersOf(...starts: Array<HTMLElement | null>): HTMLElement[] {
 export function useDragSort(options: UseDragSortOptions) {
   const drag = shallowRef<DragState | null>(null)
   const announcement = ref('')
+  /**
+   * A pointer drop is waiting for its acknowledged order. The card already holds
+   * its target slot and the list must not animate the commit-time re-render.
+   */
+  const settling = ref(false)
 
   let pending: Pending | null = null
   let session: Session | null = null
   let origin: { id: string; scope: string; index: number } | null = null
   let listenersOn = false
   /**
-   * Identity of the current drag interaction. A new pickup or pointer press
-   * bumps it, as does a silent end (cancel, disposal): a reveal or write that
-   * belongs to an older interaction must do nothing once that happens.
+   * Identity of the current drag interaction. A new pointer press bumps it, as
+   * does a silent end (cancel, disposal): a write that belongs to an older
+   * interaction must do nothing once that happens.
    */
   let interactionToken = 0
   /**
    * The interaction whose write is in flight. A silent cancel or a new drag can
-   * leave an older write pending: it must not clear the live drag, announce over
-   * it, or restore its card's focus when it settles.
+   * leave an older write pending: it must not clear the live drag or announce
+   * over it.
    */
   let committingToken: number | null = null
-  /**
-   * The grip whose focus a keyboard drag owns, and whether the user deliberately
-   * left it. Body focus alone cannot tell a remount from a press on something
-   * unfocusable, so the events that cause the latter are recorded here.
-   */
-  let focusWatchId: string | null = null
-  let focusWatchSeq = 0
-  let focusLeft = false
 
   function isCommitting(): boolean {
     return committingToken === interactionToken
@@ -273,99 +263,6 @@ export function useDragSort(options: UseDragSortOptions) {
 
   function visibleIds(scopeId: string, withoutId: string): string[] {
     return options.itemIds(scopeId).filter((x) => x !== withoutId)
-  }
-
-  function findGrip(id: string): HTMLElement | null {
-    const grips = options.root.value?.querySelectorAll<HTMLElement>('[data-drag-handle]') ?? []
-    for (const grip of grips) if (grip.dataset.dragHandle === id) return grip
-    return null
-  }
-
-  function onFocusIn(event: FocusEvent): void {
-    const id = focusWatchId
-    if (!id) return
-    const target = event.target
-    // The reveal itself focuses the same grip, which is not a departure.
-    if (target instanceof HTMLElement && target.dataset.dragHandle === id) return
-    focusLeft = true
-  }
-
-  function onFocusWatchPointerdown(event: PointerEvent): void {
-    const id = focusWatchId
-    if (!id) return
-    const target = event.target
-    if (target instanceof Element && target.closest(`[data-drag-handle="${CSS.escape(id)}"]`)) return
-    // Pressing anything else, including a lane's empty area, is the user
-    // choosing another target. A body focus after that is not a remount.
-    focusLeft = true
-  }
-
-  function startFocusWatch(id: string): number {
-    focusWatchId = id
-    focusWatchSeq += 1
-    focusLeft = false
-    document.addEventListener('focusin', onFocusIn, true)
-    document.addEventListener('pointerdown', onFocusWatchPointerdown, true)
-    return focusWatchSeq
-  }
-
-  /**
-   * `seq` identifies the watch a deferred reveal started. A newer pickup may
-   * already own the same grip; the old reveal must not end its watch.
-   */
-  function endFocusWatch(seq?: number): void {
-    if (seq !== undefined && seq !== focusWatchSeq) return
-    if (!focusWatchId) return
-    focusWatchId = null
-    focusLeft = false
-    document.removeEventListener('focusin', onFocusIn, true)
-    document.removeEventListener('pointerdown', onFocusWatchPointerdown, true)
-  }
-
-  /** The no-steal rule, including evidence a body focus is deliberate. */
-  function canRestoreFocus(id: string): boolean {
-    // A press or focus elsewhere wins even if the grip happens to still hold
-    // focus (a touch scroll, for example): the user chose another target.
-    if (focusWatchId === id && focusLeft) return false
-    const active = document.activeElement
-    if (active instanceof HTMLElement && active.dataset.dragHandle === id) return true
-    return focusStaysOnDragHandle(id)
-  }
-
-  async function reveal(id: string, token: number, watch?: number): Promise<void> {
-    // The user may already have moved on while the write was in flight.
-    if (!canRestoreFocus(id)) {
-      if (watch !== undefined) endFocusWatch(watch)
-      return
-    }
-    await nextTick()
-    if (token !== interactionToken || !canRestoreFocus(id)) {
-      if (watch !== undefined) endFocusWatch(watch)
-      return
-    }
-    const root = options.root.value
-    const target = root?.querySelector<HTMLElement>('.drag-placeholder') ?? options.itemEl(id)
-    target?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-    findGrip(id)?.focus()
-    if (watch !== undefined) endFocusWatch(watch)
-  }
-
-  /**
-   * A pointer failure restores the grip only when that grip held focus and the
-   * user has not navigated or chosen another target since. The preview can
-   * remount the focused row and drop focus to the document; without this the
-   * keyboard path back to the row is lost. Menu failures never come here: their
-   * menu owns trigger restoration.
-   */
-  function restorePointerFocusAfterFailure(id: string, token: number, watch: number): void {
-    void nextTick(() => {
-      if (token !== interactionToken || !canRestoreFocus(id)) {
-        endFocusWatch(watch)
-        return
-      }
-      findGrip(id)?.focus()
-      endFocusWatch(watch)
-    })
   }
 
   function allowed(id: string, from: string, to: string): boolean {
@@ -423,7 +320,7 @@ export function useDragSort(options: UseDragSortOptions) {
    * it has, the root's own handler tracks the captured pointer.
    */
   function onDocumentPointermove(e: PointerEvent): void {
-    if (!pending?.deferCapture || e.pointerId !== pending.pointerId) return
+    if (!pending || e.pointerId !== pending.pointerId) return
     onPointermove(e)
   }
 
@@ -434,25 +331,13 @@ export function useDragSort(options: UseDragSortOptions) {
    * the root's own listener.
    */
   function onDocumentPointerup(e: PointerEvent): void {
-    if (!pending?.deferCapture || e.pointerId !== pending.pointerId) return
+    if (!pending || e.pointerId !== pending.pointerId) return
     if (!session) teardownPointer()
   }
 
   function onDocumentPointercancel(e: PointerEvent): void {
-    if (!pending?.deferCapture || e.pointerId !== pending.pointerId) return
+    if (!pending || e.pointerId !== pending.pointerId) return
     if (!session) teardownPointer()
-  }
-
-  function onFocusout(): void {
-    // A remount across lanes blurs the grip for a moment; only a focus that
-    // really left the picked-up grip cancels.
-    setTimeout(() => {
-      const d = drag.value
-      if (!d || d.mode !== 'keyboard' || isCommitting()) return
-      const active = document.activeElement
-      if (active instanceof HTMLElement && active.dataset.dragHandle === d.id) return
-      abort(true)
-    }, 0)
   }
 
   function releaseCapture(pointerId: number): void {
@@ -461,15 +346,12 @@ export function useDragSort(options: UseDragSortOptions) {
   }
 
   function teardownPointer(): void {
-    const root = options.root.value
     if (session) {
       cancelAnimationFrame(session.raf)
       session.overlay.remove()
       releaseCapture(session.pointerId)
       session = null
-      root?.style.removeProperty(HEIGHT_VAR)
-    } else if (pending) {
-      releaseCapture(pending.pointerId)
+      options.root.value?.style.removeProperty(HEIGHT_VAR)
     }
     pending = null
     removeListeners()
@@ -484,16 +366,10 @@ export function useDragSort(options: UseDragSortOptions) {
     setTimeout(() => window.removeEventListener('click', swallow, true), 0)
   }
 
-  function finish(restoreFocus = true): void {
-    const wasKeyboard = drag.value?.mode === 'keyboard'
-    const id = drag.value?.id
-    if (wasKeyboard) options.root.value?.removeEventListener('focusout', onFocusout)
+  function finish(): void {
     drag.value = null
+    settling.value = false
     origin = null
-    if (wasKeyboard && id) {
-      if (restoreFocus) void reveal(id, interactionToken, focusWatchId ? focusWatchSeq : undefined)
-      else endFocusWatch()
-    }
   }
 
   /** End without a write. */
@@ -501,13 +377,11 @@ export function useDragSort(options: UseDragSortOptions) {
     const d = drag.value
     const o = origin
     const wasPointer = session !== null
-    const restoreFocus = speak && d?.mode === 'keyboard'
-    // The reveal and any in-flight write from this interaction are now stale.
+    // Any in-flight write from this interaction is now stale.
     interactionToken += 1
     teardownPointer()
     if (!d || !o) {
-      finish(false)
-      if (wasPointer || d?.mode === 'pointer') endFocusWatch()
+      finish()
       return
     }
     if (wasPointer) swallowNextClick()
@@ -515,8 +389,7 @@ export function useDragSort(options: UseDragSortOptions) {
       const total = options.itemIds(o.scope).length
       announce('cancel', o.id, o.scope, o.index + 1, total)
     }
-    finish(restoreFocus)
-    if (wasPointer || d.mode === 'pointer') endFocusWatch()
+    finish()
     options.onCancel?.()
   }
 
@@ -529,7 +402,6 @@ export function useDragSort(options: UseDragSortOptions) {
       return
     }
     const wasPointer = session !== null
-    const pointerWatch = wasPointer && focusWatchId === d.id ? focusWatchSeq : undefined
     const unchanged = d.toScope === o.scope && d.index === o.index
     const total = visibleIds(d.toScope, d.id).length + 1
     teardownPointer()
@@ -537,9 +409,13 @@ export function useDragSort(options: UseDragSortOptions) {
     if (unchanged) {
       announce('drop', d.id, d.toScope, d.index + 1, total)
       finish()
-      if (pointerWatch !== undefined) endFocusWatch(pointerWatch)
       return
     }
+    // The overlay is gone, but the preview stays on screen in its target slot
+    // until the acknowledged order has replaced it. Drawing a placeholder here
+    // would collapse it and shift the neighbours twice, once when the card was
+    // released and again when the answer landed.
+    if (wasPointer) settling.value = true
     const token = interactionToken
     committingToken = token
     let ok = false
@@ -560,16 +436,10 @@ export function useDragSort(options: UseDragSortOptions) {
     if (ok) {
       announce('drop', d.id, d.toScope, d.index + 1, total)
       finish()
-      if (pointerWatch !== undefined) endFocusWatch(pointerWatch)
       return
     }
     announcement.value = moveAnnouncement('fail', '', '', 0, 0)
-    // Keyboard failures restore focus through `finish`/`reveal`, the one
-    // deferred path that owns the focus watch. A pointer failure restores only
-    // the grip that held focus before the preview remounted it; menu failures
-    // never reach either path.
     finish()
-    if (pointerWatch !== undefined) restorePointerFocusAfterFailure(d.id, token, pointerWatch)
   }
 
   // ---- pointer flow ----------------------------------------------------
@@ -666,7 +536,7 @@ export function useDragSort(options: UseDragSortOptions) {
     session.raf = requestAnimationFrame(tick)
   }
 
-  function activate(e: PointerEvent, clearSelection = false): void {
+  function activate(e: PointerEvent): void {
     const p = pending
     const source = p ? options.itemEl(p.id) : null
     const root = options.root.value
@@ -676,7 +546,6 @@ export function useDragSort(options: UseDragSortOptions) {
     }
     const rect = source.getBoundingClientRect()
     const overlay = source.cloneNode(true) as HTMLElement
-    overlay.querySelectorAll('[data-drag-handle]').forEach((n) => n.removeAttribute('data-drag-handle'))
     // The clone is decoration: it must not duplicate ids or radio groups, or
     // re-point labels, in the live document.
     for (const n of [overlay, ...overlay.querySelectorAll('[id],[name],[for]')]) {
@@ -712,34 +581,25 @@ export function useDragSort(options: UseDragSortOptions) {
     }
     const index = options.itemIds(p.scopeId).indexOf(p.id)
     origin = { id: p.id, scope: p.scopeId, index }
-    drag.value = { id: p.id, fromScope: p.scopeId, toScope: p.scopeId, index, mode: 'pointer' }
+    drag.value = { id: p.id, fromScope: p.scopeId, toScope: p.scopeId, index }
     // A surface press was selecting text until it became a drag; the trail it
-    // leaves would follow the pointer across the board. A grip press owns no
-    // selection, and a sidebar row may share one the user is reading.
-    if (clearSelection) window.getSelection()?.removeAllRanges()
-    // A pointer press focuses its grip in the browser. Keep that ownership so a
-    // failed write can put focus back after the preview remounts the row; touch
-    // and presses that never focused the grip start no watch.
-    const active = document.activeElement
-    if (active instanceof HTMLElement && active.dataset.dragHandle === p.id) startFocusWatch(p.id)
+    // leaves would follow the pointer across the board.
+    window.getSelection()?.removeAllRanges()
     announce('pickup', p.id, p.scopeId, index + 1, options.itemIds(p.scopeId).length)
     positionOverlay()
     updateTarget(e.clientX, e.clientY)
     session.raf = requestAnimationFrame(tick)
   }
 
-  function onPointerdown(id: string, scopeId: string, e: PointerEvent, deferCapture = false): void {
+  function onPointerdown(id: string, scopeId: string, e: PointerEvent): void {
     if (drag.value || pending || isCommitting()) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     if (!e.isPrimary || !options.canDrag(id, scopeId)) return
-    const root = options.root.value
-    if (!root) return
-    pending = { id, scopeId, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, deferCapture }
-    if (!deferCapture) root.setPointerCapture(e.pointerId)
-    // A pointer gesture is a new interaction: any keyboard reveal still waiting
-    // on its tick belongs to the gesture the user just left.
+    if (!options.root.value) return
+    pending = { id, scopeId, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY }
+    // A pointer gesture is a new interaction: a write still landing from the
+    // previous one must not end or announce over this drag.
     interactionToken += 1
-    endFocusWatch()
     addListeners()
   }
 
@@ -756,12 +616,8 @@ export function useDragSort(options: UseDragSortOptions) {
     if (exceedsThreshold(e.clientX - pending.startX, e.clientY - pending.startY, options.threshold)) {
       // From here the gesture is a drag, not a click: capture so the rest of it
       // keeps arriving even over another lane, and the root can commit it.
-      const fromSurface = pending.deferCapture
-      if (pending.deferCapture) {
-        options.root.value?.setPointerCapture(pending.pointerId)
-        pending.deferCapture = false
-      }
-      activate(e, fromSurface)
+      options.root.value?.setPointerCapture(pending.pointerId)
+      activate(e)
     }
   }
 
@@ -804,112 +660,24 @@ export function useDragSort(options: UseDragSortOptions) {
     abort(true)
   }
 
-  // ---- keyboard flow ---------------------------------------------------
-
-  function pickUp(id: string, scopeId: string): void {
-    const ids = options.itemIds(scopeId)
-    const index = ids.indexOf(id)
-    // A pickup is a new interaction, superseding any deferred restore.
-    interactionToken += 1
-    origin = { id, scope: scopeId, index }
-    drag.value = { id, fromScope: scopeId, toScope: scopeId, index, mode: 'keyboard' }
-    options.root.value?.addEventListener('focusout', onFocusout)
-    startFocusWatch(id)
-    announce('pickup', id, scopeId, index + 1, ids.length)
-    void reveal(id, interactionToken)
-  }
-
-  function neighbourScope(from: string, step: -1 | 1): string | null {
-    const scopes = options.scopes()
-    let i = scopes.findIndex((s) => s.id === from) + step
-    for (; i >= 0 && i < scopes.length; i += step) {
-      const s = scopes[i]
-      if (s.positional === false) continue
-      const d = drag.value
-      if (d && !allowed(d.id, d.fromScope, s.id)) continue
-      return s.id
-    }
-    return null
-  }
-
-  function keyboardMove(key: string): boolean {
-    const d = drag.value
-    if (!d) return false
-    let toScope = d.toScope
-    let index = d.index
-    if (key === 'ArrowUp') {
-      if (index === 0) return true
-      index -= 1
-    } else if (key === 'ArrowDown') {
-      if (index >= visibleIds(toScope, d.id).length) return true
-      index += 1
-    } else if (options.horizontalScopes && (key === 'ArrowLeft' || key === 'ArrowRight')) {
-      const next = neighbourScope(toScope, key === 'ArrowLeft' ? -1 : 1)
-      if (next === null) return true
-      toScope = next
-      index = Math.min(index, visibleIds(next, d.id).length)
-    } else {
-      return false
-    }
-    drag.value = { ...d, toScope, index }
-    announce('move', d.id, toScope, index + 1, visibleIds(toScope, d.id).length + 1)
-    void reveal(d.id, interactionToken)
-    return true
-  }
-
-  function onKeydown(id: string, scopeId: string, e: KeyboardEvent): void {
-    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return
-    const d = drag.value
-    const pickKey = e.key === ' ' || e.key === 'Enter'
-    if (!d) {
-      if (pending || isCommitting() || !pickKey || !options.canDrag(id, scopeId)) return
-      e.preventDefault()
-      e.stopPropagation()
-      pickUp(id, scopeId)
-      return
-    }
-    if (d.mode !== 'keyboard' || d.id !== id || isCommitting()) return
-    if (pickKey) {
-      e.preventDefault()
-      e.stopPropagation()
-      void commit()
-    } else if (e.key === 'Escape') {
-      e.preventDefault()
-      e.stopPropagation()
-      abort(true)
-    } else if (keyboardMove(e.key)) {
-      e.preventDefault()
-      e.stopPropagation()
-    }
-  }
-
   // ---- public ----------------------------------------------------------
 
-  function gripHandlers(id: string, scopeId: string) {
-    return {
-      onPointerdown: (e: PointerEvent) => onPointerdown(id, scopeId, e),
-      onKeydown: (e: KeyboardEvent) => onKeydown(id, scopeId, e),
-      onClick: (e: MouseEvent) => {
-        e.stopPropagation()
-        e.preventDefault()
-      },
-    }
-  }
-
   /**
-   * The row's own surface as a second pointer target: the same pick-up,
-   * threshold, placement and write as the grip.
+   * The row's own surface as the pointer target: the pick-up, threshold,
+   * placement and write.
    *
    * Only a press on non-interactive content starts it, and touch is excluded so
-   * a swipe still scrolls the board; the grip remains the touch path. A press
-   * that never clears the threshold is an ordinary click, and the engine eats
-   * the click the browser sends after an activated drag.
+   * a swipe still scrolls the board. A press that never clears the threshold is
+   * an ordinary click, and the engine eats the click the browser sends after an
+   * activated drag.
    */
   function surfaceHandlers(id: string, scopeId: string) {
     return {
       onPointerdown: (e: PointerEvent) => {
-        if (e.pointerType === 'touch' || isOwnGesture(e.target)) return
-        onPointerdown(id, scopeId, e, true)
+        if (e.pointerType === 'touch') return
+        const own = ownGesture(e.target)
+        if (own && !own.matches(PRIMARY_GESTURE)) return
+        onPointerdown(id, scopeId, e)
       },
     }
   }
@@ -917,21 +685,20 @@ export function useDragSort(options: UseDragSortOptions) {
   function entriesFor(scopeId: string): PreviewEntry[] {
     const ids = options.itemIds(scopeId)
     const d = drag.value
-    if (d?.mode === 'keyboard') {
-      const rest = ids.filter((id) => id !== d.id)
-      if (d.toScope === scopeId) rest.splice(d.index, 0, d.id)
-      return rest.map((id): PreviewEntry => ({ kind: 'item', id }))
+    if (d && settling.value) {
+      if (d.toScope === scopeId) {
+        return settledOrder(ids, d.id, d.index).map((id): PreviewEntry => ({ kind: 'item', id }))
+      }
+      return ids
+        .filter((id) => id !== d.id)
+        .map((id): PreviewEntry => ({ kind: 'item', id }))
     }
     if (d && d.toScope === scopeId) return previewEntries(ids, d.id, d.index)
     return ids.map((id): PreviewEntry => ({ kind: 'item', id }))
   }
 
   function isSource(id: string): boolean {
-    return drag.value?.mode === 'pointer' && drag.value.id === id
-  }
-
-  function isLifted(id: string): boolean {
-    return drag.value?.mode === 'keyboard' && drag.value.id === id
+    return Boolean(drag.value && !settling.value && drag.value.id === id)
   }
 
   function cancel(_reason?: string): void {
@@ -939,11 +706,10 @@ export function useDragSort(options: UseDragSortOptions) {
       abort(false)
       return
     }
-    // Navigation or an unmount can land between a drop's write and its reveal,
+    // Navigation or an unmount can land between a drop's write and its answer,
     // or while the write itself is still pending.
     interactionToken += 1
     if (pending) teardownPointer()
-    endFocusWatch()
   }
 
   async function move(id: string, scopeId: string, direction: MoveDirection): Promise<boolean> {
@@ -951,34 +717,58 @@ export function useDragSort(options: UseDragSortOptions) {
     const ids = options.itemIds(scopeId)
     const pos = ids.indexOf(id)
     if (pos < 0) return false
-    let toScope = scopeId
-    let index = pos
-    if (direction === 'up') index = pos - 1
-    else if (direction === 'down') index = pos + 1
-    else if (options.horizontalScopes) {
-      const scopes = options.scopes()
-      const at = scopes.findIndex((s) => s.id === scopeId)
-      const next = scopes[at + (direction === 'left' ? -1 : 1)]
-      if (!next || next.positional === false) return false
-      toScope = next.id
-      index = Math.min(pos, visibleIds(next.id, id).length)
-    } else {
-      return false
-    }
-    if (toScope === scopeId && (index < 0 || index >= ids.length)) return false
-    if (!allowed(id, scopeId, toScope)) return false
-    const total = visibleIds(toScope, id).length + 1
+    const index = direction === 'up' ? pos - 1 : pos + 1
+    if (index < 0 || index >= ids.length) return false
+    if (!allowed(id, scopeId, scopeId)) return false
+    const total = visibleIds(scopeId, id).length + 1
     const token = interactionToken
     committingToken = token
     let ok = false
     try {
-      ok = await options.onCommit({ id, fromScope: scopeId, toScope, index })
+      ok = await options.onCommit({ id, fromScope: scopeId, toScope: scopeId, index })
     } catch {
       ok = false
     }
     if (committingToken === token) committingToken = null
     if (token !== interactionToken) return ok
-    if (ok) announce('drop', id, toScope, index + 1, total)
+    if (ok) announce('drop', id, scopeId, index + 1, total)
+    else announcement.value = moveAnnouncement('fail', '', '', 0, 0)
+    return ok
+  }
+
+  /**
+   * Place a row chosen from a menu action or dialog. The index is the insertion
+   * point among the destination's other rows, exactly what `onCommit` expects;
+   * one write carries a cross-lane status and its placement. A no-op choice
+   * announces the position without writing.
+   */
+  async function place(
+    id: string,
+    fromScope: string,
+    toScope: string,
+    index: number,
+  ): Promise<boolean> {
+    if (drag.value || isCommitting() || !toScope) return false
+    if (!options.canDrag(id, fromScope) || !allowed(id, fromScope, toScope)) return false
+    const others = visibleIds(toScope, id)
+    const target = Math.min(Math.max(Math.trunc(index) || 0, 0), others.length)
+    const total = others.length + 1
+    const current = fromScope === toScope ? options.itemIds(toScope).indexOf(id) : -1
+    if (current === target) {
+      announce('drop', id, toScope, target + 1, total)
+      return true
+    }
+    const token = interactionToken
+    committingToken = token
+    let ok = false
+    try {
+      ok = await options.onCommit({ id, fromScope, toScope, index: target })
+    } catch {
+      ok = false
+    }
+    if (committingToken === token) committingToken = null
+    if (token !== interactionToken) return ok
+    if (ok) announce('drop', id, toScope, target + 1, total)
     else announcement.value = moveAnnouncement('fail', '', '', 0, 0)
     return ok
   }
@@ -988,12 +778,12 @@ export function useDragSort(options: UseDragSortOptions) {
   return {
     drag: drag as Readonly<ShallowRef<DragState | null>>,
     announcement: announcement as Readonly<Ref<string>>,
-    gripHandlers,
+    settling: settling as Readonly<Ref<boolean>>,
     surfaceHandlers,
     entriesFor,
     isSource,
-    isLifted,
     cancel,
     move,
+    place,
   }
 }

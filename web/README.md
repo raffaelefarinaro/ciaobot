@@ -101,9 +101,6 @@ web/
                            blue, teal, lime and fuchsia), plus the
                            scoped CSS they share with it
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
-    components/DragGrip.vue  the grip button the shared drag-sort engine binds to (`gripHandlers`, `data-drag-handle`);
-                           it is `draggable="false"` and emits nothing, and the row it sits in reveals it on hover or focus
-                           on a fine pointer
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
                            MemoryMapView under the header (so every Memory section shows it). Its open
                            state is the only storage, `ciao.memory.howOpen` ('1'/'0', read and written in
@@ -122,15 +119,21 @@ web/
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
                           useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices,
-                          useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer and keyboard drag-sort
-                          engine for the task lanes and the sidebar's project list; `gripHandlers` binds the
-                          labelled grip and `surfaceHandlers` lets the task card's non-interactive text drag
-                          the same way on a fine pointer; it persists nothing and calls `onCommit`,
-                          and its deferred keyboard focus restoration never takes focus from where the user moved it)
+                          useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
+                          for the task lanes and the sidebar's project list; there is no drag handle, so
+                          `surfaceHandlers` lets a row's own non-interactive content drag on a fine pointer (a
+                          `data-drag-primary` name control keeps its click below the threshold), while the row menu's
+                          Move up / Move down call `move()` and the card's Move… dialog calls `place()` for the
+                          keyboard and touch path (all four columns as destinations, a cross-lane
+                          placement is one write, and a closed dialog or changed workspace cancels one); `settling` hands the
+                          preview slot to the real row until the acknowledged order renders, so a drop does not
+                          replay its neighbours in either lane; it persists nothing and calls `onCommit`;
+                          useMenuFocusReturn keeps a menu action's trigger focus without stealing it back after
+                          the user has focused or pressed elsewhere)
     lib/                  pure helpers (api, time, safeMarkdown, contrast, gwsProfileId, notificationInbox, sourceHealth,
                           updateTasks, etc.) — no Vue imports; `taskOrder.ts` (the server order, lane derivation,
                           placement anchors and the preview mirror of the server's insertion) and `dragSort.ts`
-                          (drop-slot geometry, auto-scroll step, announcement wording)
+                          (drop-slot geometry, settled order, auto-scroll step, announcement wording)
 ```
 
 ## iOS PWA gotchas

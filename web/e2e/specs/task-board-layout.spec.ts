@@ -42,7 +42,10 @@ for (const width of [1440, 900, 390]) {
       // tested here (1440 leaves about 1036px) and the board scrolls sideways.
       expect(await page.locator('.task-lanes').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
-      await expect(page.locator('.task-card .drag-grip')).toHaveCount(4)
+      // Reordering has no handle: the card menu's Move up / Move down is the
+      // keyboard and touch path, and every card has it.
+      await expect(page.locator('.task-card .drag-grip')).toHaveCount(0)
+      await expect(page.locator('.task-card .task-more')).toHaveCount(4)
       await page.screenshot({ path: testInfo.outputPath('status-groups.png'), fullPage: true, animations: 'disabled' })
       await page.locator('html').evaluate(el => el.classList.remove('theme-light'))
       await page.screenshot({ path: testInfo.outputPath('status-groups-dark.png'), fullPage: true, animations: 'disabled' })
@@ -54,7 +57,10 @@ for (const width of [1440, 900, 390]) {
       // As in browser-zoom.spec.ts, 200% page zoom halves the CSS viewport.
       // CSS zoom alone would leave the sidebar's window breakpoint unchanged.
       await page.setViewportSize({ width: Math.round(width / 2), height: 500 })
-      await expect(page.locator('.task-card .drag-grip')).toHaveCount(4)
+      // Reordering has no handle: the card menu's Move up / Move down is the
+      // keyboard and touch path, and every card has it.
+      await expect(page.locator('.task-card .drag-grip')).toHaveCount(0)
+      await expect(page.locator('.task-card .task-more')).toHaveCount(4)
       await expect(page.locator('.task-lane-label')).toHaveText(labels)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
     })

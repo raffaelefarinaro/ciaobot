@@ -53,11 +53,11 @@ test.describe('sidebar project reordering', () => {
       }
     })
     const group = page.locator(`[data-project-id="${NOTES}"]`)
-    await group.locator('.project-header').hover()
-    const grip = group.locator('.drag-grip')
-    const box = (await grip.boundingBox())!
+    const name = group.locator('.project-name')
+    await name.hover()
+    const box = (await name.boundingBox())!
     const edge = (await scroller(page))!
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.move(box.x + 4, box.y + box.height / 2)
     await page.mouse.down()
     await page.mouse.move(edge.left + 80, edge.bottom - 12, { steps: 12 })
     await expect.poll(() =>
@@ -92,12 +92,13 @@ test.describe('sidebar project reordering', () => {
       }
     })
     const group = page.locator('[data-project-id="filler-02"]')
-    await group.locator('.project-header').hover()
-    const grip = (await group.locator('.drag-grip').boundingBox())!
-    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2)
+    const name = group.locator('.project-name')
+    await name.hover()
+    const from = (await name.boundingBox())!
+    await page.mouse.move(from.x + 4, from.y + from.height / 2)
     await page.mouse.down()
     // Activate at the source slot, so the preview has drawn its placeholder there.
-    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + 12, { steps: 3 })
+    await page.mouse.move(from.x + 4, from.y + from.height / 2 + 12, { steps: 3 })
     await expect(page.locator('.drag-overlay')).toBeVisible()
     await expect(page.locator('.project-list > .drag-placeholder')).toHaveCount(1)
 
@@ -116,6 +117,56 @@ test.describe('sidebar project reordering', () => {
     expect(await rowOrder(page)).toEqual(['alpha-general', ...expected])
   })
 
+  test('a project reorders from its header name, with no handle on the row', async ({ page }) => {
+    const requests: Array<Record<string, unknown>> = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/projects/reorder')) {
+        requests.push(request.postDataJSON())
+      }
+    })
+    // There is no drag handle at all: pointer drags the header, and the row menu
+    // (with 44px items on touch) is the keyboard and touch path.
+    await expect(page.locator('.project-list .drag-grip')).toHaveCount(0)
+
+    // Drag a one-row project up by its name, above Notes: above the target is
+    // stable whether or not the placeholder has flushed, so the assertion is
+    // about the surface gesture, not about the fast-release seam (covered above).
+    const name = page.locator('[data-project-id="filler-02"] .project-name')
+    await name.hover()
+    const from = (await name.boundingBox())!
+    await page.mouse.move(from.x + 4, from.y + from.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(from.x + 4, from.y + from.height / 2 - 12, { steps: 3 })
+    // Measure after the pick-up has collapsed the source row, in the layout the
+    // drag is actually in.
+    const above = (await page.locator(`[data-project-id="${NOTES}"] .project-header`).boundingBox())!
+    await page.mouse.move(above.x + above.width / 2, above.y + 4, { steps: 12 })
+    await expect.poll(() => page.evaluate((notes) => {
+      const children = [...document.querySelector('.project-list')!.children] as HTMLElement[]
+      const placeholder = children.findIndex((el) => el.classList.contains('drag-placeholder'))
+      const target = children.findIndex((el) => el.dataset.projectId === notes)
+      return placeholder >= 0 && placeholder === target - 1
+    }, NOTES)).toBe(true)
+    await page.mouse.up()
+
+    await expect.poll(() => requests.length).toBe(1)
+    const expected = ['filler-02', NOTES, 'filler-01', ...FILLERS.slice(2)]
+    expect(requests[0]!.order).toEqual(expected)
+    expect(await rowOrder(page)).toEqual(['alpha-general', ...expected])
+    // The press was a drag, not the name's click.
+    expect(new URL(page.url()).pathname).toBe('/')
+  })
+
+  test('a plain press on a project name still opens the project page', async ({ page }) => {
+    let posted = 0
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && request.url().endsWith('/api/projects/reorder')) posted += 1
+    })
+    await page.locator(`[data-project-id="${NOTES}"] .project-name`).click()
+    await expect(page).toHaveURL(new RegExp(`/project/${NOTES}$`))
+    expect(posted).toBe(0)
+  })
+
   test('an expanded group moves as one and Escape cancels with no request', async ({ page }) => {
     let posted = 0
     page.on('request', (request) => {
@@ -124,8 +175,9 @@ test.describe('sidebar project reordering', () => {
     const group = page.locator(`[data-project-id="${NOTES}"]`)
     await expect(group.locator('.chat-item')).toHaveCount(1)
     const groupHeight = (await group.boundingBox())!.height
-    await group.locator('.project-header').hover()
-    const box = (await group.locator('.drag-grip').boundingBox())!
+    const name = group.locator('.project-name')
+    await name.hover()
+    const box = (await name.boundingBox())!
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.down()
     await page.mouse.move(box.x + 40, box.y + 120, { steps: 8 })
@@ -150,8 +202,9 @@ test.describe('sidebar project reordering', () => {
       if (request.method() === 'POST' && request.url().endsWith('/api/projects/reorder')) posted += 1
     })
     const group = page.locator(`[data-project-id="${NOTES}"]`)
-    await group.locator('.project-header').hover()
-    const box = (await group.locator('.drag-grip').boundingBox())!
+    const name = group.locator('.project-name')
+    await name.hover()
+    const box = (await name.boundingBox())!
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.down()
     await page.mouse.move(box.x + 40, box.y + 120, { steps: 8 })
@@ -193,20 +246,28 @@ test.describe('sidebar project reordering', () => {
     await expect.poll(() => patched).toEqual({ project_id: 'filler-01' })
   })
 
-  test('the grip moves a project with the keyboard and keeps focus', async ({ page }) => {
-    const grip = page.locator(`[data-project-id="${NOTES}"] .drag-grip`)
-    await grip.focus()
-    await page.keyboard.press('Space')
-    await page.keyboard.press('ArrowDown')
-    expect((await rowOrder(page)).slice(0, 3)).toEqual(['alpha-general', 'filler-01', NOTES])
-    await page.keyboard.press('Escape')
-    expect((await rowOrder(page)).slice(0, 2)).toEqual(['alpha-general', NOTES])
-    await expect(grip).toBeFocused()
+  test('the project menu reorders with the keyboard and returns focus to its trigger', async ({ page }) => {
+    const trigger = page.locator('[data-project-id="filler-02"] .project-actions-btn')
+    await trigger.focus()
+    await page.keyboard.press('Enter')
+    const moveUp = page.getByRole('menuitem', { name: 'Move up' })
+    await expect(moveUp).toBeVisible()
+    // Rename is first; walk to Move up when it is not the first item focused.
+    for (let step = 0; step < 4; step += 1) {
+      if (await moveUp.evaluate((el) => el === document.activeElement)) break
+      await page.keyboard.press('ArrowDown')
+    }
+    await expect(moveUp).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect.poll(() => rowOrder(page)).toEqual([
+      'alpha-general', NOTES, 'filler-02', 'filler-01', ...FILLERS.slice(2),
+    ])
+    await expect(trigger).toBeFocused()
   })
 })
 
 test.describe('sidebar project reordering on a phone', () => {
-  test('a touch drag on the 44px grip reorders without scrolling the sidebar', async ({ browser }, testInfo) => {
+  test('the project menu reorders by touch, with 44px targets', async ({ browser }, testInfo) => {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
       isMobile: true,
@@ -218,40 +279,28 @@ test.describe('sidebar project reordering on a phone', () => {
     await boot(page, '/chat/alpha-chat-1', 'textarea.chat-input')
     await page.getByRole('button', { name: 'Open sidebar' }).click()
 
-    const group = page.locator(`[data-project-id="${NOTES}"]`)
-    const grip = group.locator('.drag-grip')
-    await expect(grip).toBeVisible()
     // The drawer slides in: measure once it has stopped.
     await quiesce(page)
-    const box = (await grip.boundingBox())!
-    const cx = box.x + box.width / 2
-    const cy = box.y + box.height / 2
-    // The grip's hit area is the 44px square, not the 20x24 button: a point
-    // outside the button's box but inside the square still reaches it.
-    const hit = await page.evaluate(
-      ([x, y]) => document.elementFromPoint(x, y)?.closest('[data-drag-handle]')?.getAttribute('data-drag-handle'),
-      [cx - 16, cy + 16],
-    )
-    expect(hit).toBe(NOTES)
-
-    // Pinned General has no grip; its chevron still lines up with the rows that do.
+    // Pinned and reorderable rows now share one leading chevron: no handle slot.
     const chevronLeft = (id: string) =>
       page.locator(`[data-project-id="${id}"] .project-icon`).evaluate((el) => el.getBoundingClientRect().left)
     expect(Math.abs((await chevronLeft('alpha-general')) - (await chevronLeft(NOTES)))).toBeLessThanOrEqual(1)
 
+    const trigger = page.locator(`[data-project-id="${NOTES}"] .project-actions-btn`)
+    const hit = (await trigger.boundingBox())!
+    expect(hit.width).toBeGreaterThanOrEqual(44)
+    expect(hit.height).toBeGreaterThanOrEqual(44)
+
     const requested = page.waitForRequest(
       (request) => request.method() === 'POST' && request.url().endsWith('/api/projects/reorder'),
     )
-    const cdp = await context.newCDPSession(page)
-    const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', x: number, y: number) =>
-      cdp.send('Input.dispatchTouchEvent', {
-        type,
-        touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }],
-      })
-    await touch('touchStart', cx, cy)
-    for (let i = 1; i <= 10; i += 1) await touch('touchMove', cx, cy + i * 12)
-    await expect(page.locator('.drag-overlay')).toBeVisible()
-    await touch('touchEnd', cx, cy + 120)
+    await trigger.tap()
+    const moveDown = page.getByRole('menuitem', { name: 'Move down' })
+    await expect(moveDown).toBeVisible()
+    const item = (await moveDown.boundingBox())!
+    expect(item.height).toBeGreaterThanOrEqual(44)
+    await moveDown.tap()
+
     const request = await requested
     expect((request.postDataJSON().order as string[]).indexOf(NOTES)).toBeGreaterThan(0)
     await context.close()
