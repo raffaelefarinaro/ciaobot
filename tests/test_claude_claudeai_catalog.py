@@ -35,7 +35,6 @@ _SLACK_ROW: dict[str, Any] = {"mcpServers": [{"name": "claude.ai Slack", "status
 def _fast_watch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(claude_mod, "_CLAUDEAI_CATALOG_DEADLINE_S", 0.05)
     monkeypatch.setattr(claude_mod, "_CLAUDEAI_CATALOG_POLL_S", 0.01)
-    monkeypatch.setattr(claude_mod, "_claudeai_catalog_seen", False)
 
 
 class _StatusClient:
@@ -53,6 +52,15 @@ def _provider(tmp_path: Path, client: object) -> ClaudeProvider:
     return provider
 
 
+def _marker(tmp_path: Path) -> Path:
+    return tmp_path / ".runtime" / claude_mod._CLAUDEAI_SEEN_MARKER
+
+
+def _mark_seen(tmp_path: Path) -> None:
+    _marker(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    _marker(tmp_path).touch()
+
+
 def _watch(provider: ClaudeProvider, client: object) -> None:
     asyncio.run(provider._watch_claudeai_catalog(client))  # type: ignore[arg-type]
 
@@ -64,7 +72,7 @@ def test_watch_marks_seen_and_resets_retries_when_rows_appear(tmp_path: Path) ->
 
     _watch(provider, client)
 
-    assert claude_mod._claudeai_catalog_seen is True
+    assert _marker(tmp_path).exists()
     assert provider._claudeai_catalog_missing is False
     assert provider._claudeai_catalog_retries == 0
 
@@ -79,10 +87,8 @@ def test_watch_drops_stale_gave_up_notice_when_rows_appear(tmp_path: Path) -> No
     assert provider._take_respawn_notice() is None
 
 
-def test_watch_flags_missing_and_emits_notice_when_seen_before(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(claude_mod, "_claudeai_catalog_seen", True)
+def test_watch_flags_missing_and_emits_notice_when_seen_before(tmp_path: Path) -> None:
+    _mark_seen(tmp_path)
     client = _StatusClient()
     provider = _provider(tmp_path, client)
     sink: list[str] = []
@@ -94,10 +100,8 @@ def test_watch_flags_missing_and_emits_notice_when_seen_before(
     assert sink == [CLAUDEAI_CATALOG_RETRY_NOTICE]
 
 
-def test_watch_emits_gave_up_notice_after_max_retries(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(claude_mod, "_claudeai_catalog_seen", True)
+def test_watch_emits_gave_up_notice_after_max_retries(tmp_path: Path) -> None:
+    _mark_seen(tmp_path)
     client = _StatusClient()
     provider = _provider(tmp_path, client)
     provider._claudeai_catalog_retries = _CLAUDEAI_CATALOG_MAX_RETRIES
@@ -107,6 +111,22 @@ def test_watch_emits_gave_up_notice_after_max_retries(
     _watch(provider, client)
 
     assert sink == [CLAUDEAI_CATALOG_GAVE_UP_NOTICE]
+    # Giving up forgets the account had connectors, so later chats stop retrying.
+    assert not _marker(tmp_path).exists()
+
+
+def test_watch_flags_missing_on_a_fresh_provider_after_engine_restart(tmp_path: Path) -> None:
+    # An earlier engine process saw the rows; this one has seen none yet.
+    _mark_seen(tmp_path)
+    client = _StatusClient()
+    provider = _provider(tmp_path, client)
+    sink: list[str] = []
+    provider._turn_status_sink = sink.append
+
+    _watch(provider, client)
+
+    assert provider._claudeai_catalog_missing is True
+    assert sink == [CLAUDEAI_CATALOG_RETRY_NOTICE]
 
 
 def test_watch_silent_when_account_never_had_connectors(tmp_path: Path) -> None:
@@ -127,13 +147,11 @@ def test_watch_survives_status_errors(tmp_path: Path) -> None:
 
     _watch(provider, client)
 
-    assert claude_mod._claudeai_catalog_seen is True
+    assert _marker(tmp_path).exists()
 
 
-def test_watch_stops_when_client_replaced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(claude_mod, "_claudeai_catalog_seen", True)
+def test_watch_stops_when_client_replaced(tmp_path: Path) -> None:
+    _mark_seen(tmp_path)
     client = _StatusClient()
     provider = _provider(tmp_path, client)
     provider._client = _StatusClient()  # type: ignore[assignment]
@@ -250,10 +268,8 @@ def test_start_watch_creates_task_and_replaces_previous(tmp_path: Path) -> None:
     assert first.cancelled()
 
 
-def test_gave_up_notice_deferred_to_next_turn_when_no_sink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(claude_mod, "_claudeai_catalog_seen", True)
+def test_gave_up_notice_deferred_to_next_turn_when_no_sink(tmp_path: Path) -> None:
+    _mark_seen(tmp_path)
     client = _StatusClient()
     provider = _provider(tmp_path, client)
     provider._claudeai_catalog_retries = _CLAUDEAI_CATALOG_MAX_RETRIES
