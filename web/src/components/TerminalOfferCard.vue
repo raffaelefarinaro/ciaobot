@@ -198,7 +198,7 @@ onBeforeUnmount(() => {
 
       <!-- The one way into the browser terminal. It opens the panel for this
            chat and starts no shell: that stays an explicit act. -->
-      <span class="terminal-offer-open"><BrowserTerminalButton :chat-id="chatId" /></span>
+      <span class="terminal-offer-open"><BrowserTerminalButton :chat-id="chatId" :start-shell="false" /></span>
 
       <button
         ref="dismissEl"

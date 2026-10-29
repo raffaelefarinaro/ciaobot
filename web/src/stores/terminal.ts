@@ -51,6 +51,15 @@ export type { TerminalSessionInfo }
 /** What a terminal is scoped to: one chat, or one project. */
 export type TerminalTarget = { chatId: string } | { projectId: string }
 
+/** Which of the engine's folders a new shell starts in. */
+export type TerminalLocation = 'workspace' | 'repo'
+
+/** A folder a new shell may start in, as the engine named it. */
+export interface TerminalFolderChoice {
+  location: TerminalLocation
+  folder: string
+}
+
 /** Where the terminal surface is in its lifecycle. */
 export type TerminalPhase =
   | 'closed'
@@ -166,6 +175,26 @@ function parseSessionInfo(value: unknown): TerminalSessionInfo | null {
   return { session_id, folder, cols, rows, seq, attached, exited, exit_code }
 }
 
+/**
+ * The folders the engine offers for a new shell, repo first when there is one.
+ *
+ * A list without them, or with an entry this client does not know, offers no
+ * choice: the engine's default folder is used.
+ */
+function parseLocations(value: unknown): TerminalFolderChoice[] {
+  if (!isRecord(value) || !Array.isArray(value.locations)) return []
+  const parsed: TerminalFolderChoice[] = []
+  for (const entry of value.locations) {
+    if (!isRecord(entry)) return []
+    const { location, folder } = entry
+    if (location !== 'workspace' && location !== 'repo') return []
+    if (typeof folder !== 'string' || !folder.trim() || folder.length > TERMINAL_MAX_FOLDER_CHARS) return []
+    if (parsed.some((choice) => choice.location === location)) return []
+    parsed.push({ location, folder })
+  }
+  return parsed
+}
+
 function parseSessionList(value: unknown): TerminalSessionInfo[] | null {
   if (!isRecord(value)) return null
   const { sessions } = value
@@ -213,10 +242,16 @@ function scopeQuery(scope: TerminalTarget): string {
   return params.toString()
 }
 
-/** The one body field a session creation is scoped by. Never a path, never a command. */
-function scopeBody(scope: TerminalTarget): { chat_id: string } | { project_id: string } {
-  if ('chatId' in scope) return { chat_id: scope.chatId }
-  return { project_id: scope.projectId }
+/**
+ * The body a session creation is scoped by: the target and, optionally, which
+ * of the engine's folders to start in. Never a path, never a command.
+ */
+function scopeBody(
+  scope: TerminalTarget,
+  location?: TerminalLocation,
+): { chat_id: string; location?: TerminalLocation } | { project_id: string; location?: TerminalLocation } {
+  const body = 'chatId' in scope ? { chat_id: scope.chatId } : { project_id: scope.projectId }
+  return location ? { ...body, location } : body
 }
 
 export const useTerminalStore = defineStore('terminal', () => {
@@ -227,6 +262,12 @@ export const useTerminalStore = defineStore('terminal', () => {
   const status = ref<TerminalStatus | null>(null)
   const sessions = ref<TerminalSessionInfo[]>([])
   const activeSession = ref<TerminalSessionInfo | null>(null)
+  /**
+   * The folders a new shell may start in. Two entries — the workspace and a
+   * linked repository — mean the pane asks which one; one or none means the
+   * engine's default is used without asking.
+   */
+  const locations = ref<TerminalFolderChoice[]>([])
   const phase = ref<TerminalPhase>('closed')
   /** A friendly message for the pane. Never a payload, never a credential. */
   const error = ref('')
@@ -947,10 +988,14 @@ export const useTerminalStore = defineStore('terminal', () => {
    * signed-in session is the terminal's trust boundary. A grant the engine
    * will not give is not the end of the road either: the pane asks again,
    * on the same bounded backoff a lost connection uses. Sessions are listed
-   * when the grant is live, and an existing session is adopted — never
-   * created. Creating a shell is an explicit action.
+   * when the grant is live, and an existing session is adopted.
+   *
+   * With `ensureSession`, a scope that has no running shell gets one: the
+   * person asked for a terminal, so an empty pane would be one more click.
+   * When the scope offers two folders (a linked repository beside the
+   * workspace) nothing is started — the pane asks which one instead.
    */
-  async function open(next: TerminalTarget): Promise<void> {
+  async function open(next: TerminalTarget, options: { ensureSession?: boolean } = {}): Promise<void> {
     const id = 'chatId' in next ? next.chatId : next.projectId
     if (!id || !id.trim()) {
       error.value = 'The terminal needs a chat or a project to run in.'
@@ -970,6 +1015,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (scopeChanged) {
       scopeEpoch += 1
       sessions.value = []
+      locations.value = []
       activeSession.value = null
       truncated.value = false
     }
@@ -1024,8 +1070,12 @@ export const useTerminalStore = defineStore('terminal', () => {
         }
       }
       phase.value = 'ready'
-      await refreshSessions()
+      const listed = await refreshSessions()
       if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+      if (options.ensureSession && listed && needsFirstShell()) {
+        await createSession()
+        return
+      }
       maybeConnect()
     } catch {
       if (myScope !== scopeEpoch || myOpen !== openEpoch) return
@@ -1154,51 +1204,69 @@ export const useTerminalStore = defineStore('terminal', () => {
    * A refresh that started before a *later* refresh is stale whatever the
    * scope, so the newest request is the one that answers.
    */
-  async function refreshSessions(): Promise<void> {
+  async function refreshSessions(): Promise<boolean> {
     const scope = target.value
-    if (!scope) return
+    if (!scope) return false
     const myScope = scopeEpoch
     const myRefresh = ++refreshEpoch
     const selectedAtStart = activeSession.value?.session_id
     try {
       const raw = await api.get<unknown>(`${TERMINAL_API}/sessions?${scopeQuery(scope)}`)
-      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch) return
+      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch) return false
       const parsed = parseSessionList(raw)
       if (!parsed) {
         error.value = 'The engine did not report a session list this app understands.'
-        return
+        return false
       }
       sessions.value = parsed
+      locations.value = parseLocations(raw)
       const current = activeSession.value
       if (current) {
         const fresh = parsed.find((session) => session.session_id === current.session_id)
         if (fresh) activeSession.value = fresh
-        return
+        return true
       }
       // A session was already selected when the request went out, and it is
       // gone from the list now: the list does not get to choose a different
       // one behind the user's back.
-      if (selectedAtStart) return
+      if (selectedAtStart) return true
       const candidate = parsed.find((session) => !session.exited)
       if (candidate) {
         activeSession.value = candidate
       }
+      return true
     } catch {
       // A failure that belongs to a read that has been superseded is not
       // the newer one's error to show.
-      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch) return
+      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch) return false
       error.value = 'The terminal sessions could not be listed.'
+      return false
     }
+  }
+
+  /**
+   * True when the scope has no running shell and only one folder to start
+   * one in, so opening the pane may start it without asking.
+   */
+  function needsFirstShell(): boolean {
+    if (activeSession.value || sessions.value.some((session) => !session.exited)) return false
+    // The engine keeps at most four sessions, exited ones included: a full
+    // list would only earn a capacity refusal.
+    if (sessions.value.length >= MAX_SESSIONS) return false
+    return locations.value.length <= 1
   }
 
   /**
    * Create a session.
    *
-   * This is the only path that starts a shell, and it is explicit: opening
-   * the terminal does not create one, and a reconnect never does. A second
+   * This is the only path that starts a shell: opening the terminal calls it
+   * only when asked to (`ensureSession`) for a scope with no running shell
+   * and one folder, and a reconnect never does. A second
    * click while the first is in flight is refused rather than sent.
+   * `location` picks one of the folders the engine listed; without it the
+   * engine's default folder is used.
    */
-  async function createSession(): Promise<boolean> {
+  async function createSession(location?: TerminalLocation): Promise<boolean> {
     const scope = target.value
     if (!scope) return false
     if (creating.value) return false
@@ -1207,7 +1275,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const myScope = scopeEpoch
     const selectedAtStart = activeSession.value?.session_id
     try {
-      const raw = await api.post<unknown>(`${TERMINAL_API}/sessions`, scopeBody(scope))
+      const raw = await api.post<unknown>(`${TERMINAL_API}/sessions`, scopeBody(scope, location))
       if (myScope !== scopeEpoch) return false
       const session = parseSessionEnvelope(raw)
       if (!session) {
@@ -1459,6 +1527,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     status,
     sessions,
     activeSession,
+    locations,
     phase,
     error,
     warning,

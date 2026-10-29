@@ -341,6 +341,36 @@ def test_resolve_folder_falls_back_to_the_agent_root(tmp_path: Path) -> None:
         host_terminal.resolve_folder(_config(tmp_path / "gone"), pcm, project_id="p")
 
 
+def test_folder_choices_lists_the_repo_then_the_workspace(tmp_path: Path) -> None:
+    config, pcm, root, _repo, tree = _resolve_fixture(tmp_path, code_mode=True)
+    assert host_terminal.folder_choices(config, pcm, chat_id="c") == {
+        "repo": tree.resolve(),
+        "workspace": root.resolve(),
+    }
+
+
+def test_resolve_folder_honours_the_location(tmp_path: Path) -> None:
+    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path, code_mode=False)
+    assert host_terminal.resolve_folder(config, pcm, chat_id="c", location="workspace") == root.resolve()
+    assert host_terminal.resolve_folder(config, pcm, chat_id="c", location="repo") == repo.resolve()
+
+
+def test_resolve_folder_keeps_the_repo_when_the_workspace_root_is_gone(tmp_path: Path) -> None:
+    config, pcm, root, repo, _tree = _resolve_fixture(tmp_path, code_mode=False)
+    root.rmdir()
+    assert host_terminal.resolve_folder(config, pcm, chat_id="c") == repo.resolve()
+    with pytest.raises(FileNotFoundError):
+        host_terminal.resolve_folder(config, pcm, chat_id="c", location="workspace")
+
+
+def test_folder_choices_offers_one_folder_when_the_repo_is_the_workspace(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    project = SimpleNamespace(id="p", repo_path=str(root), workspace="")
+    pcm = _Pcm({}, {"p": project})
+    assert host_terminal.folder_choices(_config(root), pcm, project_id="p") == {"repo": root.resolve()}
+
+
 def test_resolve_folder_unknown_chat_is_lookup_error(tmp_path: Path) -> None:
     pcm = _Pcm({}, {})
     with pytest.raises(LookupError):

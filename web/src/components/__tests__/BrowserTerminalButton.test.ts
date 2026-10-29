@@ -76,6 +76,21 @@ describe('BrowserTerminalButton', () => {
     wrapper.unmount()
   })
 
+  it('starts a shell when the chat has none', async () => {
+    apiPost.mockResolvedValue({
+      session: {
+        session_id: 's1', folder: '/w', cols: 80, rows: 24, seq: 0,
+        attached: false, exited: false, exit_code: null,
+      },
+    })
+    const wrapper = mount(BrowserTerminalButton, { props: { chatId: 'c1' } })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'c1' })
+    wrapper.unmount()
+  })
+
   it('does not open a native terminal window', async () => {
     const wrapper = mount(BrowserTerminalButton, { props: { chatId: 'c1' } })
     await wrapper.get('button').trigger('click')

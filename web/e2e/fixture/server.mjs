@@ -16,6 +16,7 @@
  *   POST /__fixture__/projects  { projects: [...] }  replace this session's project list
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
  *   POST /__fixture__/terminal-offer { chat_id, command }  offer a suggested command
+ *   POST /__fixture__/terminal-repo  { chat_id }      link a repository to a chat's terminal
  *   POST /__fixture__/inbox     { reset?, chats?, removeChats?, tasks?, schedules?,
  *                                 removeSchedules?, actions?, events? }  move what the
  *                               notification inbox reads, and push events frames
@@ -432,6 +433,16 @@ function dismissOffer(state, chatId, body) {
 // machine, and a stray command cannot touch anything.
 
 const TERMINAL_FOLDER = '/synthetic/workspace'
+const TERMINAL_REPO_FOLDER = '/synthetic/repo'
+
+/** The folders a new shell may start in for a scope: the repo first, when linked. */
+function terminalLocations(state, scope) {
+  const linked = state.terminalRepoScopes?.has(scope)
+  return [
+    ...(linked ? [{ location: 'repo', folder: TERMINAL_REPO_FOLDER }] : []),
+    { location: 'workspace', folder: TERMINAL_FOLDER },
+  ]
+}
 const TERMINAL_PLATFORM = 'macos'
 const TERMINAL_HOST = 'fixture.local'
 
@@ -514,16 +525,26 @@ async function terminalApi(req, res, pathname, url, state) {
   if (pathname === '/api/terminal/sessions' && req.method === 'GET') {
     const scope = terminalScope(url)
     const sessions = [...terminals.values()].filter((s) => s.scope === scope)
-    return sendJson(res, { sessions: sessions.map(terminalInfo) })
+    return sendJson(res, {
+      sessions: sessions.map(terminalInfo),
+      locations: terminalLocations(state, scope),
+    })
   }
   if (pathname === '/api/terminal/sessions' && req.method === 'POST') {
     const body = await readBody(req)
     const scope = body?.chat_id ? `chat:${body.chat_id}` : body?.project_id ? `project:${body.project_id}` : ''
     const id = `term-${terminals.size + 1}`
+    const locations = terminalLocations(state, scope)
+    const chosen = body?.location
+      ? locations.find((entry) => entry.location === body.location)
+      : locations[0]
+    if (!chosen) {
+      return sendJson(res, { ok: false, reason: 'folder_missing', error: 'folder not found' }, 409)
+    }
     const session = {
       session_id: id,
       scope,
-      folder: TERMINAL_FOLDER,
+      folder: chosen.folder,
       cols: 80,
       rows: 24,
       seq: 0,
@@ -977,6 +998,16 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, {
         sessions: [...terminals.values()].map(terminalInfo),
       })
+    }
+    if (pathname === '/__fixture__/terminal-repo') {
+      // Give one chat's terminal a linked repository beside the workspace,
+      // so the pane has two folders to offer.
+      const body = await readBody(req)
+      const chatId = String(body?.chat_id || '')
+      if (!chatId) return sendJson(res, { error: 'chat_id is required' }, 400)
+      if (!state.terminalRepoScopes) state.terminalRepoScopes = new Set()
+      state.terminalRepoScopes.add(`chat:${chatId}`)
+      return sendJson(res, { ok: true })
     }
     if (pathname === '/__fixture__/terminal-offer') {
       // Offer a suggested command to one chat. The replacement is silent: the

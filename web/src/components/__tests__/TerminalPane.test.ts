@@ -186,10 +186,14 @@ function sessionInfo(sessionId: string, overrides: Record<string, unknown> = {})
 }
 
 /** The API the store talks to: a status, a session list, and nothing else. */
-function serve(sessions: Record<string, unknown>[] = [], status: Record<string, unknown> = {}) {
+function serve(
+  sessions: Record<string, unknown>[] = [],
+  status: Record<string, unknown> = {},
+  locations: Record<string, unknown>[] = [],
+) {
   apiGet.mockImplementation((path: string) => {
     if (path === '/api/terminal/status') return Promise.resolve(statusPayload(status))
-    if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions })
+    if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions, locations })
     return Promise.resolve({})
   })
 }
@@ -335,6 +339,51 @@ describe('TerminalPane', () => {
     expect(tabs[1].text()).toContain('ended')
     expect(wrapper.get('[role="tablist"]').attributes('aria-label')).toBe('Terminal sessions')
     expect(wrapper.find('button[aria-label="New terminal session"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  const BOTH_FOLDERS = [
+    { location: 'repo', folder: '/src/ciaobot' },
+    { location: 'workspace', folder: '/ciao/personal' },
+  ]
+
+  it('asks whether to open the shell in the workspace or the repository', async () => {
+    serve([], {}, BOTH_FOLDERS)
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' }, { ensureSession: true })
+    await flushPromises()
+
+    expect(apiPost).not.toHaveBeenCalled()
+    const options = wrapper.findAll('.tp-chooser-option')
+    expect(options.map((option) => option.text())).toEqual([
+      expect.stringContaining('Repository'),
+      expect.stringContaining('Workspace'),
+    ])
+    expect(options[1].text()).toContain('personal')
+
+    await options[1].trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'c1', location: 'workspace' })
+    expect(wrapper.find('.tp-chooser').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('asks again from the new-session control when a repository is linked', async () => {
+    serve([sessionInfo('s1')], {}, BOTH_FOLDERS)
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    expect(wrapper.find('.tp-chooser').exists()).toBe(false)
+
+    await wrapper.get('button[aria-label="New terminal session"]').trigger('click')
+
+    expect(apiPost).not.toHaveBeenCalledWith('/api/terminal/sessions', expect.anything())
+    expect(wrapper.findAll('.tp-chooser-option')).toHaveLength(2)
+    await wrapper.get('.tp-chooser-cancel').trigger('click')
+    expect(wrapper.find('.tp-chooser').exists()).toBe(false)
     wrapper.unmount()
   })
 

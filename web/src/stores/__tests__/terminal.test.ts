@@ -1305,6 +1305,82 @@ describe('terminal store status and grant', () => {
 
 // ── Session lifecycle ────────────────────────────────────────────────────
 
+describe('terminal store first shell', () => {
+  const BOTH = [
+    { location: 'repo', folder: '/Users/someone/repo' },
+    { location: 'workspace', folder: '/Users/someone/workspace' },
+  ]
+
+  function listing(sessions: unknown[], locations: unknown[]): void {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions, locations })
+      return Promise.resolve({})
+    })
+  }
+
+  it('starts a shell when asked to ensure one and the scope has none', async () => {
+    listing([], [{ location: 'workspace', folder: '/Users/someone/workspace' }])
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' }, { ensureSession: true })
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'chat-1' })
+    expect(store.activeSession?.session_id).toBe('s1')
+  })
+
+  it('adopts a running shell instead of starting another', async () => {
+    listing([sessionPayload('s0')], [])
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' }, { ensureSession: true })
+
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(store.activeSession?.session_id).toBe('s0')
+  })
+
+  it('starts nothing without ensureSession', async () => {
+    listing([], [])
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('asks instead of starting when a repository sits beside the workspace', async () => {
+    listing([], BOTH)
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' }, { ensureSession: true })
+
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(store.locations.map((choice) => choice.location)).toEqual(['repo', 'workspace'])
+  })
+
+  it('sends the chosen location with the create', async () => {
+    listing([], BOTH)
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' }, { ensureSession: true })
+
+    await store.createSession('workspace')
+
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'chat-1', location: 'workspace' })
+  })
+
+  it('offers no choice from a location list it does not understand', async () => {
+    listing([], [{ location: '/etc', folder: '/etc' }, BOTH[1]])
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+
+    expect(store.locations).toEqual([])
+  })
+})
+
 describe('terminal store session lifecycle', () => {
   it('creates a session only when asked, with exactly one scope id', async () => {
     const store = useTerminalStore()

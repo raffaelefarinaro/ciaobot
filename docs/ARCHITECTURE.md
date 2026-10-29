@@ -414,6 +414,10 @@ web/                           Vue 3 PWA frontend.
                                hand the keyboard back to the panel's controls. Sessions are
                                compact switchable tabs; closing the pane detaches without
                                ending shells, while a tab's close control ends only that shell.
+                               Opening from a chat or project starts a shell when none is
+                               running; when the engine lists two folders (a linked repository
+                               beside the workspace) the pane asks Repository or Workspace
+                               instead, and "+" asks the same for each further shell.
                                `notificationInbox.ts` is the inbox's pure projection: sources in, and out come the
                                rows, sections, distinct-item count, source health, notice keys and exact-link
                                destinations. `sourceHealth.ts` holds the shared `checking`/`ready`/`stale`/`unavailable`
