@@ -7229,6 +7229,11 @@ class ProjectChatManager:
         """Chats currently driving an in-flight broker stream."""
         return [cid for cid in list(self._broker._streams) if self._broker.get(cid) is not None]
 
+    def background_stream_active(self, chat_id: str) -> bool:
+        """True while a between-turns wake, not a user turn, streams in this chat."""
+        stream = self._broker.get(chat_id)
+        return stream is not None and stream.background
+
     def active_chat_ids(self) -> list[str]:
         """Chats with work that must settle before a safe server restart.
 

@@ -183,6 +183,22 @@ describe('ChatPanel live trace', () => {
     localStorage.clear()
   })
 
+  it('keeps the settled turn drawn while a wake streams after it', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = turnMessages()
+    store.projectStreaming['chat-1'] = true
+    await flushPromises()
+    // A user turn in flight: its buffer belongs to the live trace.
+    expect(wrapper.findAll('.message-wrap.assistant')).toHaveLength(0)
+
+    store.wakeStreaming['chat-1'] = true
+    await flushPromises()
+    const bubbles = wrapper.findAll('.message-wrap.assistant')
+    expect(bubbles).toHaveLength(1)
+    expect(bubbles[0].text()).toContain('All done, final reply.')
+    expect(wrapper.find('.trace-block.live').exists()).toBe(true)
+  })
+
   describe('subagents of turns older than the loaded history', () => {
     // Only the latest messages are loaded; this chat's history starts at turn 5.
     const loaded = () => [

@@ -568,7 +568,7 @@ async def ws_events(websocket: WebSocket) -> None:
     """Global awareness WebSocket. Streams cross-chat lifecycle events.
 
     Event payloads (JSON):
-    - `chat_streaming_started`  {chat_id, project_id}
+    - `chat_streaming_started`  {chat_id, project_id, background?}  (background: a wake)
     - `chat_streaming_done`     {chat_id, project_id, is_error, last_error}
     - `chat_result_ready`       {chat_id, project_id, title, snippet}
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
@@ -599,10 +599,13 @@ async def ws_events(websocket: WebSocket) -> None:
         snapshot = []
         for cid in pcm.active_stream_chat_ids():
             chat = pcm.get_chat(cid)
-            snapshot.append({
+            entry = {
                 "chat_id": cid,
                 "project_id": chat.project_id if chat else "",
-            })
+            }
+            if pcm.background_stream_active(cid):
+                entry["background"] = True
+            snapshot.append(entry)
         await websocket.send_json({
             "type": "snapshot",
             "active_streams": snapshot,

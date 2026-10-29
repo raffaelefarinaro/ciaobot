@@ -280,6 +280,8 @@ async def test_drain_between_turns_streams_an_opencode_wake(tmp_path, monkeypatc
     kinds = [e["type"] for e in published if e.get("chat_id") == chat.chat_id]
     assert "chat_streaming_started" in kinds
     assert "chat_streaming_done" in kinds
+    started = next(e for e in published if e["type"] == "chat_streaming_started")
+    assert started["background"] is True
     assert chat.last_response == "BGDONE"
     assert chat.last_response_status == "success"
 

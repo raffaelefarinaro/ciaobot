@@ -1931,12 +1931,12 @@ class ChatStreaming:
         self._between_turn_drains[chat_id] = task
 
     def _record_opencode_wake_turn(self, chat_id: str, event: ResultEvent) -> None:
-        """File the execution OpenCode ran after a background shell finished.
+        """File the execution OpenCode ran after background work finished.
 
         OpenCode's own session store holds the wake, but the durable transcript
         is the fallback copy a reload reads when that store is unreadable. The
         notice is the turn's prompt; ``origin`` keeps it a system row. A wake
-        whose shell item was missed has no notice and records nothing, by design.
+        whose wake item was missed has no notice and records nothing, by design.
         """
         chat = self._host._chats.get(chat_id)
         if (
@@ -2035,6 +2035,9 @@ class ChatStreaming:
                             "type": "chat_streaming_started",
                             "chat_id": chat_id,
                             "project_id": project_id,
+                            # A wake: the turn before it is finished, so the
+                            # client keeps drawing it (no user row follows).
+                            "background": True,
                         }
                     )
                 stream.publish(payload)

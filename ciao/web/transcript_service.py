@@ -46,7 +46,7 @@ from ciao.models import ChatContext
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.opencode import (
     OpencodeProvider,
-    native_shell_run,
+    native_wake_run,
     _file_touches as _opencode_file_touches,
     _summarize_tool_input as _summarize_opencode_tool_input,
 )
@@ -756,7 +756,8 @@ def _render_opencode_thread(
             pending_tools.clear()
 
     def flush_notice() -> None:
-        # Shells that finished together draw one card, ahead of the reply.
+        # Shells and subagents that finished together draw one card, ahead of
+        # the reply; it also splits the wake from the turn before it.
         if pending_runs:
             result.append({
                 "role": "system",
@@ -775,7 +776,7 @@ def _render_opencode_thread(
         parts = [part for part in parts if isinstance(part, dict)] if isinstance(parts, list) else []
         if role == "synthetic":
             flush_tools()
-            run = native_shell_run(
+            run = native_wake_run(
                 "\n".join(str(part.get("text") or "") for part in parts),
                 info.get("description"),
                 info.get("metadata"),
