@@ -1439,6 +1439,15 @@ watch(
   flex-direction: column;
   overflow: hidden;
 }
+/* An artifact is a document with its own scroller. Keeping the body a block
+   box left the viewer's `flex: 1` inert, so the frame sat at its 320px floor
+   inside a full-height modal and the phone got a dead screen under it. Give
+   the body the column contract and let the frame own the scrolling. */
+.fv-body-html {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 .fv-img {
   max-width: 100%;
   max-height: 100%;
