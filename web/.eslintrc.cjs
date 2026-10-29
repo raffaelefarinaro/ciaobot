@@ -42,4 +42,24 @@ module.exports = {
     '@typescript-eslint/no-explicit-any': 'warn',
     '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
   },
+  overrides: [
+    {
+      // Specs legitimately print measurement output, so `no-console` is not an
+      // option here. A line tagged `[DEBUG…]` is scaffolding from someone's
+      // investigation and must not ride into a commit.
+      files: ['e2e/**/*.ts'],
+      rules: {
+        'no-restricted-syntax': ['error',
+          {
+            selector: "CallExpression[callee.object.name='console'] > Literal[value=/^\\[DEBUG/]",
+            message: 'Remove [DEBUG…] logging before committing.',
+          },
+          {
+            selector: "CallExpression[callee.object.name='console'] > TemplateLiteral > TemplateElement[value.raw=/^\\[DEBUG/]",
+            message: 'Remove [DEBUG…] logging before committing.',
+          },
+        ],
+      },
+    },
+  ],
 };
