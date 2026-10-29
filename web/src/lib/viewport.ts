@@ -5,7 +5,8 @@
  * instantly when the iOS keyboard opens/closes. `100dvh` alone does not update
  * on iOS Safari until the user interacts with the page. Also toggles a
  * `.keyboard-open` class so the home-indicator safe-area can collapse while
- * the keyboard is covering it.
+ * the keyboard is covering it, and resolves `--safe-top` so an installed PWA
+ * whose webview is already below the status bar does not add that inset twice.
  *
  * `viewportHeight()` / `viewportWidth()` are the size any `position: fixed`
  * element should measure itself against: with `interactive-widget=resizes-content`
@@ -24,6 +25,41 @@ const RESETTLE_DELAYS_MS = [50, 200, 500]
 
 /** Fraction of the tallest seen viewport below which we call the keyboard open. */
 const KEYBOARD_OPEN_RATIO = 0.85
+
+/** Slack when comparing the OS inset to the gap above the viewport, in px. */
+const TOP_INSET_TOLERANCE_PX = 2
+
+export interface TopInsetInputs {
+  /** Resolved env(safe-area-inset-top) in CSS px. */
+  envInset: number
+  /** window.screen.height — the device's CSS-px height. */
+  screenHeight: number
+  /** visualViewport.height (or innerHeight). */
+  viewportHeight: number
+  /** visualViewport.offsetTop (0 when absent). */
+  viewportOffsetTop: number
+}
+
+/**
+ * The top inset the app should add: 0 when the OS already inset the webview.
+ *
+ * An installed PWA can be laid out below the status bar — iOS paints that band
+ * itself — while `env(safe-area-inset-top)` still reports the inset. Adding it
+ * again pushes the whole pane down by one status bar. When the webview is inset
+ * like that, the gap between the screen and the visual viewport is already one
+ * status bar tall; on a genuinely full-screen webview it is 0.
+ */
+export function resolveTopInset({
+  envInset,
+  screenHeight,
+  viewportHeight,
+  viewportOffsetTop,
+}: TopInsetInputs): number {
+  if (envInset <= 0) return 0
+  const alreadyInset = screenHeight - (viewportHeight + viewportOffsetTop)
+  if (alreadyInset >= envInset - TOP_INSET_TOLERANCE_PX) return 0
+  return envInset
+}
 
 /** Height of the visible viewport, i.e. excluding the on-screen keyboard. */
 export function viewportHeight(): number {
@@ -51,6 +87,30 @@ export function onViewportChange(cb: (height: number) => void): () => void {
 let maxViewportHeight = 0
 let listenersAttached = false
 
+// `env()` cannot be read back from a custom property: `getComputedStyle` returns
+// the raw `env(...)` token, not the resolved length. Layout is the only way to
+// resolve it, so measure a throwaway box once and cache it. Rotation and resume
+// re-read it because the inset changes with orientation.
+let cachedEnvTopInset: number | null = null
+// Avoid a style write on every resize tick while the value stays the same.
+let writtenSafeTop: number | null = null
+
+/** Resolve `env(safe-area-inset-top, 0px)` through layout, then cache it. */
+function envTopInset(): number {
+  if (typeof document === 'undefined') return 0
+  if (cachedEnvTopInset !== null) return cachedEnvTopInset
+  const probe = document.createElement('div')
+  // Must not take layout space or focus, and must not intercept pointers.
+  probe.style.cssText =
+    'position: absolute; top: 0; left: 0; width: 0; visibility: hidden; pointer-events: none;' +
+    ' height: env(safe-area-inset-top, 0px);'
+  document.documentElement.appendChild(probe)
+  const measured = probe.getBoundingClientRect().height
+  probe.remove()
+  cachedEnvTopInset = Number.isFinite(measured) ? Math.max(0, Math.round(measured)) : 0
+  return cachedEnvTopInset
+}
+
 function measure(): void {
   // The settling timers below fire up to 500ms after they are scheduled, which
   // can outlive the page — or, under vitest, the jsdom environment that owns
@@ -67,6 +127,24 @@ function measure(): void {
   // heuristic always returns false. Detect keyboard open by comparing
   // against the tallest viewport height we've seen for this orientation.
   const keyboardOpen = h < maxViewportHeight * KEYBOARD_OPEN_RATIO
+  // While the keyboard is up the viewport is short for a reason that has
+  // nothing to do with the top safe area — the gap is the keyboard, below.
+  // Reading it as "the OS already inset the webview" would drop the inset and
+  // jerk every header up a status bar each time the field takes focus.
+  // `window.screen.height` is already in CSS px on iOS; do not scale it by
+  // devicePixelRatio.
+  const safeTop = keyboardOpen
+    ? envTopInset()
+    : resolveTopInset({
+      envInset: envTopInset(),
+      screenHeight: window.screen?.height ?? h,
+      viewportHeight: h,
+      viewportOffsetTop: window.visualViewport?.offsetTop ?? 0,
+    })
+  if (safeTop !== writtenSafeTop) {
+    document.documentElement.style.setProperty('--safe-top', `${safeTop}px`)
+    writtenSafeTop = safeTop
+  }
   const wasOpen = document.documentElement.classList.contains('keyboard-open')
   document.documentElement.classList.toggle('keyboard-open', keyboardOpen)
   for (const cb of subscribers) cb(h)
@@ -127,8 +205,10 @@ export function installViewportPlumbing(): void {
   window.addEventListener('resize', measure)
   window.addEventListener('orientationchange', () => {
     // The tallest height for the previous orientation says nothing about this
-    // one, so drop it and re-derive from the new viewport.
+    // one, so drop it and re-derive from the new viewport. The safe-area inset
+    // also changes with orientation, so re-read it through layout.
     maxViewportHeight = 0
+    cachedEnvTopInset = null
     remeasureWhileSettling()
   })
   if (window.visualViewport) {
