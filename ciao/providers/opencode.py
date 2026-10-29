@@ -1018,6 +1018,53 @@ def native_shell_run(
     }
 
 
+
+_SUBAGENT_BODY_RE = re.compile(r"<subagent\b[^>]*>\n?(.*?)\n?</subagent>\s*$", re.DOTALL)
+
+
+def native_subagent_run(
+    text: str, description: str | None, metadata: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """A ``format_finished_runs`` entry for one finished background subagent.
+
+    OpenCode wakes the session with a ``synthetic`` item whose metadata names
+    the child session (``source == "subagent"``) and whose text wraps the
+    child's report in a ``<subagent ...>`` element. Without a notice row the
+    wake's reply joins the turn before it and that turn's answer is drawn as
+    a trace step. Returns None for any other item.
+    """
+    if not isinstance(metadata, Mapping) or metadata.get("source") != "subagent":
+        return None
+    raw = str(text or "")
+    match = _SUBAGENT_BODY_RE.search(raw)
+    body = match.group(1) if match else raw
+    state = str(metadata.get("state") or "")
+    if state == "completed":
+        status = "ok"
+    elif _SHELL_CANCELLED_RE.search(state):
+        status = "cancelled"
+    else:
+        status = "failed"
+    label = " ".join(str(description or metadata.get("agent") or "").split())[:120]
+    return {
+        "label": label,
+        "run_id": str(metadata.get("childID") or ""),
+        "exit_code": None,
+        "status": status,
+        "error": "",
+        "log_path": None,
+        "last_lines": body.rstrip().splitlines()[-_SHELL_TAIL_LINES:],
+    }
+
+
+def native_wake_run(
+    text: str, description: str | None, metadata: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """The finished-run entry for a shell or subagent wake item, else None."""
+    return native_shell_run(text, description, metadata) or native_subagent_run(
+        text, description, metadata
+    )
+
 def _projected_message(message: Mapping[str, Any]) -> dict[str, Any] | None:
     """Project one flat V2 message into the provider's internal part shape.
 
@@ -1762,8 +1809,9 @@ class OpencodeProvider(BaseSDKProvider):
         # surfaced (#1617). Outlives a turn; cleared by `disconnect`.
         self._child_sessions: dict[str, str] = {}
         self._background_changed = asyncio.Event()
-        # Finished native shells whose synthetic wake items arrived since the
-        # last execution ended; `_wake_result` turns them into the notice.
+        # Finished shells and subagents whose synthetic wake items arrived
+        # since the last execution ended; `_wake_result` turns them into the
+        # notice.
         self._wake_runs: list[dict[str, Any]] = []
         # Monotonic time of the last event seen from the server; the idle
         # reaper bounds its "work outstanding" protection with it.
@@ -2362,7 +2410,7 @@ class OpencodeProvider(BaseSDKProvider):
                         and item.get("type") == "synthetic"
                         and isinstance(payload, Mapping)
                     ):
-                        run = native_shell_run(
+                        run = native_wake_run(
                             str(payload.get("text") or ""),
                             payload.get("description"),
                             payload.get("metadata"),

@@ -38,6 +38,8 @@ from ciao.providers.opencode import (
     _validate_form_field,
     _projected_message,
     native_shell_run,
+    native_subagent_run,
+    native_wake_run,
     _log_catalog_change,
     _read_v2_messages,
     _server_version_error,
@@ -5329,3 +5331,38 @@ async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypat
     assert config["skills"]["paths"] == [str(repo / ".claude" / "skills")]
     assert config["tool_output"] == {"max_lines": 1000, "max_bytes": 20_000}
     provider._client = None
+
+
+def test_native_subagent_run_verdicts():
+    def run(state="completed", body="REPORT\nline two", description="Review"):
+        text = (
+            f'<subagent sessionID="ses_c" state="{state}" description="x">\n'
+            f"{body}\n</subagent>"
+        )
+        return native_subagent_run(
+            text, description,
+            {"source": "subagent", "childID": "ses_c", "agent": "General", "state": state},
+        )
+
+    ok = run()
+    assert ok is not None
+    assert (ok["status"], ok["exit_code"], ok["run_id"], ok["label"]) == (
+        "ok", None, "ses_c", "Review"
+    )
+    assert ok["last_lines"] == ["REPORT", "line two"]
+    failed = run(state="error")
+    assert failed is not None and failed["status"] == "failed"
+    cancelled = run(state="cancelled")
+    assert cancelled is not None and cancelled["status"] == "cancelled"
+    assert run(description=None)["label"] == "General"  # type: ignore[index]
+    assert native_subagent_run("x", None, {"source": "shell"}) is None
+    shell = native_wake_run(
+        '<shell id="sh_1" state="completed" command="c">\nOUT\n</shell>', "c",
+        {"source": "shell", "shellID": "sh_1", "state": "completed", "exit": 0},
+    )
+    assert shell is not None and shell["run_id"] == "sh_1"
+    sub = native_wake_run(
+        "<subagent>\nR\n</subagent>", "d",
+        {"source": "subagent", "childID": "c", "state": "completed"},
+    )
+    assert sub is not None and sub["run_id"] == "c"

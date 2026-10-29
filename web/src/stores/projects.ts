@@ -295,6 +295,10 @@ export const useProjectStore = defineStore('projects', () => {
   // WS is open). projectStreaming is what powers sidebar dots on inactive
   // chats and projects.
   const projectStreaming = ref<Record<string, boolean>>({})
+  // Chats whose running stream is a between-turns wake (background work
+  // finished, no user row drove it). The turn before it already settled, so
+  // it keeps rendering instead of yielding to the live trace.
+  const wakeStreaming = ref<Record<string, boolean>>({})
   // Per-chat count of background subagents still running *after* the parent
   // turn's result landed. Driven by `chat_subagents_ready` over /ws/events
   // (the server's subagent watcher). Powers a persistent "N background agents
@@ -1059,6 +1063,8 @@ export const useProjectStore = defineStore('projects', () => {
     const chatId = activeChatId.value || ''
     return Boolean(streaming.value[chatId] || projectStreaming.value[chatId])
   })
+
+  const isWakeStreaming = computed(() => Boolean(wakeStreaming.value[activeChatId.value || '']))
 
   const currentStreamingText = computed(() =>
     streamingText.value[activeChatId.value || ''] || ''
@@ -3485,7 +3491,16 @@ export const useProjectStore = defineStore('projects', () => {
                   break
                 }
               }
-              if (serverLastUserIdx >= 0) {
+                if (serverLastUserIdx >= 0 && wakeStreaming.value[chatId]) {
+                // A wake follows a settled turn: keep that turn and cut at the
+                // wake's notice row, or nowhere when it has none yet.
+                let noticeIdx = -1
+                for (let i = windowRows.length - 1; i > serverLastUserIdx; i--) {
+                  const row = windowRows[i]
+                  if (row.role === 'system' && !row.tool_name) { noticeIdx = i; break }
+                }
+                if (noticeIdx >= 0) windowRows = windowRows.slice(0, noticeIdx + 1)
+              } else if (serverLastUserIdx >= 0) {
                 windowRows = windowRows.slice(0, serverLastUserIdx + 1)
               }
             }
@@ -4817,8 +4832,10 @@ export const useProjectStore = defineStore('projects', () => {
         if (msg.appearance) applyAppearanceSettings(msg.appearance)
         // Reset broker-streaming state to match server truth.
         projectStreaming.value = {}
+        wakeStreaming.value = {}
         for (const entry of msg.active_streams) {
           projectStreaming.value[entry.chat_id] = true
+          if (entry.background) wakeStreaming.value[entry.chat_id] = true
         }
         // Authoritative background-agent counts: replace local state so a
         // count left stale by a missed event (WS gap, server restart) heals
@@ -4866,6 +4883,8 @@ export const useProjectStore = defineStore('projects', () => {
         break
       case 'chat_streaming_started':
         projectStreaming.value[msg.chat_id] = true
+        if (msg.background) wakeStreaming.value[msg.chat_id] = true
+        else delete wakeStreaming.value[msg.chat_id]
         // Note: backgroundAgents is NOT cleared here — agents from a prior
         // turn keep running across new turns. The server's JSONL watcher
         // re-announces the count at every turn end (including 0), and the
@@ -4880,6 +4899,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
       case 'chat_streaming_done': {
         delete projectStreaming.value[msg.chat_id]
+        delete wakeStreaming.value[msg.chat_id]
         const doneChat = chats.value.find(c => c.chat_id === msg.chat_id)
         if (doneChat) doneChat.last_error = msg.last_error || ''
         if (doneChat && msg.repo_location) doneChat.repo_location = msg.repo_location
@@ -7068,7 +7088,7 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
-    projectStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     terminalOffers,
     serverRestarting, serverRestartMessage,
     // Computed

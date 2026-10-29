@@ -707,6 +707,8 @@ async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
     assert _texts(events) == "SUBDONE"
     results = [event for event in events if isinstance(event, ResultEvent)]
     assert [r.result for r in results] == ["SUBDONE"]
+    assert results[0].wake_notice.startswith("[Ciaobot] 1 background run finished.")
+    assert "— Run delayed shell command (ses_bgsub_child, ok)" in results[0].wake_notice
     assert provider._background_children == set()
 
 

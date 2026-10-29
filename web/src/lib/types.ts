@@ -629,7 +629,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string; background?: boolean }[]; background_agents?: Record<string, number>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; chat_terminal_offers: Record<string, TerminalOffer>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string; appearance?: AppearancePayload | null }
   | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
   | ({ type: 'appearance_settings_changed' } & AppearancePayload)
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
@@ -638,7 +638,7 @@ export type EventsWsMessage =
   // because the engine can change a chat's offer from any session.
   | { type: 'chat_terminal_offer_changed'; chat_id: string; terminal_offer: TerminalOffer | null }
   | { type: 'chat_created'; chat: ChatInfo }
-  | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
+  | { type: 'chat_streaming_started'; chat_id: string; project_id: string; background?: boolean }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
   | { type: 'chat_code_mode'; chat_id: string; project_id: string; code_mode: boolean; actor: CodeModeActor; at: string }

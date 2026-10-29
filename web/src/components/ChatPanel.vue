@@ -4294,8 +4294,10 @@ const renderData = computed<{
     // (`store.currentTimeline`), so drop its buffer rather than emitting a
     // second, static copy. Only the trailing turn is in flight — earlier turns
     // keep their trace even when they never produced an answer bubble (the
-    // user hit Stop, or the turn ended in tool calls only).
-    if (isFinal && store.isStreaming) {
+    // user hit Stop, or the turn ended in tool calls only). A wake stream has
+    // no user row of its own, so the trailing turn is the settled one before
+    // it and stays drawn.
+    if (isFinal && store.isStreaming && !store.isWakeStreaming) {
       buffer = []
       return
     }

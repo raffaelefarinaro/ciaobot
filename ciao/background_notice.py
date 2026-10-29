@@ -1,4 +1,4 @@
-"""The "background runs finished" notice text for provider-native shells.
+"""The "background runs finished" notice text for provider-native work.
 
 Shared by the OpenCode shell wake and the transcript's notice for finished
 shells, so the two cannot drift from the frontend parser
