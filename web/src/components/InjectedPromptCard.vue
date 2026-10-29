@@ -35,6 +35,7 @@ const detailId = useId()
 const rawId = useId()
 
 const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
+  compaction: 'doc',
   background_run: 'activity',
   cli_task_wake: 'activity',
   schedule: 'clock',
@@ -86,6 +87,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
     <div v-if="$slots.actions" class="injected-card-actions"><slot name="actions" /></div>
 
     <div v-if="open" :id="bodyId" class="injected-card-body">
+      <div v-if="prompt.kind === 'compaction'" class="injected-card-prose" tabindex="0" role="region" aria-label="Conversation summary" v-html="md(prompt.text)"></div>
       <template v-if="prompt.kind === 'background_run'">
         <ul class="injected-card-runs">
           <li v-for="(run, idx) in prompt.runs" :key="`${run.runId}-${idx}`">

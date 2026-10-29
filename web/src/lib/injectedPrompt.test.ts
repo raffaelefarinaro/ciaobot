@@ -2,6 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { errorNoticePrompt, parseInjectedPrompt, summarizeInjectedPrompt } from './injectedPrompt'
 import type { InjectedPrompt } from './injectedPrompt'
 
+it('compaction origin produces a summary notice without classifying ordinary messages', () => {
+  const prompt = parseInjectedPrompt('The preserved context', 'compaction')
+  expect(prompt).toEqual({ kind: 'compaction', text: 'The preserved context' })
+  expect(summarizeInjectedPrompt(prompt!)).toMatchObject({ label: 'Context compacted' })
+  expect(parseInjectedPrompt('The preserved context')).toBeNull()
+})
+
 const D = '—'
 
 function fence(tag: string, body: string, label: string): string {

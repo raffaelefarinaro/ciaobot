@@ -394,7 +394,7 @@ def _is_countable_user_turn(
         return False
     if is_cli_envelope(text):
         return False
-    if is_compact_summary(record, text):
+    if is_compact_summary(record):
         return False
     if is_hidden_continuation(text):
         return False
@@ -514,6 +514,11 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                 continue
 
             if rtype != "user":
+                continue
+            # Compaction recaps are provider-generated context, not user turns
+            # or task events. Exclude them before inspecting tool receipts,
+            # wake prompts, or completion notifications in their text.
+            if is_compact_summary(record):
                 continue
 
             message = record.get("message")
