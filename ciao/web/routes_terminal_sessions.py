@@ -55,6 +55,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao import host_terminal
+from ciao.host_terminal import FolderLocation
 from ciao.terminal_sessions import (
     TerminalSessionError,
     TerminalSessionInfo,
@@ -155,43 +156,55 @@ def _query_target(request: Request) -> tuple[TerminalTargetKind, str] | None:
     return "project", params["project_id"]
 
 
-def _body_target(payload: Any) -> tuple[TerminalTargetKind, str] | None:
+def _body_target(
+    payload: Any,
+) -> tuple[TerminalTargetKind, str, FolderLocation | None] | None:
     """The target the body names, or ``None`` when it names no usable one.
 
     The body is exactly ``{"chat_id": str}`` or exactly
-    ``{"project_id": str}``: a missing key, an unknown key, two keys and a
-    value that is not a string are all the same refusal, so a caller
-    cannot learn the shape by trying variants.
+    ``{"project_id": str}``, optionally with ``"location"`` set to
+    ``"workspace"`` or ``"repo"``: a missing key, an unknown key, two target
+    keys and a value of the wrong kind are all the same refusal, so a caller
+    cannot learn the shape by trying variants. The location picks one of the
+    engine's own folders; it never names a path.
     """
     if not isinstance(payload, dict):
         return None
     keys = set(payload)
+    location: FolderLocation | None = None
+    if "location" in keys:
+        keys.discard("location")
+        raw_location = payload["location"]
+        if raw_location == "workspace":
+            location = "workspace"
+        elif raw_location == "repo":
+            location = "repo"
+        else:
+            return None
     if keys == {"chat_id"}:
         value = payload["chat_id"]
-        return ("chat", value) if isinstance(value, str) else None
+        return ("chat", value, location) if isinstance(value, str) else None
     if keys == {"project_id"}:
         value = payload["project_id"]
-        return ("project", value) if isinstance(value, str) else None
+        return ("project", value, location) if isinstance(value, str) else None
     return None
 
 
-def _folder_for(
-    request: Request, kind: TerminalTargetKind, target_id: str
-) -> Path | JSONResponse:
-    """The folder this target opens in, or the refusal it earns.
+def _resolve_target(
+    request: Request, kind: TerminalTargetKind, target_id: str, resolver: Any, **extra: Any
+) -> Any:
+    """Run one of :mod:`ciao.host_terminal`'s resolvers, or the refusal it earns.
 
-    The folder is the engine's own answer and never the caller's: it comes
-    from :func:`ciao.host_terminal.resolve_folder`, which is also what
-    decides whether the target exists at all. A target that names nothing
-    is a 400, a target that does not exist is a 404, and a target whose
-    folder is gone is a 409.
+    A target that names nothing is a 400, a target that does not exist is a
+    404, and a target whose folder is gone is a 409.
     """
     try:
-        return host_terminal.resolve_folder(
+        return resolver(
             request.app.state.config,
             request.app.state.project_chat_manager,
             chat_id=target_id if kind == "chat" else "",
             project_id=target_id if kind == "project" else "",
+            **extra,
         )
     except ValueError as exc:
         return _fail("bad_request", str(exc), 400)
@@ -199,6 +212,38 @@ def _folder_for(
         return _fail("not_found", str(exc), 404)
     except FileNotFoundError as exc:
         return _fail("folder_missing", f"folder not found: {exc}", 409)
+
+
+def _folder_for(
+    request: Request,
+    kind: TerminalTargetKind,
+    target_id: str,
+    location: FolderLocation | None = None,
+) -> Path | JSONResponse:
+    """The folder this target opens in, or the refusal it earns.
+
+    The folder is the engine's own answer and never the caller's: it comes
+    from :func:`ciao.host_terminal.resolve_folder`, which is also what
+    decides whether the target exists at all.
+    """
+    result: Path | JSONResponse = _resolve_target(
+        request, kind, target_id, host_terminal.resolve_folder, location=location
+    )
+    return result
+
+
+def _choices_for(
+    request: Request, kind: TerminalTargetKind, target_id: str
+) -> dict[FolderLocation, Path] | JSONResponse:
+    """The folders this target may open in, or the refusal it earns.
+
+    The same resolution as :func:`_folder_for`, so the list and the create
+    agree on whether a target exists and where its shells start.
+    """
+    result: dict[FolderLocation, Path] | JSONResponse = _resolve_target(
+        request, kind, target_id, host_terminal.folder_choices
+    )
+    return result
 
 
 def _manager_failure(exc: TerminalSessionError) -> JSONResponse:
@@ -240,10 +285,12 @@ async def terminal_sessions_list(request: Request) -> JSONResponse:
 
     The list is scoped exactly: a project session and a chat session that
     happen to share an id are two different sessions, and neither appears
-    in the other's list. The folder is resolved even though the list does
-    not need it, because that resolution is the one place that decides
-    whether a target exists — so an unknown chat is a 404 here rather
-    than an empty list that looks like "nothing is running".
+    in the other's list. The answer also names the folders a new shell may
+    start in (``locations``: the workspace, and the repository when one is
+    linked), so the pane can offer the choice. That resolution is also the
+    one place that decides whether a target exists — so an unknown chat is
+    a 404 here rather than an empty list that looks like "nothing is
+    running".
     """
     refusal = _gate(request)
     if refusal is not None:
@@ -254,22 +301,31 @@ async def terminal_sessions_list(request: Request) -> JSONResponse:
             "bad_request", "name exactly one of chat_id or project_id.", 400
         )
     kind, target_id = target
-    folder = _folder_for(request, kind, target_id)
-    if isinstance(folder, JSONResponse):
-        return folder
+    choices = _choices_for(request, kind, target_id)
+    if isinstance(choices, JSONResponse):
+        return choices
     try:
         sessions = _manager(request).list_for(kind, target_id)
     except TerminalSessionError as exc:
         return _manager_failure(exc)
     return _no_store(
-        JSONResponse({"sessions": [_info_json(info) for info in sessions]})
+        JSONResponse(
+            {
+                "sessions": [_info_json(info) for info in sessions],
+                "locations": [
+                    {"location": location, "folder": str(folder)}
+                    for location, folder in choices.items()
+                ],
+            }
+        )
     )
 
 
 async def terminal_sessions_create(request: Request) -> JSONResponse:
     """Open a shell for one chat or one project.
 
-    The body names the target and nothing else: the folder comes from the
+    The body names the target and, optionally, which of the engine's own
+    folders to start in (``workspace`` or ``repo``); the path comes from the
     engine, the window comes from the manager, and the shell that is
     started is the manager's own. The slot is reserved before the shell
     exists, so a full manager refuses the request instead of starting a
@@ -293,11 +349,12 @@ async def terminal_sessions_create(request: Request) -> JSONResponse:
     if target is None:
         return _fail(
             "bad_request",
-            'send exactly {"chat_id": "<id>"} or {"project_id": "<id>"}',
+            'send exactly {"chat_id": "<id>"} or {"project_id": "<id>"},'
+            ' optionally with "location": "workspace" or "repo"',
             400,
         )
-    kind, target_id = target
-    folder = _folder_for(request, kind, target_id)
+    kind, target_id, location = target
+    folder = _folder_for(request, kind, target_id, location)
     if isinstance(folder, JSONResponse):
         return folder
     try:

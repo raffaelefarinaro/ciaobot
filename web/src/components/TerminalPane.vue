@@ -49,6 +49,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useTerminalStore } from '../stores/terminal'
 import type { TerminalSessionInfo } from '../lib/terminalProtocol'
+import type { TerminalFolderChoice, TerminalLocation } from '../stores/terminal'
 import type { TerminalRenderer } from '../lib/terminalRenderer'
 
 const store = useTerminalStore()
@@ -237,8 +238,41 @@ async function end(session: TerminalSessionInfo): Promise<void> {
   await store.endSession(session.session_id)
 }
 
+/**
+ * The "where" question, asked when a scope offers two folders.
+ *
+ * A chat with a linked repository can start a shell in the workspace or in
+ * the repository, and neither is the obvious one, so the pane asks: on its
+ * own when no shell is running, and after "+" when one is.
+ */
+const choosing = ref(false)
+const offersChoice = computed(() => store.locations.length > 1)
+/** Phases with a live grant and a listed scope: a pick can be acted on. */
+const CHOOSER_PHASES = new Set<string>(['ready', 'connecting', 'live', 'reconnecting', 'ended'])
+const showChooser = computed(() => offersChoice.value
+  && CHOOSER_PHASES.has(store.phase)
+  && (choosing.value || (!store.activeSession && !store.creating)))
+
+const LOCATION_LABELS: Record<TerminalLocation, string> = {
+  workspace: 'Workspace',
+  repo: 'Repository',
+}
+
+function folderName(folder: string): string {
+  return folder.split(/[\\/]/).filter(Boolean).at(-1) || folder
+}
+
 async function create(): Promise<void> {
+  if (offersChoice.value) {
+    choosing.value = !choosing.value
+    return
+  }
   await store.createSession()
+}
+
+async function createIn(choice: TerminalFolderChoice): Promise<void> {
+  choosing.value = false
+  await store.createSession(choice.location)
 }
 
 function openSession(session: TerminalSessionInfo): void {
@@ -320,6 +354,8 @@ function focusControls(): void {
 }
 
 // ── Lifecycle ───────────────────────────────────────────────────────────
+
+watch(() => store.target, () => { choosing.value = false })
 
 watch(() => store.activeSession?.session_id, (sessionId) => {
   if (!sessionId) {
@@ -417,12 +453,12 @@ onBeforeUnmount(() => {
               :tabindex="session.session_id === store.activeSession?.session_id ? 0 : -1"
               :title="`${session.folder} · ${sessionState(session)}`"
               @keydown="onTabKeydown($event, store.sessions.indexOf(session))" @click="openSession(session)">
-              <span class="tp-session-folder">{{ session.folder.split('/').filter(Boolean).at(-1) || session.folder }}</span>
+              <span class="tp-session-folder">{{ folderName(session.folder) }}</span>
               <span class="tp-session-state">{{ sessionState(session) }}</span>
             </button>
             <button type="button" class="btn-icon tp-session-end" :aria-label="`End terminal session ${session.folder}`" title="End session" :disabled="store.ending" @click="end(session)">×</button>
           </div>
-          <button type="button" class="btn-icon tp-new" aria-label="New terminal session" :title="store.creating ? 'Starting…' : 'New session'" :disabled="store.creating || store.sessions.length >= 4" @click="create">+</button>
+          <button type="button" class="btn-icon tp-new" aria-label="New terminal session" :title="store.creating ? 'Starting…' : 'New session'" :aria-expanded="offersChoice ? choosing : undefined" :disabled="store.creating || store.sessions.length >= 4" @click="create">+</button>
         </div>
         <div v-if="store.phase === 'takeover'" class="tp-takeover" role="alert">
           <p class="tp-takeover-text">Another connection took over this terminal session.</p>
@@ -437,6 +473,27 @@ onBeforeUnmount(() => {
         </p>
         <p v-else-if="store.phase === 'ended'" class="tp-phase" role="status">
           This session has ended. Its output stays on the engine until the session is removed.
+        </p>
+        <div v-if="showChooser" class="tp-chooser" role="group" aria-label="Where to open the shell">
+          <p class="tp-chooser-title">Open a shell in</p>
+          <div class="tp-chooser-options">
+            <button
+              v-for="choice in store.locations"
+              :key="choice.location"
+              type="button"
+              class="tp-chooser-option"
+              :title="choice.folder"
+              :disabled="store.creating || store.sessions.length >= 4"
+              @click="createIn(choice)"
+            >
+              <span class="tp-chooser-label">{{ LOCATION_LABELS[choice.location] }}</span>
+              <span class="tp-chooser-folder">{{ folderName(choice.folder) }}</span>
+            </button>
+          </div>
+          <button v-if="store.activeSession" type="button" class="btn-small tp-chooser-cancel" @click="choosing = false">Cancel</button>
+        </div>
+        <p v-else-if="!store.activeSession && store.creating" class="tp-phase" role="status">
+          Starting a shell…
         </p>
         <p v-else-if="!store.activeSession" class="tp-phase" role="status">
           No shell is open for this {{ store.target && 'projectId' in store.target ? 'project' : 'chat' }} yet.
@@ -608,6 +665,59 @@ onBeforeUnmount(() => {
   font-size: var(--text-xs);
   pointer-events: none;
 }
+.tp-chooser {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  border-radius: var(--radius-sm);
+}
+.tp-chooser-title {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+}
+.tp-chooser-options {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+.tp-chooser-option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 160px;
+  max-width: 240px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tp-chooser-option:hover:not(:disabled) { border-color: var(--border-strong); background: var(--bg3); }
+.tp-chooser-option:disabled { opacity: 0.5; cursor: default; }
+.tp-chooser-option:focus-visible,
+.tp-chooser-cancel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tp-chooser-label { font-size: var(--text-sm); font-weight: 600; }
+.tp-chooser-folder {
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .tp-sessions {
   flex: 0 0 auto;
   min-width: 0;
@@ -702,6 +812,8 @@ onBeforeUnmount(() => {
     min-width: var(--touch);
   }
   .tp-tab-wrap { min-height: var(--touch); }
+  .tp-chooser-option,
+  .tp-chooser-cancel { min-height: var(--touch); }
   .tp-tab { min-height: var(--touch); }
 }
 </style>

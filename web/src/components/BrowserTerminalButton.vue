@@ -9,25 +9,34 @@
  * terminal keeps its own button (`HostTerminalButton.vue`) for the actions
  * that need a real window on the engine's own machine: provider sign-in,
  * skill updates, the engine's own update.
+ *
+ * Opening from here starts a shell when the scope has none, so the pane is
+ * never an empty box; a chat with a linked repository asks which folder.
  */
 import { useTerminalStore } from '../stores/terminal'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   chatId?: string
   projectId?: string
   /** `row`: a full-width rail row with the prompt glyph, for Chat details. */
   variant?: 'link' | 'row'
-}>()
+  /**
+   * Start a shell when the scope has none. Off for the suggested-command
+   * card, which only opens the pane: a model-authored command never gets a
+   * shell started on its behalf.
+   */
+  startShell?: boolean
+}>(), { startShell: true })
 
 const store = useTerminalStore()
 
 async function open(): Promise<void> {
   if (props.chatId) {
-    await store.open({ chatId: props.chatId })
+    await store.open({ chatId: props.chatId }, { ensureSession: props.startShell })
     return
   }
   if (props.projectId) {
-    await store.open({ projectId: props.projectId })
+    await store.open({ projectId: props.projectId }, { ensureSession: props.startShell })
   }
 }
 </script>

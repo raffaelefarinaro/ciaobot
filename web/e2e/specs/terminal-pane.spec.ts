@@ -89,9 +89,7 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   await expect(pane.locator('.tp-warning')).toContainText('not a sandbox')
   await expect(pane.locator('.tp-status')).toContainText('fixture.local')
 
-  // No shell is running yet, and starting one is an explicit act.
-  await expect(pane.getByRole('tab')).toHaveCount(0)
-  await pane.getByRole('button', { name: 'New terminal session' }).click()
+  // No shell was running, so opening the terminal started one.
   await expect(pane.getByRole('tab')).toHaveCount(1)
 
   // The shell answers.
@@ -357,10 +355,38 @@ test('a chat with no repository opens the terminal too', async ({ page }) => {
   // The pane is scoped to this chat, not to another one.
   await expect.poll(() => scopeQueries.join(' ')).toContain('chat_id=alpha-chat-2')
 
-  // A shell starts here like any other: opening the panel starts nothing.
-  await expect(pane.getByRole('tab')).toHaveCount(0)
-  await pane.getByRole('button', { name: 'New terminal session' }).click()
+  // A shell starts here like any other: opening the panel starts one.
   await expect(pane.getByRole('tab')).toHaveCount(1)
+})
+
+test('a chat with a linked repository asks where to open the shell', async ({ page }, testInfo) => {
+  // A fixture session of its own: the earlier journeys left shells running
+  // for this chat, and a running shell is adopted rather than asked about.
+  await isolate(page, `terminal-pane-repo-${testInfo.workerIndex}`)
+  const linked = await page.request.post('/__fixture__/terminal-repo', { data: { chat_id: 'alpha-chat-1' } })
+  expect(linked.ok(), 'the fixture refused the repository').toBe(true)
+  await boot(page, CHAT_PATH, COMPOSER)
+
+  await page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+
+  // Nothing starts until the person picks a folder.
+  const chooser = pane.getByRole('group', { name: 'Where to open the shell' })
+  await expect(chooser).toBeVisible()
+  await expect(pane.getByRole('tab')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('terminal-chooser.png'), animations: 'disabled' })
+
+  await chooser.getByRole('button', { name: /Repository/ }).click()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
+  await expect(pane.getByRole('tab')).toHaveAttribute('title', /\/synthetic\/repo/)
+  await expect(chooser).toBeHidden()
+
+  // A second shell asks again, and can go to the workspace.
+  await pane.getByRole('button', { name: 'New terminal session' }).click()
+  await chooser.getByRole('button', { name: /Workspace/ }).click()
+  await expect(pane.getByRole('tab')).toHaveCount(2)
+  await expect(pane.getByRole('tab').nth(1)).toHaveAttribute('title', /\/synthetic\/workspace/)
 })
 
 test.describe('on a phone', () => {

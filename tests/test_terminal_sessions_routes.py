@@ -417,6 +417,9 @@ def test_the_query_must_name_exactly_one_target(tmp_path: Path, query: str) -> N
         {"chat_id": 5},
         {"chat_id": None},
         {"chat_id": ""},
+        {"chat_id": "c1", "location": "/tmp"},
+        {"chat_id": "c1", "location": None},
+        {"location": "repo"},
     ],
     ids=[
         "neither",
@@ -425,6 +428,9 @@ def test_the_query_must_name_exactly_one_target(tmp_path: Path, query: str) -> N
         "a number",
         "null",
         "an empty id",
+        "a path as location",
+        "a null location",
+        "a location without a target",
     ],
 )
 def test_the_body_must_name_exactly_one_target(tmp_path: Path, body: Any) -> None:
@@ -557,6 +563,57 @@ def test_the_list_is_scoped_to_its_target(tmp_path: Path) -> None:
         listed = client.get(f"{SESSIONS}?chat_id=c2", headers=_origin())
         assert listed.status_code == 200
         assert listed.json()["sessions"] == []
+
+
+def _linked_app(tmp_path: Path) -> tuple[Starlette, Path, Path]:
+    """A chat whose project links a repository beside the workspace root."""
+    root = tmp_path / "root"
+    repo = tmp_path / "repo"
+    root.mkdir()
+    repo.mkdir()
+    project = SimpleNamespace(id="p1", repo_path=str(repo), workspace="")
+    chat = SimpleNamespace(id="c1", project_id="p1", code_mode=False, repo_location={})
+    app = _app(tmp_path, root=root, pcm=FakePcm({"c1": chat}, {"p1": project}))
+    return app, root, repo
+
+
+def test_the_list_names_the_folders_a_shell_may_start_in(tmp_path: Path) -> None:
+    app, root, repo = _linked_app(tmp_path)
+    with _client(app) as client:
+        listed = client.get(f"{SESSIONS}?chat_id=c1", headers=_origin())
+    assert listed.status_code == 200
+    assert listed.json()["locations"] == [
+        {"location": "repo", "folder": str(repo.resolve())},
+        {"location": "workspace", "folder": str(root.resolve())},
+    ]
+
+
+def test_a_location_picks_the_folder_and_the_default_is_the_repo(tmp_path: Path) -> None:
+    app, root, repo = _linked_app(tmp_path)
+    with _client(app) as client:
+        default = client.post(SESSIONS, json={"chat_id": "c1"}, headers=_origin())
+        workspace = client.post(
+            SESSIONS, json={"chat_id": "c1", "location": "workspace"}, headers=_origin()
+        )
+        linked = client.post(
+            SESSIONS, json={"chat_id": "c1", "location": "repo"}, headers=_origin()
+        )
+    assert default.json()["session"]["folder"] == str(repo.resolve())
+    assert workspace.json()["session"]["folder"] == str(root.resolve())
+    assert linked.json()["session"]["folder"] == str(repo.resolve())
+
+
+def test_a_repo_location_without_a_linked_repo_is_a_conflict(tmp_path: Path) -> None:
+    project = SimpleNamespace(id="p2", repo_path="", workspace="")
+    app = _app(tmp_path, pcm=FakePcm({}, {"p2": project}))
+    with _client(app) as client:
+        listed = client.get(f"{SESSIONS}?project_id=p2", headers=_origin())
+        response = client.post(
+            SESSIONS, json={"project_id": "p2", "location": "repo"}, headers=_origin()
+        )
+    assert [entry["location"] for entry in listed.json()["locations"]] == ["workspace"]
+    assert response.status_code == 409
+    assert response.json()["reason"] == "folder_missing"
 
 
 def test_ending_a_session_removes_it_and_a_second_end_is_not_found(tmp_path: Path) -> None:

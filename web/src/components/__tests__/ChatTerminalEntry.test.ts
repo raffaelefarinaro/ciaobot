@@ -265,8 +265,8 @@ describe('the ways into the browser terminal', () => {
     expect(terminal.visible).toBe(true)
     expect(terminal.target).toEqual({ chatId: 'chat-1' })
     expect(terminalPanelWanted.value).toBe(true)
-    // Opening the panel starts nothing: a shell is an explicit act.
-    expect(post).not.toHaveBeenCalled()
+    // A chat with no shell gets one: the person asked for a terminal.
+    expect(post).toHaveBeenCalledWith('/api/terminal/sessions', { chat_id: 'chat-1' })
   })
 
   it('gives a chat with a repository exactly one terminal entry', async () => {
