@@ -2435,3 +2435,157 @@ def test_a_background_stream_does_not_count_as_a_live_turn(tmp_path: Path) -> No
     assert calls == [("chat-1", "proj-1", "Title", "interim")]
 
 
+# ── OpenCode background work interrupted by a restart ────────────────────────
+#
+# OpenCode keeps its background set only in the provider object, so shutdown
+# records it and the next boot consumes the record once.
+
+
+def _opencode_chat_with_background_work(
+    pcm: ProjectChatManager, tmp_path: Path, *, outstanding: bool = True
+):
+    project = pcm.create_project("oc-restart", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="oc-restart")
+    chat.provider = "opencode"
+    chat.session_id = "ses_parent_1"
+    pcm._save()
+    provider = OpencodeProvider(tmp_path)
+    provider._background_children = {"ses_child_b", "ses_child_a"}
+    provider._background_shells = {"sh_1"}
+    provider._shell_commands = {"sh_1": "bash gates.sh"}
+    pcm._providers[chat.chat_id] = SimpleNamespace(
+        provider=provider, background_work_outstanding=outstanding
+    )
+    return chat
+
+
+async def test_restart_wakes_opencode_chat_with_interrupted_background_work(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao import subagent_tracking
+
+    pcm = _make_manager(tmp_path)
+    chat = _opencode_chat_with_background_work(pcm, tmp_path)
+    assert pcm.record_interrupted_background_work() == 1
+    pcm._providers.clear()
+
+    pcm2 = _make_manager(tmp_path)
+    wakes: list[tuple[object, str, int, str]] = []
+    monkeypatch.setattr(
+        pcm2,
+        "_deliver_wake",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count, origin)) or "started",
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    assert pcm2.sweep_interrupted_background_work() == 1
+
+    await asyncio.sleep(0)
+    pending = [
+        t for t in list(asyncio.all_tasks())
+        if t is not asyncio.current_task()
+    ]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    assert len(wakes) == 1
+    parent, prompt, count, origin = wakes[0]
+    assert parent.chat_id == chat.chat_id
+    assert origin == "cli_task_wake"
+    assert count == 3
+    assert prompt.startswith(subagent_tracking.CLI_TASK_WAKE_PREFIX + " 3 CLI tasks")
+    assert prompt.index("(task ses_child_a)") < prompt.index("(task ses_child_b)")
+    assert prompt.index("(task ses_child_b)") < prompt.index("(task sh_1)")
+    assert "command: bash gates.sh" in prompt
+    assert not (tmp_path / ".runtime" / "interrupted_background_work.json").exists()
+    assert pcm2.sweep_interrupted_background_work() == 0
+
+
+def test_record_interrupted_background_work_skips_idle_and_claude_chats(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    _opencode_chat_with_background_work(pcm, tmp_path, outstanding=False)
+    project = pcm.create_project("claude-restart", workspace="personal")
+    claude_chat = pcm.create_chat(project.project_id, title="claude-restart")
+    claude_chat.session_id = "sess-claude-1"
+    pcm._providers[claude_chat.chat_id] = SimpleNamespace(
+        provider=object(), background_work_outstanding=True
+    )
+
+    assert pcm.record_interrupted_background_work() == 0
+    assert not (tmp_path / ".runtime" / "interrupted_background_work.json").exists()
+
+
+async def test_interrupted_work_sweep_skips_archived_moved_and_stale_records(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    pcm = _make_manager(tmp_path)
+    archived = pcm.create_chat(pcm.create_project("oc-archived", workspace="personal").project_id, title="archived")
+    archived.provider = "opencode"
+    archived.session_id = "ses_archived"
+    archived.archived = True
+    moved = pcm.create_chat(pcm.create_project("oc-moved", workspace="personal").project_id, title="moved")
+    moved.provider = "opencode"
+    moved.session_id = "ses_moved_now"
+    valid = pcm.create_chat(pcm.create_project("oc-valid", workspace="personal").project_id, title="valid")
+    valid.provider = "opencode"
+    valid.session_id = "ses_valid"
+    pcm._save()
+
+    path = tmp_path / ".runtime" / "interrupted_background_work.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record(recorded_at: datetime) -> None:
+        entry = {"session_id": "ses_moved_recorded", "children": ["ses_child_x"], "shells": []}
+        payload = {
+            "recorded_at": recorded_at.isoformat(),
+            "chats": {
+                archived.chat_id: {**entry, "session_id": "ses_archived"},
+                moved.chat_id: entry,
+                valid.chat_id: {**entry, "session_id": "ses_valid"},
+            },
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    wakes: list[str] = []
+    monkeypatch.setattr(
+        pcm,
+        "_deliver_wake",
+        lambda parent, prompt, *, count, origin="": wakes.append(parent.chat_id) or "started",
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    # Fresh record: only the valid chat is woken. Archived and moved are guarded.
+    record(datetime.now(UTC))
+    assert pcm.sweep_interrupted_background_work() == 1
+    await asyncio.sleep(0)
+    pending = [t for t in list(asyncio.all_tasks()) if t is not asyncio.current_task()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    assert wakes == [valid.chat_id]
+    assert not path.exists()
+
+    # Stale record (8 days): nothing is woken, and the file is still consumed.
+    record(datetime.now(UTC) - timedelta(days=8))
+    assert pcm.sweep_interrupted_background_work() == 0
+    assert wakes == [valid.chat_id]
+    assert not path.exists()
+
+
+def test_interrupted_work_sweep_removes_an_unreadable_file(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    path = tmp_path / ".runtime" / "interrupted_background_work.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json", encoding="utf-8")
+
+    assert pcm.sweep_interrupted_background_work() == 0
+    assert not path.exists()

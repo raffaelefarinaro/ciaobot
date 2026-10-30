@@ -8478,6 +8478,14 @@ class ProjectChatManager:
         """Wake chats whose CLI tasks were still running when the server died."""
         return self._subagents.sweep_orphaned_cli_tasks()
 
+    def record_interrupted_background_work(self) -> int:
+        """At shutdown, record OpenCode background work the restart is about to kill."""
+        return self._subagents.record_interrupted_background_work()
+
+    def sweep_interrupted_background_work(self) -> int:
+        """At boot, wake OpenCode chats whose background work a restart interrupted."""
+        return self._subagents.sweep_interrupted_background_work()
+
     @staticmethod
     def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
         return SubagentWatchers.build_cli_task_wake_prompt(tasks)
