@@ -67,6 +67,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Literal, NoReturn
+from xml.etree import ElementTree
+from xml.parsers import expat
 
 __all__ = [
     "APP_NAME",
@@ -1315,6 +1317,25 @@ def _display(target: Path, runner: Runner, *extra: str) -> str | None:
     return f"{completed.stdout or ''}\n{completed.stderr or ''}"
 
 
+#: The ``codesign -dv`` fields the signed policy consumes from the *bundle*
+#: display: the universal shape, the bundle identifier and the ad-hoc marker.
+#: Each may be printed once; ``Authority`` repeats once per certificate and is
+#: deliberately absent.
+_CONSUMED_BUNDLE_DISPLAY_FIELDS = ("Format", "Identifier", "Signature")
+
+
+def _refuse_repeated_display_field(text: str, name: str) -> None:
+    """Refuse a consumed bundle field ``codesign -dv`` printed more than once.
+
+    The signed policy reads ``Format``, ``Identifier`` and ``Signature`` from the
+    bundle display; two copies of any of them is contradictory evidence, exactly
+    like a repeated slice field, and one of them would otherwise silently win.
+    """
+    printed = sum(1 for line in text.splitlines() if line.startswith(f"{name}="))
+    if printed > 1:
+        _refuse_signed(f"the host bundle's signature details repeat {name!r}")
+
+
 def _require_signed_universal(bundle: Path, runner: Runner) -> None:
     """An ad-hoc signature for this bundle id over exactly the two slices."""
     shown = _display(bundle, runner)
@@ -1377,11 +1398,32 @@ def _refuse_signed(message: str) -> NoReturn:
     raise ServerHostError(message, code=SIGNATURE_REJECTED)
 
 
+#: The ``codesign -dv`` fields the signed policy consumes. A repeat of any of
+#: them is contradictory evidence: one slice cannot carry two identifiers, two
+#: teams, two CDHashes or two CodeDirectory descriptions. ``Authority`` is not
+#: here on purpose: a Developer ID chain prints one per certificate.
+_CONSUMED_DISPLAY_FIELDS = frozenset(
+    {
+        "Identifier",
+        "Signature",
+        "TeamIdentifier",
+        "Runtime Version",
+        "Timestamp",
+        "CDHash",
+        "CodeDirectory",
+    }
+)
+
+
 def _slice_fields(executable: Path, arch: str, runner: Runner) -> dict[str, str]:
     """``codesign -dv`` fields of one slice, keyed by their printed name.
 
     A nonzero exit means the slice cannot be read as a signed host at all, which
-    is a disproved policy, not an unavailable probe.
+    is a disproved policy, not an unavailable probe. A field the policy consumes
+    may be printed once and only once: a repeat is contradictory evidence even
+    when both copies agree, because the policy cannot tell which one the bundle
+    really carries. ``Authority`` is deliberately not consumed — a Developer ID
+    chain prints it once per certificate, so repeating it is normal.
     """
     shown = _display(executable, runner, "--arch", arch)
     if shown is None:
@@ -1391,12 +1433,116 @@ def _slice_fields(executable: Path, arch: str, runner: Runner) -> dict[str, str]
         # "CodeDirectory v=20400 size=400 flags=0x10000(runtime) ..." has no
         # single Key=Value shape, so keep the whole line under its name.
         if line.startswith("CodeDirectory"):
-            fields.setdefault("CodeDirectory", line)
+            name, value = "CodeDirectory", line
+        else:
+            key, separator, printed = line.partition("=")
+            if not separator or not key:
+                continue
+            name, value = key, printed.strip()
+        if name in fields:
+            if name in _CONSUMED_DISPLAY_FIELDS:
+                _refuse_signed(
+                    f"the {arch} slice's signature details repeat {name!r}"
+                )
             continue
-        key, separator, value = line.partition("=")
-        if separator and key and key not in fields:
-            fields[key] = value.strip()
+        fields[name] = value
     return fields
+
+
+class _RefusedXml(Exception):
+    """A document construct the entitlement allowlist refuses (never escapes)."""
+
+
+def _is_plain_xml(raw: bytes) -> bool:
+    """False if the blob uses a reference, CDATA, a comment, a PI or an internal DTD.
+
+    ``plistlib`` and ``xml.etree`` resolve those invisibly — CDATA, an entity and
+    a numeric character reference all become ordinary text — so the entitlement
+    allowlist is lexical as well as structural. ``expat`` reports the constructs
+    that come from the document's own markup, but it expands a numeric character
+    reference (``&#46;`` or ``&#x2e;``) itself without calling any entity
+    handler, so the raw bytes are checked for that one. A malformed document is
+    False too; the caller refuses it either way. The one DOCTYPE ``codesign
+    --xml`` prints (the public plist DTD, no internal subset) stays allowed, and
+    the external DTD is never fetched.
+    """
+    if b"&#" in raw:
+        return False
+    parser = expat.ParserCreate()
+
+    def refuse(*_args: object) -> None:
+        raise _RefusedXml
+
+    def refuse_internal_subset(
+        _name: str, _system_id: str | None, _public_id: str | None, internal: int
+    ) -> None:
+        if internal:
+            raise _RefusedXml
+
+    # expat declares each handler with its own signature, so they are installed
+    # by name; every one of them refuses.
+    for attribute in (
+        "StartCdataSectionHandler",
+        "CommentHandler",
+        "ProcessingInstructionHandler",
+        "EntityDeclHandler",
+        "SkippedEntityHandler",
+        "ExternalEntityRefHandler",
+    ):
+        setattr(parser, attribute, refuse)
+    setattr(parser, "StartDoctypeDeclHandler", refuse_internal_subset)
+    try:
+        parser.Parse(raw, True)
+    except (_RefusedXml, expat.ExpatError):
+        return False
+    return True
+
+
+def _entitlement_key_texts(raw: bytes) -> tuple[str, ...] | None:
+    """The keys a strictly shaped entitlement blob declares, or None.
+
+    The whole document is allowlisted: only ``plist``, ``dict``, ``key`` and
+    ``true`` elements, exactly one dictionary directly under the plist, and its
+    children strictly alternating ``<key>text</key>`` followed by ``<true/>`` —
+    with no other text (including text after the dictionary), no attributes on
+    the dictionary or its children and no nested element. A key inside an unknown
+    wrapper is flattened by ``plistlib``, so the parsed dictionary cannot be
+    trusted to reveal it: only the shape can. This function checks keys alone;
+    ``plistlib`` still supplies every value.
+    """
+    if not _is_plain_xml(raw):
+        return None
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError:
+        return None
+    if root.tag != "plist" or not set(root.attrib) <= {"version"}:
+        return None
+    if len(root) != 1 or (root.text or "").strip() or (root.tail or "").strip():
+        return None
+    body = root[0]
+    if body.tag != "dict" or body.attrib or (body.text or "").strip():
+        return None
+    if (body.tail or "").strip():
+        return None
+    if len(body) % 2:
+        return None
+    keys: list[str] = []
+    for index, element in enumerate(body):
+        if (element.tail or "").strip():
+            return None
+        if index % 2 == 0:
+            if element.tag != "key" or element.attrib or len(element):
+                return None
+            if not element.text:
+                return None
+            keys.append(element.text)
+            continue
+        if element.tag != "true" or element.attrib or len(element):
+            return None
+        if (element.text or "").strip():
+            return None
+    return tuple(keys)
 
 
 def _entitlements_of_slice(
@@ -1406,7 +1552,9 @@ def _entitlements_of_slice(
 
     An empty blob is an empty dictionary: a slice with no entitlement is a
     refusal later, not a parse error. Anything the parser rejects is
-    contradictory evidence and is refused as a disproved policy.
+    contradictory evidence and is refused as a disproved policy, and so is a
+    document that is not the exact ``codesign --xml`` shape: wrapped or nested
+    keys, CDATA, entities, comments and every repeated key.
     """
     completed = _run_native(
         runner,
@@ -1434,6 +1582,17 @@ def _entitlements_of_slice(
         _refuse_signed(f"the {arch} slice's entitlements are malformed")
     if not isinstance(parsed, dict):
         _refuse_signed(f"the {arch} slice's entitlements are not a dictionary")
+    declared = _entitlement_key_texts(raw)
+    if declared is None:
+        _refuse_signed(
+            f"the {arch} slice's entitlements are not the accepted XML shape"
+        )
+    if len(set(declared)) != len(declared):
+        _refuse_signed(f"the {arch} slice's entitlements declare a duplicated key")
+    if set(declared) != set(parsed):
+        _refuse_signed(
+            f"the {arch} slice's entitlements do not match their parsed dictionary"
+        )
     return parsed
 
 
@@ -1452,7 +1611,11 @@ def _is_signed_entitlement_set(value: object) -> bool:
 def _designated_requirement_of_slice(
     executable: Path, arch: str, runner: Runner
 ) -> str:
-    """The ``designated =>`` requirement a slice embeds, exactly as printed."""
+    """The one ``designated =>`` requirement a slice embeds, exactly as printed.
+
+    A second ``designated =>`` line is a second identity, so a slice that prints
+    more than one is contradictory evidence and is refused.
+    """
     completed = _run_native(
         runner,
         [CODESIGN, "-d", "-r-", "--arch", arch, os.fspath(executable)],
@@ -1460,11 +1623,19 @@ def _designated_requirement_of_slice(
     if completed.returncode != 0:
         _refuse_signed(f"the {arch} slice's designated requirement cannot be read")
     text = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    found: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("designated =>"):
-            return stripped[len("designated =>") :].strip()
-    _refuse_signed(f"the {arch} slice has no designated requirement")
+        if not stripped.startswith("designated =>"):
+            continue
+        if found is not None:
+            _refuse_signed(
+                f"the {arch} slice prints more than one designated requirement"
+            )
+        found = stripped[len("designated =>") :].strip()
+    if found is None:
+        _refuse_signed(f"the {arch} slice has no designated requirement")
+    return found
 
 
 def _require_developer_id_host(
@@ -1505,6 +1676,8 @@ def _require_developer_id_host(
     shown = _display(bundle, runner)
     if shown is None:
         _refuse_signed(f"the host bundle's signature cannot be read: {bundle}")
+    for name in _CONSUMED_BUNDLE_DISPLAY_FIELDS:
+        _refuse_repeated_display_field(shown, name)
     if _display_value(shown, "Identifier") != BUNDLE_ID:
         _refuse_signed(f"the host bundle is not signed as {BUNDLE_ID!r}")
     if (_display_value(shown, "Signature") or "").lower() == "adhoc":

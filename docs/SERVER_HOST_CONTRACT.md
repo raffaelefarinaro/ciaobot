@@ -211,6 +211,26 @@ The signed policy requires, on the bundle and on **every** slice:
   blob is refused. The usage-description strings stay in `Info.plist` and are not
   part of this policy.
 
+Contradictory evidence is refused, not resolved. A consumed display field —
+`Format`, `Identifier` and `Signature` on the bundle; `Identifier`, `Signature`,
+`TeamIdentifier`, `Runtime Version`, `Timestamp`, `CDHash` and the `CodeDirectory`
+line on each slice — may be printed once and only once, and exactly one
+`designated =>` line may appear. A repeat is refused even when both copies agree,
+because the policy cannot tell which one the bundle carries. `Authority` is the
+deliberate exception: a Developer ID chain prints one per certificate, so it
+repeats freely.
+
+The entitlement read is a strict structural allowlist over the whole document,
+because `plistlib` flattens a key inside an unknown wrapper and keeps only the
+last value of a repeated key. Only `plist`, `dict`, `key` and `true` elements are
+allowed; exactly one `<dict>` sits directly under `<plist>`, and its children
+strictly alternate `<key>text</key>` and `<true/>`, with only whitespace
+anywhere else — no stray text after the dictionary. A wrapped or nested key,
+CDATA, an entity, a numeric character reference (`&#46;` / `&#x2e;`), a comment,
+an internal DTD subset, any other element or a repeated key is
+`signature_rejected` — never a crash. The values still come from `plistlib`,
+compared by identity.
+
 A disproved policy is the stable code `signature_rejected`; a probe that could not
 start or timed out stays `inspection_failed`. The distinction lets the installer
 say "this bundle is not the signed host" rather than "this Mac could not check",

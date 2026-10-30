@@ -4,6 +4,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,9 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from ciao import release_manifest
 from ciao.release_manifest import (
+    MANIFEST_NAME,
     RELEASE_PUBLIC_KEY,
     SERVER_HOST_ARCH,
     SERVER_HOST_BUNDLE_ID,
@@ -746,14 +749,60 @@ def test_main_check_static_cli(tmp_path: Path) -> None:
 
 # ── the explicitly signed host entry (#2329) ────────────────────────────────
 
+# The exact bytes a release manifest had before a signed host entry existed:
+# one wheel and the published revision-4 host, serialized by the writer's own
+# `json.dumps(..., indent=2, sort_keys=True)` plus a trailing newline. Compared
+# as bytes so a changed field, value, type or serialization is caught, not just
+# a changed dictionary.
+_LEGACY_MANIFEST_BYTES = b"""{
+  "artifacts": [
+    {
+      "arch": "any",
+      "filename": "ciaobot-1.2.3-py3-none-any.whl",
+      "kind": "wheel",
+      "platform": "any",
+      "sha256": "67c0d8f7de19e30c2d5891030a0b37cbfcdd240852b53055c0b28290ad52290b",
+      "size": 11
+    },
+    {
+      "arch": "universal",
+      "bundle_id": "local.ciaobot.server",
+      "filename": "ciaobot-server-host-macos-universal-v1.tar.gz",
+      "host_protocol": 2,
+      "host_revision": 4,
+      "kind": "server-host",
+      "platform": "macos",
+      "sha256": "0dd7ce86fee4d42d5eff60ddf955828474d3f914858b5cfefdc5141d002b3ea3",
+      "size": 18
+    }
+  ],
+  "created": "2026-09-25T10:00:00+00:00",
+  "schema": 1,
+  "tag": "v1.2.3",
+  "version": "1.2.3"
+}
+"""
 
-def test_legacy_host_entry_is_unchanged_without_signed_flag(tmp_path: Path) -> None:
+
+class _FixedClock:
+    """A fixed ``datetime`` stand-in, so an emitted manifest is byte-stable."""
+
+    @staticmethod
+    def now(_tz: object) -> datetime:
+        return datetime(2026, 9, 25, 10, 0, 0, tzinfo=UTC)
+
+
+def test_legacy_host_entry_is_unchanged_without_signed_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The production default is byte-for-byte what every release has published:
     # revision 4, no signing key at all. Neither the entry nor the runtime or
     # builder default moved.
     payload = b"host archive bytes"
     archive = tmp_path / SERVER_HOST_FILENAME
     archive.write_bytes(payload)
+    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
 
     entry = server_host_artifact_entry(archive)
 
@@ -774,6 +823,27 @@ def test_legacy_host_entry_is_unchanged_without_signed_flag(tmp_path: Path) -> N
 
     assert server_host.HOST_REVISION == 4
     assert server_host.SCHEMA_VERSION == 1
+
+    # The manifest the build actually writes, as bytes: the serialization, the
+    # field order, the values and their types are all part of the fixture.
+    monkeypatch.setattr(release_manifest, "datetime", _FixedClock)
+    out = tmp_path / MANIFEST_NAME
+    assert (
+        main(
+            [
+                "build",
+                "--version",
+                "1.2.3",
+                "--out",
+                str(out),
+                "--server-host",
+                str(archive),
+                str(wheel),
+            ]
+        )
+        == 0
+    )
+    assert out.read_bytes() == _LEGACY_MANIFEST_BYTES
 
 
 def test_signed_server_host_entry_round_trip(tmp_path: Path) -> None:

@@ -841,7 +841,19 @@ class _FakeRunner:
     and ``Signature=adhoc`` on stderr. A non-ad-hoc answer prints the fields a
     Developer ID signed host really carries; every signed-policy probe has an
     explicit switch, so a test never gets blanket success for a command it did
-    not reason about. Per-slice overrides let one architecture fail on its own.
+    not reason about. Per-slice overrides let one architecture fail on its own,
+    and ``display_text`` / ``requirement_text`` / ``entitlements_raw`` supply the
+    exact bytes or lines a contradictory or duplicated answer needs.
+
+    Every probe must be the *complete* argv the contract allows: the absolute
+    ``/usr/bin/codesign``, the exact flags, the architecture, the expected
+    requirement text and the right target (the bundle for a bundle probe, this
+    bundle's executable for a slice probe). Anything else raises, so dropping
+    ``--strict``, ``--all-architectures``, ``--xml``, ``--arch`` or ``-r-``, or
+    probing a different path, cannot stay green. ``expected_team`` is the team
+    the caller should have taken from the private record: the requirement text
+    is built by the *builder*, not by the module under test, so a hardcoded or
+    mistranslated team in :func:`developer_id_requirement` is refused here.
     """
 
     def __init__(
@@ -856,11 +868,13 @@ class _FakeRunner:
         cdhashes: dict[str, str] | None = None,
         raises: BaseException | None = None,
         team_id: str = _TEST_TEAM,
+        expected_team: str = _TEST_TEAM,
         runtime: bool = True,
         timestamp: bool = True,
         designated: str | None = None,
         entitlements: dict[str, object] | None = None,
         slices: dict[str, dict[str, Any]] | None = None,
+        display_text: str | None = None,
     ) -> None:
         self.commands: list[list[str]] = []
         self.kwargs: list[dict[str, Any]] = []
@@ -873,6 +887,7 @@ class _FakeRunner:
         self.cdhashes = dict(cdhashes or _CDHASH)
         self.raises = raises
         self.team_id = team_id
+        self.expected_team = expected_team
         self.runtime = runtime
         self.timestamp = timestamp
         self.designated = (
@@ -885,6 +900,9 @@ class _FakeRunner:
             else {"com.apple.security.automation.apple-events": True}
         )
         self.slices = dict(slices or {})
+        self.display_text = display_text
+        #: The bundle under test in the current inspection, set by its probes.
+        self.bundle: str | None = None
 
     def _slice(self, arch: str) -> dict[str, Any]:
         fields: dict[str, Any] = {
@@ -896,12 +914,148 @@ class _FakeRunner:
             "designated": self.designated,
             "entitlements": self.entitlements,
             "entitlements_raw": None,
+            "display_text": None,
+            "requirement_text": None,
             "display_rc": 0,
             "entitlements_rc": 0,
             "designated_rc": 0,
         }
         fields.update(self.slices.get(arch, {}))
         return fields
+
+    def _requirement_argument(self) -> str:
+        """The ``--test-requirement`` text for the expected team, from the builder."""
+        return "=" + BUILD.designated_requirement(self.expected_team)
+
+    def _note_bundle(self, target: str) -> None:
+        if not os.path.isabs(target) or os.path.basename(target) != APP_NAME:
+            raise AssertionError(f"probe does not name the host bundle: {target!r}")
+        # Pinned to one bundle: the first target binds, and a later probe aimed
+        # at another bundle-shaped path is a broken contract, not a new subject.
+        if self.bundle is not None and target != self.bundle:
+            raise AssertionError(
+                f"probe names {target!r}, not the bundle under test {self.bundle!r}"
+            )
+        self.bundle = target
+
+    def _note_executable(self, target: str) -> None:
+        suffix = "/" + _EXE_REL
+        if not os.path.isabs(target) or not target.endswith(suffix):
+            raise AssertionError(f"probe does not name the host executable: {target!r}")
+        expected = None if self.bundle is None else self.bundle + suffix
+        if expected is not None and target != expected:
+            raise AssertionError(f"probe names {target!r}, not {expected!r}")
+        self.bundle = target[: -len(suffix)]
+
+    def display_for(self, arch: str) -> str:
+        """The default ``codesign -dv`` text of one slice, before any override."""
+        fields = self._slice(arch)
+        return self._display_text(
+            identifier=str(fields["identifier"]),
+            cdhash=fields["cdhash"],
+            team_id=str(fields["team_id"]),
+            runtime=bool(fields["runtime"]),
+            timestamp=bool(fields["timestamp"]),
+            with_format=False,
+        )
+
+    def _answer_verify(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        plain = [_CODESIGN, "--verify", "--strict"]
+        signed = [*plain, "--all-architectures"]
+        if args[:3] != plain:
+            raise AssertionError(f"unexpected verify probe: {args}")
+        if len(args) == 4:
+            self._note_bundle(args[3])
+            return subprocess.CompletedProcess(args, self.verify_rc, "", "")
+        if args[:4] != signed:
+            raise AssertionError(f"unexpected verify probe: {args}")
+        if len(args) == 5:
+            self._note_bundle(args[4])
+            return subprocess.CompletedProcess(args, self.verify_rc, "", "")
+        if len(args) == 7 and args[4] == "--test-requirement":
+            if args[5] != self._requirement_argument():
+                raise AssertionError(
+                    "the requirement text is not the expected team's: " + repr(args[5])
+                )
+            self._note_bundle(args[6])
+            return subprocess.CompletedProcess(args, self.requirement_rc, "", "")
+        raise AssertionError(f"unexpected verify probe: {args}")
+
+    def _answer_display(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        if len(args) == 4:
+            self._note_bundle(args[3])
+            stderr = self._display_text(
+                identifier=self.identifier,
+                cdhash=None,
+                team_id=self.team_id,
+                runtime=self.runtime,
+                timestamp=self.timestamp,
+                with_format=True,
+            )
+            if self.display_text is not None:
+                stderr = self.display_text
+            return subprocess.CompletedProcess(args, 0, "", stderr)
+        if len(args) == 6 and args[3] == "--arch":
+            arch = args[4]
+            if arch not in ARCHITECTURES:
+                raise AssertionError(f"probe names an unknown architecture: {args}")
+            self._note_executable(args[5])
+            if self.arch_rc != 0:
+                return subprocess.CompletedProcess(args, self.arch_rc, "", "")
+            fields = self._slice(arch)
+            if fields["display_rc"] != 0:
+                return subprocess.CompletedProcess(args, fields["display_rc"], "", "")
+            text = fields["display_text"]
+            return subprocess.CompletedProcess(
+                args, 0, "", self.display_for(arch) if text is None else str(text)
+            )
+        raise AssertionError(f"unexpected display probe: {args}")
+
+    def _answer_entitlements(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        expected = [
+            _CODESIGN,
+            "-d",
+            "--entitlements",
+            ":-",
+            "--xml",
+            "--arch",
+        ]
+        if len(args) != 8 or args[:6] != expected:
+            raise AssertionError(f"unexpected entitlement probe: {args}")
+        arch = args[6]
+        if arch not in ARCHITECTURES:
+            raise AssertionError(f"probe names an unknown architecture: {args}")
+        self._note_executable(args[7])
+        fields = self._slice(arch)
+        if fields["entitlements_rc"] != 0:
+            return subprocess.CompletedProcess(
+                args, fields["entitlements_rc"], "", ""
+            )
+        raw = fields["entitlements_raw"]
+        if raw is not None:
+            return subprocess.CompletedProcess(args, 0, str(raw), "")
+        blob = fields["entitlements"]
+        text = "" if blob is None else plistlib.dumps(blob).decode("utf-8")
+        return subprocess.CompletedProcess(args, 0, text, "")
+
+    def _answer_designated(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        expected = [_CODESIGN, "-d", "-r-", "--arch"]
+        if len(args) != 6 or args[:4] != expected:
+            raise AssertionError(f"unexpected designated requirement probe: {args}")
+        arch = args[4]
+        if arch not in ARCHITECTURES:
+            raise AssertionError(f"probe names an unknown architecture: {args}")
+        self._note_executable(args[5])
+        fields = self._slice(arch)
+        if fields["designated_rc"] != 0:
+            return subprocess.CompletedProcess(args, fields["designated_rc"], "", "")
+        text = fields["requirement_text"]
+        if text is not None:
+            return subprocess.CompletedProcess(args, 0, "", str(text))
+        requirement = fields["designated"]
+        if requirement is None:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 0, "", f"designated => {requirement}\n")
 
     def _display_text(
         self,
@@ -944,59 +1098,13 @@ class _FakeRunner:
             raise self.raises
         args = list(argv)
         if args[:2] == [_CODESIGN, "--verify"]:
-            if "--test-requirement" in args:
-                return subprocess.CompletedProcess(args, self.requirement_rc, "", "")
-            return subprocess.CompletedProcess(args, self.verify_rc, "", "")
-        if args[:2] == [_CODESIGN, "-dv"]:
-            if "--arch" in args:
-                arch = args[args.index("--arch") + 1]
-                if self.arch_rc != 0:
-                    return subprocess.CompletedProcess(args, self.arch_rc, "", "")
-                fields = self._slice(arch)
-                if fields["display_rc"] != 0:
-                    return subprocess.CompletedProcess(args, fields["display_rc"], "", "")
-                stderr = self._display_text(
-                    identifier=str(fields["identifier"]),
-                    cdhash=fields["cdhash"],
-                    team_id=str(fields["team_id"]),
-                    runtime=bool(fields["runtime"]),
-                    timestamp=bool(fields["timestamp"]),
-                    with_format=False,
-                )
-                return subprocess.CompletedProcess(args, 0, "", stderr)
-            stderr = self._display_text(
-                identifier=self.identifier,
-                cdhash=None,
-                team_id=self.team_id,
-                runtime=self.runtime,
-                timestamp=self.timestamp,
-                with_format=True,
-            )
-            return subprocess.CompletedProcess(args, 0, "", stderr)
-        if args[:2] == [_CODESIGN, "-d"] and "--entitlements" in args:
-            arch = args[args.index("--arch") + 1]
-            fields = self._slice(arch)
-            if fields["entitlements_rc"] != 0:
-                return subprocess.CompletedProcess(
-                    args, fields["entitlements_rc"], "", ""
-                )
-            raw = fields["entitlements_raw"]
-            if raw is not None:
-                return subprocess.CompletedProcess(args, 0, str(raw), "")
-            blob = fields["entitlements"]
-            text = "" if blob is None else plistlib.dumps(blob).decode("utf-8")
-            return subprocess.CompletedProcess(args, 0, text, "")
-        if args[:2] == [_CODESIGN, "-d"] and "-r-" in args:
-            arch = args[args.index("--arch") + 1]
-            fields = self._slice(arch)
-            if fields["designated_rc"] != 0:
-                return subprocess.CompletedProcess(args, fields["designated_rc"], "", "")
-            requirement = fields["designated"]
-            if requirement is None:
-                return subprocess.CompletedProcess(args, 0, "", "")
-            return subprocess.CompletedProcess(
-                args, 0, "", f"designated => {requirement}\n"
-            )
+            return self._answer_verify(args)
+        if args[:3] == [_CODESIGN, "-dv", "--verbose=4"]:
+            return self._answer_display(args)
+        if args[:4] == [_CODESIGN, "-d", "--entitlements", ":-"]:
+            return self._answer_entitlements(args)
+        if args[:3] == [_CODESIGN, "-d", "-r-"]:
+            return self._answer_designated(args)
         raise AssertionError(f"unexpected native probe: {args}")
 
 
@@ -1047,6 +1155,128 @@ def test_inspect_bundle_snapshot_and_probe_contract(
         assert kwargs["capture_output"] is True
         assert kwargs["text"] is True
         assert kwargs["check"] is False
+
+
+def test_the_probe_fake_answers_only_the_complete_argv(tmp_path: Path) -> None:
+    # The fake is the seam that proves the native contract, so it must refuse
+    # every weakened form itself: otherwise dropping a flag from the production
+    # probe would still be answered and the suite would stay green.
+    bundle = _make_bundle(tmp_path)
+    canonical_bundle = os.fspath(Path(os.path.realpath(bundle)))
+    executable = f"{canonical_bundle}/{_EXE_REL}"
+    arch = ARCHITECTURES[0]
+    requirement = "=" + BUILD.designated_requirement(_TEST_TEAM)
+
+    accepted = [
+        [_CODESIGN, "--verify", "--strict", canonical_bundle],
+        [_CODESIGN, "--verify", "--strict", "--all-architectures", canonical_bundle],
+        [
+            _CODESIGN,
+            "--verify",
+            "--strict",
+            "--all-architectures",
+            "--test-requirement",
+            requirement,
+            canonical_bundle,
+        ],
+        [_CODESIGN, "-dv", "--verbose=4", canonical_bundle],
+        [_CODESIGN, "-dv", "--verbose=4", "--arch", arch, executable],
+        [_CODESIGN, "-d", "--entitlements", ":-", "--xml", "--arch", arch, executable],
+        [_CODESIGN, "-d", "-r-", "--arch", arch, executable],
+    ]
+    runner = _FakeRunner(adhoc=False)
+    for argv in accepted:
+        runner(argv)
+    assert runner.commands == accepted
+
+    elsewhere = os.fspath(tmp_path / "elsewhere" / APP_NAME)
+    malformed = [
+        # `--strict` dropped from either verification.
+        [_CODESIGN, "--verify", canonical_bundle],
+        [_CODESIGN, "--verify", "--all-architectures", canonical_bundle],
+        [
+            _CODESIGN,
+            "--verify",
+            "--strict",
+            "--all-architectures",
+            canonical_bundle,
+            "extra",
+        ],
+        # `--all-architectures` dropped from, or the requirement missing in, the
+        # external requirement probe.
+        [
+            _CODESIGN,
+            "--verify",
+            "--strict",
+            "--test-requirement",
+            requirement,
+            canonical_bundle,
+        ],
+        [
+            _CODESIGN,
+            "--verify",
+            "--strict",
+            "--all-architectures",
+            "--test-requirement",
+            canonical_bundle,
+        ],
+        # Another team's requirement text, or the text without its `=` prefix.
+        [
+            _CODESIGN,
+            "--verify",
+            "--strict",
+            "--all-architectures",
+            "--test-requirement",
+            "=" + BUILD.designated_requirement("OTHERTEAM1"),
+            canonical_bundle,
+        ],
+        [
+            _CODESIGN,
+            "--verify",
+            "--strict",
+            "--all-architectures",
+            "--test-requirement",
+            BUILD.designated_requirement(_TEST_TEAM),
+            canonical_bundle,
+        ],
+        # The bundle probe pointing at the executable, and the slice probe at
+        # the bundle.
+        [_CODESIGN, "--verify", "--strict", executable],
+        [_CODESIGN, "-dv", "--verbose=4", executable],
+        [_CODESIGN, "-dv", "--verbose=4", "--arch", arch, canonical_bundle],
+        # `--verbose=4` or `--arch` dropped from the display read.
+        [_CODESIGN, "-dv", canonical_bundle],
+        [_CODESIGN, "-dv", "--verbose=4", "--arch", "arm64e", executable],
+        # `--xml` or `--arch` dropped from the entitlement read.
+        [_CODESIGN, "-d", "--entitlements", ":-", "--arch", arch, executable],
+        [_CODESIGN, "-d", "--entitlements", ":-", "--xml", executable],
+        [
+            _CODESIGN,
+            "-d",
+            "--entitlements",
+            ":-",
+            "--xml",
+            "--arch",
+            arch,
+            canonical_bundle,
+        ],
+        # `-r-` dropped from the designated requirement read.
+        [_CODESIGN, "-d", "--arch", arch, executable],
+        [_CODESIGN, "-d", "-r-", arch, executable],
+        # A slice probe for another bundle than the one under test.
+        [_CODESIGN, "-dv", "--verbose=4", "--arch", arch, f"{elsewhere}/{_EXE_REL}"],
+        # A bundle probe for another bundle-shaped path after the first target
+        # was bound: the fake is pinned to the bundle under test.
+        [_CODESIGN, "-dv", "--verbose=4", elsewhere],
+        [_CODESIGN, "--verify", "--strict", elsewhere],
+        # Not a read-only codesign probe at all.
+        ["/usr/bin/lipo", "-info", executable],
+        [_CODESIGN, "--sign", "-", canonical_bundle],
+        [_CODESIGN, "--verify", "--strict", canonical_bundle, "--deep"],
+    ]
+    for argv in malformed:
+        with pytest.raises(AssertionError):
+            runner(argv)
 
 
 @pytest.mark.parametrize("platform_name", ["linux", "win32"])
@@ -1393,12 +1623,14 @@ def test_verify_owned_host_refuses_a_path_mismatch(
     monkeypatch.setattr(sys, "platform", "darwin")
     bundle_a = _make_bundle(tmp_path / "a")
     bundle_b = _make_bundle(tmp_path / "b")
-    runner = _FakeRunner()
     record = _install_record(
-        tmp_path / "server-host.json", inspect_host_bundle(bundle_a, runner=runner)
+        tmp_path / "server-host.json",
+        inspect_host_bundle(bundle_a, runner=_FakeRunner()),
     )
+    # One runner per bundle: the fake is pinned to the bundle it was given, so a
+    # second bundle is inspected through its own runner.
     with pytest.raises(ServerHostError) as caught:
-        verify_owned_host(bundle_b, ownership_path=record, runner=runner)
+        verify_owned_host(bundle_b, ownership_path=record, runner=_FakeRunner())
     assert caught.value.code == server_host.NOT_OWNED
 
 
@@ -1663,6 +1895,14 @@ def test_parse_refuses_the_retired_executable_name() -> None:
 # ── the explicitly signed (revision 5) host policy (#2329) ──────────────────
 
 SIGNED = DeveloperIDSigning(_TEST_TEAM)
+#: A second fake team: one team everywhere would let a hardcoded team survive.
+_OTHER_TEAM = "OTHERTEAM1"
+SIGNED_OTHER = DeveloperIDSigning(_OTHER_TEAM)
+
+_PLIST_DOCTYPE = (
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+)
 
 
 def _make_signed_bundle(
@@ -1705,14 +1945,35 @@ def _signed_record(bundle: Path) -> dict[str, Any]:
 
 
 def _inspect_signed(
-    bundle: Path, runner: _FakeRunner
+    bundle: Path, runner: _FakeRunner, *, signing: DeveloperIDSigning = SIGNED
 ) -> HostOwnership:
     return inspect_host_bundle(
         bundle,
         runner=runner,
         revision=SIGNED_HOST_REVISION,
         protocol=HOST_PROTOCOL,
-        signing=SIGNED,
+        signing=signing,
+    )
+
+
+def _entitlements_xml(*values: str) -> str:
+    """The XML blob ``codesign --xml`` prints, declaring the key once per value.
+
+    ``plistlib`` keeps only the last value of a repeated dictionary key, so this
+    is the evidence a parsed dictionary cannot show on its own.
+    """
+    entries = "".join(
+        "\t<key>com.apple.security.automation.apple-events</key>\n"
+        f"\t<{value}/>\n"
+        for value in values
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n" + entries + "</dict>\n"
+        "</plist>\n"
     )
 
 
@@ -1792,6 +2053,56 @@ def test_signed_record_round_trips_with_expected_team(
         parsed.bundle_files[_PLIST_REL] = _HASH_B  # type: ignore[index]
     with pytest.raises(TypeError):
         parsed.per_arch_cdhashes["arm64"] = "0" * 40  # type: ignore[index]
+
+
+@requires_posix_uid
+def test_signed_policy_binds_the_team_from_the_private_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every successful signed case above used one fake team, so a team hardcoded
+    # inside the requirement builder could have survived. A second team signs a
+    # bundle end to end here, and the external `--test-requirement` text must
+    # carry the team the private record names.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    other_requirement = BUILD.designated_requirement(_OTHER_TEAM)
+    assert other_requirement != BUILD.designated_requirement(_TEST_TEAM)
+
+    runner = _FakeRunner(
+        adhoc=False,
+        team_id=_OTHER_TEAM,
+        expected_team=_OTHER_TEAM,
+        designated=other_requirement,
+    )
+    snapshot = _inspect_signed(bundle, runner, signing=SIGNED_OTHER)
+
+    assert snapshot.signing == SIGNED_OTHER
+    assert snapshot.to_record()["signing"] == {
+        "kind": "developer-id",
+        "team_id": _OTHER_TEAM,
+    }
+    probe = next(
+        command for command in runner.commands if "--test-requirement" in command
+    )
+    assert probe[probe.index("--test-requirement") + 1] == "=" + other_requirement
+    assert f'certificate leaf[subject.OU] = "{_OTHER_TEAM}"' in probe[5]
+
+    # The record carries the team, and the same record verifies the same bundle.
+    record = _install_record(tmp_path / "server-host.json", snapshot)
+    assert verify_owned_host(bundle, ownership_path=record, runner=runner) == snapshot
+
+    # A bundle signed by the other team is not this record's host, and vice
+    # versa: the expected team comes from the record, never from the bundle.
+    for signing, bundle_team in ((SIGNED, _OTHER_TEAM), (SIGNED_OTHER, _TEST_TEAM)):
+        runner = _FakeRunner(
+            adhoc=False,
+            team_id=bundle_team,
+            expected_team=signing.team_id,
+            designated=BUILD.designated_requirement(bundle_team),
+        )
+        with pytest.raises(ServerHostError) as caught:
+            _inspect_signed(bundle, runner, signing=signing)
+        assert caught.value.code == SIGNATURE_REJECTED, (signing, bundle_team)
 
 
 def test_record_rejects_schema_revision_signing_confusion(tmp_path: Path) -> None:
@@ -2026,6 +2337,243 @@ def test_signed_host_requires_stable_designated_requirement(
     assert caught.value.code == SIGNATURE_REJECTED
 
 
+def test_signed_host_refuses_duplicate_or_conflicting_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `codesign -dv` output is evidence, not a claim. A field the policy consumes
+    # may be printed once and only once: a repeated value is a contradiction even
+    # when both copies agree, because the policy cannot know which one the bundle
+    # really carries. `Authority` is the exception — a Developer ID chain prints
+    # it once per certificate.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    arch = ARCHITECTURES[0]
+    other = ARCHITECTURES[1]
+    text = _FakeRunner(adhoc=False).display_for(arch)
+
+    code_directory = next(
+        line for line in text.splitlines() if line.startswith("CodeDirectory")
+    )
+    # Each entry is what gets appended to the slice's display: one or more lines.
+    repeated = [
+        # Repeats that agree with the line already printed.
+        f"Identifier={BUNDLE_ID}",
+        f"TeamIdentifier={_TEST_TEAM}",
+        "Signature=Developer ID Application: Ciaobot Test\n"
+        "Signature=Developer ID Application: Ciaobot Test",
+        "Runtime Version=13.0.0",
+        "Timestamp=Oct 30, 2026 at 11:00:00",
+        f"CDHash={_CDHASH[arch]}",
+        code_directory,
+        # Repeats that contradict it.
+        "Identifier=local.other",
+        "Signature=adhoc\nSignature=adhoc",
+        "TeamIdentifier=OTHERTEAM1",
+        "Runtime Version=12.0.0",
+        "Timestamp=",
+        f"CDHash={_CDHASH[other]}",
+        "CodeDirectory v=20500 size=400 flags=0x0(none) hashes=1+3 "
+        "location=embedded",
+    ]
+    for line in repeated:
+        runner = _FakeRunner(
+            adhoc=False, slices={arch: {"display_text": text + line + "\n"}}
+        )
+        with pytest.raises(ServerHostError) as caught:
+            _inspect_signed(bundle, runner)
+        assert caught.value.code == SIGNATURE_REJECTED, line
+
+    # The bundle's own display is the same evidence, so it is refused the same
+    # way: a second Identifier or Signature line would silently win.
+    bundle_text = _FakeRunner(adhoc=False)._display_text(
+        identifier=BUNDLE_ID,
+        cdhash=None,
+        team_id=_TEST_TEAM,
+        runtime=True,
+        timestamp=True,
+        with_format=True,
+    )
+    format_line = next(
+        line for line in bundle_text.splitlines() if line.startswith("Format=")
+    )
+    for line in (
+        f"Identifier={BUNDLE_ID}",
+        "Identifier=local.other",
+        "Signature=adhoc",
+        # Format decides the architecture set, so a repeat of it is the same
+        # contradiction: agreeing first, then contradicting.
+        format_line,
+        "Format=app bundle with Mach-O universal (arm64)",
+        "Format=app bundle",
+    ):
+        runner = _FakeRunner(adhoc=False, display_text=bundle_text + line + "\n")
+        with pytest.raises(ServerHostError) as caught:
+            _inspect_signed(bundle, runner)
+        assert caught.value.code == SIGNATURE_REJECTED, line
+
+    # Control: one Format line per bundle, as real codesign prints it, is fine.
+    _inspect_signed(bundle, _FakeRunner(adhoc=False))
+
+    # Authority repeats legitimately, so a real chain's display is still accepted.
+    authorities = text + "".join(
+        "Authority=Developer ID Certification Authority\nAuthority=Apple Root CA\n"
+        for _ in range(3)
+    )
+    _inspect_signed(
+        bundle, _FakeRunner(adhoc=False, slices={arch: {"display_text": authorities}})
+    )
+
+    # One designated requirement, from one line: a second line is a second
+    # identity, whether it repeats the first or names another team.
+    canonical = BUILD.designated_requirement(_TEST_TEAM)
+    for first, second in (
+        (canonical, canonical),
+        (canonical, BUILD.designated_requirement(_OTHER_TEAM)),
+        (BUILD.designated_requirement(_OTHER_TEAM), canonical),
+    ):
+        runner = _FakeRunner(
+            adhoc=False,
+            slices={
+                arch: {
+                    "requirement_text": (
+                        f"designated => {first}\ndesignated => {second}\n"
+                    )
+                }
+            },
+        )
+        with pytest.raises(ServerHostError) as caught:
+            _inspect_signed(bundle, runner)
+        assert caught.value.code == SIGNATURE_REJECTED, (first, second)
+
+    # A duplicated entitlement key is lost by the parser: it keeps the last
+    # value, so `false` then `true` would read as the accepted `true`. The
+    # declared key count is the evidence, and it is a refusal, never a crash.
+    assert plistlib.loads(
+        _entitlements_xml("false", "true").encode("utf-8")
+    ) == {"com.apple.security.automation.apple-events": True}
+    for values in (("false", "true"), ("true", "false"), ("true", "true")):
+        for slice_arch in ARCHITECTURES:
+            runner = _FakeRunner(
+                adhoc=False,
+                slices={slice_arch: {"entitlements_raw": _entitlements_xml(*values)}},
+            )
+            with pytest.raises(ServerHostError) as caught:
+                _inspect_signed(bundle, runner)
+            assert caught.value.code == SIGNATURE_REJECTED, (slice_arch, values)
+
+    # Control: the same blob with each key declared once is accepted, so the
+    # refusals above are about duplication and not about the XML shape.
+    _inspect_signed(
+        bundle,
+        _FakeRunner(
+            adhoc=False,
+            slices={arch: {"entitlements_raw": _entitlements_xml("true")}},
+        ),
+    )
+
+
+def _plist_document(
+    inner: str, *, declaration: str = _PLIST_DOCTYPE, after_dict: str = "\n"
+) -> str:
+    """A complete XML plist whose ``<dict>`` holds ``inner`` verbatim."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        + declaration
+        + '<plist version="1.0">\n<dict>\n'
+        + inner
+        + "</dict>"
+        + after_dict
+        + "</plist>\n"
+    )
+
+
+def test_signed_host_entitlements_are_a_strict_xml_allowlist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The entitlement read is a strict structural allowlist over the whole
+    # document, not a count of keys the parser happened to keep: plistlib
+    # flattens an unknown wrapper, so a wrapped `false` key followed by the
+    # permitted direct one would otherwise read as the accepted dictionary.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    key = "com.apple.security.automation.apple-events"
+    allowed = f"\t<key>{key}</key>\n\t<true/>\n"
+
+    wrapped = _plist_document(
+        f"\t<foo><key>{key}</key><false/></foo>\n" + allowed
+    )
+    # The premise: the parser really does flatten the wrapper to the allowed set.
+    assert plistlib.loads(wrapped.encode("utf-8")) == {key: True}
+
+    entity = _plist_document(
+        "\t<key>&evt;</key>\n\t<true/>\n",
+        declaration=f'<!DOCTYPE plist [<!ENTITY evt "{key}">]>\n',
+    )
+    refused = {
+        # A key and value inside an unknown wrapper, with and without the
+        # permitted direct pair beside it.
+        "wrapped with direct key": wrapped,
+        "wrapped only": _plist_document(
+            f"\t<foo><key>{key}</key><true/></foo>\n"
+        ),
+        # A nested dictionary, whose inner key must not stand in for a top-level
+        # one, with and without the permitted direct pair.
+        "nested dict with direct key": _plist_document(
+            f"\t<key>outer</key><dict><key>{key}</key><true/></dict>\n" + allowed
+        ),
+        "nested dict only": _plist_document(
+            f"\t<key>outer</key><dict><key>{key}</key><true/></dict>\n"
+        ),
+        # CDATA and a comment are invisible to a text scan but not to the shape.
+        "cdata key": _plist_document(f"\t<key><![CDATA[{key}]]></key>\n\t<true/>\n"),
+        "comment beside the value": _plist_document(
+            f"\t<key>{key}</key><!-- value -->\n\t<true/>\n"
+        ),
+        # An entity reference; plistlib rejects the declaration as well, and the
+        # allowlist refuses the document before any value is trusted.
+        "entity key": entity,
+        "undefined entity": _plist_document("\t<key>&evt;</key>\n\t<true/>\n"),
+        # Numeric character references: expat expands them without ever calling
+        # an entity handler, so `&#46;` would spell the permitted key literally.
+        "decimal character reference key": _plist_document(
+            "\t<key>com&#46;apple.security.automation.apple-events</key>\n\t<true/>\n"
+        ),
+        "hex character reference key": _plist_document(
+            "\t<key>com&#x2E;apple.security.automation.apple-events</key>\n\t<true/>\n"
+        ),
+        # Non-whitespace text after the dictionary is inside the plist but
+        # outside the one dictionary the shape allows.
+        "stray text after the dictionary": _plist_document(
+            allowed, after_dict="stray\n"
+        ),
+        "stray text hugging the dictionary": _plist_document(allowed, after_dict=" x "),
+    }
+    for label, document in refused.items():
+        runner = _FakeRunner(
+            adhoc=False,
+            slices={ARCHITECTURES[0]: {"entitlements_raw": document}},
+        )
+        with pytest.raises(ServerHostError) as caught:
+            _inspect_signed(bundle, runner)
+        assert caught.value.code == SIGNATURE_REJECTED, label
+
+    # Control: the exact shape codesign --xml prints is accepted — the key
+    # written literally with no character reference, and only whitespace after
+    # the dictionary — so the cases above are refused for their shape and not
+    # because everything is.
+    _inspect_signed(
+        bundle,
+        _FakeRunner(
+            adhoc=False,
+            slices={
+                ARCHITECTURES[0]: {
+                    "entitlements_raw": _plist_document(allowed, after_dict="\n")
+                }
+            },
+        ),
+    )
+
+
 @requires_posix_uid
 def test_signed_ticket_is_recorded_and_stray_files_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2122,24 +2670,87 @@ def test_signed_verification_never_downgrades_to_adhoc(
     bundle = _make_signed_bundle(tmp_path)
     snapshot = _inspect_signed(bundle, _FakeRunner(adhoc=False))
     record = _install_record(tmp_path / "server-host.json", snapshot)
+    canonical_bundle = os.fspath(Path(os.path.realpath(bundle)))
+    requirement_probe = [
+        _CODESIGN,
+        "--verify",
+        "--strict",
+        "--all-architectures",
+        "--test-requirement",
+        "=" + developer_id_requirement(_TEST_TEAM),
+        canonical_bundle,
+    ]
+
+    # Every inspection of a record's bundle goes through one policy entry point.
+    # Counting probes alone cannot catch a retry that fails during file
+    # collection or plist validation before issuing any probe, so the entry
+    # point itself is observed: exactly one call, with the record's policy.
+    inspections: list[dict[str, Any]] = []
+    inspect = server_host.inspect_host_bundle
+
+    def spy(bundle_path: Path, **kwargs: Any) -> HostOwnership:
+        inspections.append({"bundle_path": bundle_path, **kwargs})
+        return inspect(bundle_path, **kwargs)
+
+    monkeypatch.setattr(server_host, "inspect_host_bundle", spy)
 
     adhoc = _FakeRunner(adhoc=True, requirement_rc=1)
     with pytest.raises(ServerHostError) as caught:
         verify_owned_host(bundle, ownership_path=record, runner=adhoc)
     assert caught.value.code == SIGNATURE_REJECTED
-    # The requirement was evaluated and failed; nothing fell back to the
-    # ad-hoc display check.
-    assert any("--test-requirement" in command for command in adhoc.commands)
-    assert all(command[1] != "--sign" for command in adhoc.commands)
+    assert inspections == [
+        {
+            "bundle_path": bundle,
+            "runner": adhoc,
+            "revision": SIGNED_HOST_REVISION,
+            "protocol": HOST_PROTOCOL,
+            "signing": SIGNED,
+        }
+    ]
+    # The complete signed probe sequence, and nothing else: no display read, no
+    # per-slice probe and no entitlement read, so the legacy ad-hoc inspection
+    # (`_require_signed_universal` and `_per_arch_cdhashes`) was never entered.
+    # A fallback that merely failed would still have run those probes.
+    assert adhoc.commands == [
+        [_CODESIGN, "--verify", "--strict", "--all-architectures", canonical_bundle],
+        requirement_probe,
+    ]
+    assert all("--sign" not in command for command in adhoc.commands)
 
     # Re-signed bytes change the file hashes too; the policy is still what
     # refuses, so the reason is the signature and not merely the record match.
     (bundle / _ICON_REL).write_bytes(b"ad-hoc-resign")
+    resign = _FakeRunner(adhoc=True)
     with pytest.raises(ServerHostError) as caught:
-        verify_owned_host(
-            bundle, ownership_path=record, runner=_FakeRunner(adhoc=True)
-        )
+        verify_owned_host(bundle, ownership_path=record, runner=resign)
     assert caught.value.code == SIGNATURE_REJECTED
+    # Still one inspection, still with the signed policy, never a second attempt
+    # under the legacy one.
+    assert inspections == [
+        {
+            "bundle_path": bundle,
+            "runner": adhoc,
+            "revision": SIGNED_HOST_REVISION,
+            "protocol": HOST_PROTOCOL,
+            "signing": SIGNED,
+        },
+        {
+            "bundle_path": bundle,
+            "runner": resign,
+            "revision": SIGNED_HOST_REVISION,
+            "protocol": HOST_PROTOCOL,
+            "signing": SIGNED,
+        },
+    ]
+    # The signed policy rejected the display's ad-hoc signature before any
+    # slice was inspected; the legacy policy's own verify and per-slice probes
+    # (no `--all-architectures`) never ran.
+    assert resign.commands == [
+        [_CODESIGN, "--verify", "--strict", "--all-architectures", canonical_bundle],
+        requirement_probe,
+        [_CODESIGN, "-dv", "--verbose=4", canonical_bundle],
+    ]
+    assert all("--arch" not in command for command in resign.commands)
 
 
 @requires_posix_uid
