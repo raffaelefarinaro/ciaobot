@@ -5,8 +5,8 @@
  * instantly when the iOS keyboard opens/closes. `100dvh` alone does not update
  * on iOS Safari until the user interacts with the page. Also toggles a
  * `.keyboard-open` class so the home-indicator safe-area can collapse while
- * the keyboard is covering it, and resolves `--safe-top` so an installed PWA
- * whose webview is already below the status bar does not add that inset twice.
+ * the keyboard is covering it, and keeps `--safe-top` aligned with the
+ * browser's safe-area inset.
  *
  * `viewportHeight()` / `viewportWidth()` are the size any `position: fixed`
  * element should measure itself against: with `interactive-widget=resizes-content`
@@ -25,41 +25,6 @@ const RESETTLE_DELAYS_MS = [50, 200, 500]
 
 /** Fraction of the tallest seen viewport below which we call the keyboard open. */
 const KEYBOARD_OPEN_RATIO = 0.85
-
-/** Slack when comparing the OS inset to the gap above the viewport, in px. */
-const TOP_INSET_TOLERANCE_PX = 2
-
-export interface TopInsetInputs {
-  /** Resolved env(safe-area-inset-top) in CSS px. */
-  envInset: number
-  /** window.screen.height — the device's CSS-px height. */
-  screenHeight: number
-  /** visualViewport.height (or innerHeight). */
-  viewportHeight: number
-  /** visualViewport.offsetTop (0 when absent). */
-  viewportOffsetTop: number
-}
-
-/**
- * The top inset the app should add: 0 when the OS already inset the webview.
- *
- * An installed PWA can be laid out below the status bar — iOS paints that band
- * itself — while `env(safe-area-inset-top)` still reports the inset. Adding it
- * again pushes the whole pane down by one status bar. When the webview is inset
- * like that, the gap between the screen and the visual viewport is already one
- * status bar tall; on a genuinely full-screen webview it is 0.
- */
-export function resolveTopInset({
-  envInset,
-  screenHeight,
-  viewportHeight,
-  viewportOffsetTop,
-}: TopInsetInputs): number {
-  if (envInset <= 0) return 0
-  const alreadyInset = screenHeight - (viewportHeight + viewportOffsetTop)
-  if (alreadyInset >= envInset - TOP_INSET_TOLERANCE_PX) return 0
-  return envInset
-}
 
 /** Height of the visible viewport, i.e. excluding the on-screen keyboard. */
 export function viewportHeight(): number {
@@ -127,20 +92,9 @@ function measure(): void {
   // heuristic always returns false. Detect keyboard open by comparing
   // against the tallest viewport height we've seen for this orientation.
   const keyboardOpen = h < maxViewportHeight * KEYBOARD_OPEN_RATIO
-  // While the keyboard is up the viewport is short for a reason that has
-  // nothing to do with the top safe area — the gap is the keyboard, below.
-  // Reading it as "the OS already inset the webview" would drop the inset and
-  // jerk every header up a status bar each time the field takes focus.
-  // `window.screen.height` is already in CSS px on iOS; do not scale it by
-  // devicePixelRatio.
-  const safeTop = keyboardOpen
-    ? envTopInset()
-    : resolveTopInset({
-      envInset: envTopInset(),
-      screenHeight: window.screen?.height ?? h,
-      viewportHeight: h,
-      viewportOffsetTop: window.visualViewport?.offsetTop ?? 0,
-    })
+  // A shorter viewport does not say which edge lost space. Trust the safe-area
+  // inset rather than treating a bottom gap as evidence of a top inset.
+  const safeTop = envTopInset()
   if (safeTop !== writtenSafeTop) {
     document.documentElement.style.setProperty('--safe-top', `${safeTop}px`)
     writtenSafeTop = safeTop

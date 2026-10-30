@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { installViewportPlumbing, resolveTopInset, stopViewportPlumbing } from './viewport'
+import { installViewportPlumbing, stopViewportPlumbing } from './viewport'
 
 const FULL_HEIGHT = 932
 const KEYBOARD_HEIGHT = 596
@@ -170,54 +170,6 @@ describe('installViewportPlumbing', () => {
   })
 })
 
-describe('resolveTopInset', () => {
-  it('keeps the inset when the webview is full screen', () => {
-    // Healthy iPhone standalone layout: the webview is the whole screen, so
-    // the top safe area still has to be added by the app.
-    const inset = resolveTopInset({
-      envInset: 59,
-      screenHeight: 932,
-      viewportHeight: 932,
-      viewportOffsetTop: 0,
-    })
-
-    expect(inset).toBe(59)
-  })
-
-  it('drops the inset when the OS already inset the webview', () => {
-    // The reported cold-open state: iOS laid the webview out below the status
-    // bar, so the viewport is one inset shorter than the screen.
-    expect(resolveTopInset({
-      envInset: 59,
-      screenHeight: 932,
-      viewportHeight: 873,
-      viewportOffsetTop: 0,
-    })).toBe(0)
-
-    // Same case with the inset partly expressed as a visual viewport offset
-    // (e.g. after iOS shifted the page for a focused field).
-    expect(resolveTopInset({
-      envInset: 59,
-      screenHeight: 932,
-      viewportHeight: 864,
-      viewportOffsetTop: 9,
-    })).toBe(0)
-  })
-
-  it('is a no-op without an env inset', () => {
-    // Safari tab: the browser chrome already handles the status bar, so a
-    // shorter viewport (keyboard open here) must not be read as an OS inset.
-    const inset = resolveTopInset({
-      envInset: 0,
-      screenHeight: 932,
-      viewportHeight: 745,
-      viewportOffsetTop: 0,
-    })
-
-    expect(inset).toBe(0)
-  })
-})
-
 describe('installViewportPlumbing and --safe-top', () => {
   const originalScreen = window.screen
   const originalRect = Element.prototype.getBoundingClientRect
@@ -240,7 +192,6 @@ describe('installViewportPlumbing and --safe-top', () => {
     Object.defineProperty(window, 'screen', { value: originalScreen, configurable: true })
     Element.prototype.getBoundingClientRect = originalRect
     delete vp.offsetTop
-    document.documentElement.style.removeProperty('--safe-top')
   })
 
   it('writes the resolved inset to --safe-top', () => {
@@ -252,11 +203,11 @@ describe('installViewportPlumbing and --safe-top', () => {
     window.dispatchEvent(new Event('orientationchange'))
     expect(safeTop()).toBe('59px')
 
-    // Already-inset webview: the OS applied it, so the app adds nothing.
+    // A shorter viewport does not prove the top has been inset by the OS.
     vp.height = 873
     vp.offsetTop = 0
     window.dispatchEvent(new Event('orientationchange'))
-    expect(safeTop()).toBe('0px')
+    expect(safeTop()).toBe('59px')
   })
 
   it('keeps the inset while the keyboard is open', () => {
@@ -270,9 +221,9 @@ describe('installViewportPlumbing and --safe-top', () => {
     vp.dispatchEvent(new Event('resize'))
     expect(safeTop()).toBe('59px')
 
-    // Closing it and landing in an already-inset webview resolves again.
+    // Closing it into a shorter viewport must not remove the top inset.
     vp.height = 873
     vp.dispatchEvent(new Event('resize'))
-    expect(safeTop()).toBe('0px')
+    expect(safeTop()).toBe('59px')
   })
 })
