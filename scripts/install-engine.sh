@@ -53,6 +53,25 @@ migration_started_at=
 # Set once this run has started a migration transaction, so a signal handler can
 # tell "nothing has been touched yet" from "this stopped halfway".
 migration_active=0
+# The native server-host upgrade (#2330) is a *separate* transaction from the
+# desktop-engine migration above: it is the host bundle and its owner-only
+# ownership record, it is bound to this installer's pid, and only its own commit
+# releases the before-images. `native_host_pending` means this run started one and
+# it is still uncommitted. The rollback attempt is guarded, because `fail` may be
+# reached from inside the rollback itself.
+native_host_pending=0
+native_host_operation=
+native_host_committed=0
+native_host_rollback_tried=0
+# Set once a launchd job may be running out of the candidate host. A rollback has
+# to boot that job out and wait for the process to exit before it reverts the
+# identity on disk: a still-running candidate is never reported as rolled back.
+native_host_service_started=0
+# The last `transaction-status` read: pending, nonce, owner pid and liveness.
+native_status_pending=0
+native_status_operation=
+native_status_owner_pid=
+native_status_owner_alive=0
 # Set when this transaction has taken the app's own LaunchAgent out of launchd,
 # which is not the same fact as having removed its plist: an agent that was
 # booted out and never loaded again is an unloaded one, and an enabled label with
@@ -131,8 +150,236 @@ Installs the Ciaobot engine for the current user with uv; the PWA is its UI.
 USAGE
 }
 
+# --- the native server-host upgrade transaction ----------------------------
+#
+# Nothing in this section talks to launchd or starts a host. The Python installer
+# is inert: it moves the app, writes its owner-only record and keeps a durable
+# journal. What lives here is the shell's side of that transaction - when the
+# candidate's service may already be running, how a failure gives the old host
+# back before the old engine definition is reloaded, and how a previous run's
+# abandoned operation is recovered. All of it runs through the verified wheel's
+# own module, so there is no second copy of the policy in shell.
+#
+# Defined before `fail` because `fail` is reached from the argument parser too,
+# where nothing is pending yet and every one of these returns immediately.
+
+native_host_run() {
+    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+        python -I -m ciao.server_host_install "$@"
+}
+
+native_host_status() {
+    # The module's strict JSON in, one validated field per line out. A status this
+    # script cannot parse is a refusal, never "nothing pending": a corrupt journal
+    # read as "settled" is how a second installer would clobber a live operation.
+    native_status_json=$(native_host_run transaction-status) || return 1
+    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+        python -I -c '
+import json
+import sys
+
+PHASES = ("prepared", "old_moved", "installed")
+
+try:
+    status = json.loads(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+if not isinstance(status, dict) or not isinstance(status.get("pending"), bool):
+    raise SystemExit(1)
+if not status["pending"]:
+    print("pending=0")
+    raise SystemExit(0)
+operation = status.get("operation")
+phase = status.get("phase")
+owner = status.get("owner_pid")
+alive = status.get("owner_alive")
+if (
+    not isinstance(operation, str)
+    or len(operation) != 32
+    or any(character not in "0123456789abcdef" for character in operation)
+):
+    raise SystemExit(1)
+if phase not in PHASES:
+    raise SystemExit(1)
+if type(owner) is not int or owner <= 0 or not isinstance(alive, bool):
+    raise SystemExit(1)
+print("pending=1")
+print("operation=" + operation)
+print("owner_pid=%d" % owner)
+print("owner_alive=1" if alive else "owner_alive=0")
+' "$native_status_json"
+}
+
+read_native_host_status() {
+    # <status-file>: sets the four native_status_* globals, or fails on anything
+    # this script did not write itself.
+    native_status_pending=0
+    native_status_operation=
+    native_status_owner_pid=
+    native_status_owner_alive=0
+    [ -f "$1" ] || return 1
+    while IFS= read -r native_status_line; do
+        case "$native_status_line" in
+            pending=0) native_status_pending=0 ;;
+            pending=1) native_status_pending=1 ;;
+            operation=*) native_status_operation=${native_status_line#operation=} ;;
+            owner_pid=*) native_status_owner_pid=${native_status_line#owner_pid=} ;;
+            owner_alive=0) native_status_owner_alive=0 ;;
+            owner_alive=1) native_status_owner_alive=1 ;;
+            *) return 1 ;;
+        esac
+    done < "$1"
+    if [ "$native_status_pending" -eq 1 ] && [ -z "$native_status_operation" ]; then
+        return 1
+    fi
+    return 0
+}
+
+native_host_quiesce() {
+    # Only when a job may have been (re)started against the candidate host. The
+    # wait is bounded and the answer is checked: a candidate process that is still
+    # there means the identity on disk must not be reverted, because replacing the
+    # bytes under a running signed process is exactly what this transaction is
+    # meant to prevent - and reporting it as rolled back would be a lie.
+    if [ "$native_host_service_started" -eq 0 ]; then
+        return 0
+    fi
+    native_host_executable="$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
+    "$LAUNCHCTL" bootout "gui/$(id -u)/$SERVER_LABEL" 2>/dev/null || true
+    native_host_waited=0
+    while [ "$native_host_waited" -lt 30 ] &&
+        "$PGREP" -f "$native_host_executable" >/dev/null 2>&1; do
+        native_host_waited=$((native_host_waited + 1))
+        "$SLEEP" 1
+    done
+    if "$PGREP" -f "$native_host_executable" >/dev/null 2>&1; then
+        return 1
+    fi
+    native_host_service_started=0
+    return 0
+}
+
+native_host_rollback() {
+    # Exactly one attempt, made while the verified wheel is still unpacked. A
+    # failure keeps the durable journal and before-images and says where they are;
+    # it never claims the previous host is back.
+    if [ "$native_host_pending" -eq 0 ] || [ "$native_host_rollback_tried" -ne 0 ]; then
+        return 0
+    fi
+    native_host_rollback_tried=1
+    if ! native_host_quiesce; then
+        echo "Ciaobot engine installer: the signed Ciaobot Server is still running, so it was NOT replaced by the previous host. The previous host and its ownership record are kept: see $HOME/.local/state/ciaobot/server-host-upgrade.json" >&2
+        return 1
+    fi
+    if native_host_run rollback-upgrade --operation "$native_host_operation" \
+        --owner-pid "$$" >/dev/null; then
+        native_host_pending=0
+        native_host_service_started=0
+        echo "Ciaobot engine installer: the previous Ciaobot Server host was restored." >&2
+        return 0
+    fi
+    echo "Ciaobot engine installer: the previous Ciaobot Server host could NOT be fully restored. Its recoverable material is kept: see $HOME/.local/state/ciaobot/server-host-upgrade.json" >&2
+    native_host_service_started=0
+    return 1
+}
+
+native_host_commit() {
+    # Only ever after positive evidence: the exact new engine answered, and every
+    # enclosing step that could still roll back has succeeded. A commit that fails
+    # rolls the host back through `fail`, because this run is not complete.
+    if [ "$native_host_pending" -eq 0 ] || [ "$native_host_committed" -ne 0 ]; then
+        return 0
+    fi
+    if ! native_host_run commit-upgrade --operation "$native_host_operation" \
+        --owner-pid "$$" >/dev/null; then
+        fail "the signed Ciaobot Server host could not be committed, so this run is not complete"
+    fi
+    native_host_pending=0
+    native_host_committed=1
+    native_host_service_started=0
+}
+
+native_host_recover() {
+    # A journal a previous installer left. Its owner still running is a refusal -
+    # this run must not roll back a live operation between another shell's
+    # subprocess calls. An abandoned one is rolled back from its own material
+    # before this run touches the host. The previous run's flags are unknown, so
+    # any loaded engine job is conservatively quiesced first: the disk may already
+    # be the candidate.
+    if ! native_host_status > "$tmp/native-host-status"; then
+        fail "the Ciaobot Server host upgrade state cannot be read safely; nothing on this Mac has been changed"
+    fi
+    if ! read_native_host_status "$tmp/native-host-status"; then
+        fail "the Ciaobot Server host upgrade state is malformed; nothing on this Mac has been changed"
+    fi
+    if [ "$native_status_pending" -eq 0 ]; then
+        return 0
+    fi
+    if [ "$native_status_owner_alive" -eq 1 ] &&
+        [ "$native_status_owner_pid" != "$$" ]; then
+        fail "installer process $native_status_owner_pid is still upgrading the Ciaobot Server host; wait for it to finish and re-run"
+    fi
+    echo "Ciaobot engine installer: a previous Ciaobot Server host upgrade did not finish; restoring the previous host first." >&2
+    native_host_pending=1
+    native_host_operation=$native_status_operation
+    native_host_service_started=1
+    if ! native_host_rollback; then
+        fail "the previous Ciaobot Server host upgrade could not be recovered; nothing new was installed"
+    fi
+    # That recovery used this run's one rollback attempt. The operation this run
+    # is about to start gets its own.
+    native_host_rollback_tried=0
+    # The conservative quiesce may have unloaded the job. Reload what is on disk;
+    # a later step of this run registers the definition it needs anyway, and a
+    # label launchd still holds is an error `bootstrap` reports, which is ignored.
+    if [ -f "$HOME/Library/LaunchAgents/$SERVER_LABEL.plist" ]; then
+        "$LAUNCHCTL" bootstrap "gui/$(id -u)" \
+            "$HOME/Library/LaunchAgents/$SERVER_LABEL.plist" 2>/dev/null || true
+    fi
+    native_host_service_started=0
+}
+
+native_host_begin() {
+    # The journal this very run just created. A status query that cannot be read
+    # here is fatal: continuing would install an engine over an operation whose
+    # state this run does not know.
+    if ! native_host_status > "$tmp/native-host-status"; then
+        fail "the Ciaobot Server host upgrade state cannot be read safely after installing the host"
+    fi
+    if ! read_native_host_status "$tmp/native-host-status"; then
+        fail "the Ciaobot Server host upgrade state is malformed after installing the host"
+    fi
+    if [ "$native_status_pending" -eq 0 ]; then
+        return 0
+    fi
+    if [ "$native_status_owner_pid" != "$$" ]; then
+        fail "another installer process ($native_status_owner_pid) owns the Ciaobot Server host upgrade this run started"
+    fi
+    native_host_pending=1
+    native_host_operation=$native_status_operation
+    # A fresh operation, so the one rollback attempt applies to it.
+    native_host_rollback_tried=0
+}
+
+cleanup_on_exit() {
+    # The one place a failed or interrupted run gives the old host back, whatever
+    # ended it: an explicit `fail`, an unexpected `set -e` exit, a signal (which
+    # exits and so runs this trap) or the end of the script. The rollback happens
+    # before `$tmp` and the wheel are deleted, because the module that performs it
+    # is run out of that wheel. The original status is preserved.
+    cleanup_status=$?
+    if [ "$native_host_pending" -ne 0 ]; then
+        native_host_rollback || true
+    fi
+    rm -rf "$tmp"
+    exit "$cleanup_status"
+}
+
 fail() {
     echo "Ciaobot engine installer: $*" >&2
+    # The host first: the engine rollback below reloads launchd, and reverting the
+    # host identity is only safe once its candidate service is gone.
+    native_host_rollback || true
     exit 1
 }
 
@@ -281,9 +528,12 @@ base="$release_base/v$version"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-engine.XXXXXX")
 chmod 700 "$tmp"
-trap 'rm -rf "$tmp"' EXIT
-# A signal handler that only cleaned up would fall through into the next step
-# with the temp dir already deleted; exit runs the EXIT trap, so cleanup stays.
+# One EXIT handler for every ending: it gives the previous server host back if
+# this run left a native-host upgrade uncommitted, and only then deletes the
+# wheel it needs to do that. A signal handler that only cleaned up would fall
+# through into the next step with the temp dir already deleted; `on_signal` exits
+# and so runs this trap.
+trap cleanup_on_exit EXIT
 trap on_signal HUP INT TERM
 
 download() {
@@ -1070,7 +1320,10 @@ install_step() {
 abort_install() {
     # Every post-install failure has to undo what this transaction changed, and
     # the undo that fits is the one for the path it took: a client has nothing to
-    # restore but its own previous state, a host has an engine to give back.
+    # restore but its own previous state, a host has an engine to give back. The
+    # native server host goes back first: `rollback_host` reloads launchd, and
+    # reverting the host identity is only safe once its candidate service is gone.
+    native_host_rollback || true
     case "$migrate_path" in
         host) rollback_host "$1" ;;
         client) rollback_client "$1" ;;
@@ -1523,8 +1776,13 @@ host_entry=
 if [ "$migrate_path" != client ] &&
     "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
     python -I -c 'import ciao.server_host_install' >/dev/null 2>&1; then
+    # `--describe` adds the selected host revision and signing policy after the
+    # three fields this script already reads: a revision-5 host is Developer ID
+    # signed by the team the release authenticated, a revision-4 one is the
+    # production ad-hoc host. Nothing here decides policy; it is only what lets
+    # the migration warning be printed before anything is replaced.
     host_entry=$("$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
-        python -I -m ciao.server_host_install select \
+        python -I -m ciao.server_host_install select --describe \
         "$tmp/ciaobot-engine-manifest.json" "$tmp/ciaobot-engine-manifest.json.sig" \
         --public-key "$RELEASE_PUBLIC_KEY") \
         || fail "the signed manifest's server host entry could not be read"
@@ -1534,7 +1792,10 @@ if [ -n "$host_entry" ]; then
     host_name=${1:-}
     host_sha=${2:-}
     host_size=${3:-}
-    if [ -z "$host_name" ] || [ -z "$host_sha" ] || [ -z "$host_size" ]; then
+    host_selected_revision=${4:-}
+    host_selected_signing=${5:-}
+    if [ -z "$host_name" ] || [ -z "$host_sha" ] || [ -z "$host_size" ] ||
+        [ -z "$host_selected_revision" ] || [ -z "$host_selected_signing" ]; then
         fail "the signed manifest's server host entry is malformed"
     fi
     host="$tmp/$host_name"
@@ -1553,8 +1814,12 @@ if [ -n "$host_entry" ]; then
     # signed-build facts, never attacker input - and the host is optional and
     # inert, so it must not block every later engine install until the user
     # deletes it by hand. Exit 1 is reserved for a release that did not verify
-    # (a manifest/selection error or an archive that does not match its signed
-    # digest), and stops the run.
+    # (a manifest/selection error, an archive that does not match its signed
+    # digest, or a signed identity the local record contradicts), and stops the
+    # run. Exit 4 is its own answer: the previous host can only become the signed
+    # one through the recoverable transaction a normal (start-enabled) run takes,
+    # so `--no-start` says the migration completes later instead of replacing
+    # what it cannot prove healthy.
     #
     # A superseded host is replaced by this one (#1659). Its presence before the
     # install is what makes a successful install a replacement, and a
@@ -1572,12 +1837,14 @@ if [ -n "$host_entry" ]; then
     # from the ownership record, not from this.
     host_superseded_plist="$HOME/Applications/Ciaobot Server.app/Contents/Info.plist"
     host_replacing=0
+    host_migrating=0
     superseded_revisions=$(
         "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
             python -I -c 'from ciao.server_host import SUPERSEDED_HOST_PROTOCOLS; print(*SUPERSEDED_HOST_PROTOCOLS)' \
             2>/dev/null || true
     )
-    if [ -n "$superseded_revisions" ] && [ -f "$host_superseded_plist" ]; then
+    host_revision=
+    if [ -f "$host_superseded_plist" ]; then
         # `plutil` is looked up on PATH, not by its absolute path: the
         # installer is exercised on Linux CI too, where macOS's own plutil is
         # not there. A missing plutil only means "not a superseded host".
@@ -1585,27 +1852,65 @@ if [ -n "$host_entry" ]; then
             plutil -extract CFBundleVersion raw -o - \
                 "$host_superseded_plist" 2>/dev/null || true
         )
+    fi
+    if [ -n "$superseded_revisions" ] && [ -n "$host_revision" ]; then
         for superseded_revision in $superseded_revisions; do
             if [ "$host_revision" = "$superseded_revision" ]; then
                 host_replacing=1
             fi
         done
     fi
+    # A signed candidate over a host of another revision is the one replacement
+    # that is a *migration*, and macOS evaluates the new bytes' identity: the
+    # user may have to grant Accessibility, Automation and the folder accesses
+    # again. Said once, before anything is replaced, and without promising that
+    # any existing grant carries over.
+    if [ "$host_selected_signing" != legacy ] && [ -n "$host_revision" ] &&
+        [ "$host_revision" != "$host_selected_revision" ]; then
+        host_migrating=1
+    fi
+
+    # A journal a previous installer left is settled before this run mutates the
+    # host, so a second installer never starts from a half-replaced pair.
+    native_host_recover
+
+    if [ "$host_migrating" -eq 1 ] && [ "$no_start" -eq 0 ]; then
+        echo "warning: Ciaobot Server will be replaced by the Developer ID signed build. macOS may ask again for Accessibility and Automation, and for access to Desktop, Documents and Downloads; approve them in System Settings > Privacy & Security. Existing permissions are not transferred automatically." >&2
+    fi
+
     host_rc=0
-    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
-        python -I -m ciao.server_host_install install \
-        --manifest "$tmp/ciaobot-engine-manifest.json" \
-        --signature "$tmp/ciaobot-engine-manifest.json.sig" \
-        --archive "$host" \
-        --public-key "$RELEASE_PUBLIC_KEY" >/dev/null || host_rc=$?
+    if [ "$no_start" -eq 0 ]; then
+        # `--defer-commit` is what makes a legacy-to-signed replacement a durable
+        # transaction: the old host and its exact record stay recoverable until
+        # `commit-upgrade`, which only runs after this run has proven the new
+        # engine healthy.
+        native_host_run install \
+            --manifest "$tmp/ciaobot-engine-manifest.json" \
+            --signature "$tmp/ciaobot-engine-manifest.json.sig" \
+            --archive "$host" \
+            --public-key "$RELEASE_PUBLIC_KEY" \
+            --defer-commit --owner-pid "$$" >/dev/null || host_rc=$?
+    else
+        native_host_run install \
+            --manifest "$tmp/ciaobot-engine-manifest.json" \
+            --signature "$tmp/ciaobot-engine-manifest.json.sig" \
+            --archive "$host" \
+            --public-key "$RELEASE_PUBLIC_KEY" >/dev/null || host_rc=$?
+    fi
     case "$host_rc" in
         0)
+            if [ "$no_start" -eq 0 ]; then
+                # Whether this run owns an uncommitted host upgrade is answered
+                # by the module's journal, not by guessing from the manifest.
+                native_host_begin
+            fi
             echo "Ciaobot Server host installed and recorded."
-            if [ "$host_replacing" -eq 1 ]; then
+            if [ "$host_replacing" -eq 1 ] && [ "$host_migrating" -eq 0 ]; then
                 echo "warning: Ciaobot Server was replaced by a new build, so macOS will ask again for its Accessibility and Automation permissions; approve them in System Settings > Privacy & Security" >&2
             fi
             ;;
         3) echo "warning: the Ciaobot Server host was not installed (see above); the engine install continues" >&2 ;;
+        4) echo "Ciaobot Server: this Mac still runs the previous server host. The upgrade to the signed host happens automatically on a later installer run without --no-start; nothing was replaced." >&2 ;;
         *) fail "the signed server host could not be installed" ;;
     esac
 fi
@@ -1737,6 +2042,12 @@ if [ "$migrate_path" != client ]; then
             # `--flag=value` so a suggestion that begins with a dash still
             # reaches the wizard as a path.
             [ -z "$fresh_suggestion" ] || set -- "$@" "--installer-suggest-workspace=$fresh_suggestion"
+            # The bootstrap's activation starts the engine, which runs out of the
+            # signed host this run just installed. From here a failed run has to
+            # quiesce that job before the previous host goes back.
+            if [ "$native_host_pending" -ne 0 ]; then
+                native_host_service_started=1
+            fi
             bootstrap_rc=0
             "$ciao" "$@" || bootstrap_rc=$?
             if [ "$bootstrap_rc" -ne 0 ]; then
@@ -1857,6 +2168,13 @@ print(port)
     # Reload the agent so launchd drops any job definition it already holds
     # (another engine's), otherwise `service start` restarts the old one.
     [ "$no_start" -ne 0 ] || set -- "$@" --load-launchd
+    # From here a job may be running out of the signed host this run just
+    # installed: `--load-launchd` reloads the agent and starts it. A later
+    # failure has to boot that job out and wait for it before the previous host is
+    # put back, so the fact is recorded before the call, not after.
+    if [ "$native_host_pending" -ne 0 ] && [ "$no_start" -eq 0 ]; then
+        native_host_service_started=1
+    fi
     # `ciao setup` reports a workspace whose memory regions could not be set
     # up by exiting 3, which is not a failed install: everything else it
     # scaffolds is there, and a rollback would throw all of that away. Only
@@ -1949,7 +2267,12 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
                     port_in_use=1
                     break
                 fi
-                if [ "$migrate_path" != host ]; then
+                # Established installs accept any answer from Ciaobot's engine on
+                # the configured port... unless this run started a native host
+                # upgrade. Then `healthy=1` from an unrelated old or wrong-version
+                # server is not evidence that the engine using the new signed host
+                # came up, so the strict version match below is required.
+                if [ "$migrate_path" != host ] && [ "$native_host_pending" -eq 0 ]; then
                     healthy=1
                     break
                 fi
@@ -1985,9 +2308,15 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
             echo "Ciaobot engine installer: port $port is already in use by another program. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port" >&2
         fi
         engine_ready=0
+        # A pending host upgrade was only justified by an engine that would use
+        # it. One that could not bind is not that engine, so the previous host
+        # comes back instead of leaving the signed one installed unproven.
+        if [ "$native_host_pending" -ne 0 ]; then
+            abort_install "the new engine could not bind port $port, so the previous Ciaobot Server host was restored"
+        fi
     elif [ "$healthy" -eq 0 ]; then
         engine_ready=0
-        if [ "$migrate_path" = host ]; then
+        if [ "$migrate_path" = host ] || [ "$native_host_pending" -ne 0 ]; then
             if [ -n "$access_denied" ]; then
                 abort_install "$access_denied"
             fi
@@ -2003,6 +2332,13 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
     fi
 else
     engine_ready=1
+fi
+
+# An ordinary update that replaced the server host commits here: the exact newly
+# installed version answered on the configured port. A desktop hand-over commits
+# further down, after the retirement steps that can still roll the engine back.
+if [ "$migrate_path" != host ] && [ "$native_host_pending" -ne 0 ]; then
+    native_host_commit
 fi
 
 if [ "$migrate_path" = client ]; then
@@ -2032,6 +2368,10 @@ if [ "$migrate_path" = host ]; then
         if retire_desktop_agent; then
             retiring_desktop=0
             install_step "could not write the migration receipt" migration_receipt migrated
+            # The engine is proven and the app's own agent is retired: this is
+            # the last step that could still roll the hand-over back, so a pending
+            # native host upgrade is committed here and not before.
+            native_host_commit
         else
             # The new engine is up, but the app's agent is still loaded: a
             # desktop relaunch would bring it back next to the engine that was
