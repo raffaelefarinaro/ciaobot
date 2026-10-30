@@ -21,9 +21,13 @@ Three questions, deliberately kept apart, in the order they must be asked:
 * **Identity** — :func:`inspect_host_bundle` reads an installed ``Ciaobot
   Server.app`` on macOS and returns a frozen :class:`HostOwnership` snapshot:
   the bundle identity, the plist's fixed fields, the executable digest, the two
-  signed slice CDHashes and the digest of every regular sealed file. It proves
-  the bytes are a well-formed, strictly and ad-hoc signed universal host. It is
-  **not** ownership: a stranger's correctly built bundle inspects the same way.
+  signed slice CDHashes and the digest of every regular sealed file. The policy
+  is explicit and finite: the production revision-4 host must be strictly and
+  ad-hoc signed, and the opt-in revision-5 host must satisfy an external
+  Developer ID requirement for an expected team, a stable designated
+  requirement, the hardened runtime with a secure timestamp, and exactly one
+  Apple Events entitlement. It is **not** ownership: a stranger's correctly
+  built bundle inspects the same way.
 * **Ownership** — :func:`verify_owned_host` reads an existing, owner-only
   ownership record written outside the bundle and requires the inspected bundle
   to match it exactly: identity, revision, protocol, executable digest, both
@@ -31,16 +35,20 @@ Three questions, deliberately kept apart, in the order they must be asked:
   this host. A missing record is a refusal, never a reason to trust a bundle.
   :func:`verify_superseded_host` is the one narrower proof, against the
   revision this engine supersedes, so the installer can replace a host it can
-  prove is ours and refuse every other bundle.
+  prove is ours and refuse every other bundle. The record also selects the
+  policy: schema-1/revision-4 is the production ad-hoc host, schema-2/revision-5
+  is the explicitly signed host. A failed signed check never falls back to
+  accepting an ad-hoc signature.
 
 The record never lives inside the sealed app: a record covered by the signature
 it vouches for would be circular, and one written into the bundle would change
 the very digest the next read compares. It holds no engine version, workspace or
 credential — only the host's own immutable identity and bytes. The reader never
 runs a native command, coerces a value or writes a file. The inspector runs only
-the public, read-only ``/usr/bin/codesign --verify`` and ``/usr/bin/codesign -dv``
-probes: no signing, launch, ``open``, ``launchctl`` or AX call, and every
-subprocess is bounded and shell-free.
+the public, read-only ``/usr/bin/codesign`` probes (``--verify``, ``-dv``, and
+for a signed host the display and entitlement reads): no signing, launch,
+``open``, ``launchctl`` or AX call, and every subprocess is bounded and
+shell-free.
 """
 
 from __future__ import annotations
@@ -58,18 +66,25 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 __all__ = [
     "APP_NAME",
     "ARCHITECTURES",
     "BUNDLE_ID",
+    "DEVELOPER_ID_SIGNING_KIND",
+    "DeveloperIDSigning",
     "EXECUTABLE_NAME",
     "EXIT_TIMEOUT_SECONDS",
     "HOST_PROTOCOL",
     "HOST_PROTOCOL_KEY",
     "HOST_REVISION",
     "ICON_NAME",
+    "SIGNATURE_REJECTED",
+    "SIGNED_BUNDLE_FILES",
+    "SIGNED_ENTITLEMENTS",
+    "SIGNED_HOST_REVISION",
+    "SIGNED_SCHEMA_VERSION",
     "SUPERSEDED_HOST_PROTOCOLS",
     "MOVE_HOST_PROTOCOL",
     "MINIMUM_SYSTEM_VERSION",
@@ -81,6 +96,7 @@ __all__ = [
     "ServiceCommand",
     "default_bundle_path",
     "default_ownership_path",
+    "developer_id_requirement",
     "host_service_argv",
     "host_move_argv",
     "host_interpreter",
@@ -124,8 +140,43 @@ MOVE_HOST_PROTOCOL = 2
 STOP_GRACE_SECONDS = 35
 EXIT_TIMEOUT_SECONDS = 45
 
-#: The on-disk ownership record schema this module reads.
+#: The on-disk ownership record schema this module reads. Schema 1 is the
+#: production revision-4 record and is unchanged, field for field and byte for
+#: byte; schema 2 is the explicitly signed revision-5 record (#2329).
 SCHEMA_VERSION = 1
+
+#: The opt-in signed-host policy. A Developer ID signed, notarized host is
+#: different bytes with a different recorded identity, so it gets its own
+#: revision and record schema. Nothing here changes the production default
+#: above: revision 4 is still the host this engine publishes and installs, and
+#: revision 5 is accepted only when the private record (or an explicit caller)
+#: asks for it. Accepting it is not promoting it for publication.
+SIGNED_HOST_REVISION = 5
+SIGNED_SCHEMA_VERSION = 2
+
+#: The one signing identity a signed record may name, and the exact shape of its
+#: JSON object: ``{"kind": "developer-id", "team_id": <ten characters>}``. The
+#: team is the value the minisign-authenticated release manifest carried — it is
+#: never learned from the bundle, the keychain or the environment.
+DEVELOPER_ID_SIGNING_KIND = "developer-id"
+
+#: Developer ID requirement extensions: the Developer ID CA intermediate and the
+#: leaf's Developer ID application marker. Both survive a certificate renewal
+#: within one team, so the requirement names the team rather than a certificate
+#: fingerprint or CDHash.
+DEVELOPER_ID_CA_EXTENSION = "1.2.840.113635.100.6.2.6"
+DEVELOPER_ID_APPLICATION_EXTENSION = "1.2.840.113635.100.6.1.13"
+
+#: The only entitlement a signed host may carry. Anything else — JIT, a debugger
+#: attachment, disabled library validation, ``get-task-allow`` — is a runtime
+#: relaxation a service must never accept.
+SIGNED_ENTITLEMENTS: Mapping[str, object] = MappingProxyType(
+    {"com.apple.security.automation.apple-events": True}
+)
+
+#: The CodeDirectory option flag that marks a hardened-runtime signature
+#: (``CS_RUNTIME``). A ``Runtime Version`` line alone is not proof: the flag is.
+CODE_DIRECTORY_RUNTIME_FLAG = 0x10000
 
 #: Every native probe is bounded and shell-free. ``codesign`` is local and fast;
 #: ten seconds is a hang, not a slow machine.
@@ -164,15 +215,27 @@ MISSING_RECORD = "missing_record"
 UNSUPPORTED_PLATFORM = "unsupported_platform"
 INSPECTION_FAILED = "inspection_failed"
 NOT_OWNED = "not_owned"
+#: A completed native verification that *disproved* the requested signed
+#: identity, runtime or entitlement policy. It is deliberately distinct from
+#: :data:`INSPECTION_FAILED` (a probe that could not start or did not finish),
+#: so a caller can tell "this bundle is not the signed host" from "this machine
+#: could not check", even though neither result authorizes anything.
+SIGNATURE_REJECTED = "signature_rejected"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CDHASH_RE = re.compile(r"^[0-9a-f]{40}$")
 _PYTHON_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
+#: The one accepted team representation: ten uppercase letters or digits.
+_TEAM_ID_RE = re.compile(r"^[A-Z0-9]{10}$")
 
 _PLIST_REL = "Contents/Info.plist"
 _EXECUTABLE_REL = f"Contents/MacOS/{EXECUTABLE_NAME}"
 _ICON_REL = f"Contents/Resources/{ICON_NAME}"
 _CODESIGN_REL = "Contents/_CodeSignature/CodeResources"
+#: The notarization ticket's resource directory, distinct from
+#: ``Contents/_CodeSignature/CodeResources``. Only the signed policy names it: a
+#: production revision-4 bundle has no ticket and must not grow one.
+_APP_TICKET_REL = "Contents/CodeResources"
 
 #: Exactly the files ``scripts/build-server-host.py`` seals into a host bundle.
 #: An inspected bundle and a record's mapping must both name this set and
@@ -181,6 +244,11 @@ _CODESIGN_REL = "Contents/_CodeSignature/CodeResources"
 REQUIRED_BUNDLE_FILES = frozenset(
     {_PLIST_REL, _EXECUTABLE_REL, _ICON_REL, _CODESIGN_REL}
 )
+
+#: The signed policy's file set: the historical four plus the stapled ticket.
+#: Code signing does not seal the ticket the way it seals ordinary resources, so
+#: the record hashes it as ordinary immutable material.
+SIGNED_BUNDLE_FILES = REQUIRED_BUNDLE_FILES | {_APP_TICKET_REL}
 
 #: The directories a host bundle contains: the bundle root, ``Contents`` and the
 #: parents of the sealed files. Any other directory is refused.
@@ -207,6 +275,10 @@ _RECORD_FIELDS = frozenset(
     }
 )
 
+#: Schema 2 is the same document plus exactly one authenticated signing identity.
+_SIGNED_RECORD_FIELDS = _RECORD_FIELDS | {"signing"}
+_SIGNING_FIELDS = frozenset({"kind", "team_id"})
+
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -216,6 +288,139 @@ class ServerHostError(ValueError):
     def __init__(self, message: str, *, code: str = INVALID_OWNERSHIP) -> None:
         super().__init__(message)
         self.code = code
+
+
+# ── The signed identity: which team, and how that is proved ─────────────────
+
+
+@dataclass(frozen=True)
+class DeveloperIDSigning:
+    """The expected Developer ID signer of a signed host bundle.
+
+    The only accepted representation of a team is ten uppercase letters or
+    digits, validated here before any requirement text is built: the requirement
+    is literal source ``codesign`` evaluates, so an arbitrary string must never
+    reach it.
+    """
+
+    team_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.team_id, str) or not _TEAM_ID_RE.fullmatch(
+            self.team_id
+        ):
+            raise ServerHostError(
+                "a Developer ID team must be ten uppercase letters or digits",
+                code=INVALID_OWNERSHIP,
+            )
+
+
+def developer_id_requirement(team_id: str) -> str:
+    """The stable Developer ID designated requirement for this host and team.
+
+    Identical to ``scripts/build-server-host.py::designated_requirement``, which
+    signs the release: ``tests/test_server_host_contract.py`` asserts the parity
+    rather than importing a build script into runtime code. It names the bundle,
+    the Apple generic anchor, the Developer ID CA and leaf extensions and the
+    team — never a certificate fingerprint or CDHash, so a certificate renewal
+    within the same team keeps the same logical identity.
+    """
+    if not isinstance(team_id, str) or not _TEAM_ID_RE.fullmatch(team_id):
+        raise ServerHostError(
+            "a Developer ID team must be ten uppercase letters or digits",
+            code=INVALID_OWNERSHIP,
+        )
+    return (
+        f'identifier "{BUNDLE_ID}"'
+        " and anchor apple generic"
+        f" and certificate 1[field.{DEVELOPER_ID_CA_EXTENSION}] /* exists */"
+        f" and certificate leaf[field.{DEVELOPER_ID_APPLICATION_EXTENSION}]"
+        " /* exists */"
+        f' and certificate leaf[subject.OU] = "{team_id}"'
+    )
+
+
+@dataclass(frozen=True)
+class _HostPolicy:
+    """One finite acceptance policy, selected before untrusted bytes are read.
+
+    Nothing here is inferred from a bundle, a process environment or a
+    ``codesign -dv`` claim. A record's strict schema selects its policy, and an
+    explicit :func:`inspect_host_bundle` call names its own.
+    """
+
+    revision: int
+    protocol: int
+    schema: int
+    bundle_files: frozenset[str]
+    signing: DeveloperIDSigning | None
+
+
+_LEGACY_HOST_POLICY = _HostPolicy(
+    revision=HOST_REVISION,
+    protocol=HOST_PROTOCOL,
+    schema=SCHEMA_VERSION,
+    bundle_files=REQUIRED_BUNDLE_FILES,
+    signing=None,
+)
+
+#: The signed policy a schema-2 record selects. The signing identity is decoded
+#: from the record itself, so this descriptor only fixes the revision, protocol
+#: and file set.
+_SIGNED_RECORD_POLICY = _HostPolicy(
+    revision=SIGNED_HOST_REVISION,
+    protocol=HOST_PROTOCOL,
+    schema=SIGNED_SCHEMA_VERSION,
+    bundle_files=SIGNED_BUNDLE_FILES,
+    signing=None,
+)
+
+
+def _policy(
+    revision: int,
+    protocol: int,
+    signing: DeveloperIDSigning | None,
+    *,
+    code: str,
+) -> _HostPolicy:
+    """The one policy an explicit revision/protocol/signing triple names.
+
+    A signing policy is accepted only for the signed revision, and the signed
+    revision is accepted only with a signing policy: neither can stand in for
+    the other, and no other revision pair is a runtime policy (2 and 3 remain
+    replacement-only through :func:`verify_superseded_host`).
+    """
+    if signing is None:
+        if revision == HOST_REVISION and protocol == HOST_PROTOCOL:
+            return _LEGACY_HOST_POLICY
+        superseded = SUPERSEDED_HOST_PROTOCOLS.get(revision)
+        if superseded is not None and protocol == superseded:
+            return _HostPolicy(
+                revision=revision,
+                protocol=protocol,
+                schema=SCHEMA_VERSION,
+                bundle_files=REQUIRED_BUNDLE_FILES,
+                signing=None,
+            )
+        raise ServerHostError(
+            f"host revision {revision} / protocol {protocol} is not an accepted "
+            f"host identity without an explicit signing policy",
+            code=code,
+        )
+    if revision != SIGNED_HOST_REVISION or protocol != HOST_PROTOCOL:
+        raise ServerHostError(
+            f"a signing policy is only accepted for host revision "
+            f"{SIGNED_HOST_REVISION} / protocol {HOST_PROTOCOL}, not {revision} / "
+            f"{protocol}",
+            code=code,
+        )
+    return _HostPolicy(
+        revision=SIGNED_HOST_REVISION,
+        protocol=HOST_PROTOCOL,
+        schema=SIGNED_SCHEMA_VERSION,
+        bundle_files=SIGNED_BUNDLE_FILES,
+        signing=signing,
+    )
 
 
 # ── Syntax: the invocation a service describes ─────────────────────────────
@@ -512,19 +717,42 @@ class HostOwnership:
     executable_sha256: str
     per_arch_cdhashes: Mapping[str, str]
     bundle_files: Mapping[str, str]
+    #: The authenticated signing identity of a signed snapshot, or ``None`` for
+    #: the production ad-hoc revision-4 host. The schema and this field cannot
+    #: disagree: schema 1 has none, schema 2 has exactly one.
+    signing: DeveloperIDSigning | None = None
 
     def __post_init__(self) -> None:
         for name in ("per_arch_cdhashes", "bundle_files"):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
+        if self.schema == SCHEMA_VERSION:
+            if self.signing is not None:
+                raise ServerHostError(
+                    "a schema-1 host snapshot cannot carry a signing identity",
+                    code=INVALID_OWNERSHIP,
+                )
+        elif self.schema == SIGNED_SCHEMA_VERSION:
+            if not isinstance(self.signing, DeveloperIDSigning):
+                raise ServerHostError(
+                    "a schema-2 host snapshot must carry its signing identity",
+                    code=INVALID_OWNERSHIP,
+                )
+        else:
+            raise ServerHostError(
+                f"a host snapshot cannot be schema {self.schema}",
+                code=UNSUPPORTED_SCHEMA,
+            )
 
     def to_record(self) -> dict[str, Any]:
         """The record document this snapshot serializes to.
 
         Pure: it returns a dict and writes nothing. Persisting it owner-only,
         outside the bundle and only after a verified installation, is the
-        installer's later job (#1008 child E), not this module's.
+        installer's later job (#1008 child E), not this module's. A schema-1
+        document keeps today's exact field set and has no ``signing`` key at
+        all; a schema-2 document adds exactly that one object.
         """
-        return {
+        document: dict[str, Any] = {
             "schema": self.schema,
             "bundle_path": self.bundle_path,
             "bundle_id": self.bundle_id,
@@ -534,6 +762,13 @@ class HostOwnership:
             "per_arch_cdhashes": dict(self.per_arch_cdhashes),
             "bundle_files": dict(self.bundle_files),
         }
+        if self.schema == SIGNED_SCHEMA_VERSION:
+            assert self.signing is not None
+            document["signing"] = {
+                "kind": DEVELOPER_ID_SIGNING_KIND,
+                "team_id": self.signing.team_id,
+            }
+        return document
 
 
 def _require_sha256(value: object, *, what: str) -> str:
@@ -567,13 +802,8 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _decode_record(
-    raw: str,
-    *,
-    path: Path,
-    revision: int = HOST_REVISION,
-    protocol: int = HOST_PROTOCOL,
-) -> HostOwnership:
+def _load_document(raw: str, *, path: Path) -> dict[str, Any]:
+    """The strict JSON object of a record, refusing duplicate keys anywhere."""
     try:
         document: Any = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs)
     except ServerHostError:
@@ -588,25 +818,90 @@ def _decode_record(
             f"the ownership record at {path.name} is not a JSON object",
             code=INVALID_OWNERSHIP,
         )
-    if set(document) != _RECORD_FIELDS:
-        missing = sorted(_RECORD_FIELDS - set(document))
-        extra = sorted(set(document) - _RECORD_FIELDS)
+    return document
+
+
+def _decode_signing(value: object, *, path: Path) -> DeveloperIDSigning:
+    """The one accepted signing object: exactly ``kind`` and ``team_id``."""
+    if not isinstance(value, dict) or set(value) != _SIGNING_FIELDS:
+        raise ServerHostError(
+            f"the ownership record at {path.name} has a malformed signing identity",
+            code=INVALID_OWNERSHIP,
+        )
+    if value["kind"] != DEVELOPER_ID_SIGNING_KIND:
+        raise ServerHostError(
+            f"the ownership record at {path.name} is not "
+            f"{DEVELOPER_ID_SIGNING_KIND!r} signed",
+            code=INVALID_OWNERSHIP,
+        )
+    team_id = value["team_id"]
+    if not isinstance(team_id, str) or not _TEAM_ID_RE.fullmatch(team_id):
+        raise ServerHostError(
+            f"the ownership record at {path.name} has a malformed signing team",
+            code=INVALID_OWNERSHIP,
+        )
+    return DeveloperIDSigning(team_id)
+
+
+def _decode_record(
+    raw: str, *, path: Path, policy: _HostPolicy
+) -> HostOwnership:
+    """Decode a record against one explicit policy; no field is coerced."""
+    document = _load_document(raw, path=path)
+    return _decode_document(document, path=path, policy=policy)
+
+
+def _decode_current_record(raw: str, *, path: Path) -> HostOwnership:
+    """Decode a current record, selecting its policy from its strict schema.
+
+    Schema 1 is the production revision-4 record; schema 2 is the explicitly
+    signed revision-5 record. The selection happens before any field is read, so
+    neither schema can claim the other's revision, file set or signing identity.
+    """
+    document = _load_document(raw, path=path)
+    # A JSON `true` must not pass as schema 1: `_strict_int` excludes `bool`.
+    if not _strict_int(document.get("schema")):
+        raise ServerHostError(
+            f"the ownership record at {path.name} has no integer schema version",
+            code=UNSUPPORTED_SCHEMA,
+        )
+    if document["schema"] == SCHEMA_VERSION:
+        return _decode_document(document, path=path, policy=_LEGACY_HOST_POLICY)
+    if document["schema"] == SIGNED_SCHEMA_VERSION:
+        return _decode_document(document, path=path, policy=_SIGNED_RECORD_POLICY)
+    raise ServerHostError(
+        f"the ownership record at {path.name} is schema {document['schema']}; "
+        f"this engine reads schema {SCHEMA_VERSION} or {SIGNED_SCHEMA_VERSION}",
+        code=UNSUPPORTED_SCHEMA,
+    )
+
+
+def _decode_document(
+    document: dict[str, Any], *, path: Path, policy: _HostPolicy
+) -> HostOwnership:
+    expected_fields = (
+        _SIGNED_RECORD_FIELDS
+        if policy.schema == SIGNED_SCHEMA_VERSION
+        else _RECORD_FIELDS
+    )
+    if set(document) != expected_fields:
+        missing = sorted(expected_fields - set(document))
+        extra = sorted(set(document) - expected_fields)
         raise ServerHostError(
             f"the ownership record at {path.name} has the wrong fields "
             f"(missing={missing}, extra={extra})",
             code=INVALID_OWNERSHIP,
         )
 
-    # A JSON `true` must not pass as schema 1: `_strict_int` excludes `bool`.
     if not _strict_int(document["schema"]):
         raise ServerHostError(
             f"the ownership record at {path.name} has no integer schema version",
             code=UNSUPPORTED_SCHEMA,
         )
-    if document["schema"] != SCHEMA_VERSION:
+    if document["schema"] != policy.schema:
         raise ServerHostError(
             f"the ownership record at {path.name} is schema {document['schema']}; "
-            f"this engine reads schema {SCHEMA_VERSION}",
+            f"this policy reads schema {policy.schema}",
             code=UNSUPPORTED_SCHEMA,
         )
     if document["bundle_id"] != BUNDLE_ID:
@@ -617,17 +912,28 @@ def _decode_record(
         )
     if (
         not _strict_int(document["host_revision"])
-        or document["host_revision"] != revision
+        or document["host_revision"] != policy.revision
     ):
         raise ServerHostError(
-            f"the ownership record at {path.name} is not host revision {revision}",
+            f"the ownership record at {path.name} is not host revision "
+            f"{policy.revision}",
             code=INVALID_OWNERSHIP,
         )
-    if not _strict_int(document["host_protocol"]) or document["host_protocol"] != protocol:
+    if (
+        not _strict_int(document["host_protocol"])
+        or document["host_protocol"] != policy.protocol
+    ):
         raise ServerHostError(
-            f"the ownership record at {path.name} is not host protocol {protocol}",
+            f"the ownership record at {path.name} is not host protocol "
+            f"{policy.protocol}",
             code=INVALID_OWNERSHIP,
         )
+
+    signing = (
+        _decode_signing(document["signing"], path=path)
+        if policy.schema == SIGNED_SCHEMA_VERSION
+        else None
+    )
 
     bundle_path = _absolute_posix(
         document["bundle_path"], what="the recorded bundle path", code=INVALID_OWNERSHIP
@@ -654,18 +960,19 @@ def _decode_record(
         for arch in ARCHITECTURES
     }
 
-    # Exactly the sealed set: an absolute, traversing, backslashed or otherwise
-    # unexpected name is simply not one of these four.
+    # Exactly the policy's sealed set: an absolute, traversing, backslashed or
+    # otherwise unexpected name is simply not one of them.
+    required_files = policy.bundle_files
     files = document["bundle_files"]
-    if not isinstance(files, dict) or set(files) != REQUIRED_BUNDLE_FILES:
+    if not isinstance(files, dict) or set(files) != required_files:
         raise ServerHostError(
             f"the ownership record at {path.name} must map exactly "
-            f"{sorted(REQUIRED_BUNDLE_FILES)}",
+            f"{sorted(required_files)}",
             code=INVALID_OWNERSHIP,
         )
     bundle_files = {
         name: _require_sha256(files[name], what=f"the digest of {name}")
-        for name in sorted(REQUIRED_BUNDLE_FILES)
+        for name in sorted(required_files)
     }
     if bundle_files[_EXECUTABLE_REL] != executable_sha256:
         raise ServerHostError(
@@ -674,14 +981,15 @@ def _decode_record(
         )
 
     return HostOwnership(
-        schema=SCHEMA_VERSION,
+        schema=policy.schema,
         bundle_path=bundle_path,
         bundle_id=BUNDLE_ID,
-        host_revision=revision,
-        host_protocol=protocol,
+        host_revision=policy.revision,
+        host_protocol=policy.protocol,
         executable_sha256=executable_sha256,
         per_arch_cdhashes=per_arch,
         bundle_files=bundle_files,
+        signing=signing,
     )
 
 
@@ -719,11 +1027,15 @@ def read_host_ownership(path: Path) -> HostOwnership:
     never coerced and no file is written. On macOS the record's owner must be this uid
     and its mode must grant nothing to group or other.
 
-    Only the current revision is accepted. A record of the superseded revision
-    is a different question, answered by
-    :func:`read_superseded_ownership`.
+    Two policies are accepted, selected by the record's strict schema: schema 1
+    is the production revision-4 ad-hoc host with its historical four sealed
+    files, schema 2 the explicitly signed revision-5 host with the same files
+    plus ``Contents/CodeResources`` and exactly one signing identity. Neither
+    schema can claim the other's revision or file set, and nothing is inferred
+    from the bundle. A record of a superseded revision is a different question,
+    answered by :func:`read_superseded_ownership`.
     """
-    return _read_ownership_record(path, revision=HOST_REVISION, protocol=HOST_PROTOCOL)
+    return _read_current_ownership_record(path)
 
 
 def read_superseded_ownership(path: Path) -> HostOwnership:
@@ -733,22 +1045,55 @@ def read_superseded_ownership(path: Path) -> HostOwnership:
     :data:`SUPERSEDED_HOST_PROTOCOLS` and whose protocol is the one that
     revision spoke. It answers "was this host ours?", not "is this the host
     this engine speaks to?": the installer uses it to prove a host it may
-    replace.
+    replace. The policy is the historical schema-1 file set, so a schema-2 or
+    signed-revision record is never accepted here.
     """
     first_error: ServerHostError | None = None
     for revision, protocol in SUPERSEDED_HOST_PROTOCOLS.items():
         try:
-            return _read_ownership_record(path, revision=revision, protocol=protocol)
+            return _read_ownership_record(
+                path,
+                policy=_policy(revision, protocol, None, code=INVALID_OWNERSHIP),
+            )
         except ServerHostError as exc:
             first_error = first_error or exc
     assert first_error is not None
     raise first_error
 
 
-def _read_ownership_record(
-    path: Path, *, revision: int, protocol: int
-) -> HostOwnership:
-    """Read and strictly decode an ownership record for one revision."""
+def _read_current_ownership_record(path: Path) -> HostOwnership:
+    """Read the current record, selecting legacy or signed policy by its schema."""
+    raw, record = _read_ownership_text(path)
+    ownership = _decode_current_record(raw, path=record)
+    _refuse_record_inside_bundle(record, ownership)
+    return ownership
+
+
+def _read_ownership_record(path: Path, *, policy: _HostPolicy) -> HostOwnership:
+    """Read and strictly decode an ownership record for one policy."""
+    raw, record = _read_ownership_text(path)
+    ownership = _decode_record(raw, path=record, policy=policy)
+    _refuse_record_inside_bundle(record, ownership)
+    return ownership
+
+
+def _refuse_record_inside_bundle(record: Path, ownership: HostOwnership) -> None:
+    """The record must not live inside the bundle it vouches for.
+
+    Both sides are resolved, so a symlinked ancestor on either path cannot hide
+    the overlap.
+    """
+    if Path(os.path.realpath(record)).is_relative_to(
+        os.path.realpath(ownership.bundle_path)
+    ):
+        raise ServerHostError(
+            "the ownership record must live outside the bundle it describes",
+            code=INVALID_OWNERSHIP,
+        )
+
+
+def _read_ownership_text(path: Path) -> tuple[str, Path]:
+    """The private record's text, after every ownership check on the file."""
     record = Path(path)
     try:
         info = os.lstat(record)
@@ -790,17 +1135,7 @@ def _read_ownership_record(
             f"the host ownership record at {record} is unreadable",
             code=INVALID_OWNERSHIP,
         ) from exc
-    ownership = _decode_record(raw, path=record, revision=revision, protocol=protocol)
-    # The record must not live inside the bundle it vouches for. Both sides are
-    # resolved, so a symlinked ancestor on either path cannot hide the overlap.
-    if Path(os.path.realpath(record)).is_relative_to(
-        os.path.realpath(ownership.bundle_path)
-    ):
-        raise ServerHostError(
-            "the ownership record must live outside the bundle it describes",
-            code=INVALID_OWNERSHIP,
-        )
-    return ownership
+    return raw, record
 
 
 # ── Identity: inspecting the installed bundle ───────────────────────────────
@@ -838,11 +1173,15 @@ def _refuse_unreadable(error: OSError) -> None:
     ) from error
 
 
-def _collect_sealed_files(bundle: Path) -> tuple[dict[str, str], bytes]:
+def _collect_sealed_files(
+    bundle: Path, policy: _HostPolicy
+) -> tuple[dict[str, str], bytes]:
     """Digest every regular file, refusing a symlink, special file or stray entry.
 
     Returns the digests and the ``Info.plist`` bytes that were digested, so the
-    plist the identity checks parse is the one the snapshot records.
+    plist the identity checks parse is the one the snapshot records. The accepted
+    names are the selected policy's exact set: the historical four for the
+    production host, those four plus the notarization ticket for the signed one.
     """
     files: dict[str, str] = {}
     plist = b""
@@ -868,7 +1207,7 @@ def _collect_sealed_files(bundle: Path) -> tuple[dict[str, str], bytes]:
         for name in sorted(names):
             entry = current_path / name
             relative = _relative_name(bundle, entry)
-            if relative not in REQUIRED_BUNDLE_FILES:
+            if relative not in policy.bundle_files:
                 raise ServerHostError(
                     f"the host bundle contains an unexpected file: {relative}",
                     code=INSPECTION_FAILED,
@@ -896,7 +1235,7 @@ def _collect_sealed_files(bundle: Path) -> tuple[dict[str, str], bytes]:
                     f"the host bundle contains a special file: {relative}",
                     code=INSPECTION_FAILED,
                 )
-    absent = sorted(REQUIRED_BUNDLE_FILES - set(files))
+    absent = sorted(policy.bundle_files - set(files))
     if absent:
         raise ServerHostError(
             f"the host bundle does not seal {absent}", code=INSPECTION_FAILED
@@ -1017,12 +1356,214 @@ def _per_arch_cdhashes(executable: Path, runner: Runner) -> dict[str, str]:
     return hashes
 
 
+# ── Identity: the explicitly signed (revision 5) policy ─────────────────────
+
+#: A requirement is printed with ``/* exists */`` annotations around field
+#: tests, and some tools spell the same test as a trailing ``exists``. Both are
+#: the same requirement, so the comparison normalizes those spellings; it never
+#: normalizes away a value (an identifier, a team or a hash).
+_REQUIREMENT_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_FIELD_EXISTS_RE = re.compile(r"(certificate (?:leaf|[0-9]+)\[[^\]]*\]) exists\b")
+
+
+def _normalized_requirement(text: str) -> str:
+    without_comments = _REQUIREMENT_COMMENT_RE.sub(" ", text)
+    without_exists = _FIELD_EXISTS_RE.sub(r"\1", without_comments)
+    return " ".join(without_exists.split())
+
+
+def _refuse_signed(message: str) -> NoReturn:
+    """A completed probe that disproved the signed policy."""
+    raise ServerHostError(message, code=SIGNATURE_REJECTED)
+
+
+def _slice_fields(executable: Path, arch: str, runner: Runner) -> dict[str, str]:
+    """``codesign -dv`` fields of one slice, keyed by their printed name.
+
+    A nonzero exit means the slice cannot be read as a signed host at all, which
+    is a disproved policy, not an unavailable probe.
+    """
+    shown = _display(executable, runner, "--arch", arch)
+    if shown is None:
+        _refuse_signed(f"the {arch} slice's signature details cannot be read")
+    fields: dict[str, str] = {}
+    for line in (shown or "").splitlines():
+        # "CodeDirectory v=20400 size=400 flags=0x10000(runtime) ..." has no
+        # single Key=Value shape, so keep the whole line under its name.
+        if line.startswith("CodeDirectory"):
+            fields.setdefault("CodeDirectory", line)
+            continue
+        key, separator, value = line.partition("=")
+        if separator and key and key not in fields:
+            fields[key] = value.strip()
+    return fields
+
+
+def _entitlements_of_slice(
+    executable: Path, arch: str, runner: Runner
+) -> dict[str, object]:
+    """The XML entitlements blob a slice carries, parsed with ``plistlib``.
+
+    An empty blob is an empty dictionary: a slice with no entitlement is a
+    refusal later, not a parse error. Anything the parser rejects is
+    contradictory evidence and is refused as a disproved policy.
+    """
+    completed = _run_native(
+        runner,
+        [
+            CODESIGN,
+            "-d",
+            "--entitlements",
+            ":-",
+            "--xml",
+            "--arch",
+            arch,
+            os.fspath(executable),
+        ],
+    )
+    if completed.returncode != 0:
+        _refuse_signed(f"the {arch} slice's entitlements cannot be read")
+    raw = (completed.stdout or "").encode("utf-8")
+    if not raw.strip():
+        return {}
+    try:
+        parsed: Any = plistlib.loads(raw)
+    except Exception:
+        # The same parser boundary the bundle plist has: malformed or
+        # contradictory signature material is a refusal, never a crash.
+        _refuse_signed(f"the {arch} slice's entitlements are malformed")
+    if not isinstance(parsed, dict):
+        _refuse_signed(f"the {arch} slice's entitlements are not a dictionary")
+    return parsed
+
+
+def _is_signed_entitlement_set(value: object) -> bool:
+    """Exactly one Apple Events entitlement, and it must be the real ``true``.
+
+    A plist ``<integer>1</integer>`` compares equal to ``True`` in Python, so the
+    values are compared by identity: a coerced integer, a string, a false value
+    or any extra key is a different entitlement set, not the release one.
+    """
+    if not isinstance(value, dict) or set(value) != set(SIGNED_ENTITLEMENTS):
+        return False
+    return all(value[key] is True for key in SIGNED_ENTITLEMENTS)
+
+
+def _designated_requirement_of_slice(
+    executable: Path, arch: str, runner: Runner
+) -> str:
+    """The ``designated =>`` requirement a slice embeds, exactly as printed."""
+    completed = _run_native(
+        runner,
+        [CODESIGN, "-d", "-r-", "--arch", arch, os.fspath(executable)],
+    )
+    if completed.returncode != 0:
+        _refuse_signed(f"the {arch} slice's designated requirement cannot be read")
+    text = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("designated =>"):
+            return stripped[len("designated =>") :].strip()
+    _refuse_signed(f"the {arch} slice has no designated requirement")
+
+
+def _require_developer_id_host(
+    bundle: Path, signing: DeveloperIDSigning, runner: Runner
+) -> dict[str, str]:
+    """The signed revision-5 policy: Developer ID identity over every slice.
+
+    Strict integrity and the *external* expected requirement are evaluated by
+    ``codesign`` on every architecture; the display's ``TeamIdentifier``,
+    ``Authority`` or ``Signature`` text is supporting evidence, never the proof.
+    Each slice must then also carry the hardened runtime flag and version, a
+    secure timestamp, the canonical designated requirement and exactly the one
+    Apple Events entitlement. A completed probe that disproves any of that is
+    :data:`SIGNATURE_REJECTED`; a probe that could not start or did not finish
+    stays :data:`INSPECTION_FAILED` (raised by :func:`_run_native`).
+    """
+    requirement = developer_id_requirement(signing.team_id)
+    for argv in (
+        [CODESIGN, "--verify", "--strict", "--all-architectures", os.fspath(bundle)],
+        [
+            CODESIGN,
+            "--verify",
+            "--strict",
+            "--all-architectures",
+            # -R/--test-requirement is the verification seam: it evaluates the
+            # requirement cryptographically against the certificate chain.
+            "--test-requirement",
+            f"={requirement}",
+            os.fspath(bundle),
+        ],
+    ):
+        completed = _run_native(runner, argv)
+        if completed.returncode != 0:
+            _refuse_signed(
+                f"the host bundle does not satisfy the signed host policy: {bundle}"
+            )
+
+    shown = _display(bundle, runner)
+    if shown is None:
+        _refuse_signed(f"the host bundle's signature cannot be read: {bundle}")
+    if _display_value(shown, "Identifier") != BUNDLE_ID:
+        _refuse_signed(f"the host bundle is not signed as {BUNDLE_ID!r}")
+    if (_display_value(shown, "Signature") or "").lower() == "adhoc":
+        _refuse_signed("the host bundle is ad-hoc signed, not Developer ID signed")
+    shape = _display_value(shown, "Format") or ""
+    match = re.fullmatch(r"app bundle with Mach-O universal \(([^()]*)\)", shape)
+    archs = match.group(1).split() if match else []
+    if sorted(archs) != sorted(ARCHITECTURES):
+        _refuse_signed(
+            f"the host executable is not exactly {sorted(ARCHITECTURES)}: {shape!r}"
+        )
+
+    canonical = _normalized_requirement(requirement)
+    hashes: dict[str, str] = {}
+    executable = bundle / _EXECUTABLE_REL
+    for arch in ARCHITECTURES:
+        fields = _slice_fields(executable, arch, runner)
+        # Every message is fixed text naming our own expectation: the tool's
+        # identifier, team, flags and entitlement keys are never echoed.
+        if fields.get("Identifier") != BUNDLE_ID:
+            _refuse_signed(f"the {arch} slice's bundle identifier is not {BUNDLE_ID}")
+        if fields.get("TeamIdentifier") != signing.team_id:
+            _refuse_signed(f"the {arch} slice's signing team is not the expected team")
+        code_directory = fields.get("CodeDirectory", "")
+        flags = re.search(r"flags=0x([0-9a-fA-F]+)", code_directory)
+        if flags is None or not int(flags.group(1), 16) & CODE_DIRECTORY_RUNTIME_FLAG:
+            _refuse_signed(
+                f"the {arch} slice does not carry the hardened-runtime flag"
+            )
+        if not fields.get("Runtime Version"):
+            _refuse_signed(f"the {arch} slice carries no hardened runtime version")
+        if not fields.get("Timestamp"):
+            _refuse_signed(f"the {arch} slice carries no secure timestamp")
+        cdhash = fields.get("CDHash")
+        if not cdhash:
+            _refuse_signed(f"no CDHash reported for the {arch} slice")
+        hashes[arch] = _require_cdhash(
+            cdhash, what=f"the {arch} slice CDHash", code=SIGNATURE_REJECTED
+        )
+        if not _is_signed_entitlement_set(
+            _entitlements_of_slice(executable, arch, runner)
+        ):
+            _refuse_signed(f"the {arch} slice's entitlements are not the signed set")
+        designated = _designated_requirement_of_slice(executable, arch, runner)
+        if _normalized_requirement(designated) != canonical:
+            _refuse_signed(
+                f"the {arch} slice's designated requirement is not the stable "
+                f"Developer ID requirement"
+            )
+    return hashes
+
+
 def inspect_host_bundle(
     bundle_path: Path,
     *,
     runner: Runner = subprocess.run,
     revision: int = HOST_REVISION,
     protocol: int = HOST_PROTOCOL,
+    signing: DeveloperIDSigning | None = None,
 ) -> HostOwnership:
     """Snapshot an installed macOS host bundle's identity and bytes.
 
@@ -1034,22 +1575,27 @@ def inspect_host_bundle(
     It refuses a bundle not named ``Ciaobot Server.app``, a symlinked bundle, a
     symlinked, special or unreadable file, a missing sealed file, a stray
     directory or file (a thin build product, a config, bundled Python), a wrong
-    identity, a non-ad-hoc or invalid signature, a slice set other than exactly
+    identity, an invalid signature, a slice set other than exactly
     ``arm64``/``x86_64``, a malformed CDHash and a probe that fails or hangs. What
     it returns is a well-formed host — **not** proof that this machine installed
     it. Only :func:`verify_owned_host` answers that, against an existing private
     record.
 
-    ``revision`` and ``protocol`` name the identity the bundle is expected to
-    carry. They default to the current one; :func:`verify_superseded_host`
-    passes the superseded pair, so a bundle of an older revision can be
-    inspected without loosening any other check.
+    ``revision``, ``protocol`` and ``signing`` name the policy the bundle is
+    expected to satisfy. The defaults are the production revision-4 ad-hoc host;
+    :func:`verify_superseded_host` passes a superseded pair, so a bundle of an
+    older revision can be inspected without loosening any other check. The
+    signed revision-5 policy exists only with an explicit
+    :class:`DeveloperIDSigning`, and a signing policy is refused for any other
+    revision: the caller states the expected team, ``codesign -dv`` never tells
+    this function who signed.
     """
     if sys.platform != "darwin":
         raise ServerHostError(
             "the Ciaobot Server host is a macOS bundle; this platform cannot inspect it",
             code=UNSUPPORTED_PLATFORM,
         )
+    policy = _policy(revision, protocol, signing, code=INSPECTION_FAILED)
     supplied = Path(bundle_path)
     if not supplied.is_absolute():
         raise ServerHostError(
@@ -1071,28 +1617,34 @@ def inspect_host_bundle(
     bundle = Path(os.path.realpath(supplied))
 
     # The walk refuses a symlinked `Contents` and a missing sealed file.
-    files, plist = _collect_sealed_files(bundle)
-    _check_bundle_plist(plist, revision=revision, protocol=protocol)
+    files, plist = _collect_sealed_files(bundle, policy)
+    _check_bundle_plist(plist, revision=policy.revision, protocol=policy.protocol)
 
-    # Verification covers every architecture of a universal binary by default.
-    verify = _run_native(runner, [CODESIGN, "--verify", "--strict", os.fspath(bundle)])
-    if verify.returncode != 0:
-        raise ServerHostError(
-            f"the host bundle fails strict signature verification: {bundle}",
-            code=INSPECTION_FAILED,
+    if policy.signing is None:
+        # Verification covers every architecture of a universal binary by default.
+        verify = _run_native(
+            runner, [CODESIGN, "--verify", "--strict", os.fspath(bundle)]
         )
-    _require_signed_universal(bundle, runner)
-    cdhashes = _per_arch_cdhashes(bundle / _EXECUTABLE_REL, runner)
+        if verify.returncode != 0:
+            raise ServerHostError(
+                f"the host bundle fails strict signature verification: {bundle}",
+                code=INSPECTION_FAILED,
+            )
+        _require_signed_universal(bundle, runner)
+        cdhashes = _per_arch_cdhashes(bundle / _EXECUTABLE_REL, runner)
+    else:
+        cdhashes = _require_developer_id_host(bundle, policy.signing, runner)
 
     return HostOwnership(
-        schema=SCHEMA_VERSION,
+        schema=policy.schema,
         bundle_path=os.fspath(bundle),
         bundle_id=BUNDLE_ID,
-        host_revision=revision,
-        host_protocol=protocol,
+        host_revision=policy.revision,
+        host_protocol=policy.protocol,
         executable_sha256=files[_EXECUTABLE_REL],
         per_arch_cdhashes=cdhashes,
         bundle_files=files,
+        signing=policy.signing,
     )
 
 
@@ -1108,18 +1660,27 @@ def verify_owned_host(
     """Prove a bundle is this machine's host by matching an existing record.
 
     Reads the owner-only record (default :func:`default_ownership_path`), then
-    inspects the bundle, and requires the canonical bundle path, identity,
-    revision, protocol, executable digest, both CDHashes and the whole file set
-    to be equal. It never falls back to a direct engine when the record is
-    missing, never recreates a record, and never signs, launches, chmods,
-    deletes or writes anything. A foreign, tampered or incompatible signed bundle
-    is refused here, before any service change.
+    inspects the bundle under the exact policy that record selected, and requires
+    the canonical bundle path, identity, revision, protocol, executable digest,
+    both CDHashes, the whole file set and — for a signed record — the signing
+    identity to be equal. It never falls back to a direct engine when the record
+    is missing, never recreates a record, and never signs, launches, chmods,
+    deletes or writes anything. A record's policy is the only thing that selects
+    the signer check: a failed signed verification is a refusal, never a retry
+    as ad-hoc. A foreign, tampered or incompatible bundle is refused here, before
+    any service change.
     """
     record_path = (
         default_ownership_path() if ownership_path is None else Path(ownership_path)
     )
     record = read_host_ownership(record_path)
-    inspected = inspect_host_bundle(bundle_path, runner=runner)
+    inspected = inspect_host_bundle(
+        bundle_path,
+        runner=runner,
+        revision=record.host_revision,
+        protocol=record.host_protocol,
+        signing=record.signing,
+    )
 
     if record.bundle_path != inspected.bundle_path:
         raise ServerHostError(
@@ -1128,7 +1689,8 @@ def verify_owned_host(
             code=NOT_OWNED,
         )
     # Both snapshots carry the fixed identity constants, so equality is the
-    # executable digest, both CDHashes and the whole file set.
+    # schema, the signing identity, the executable digest, both CDHashes and the
+    # whole file set.
     if record != inspected:
         raise ServerHostError(
             "the installed host bundle does not match its ownership record",

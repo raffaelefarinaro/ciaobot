@@ -20,6 +20,8 @@ from ciao.release_manifest import (
     SERVER_HOST_PLATFORM,
     SERVER_HOST_PROTOCOL,
     SERVER_HOST_REVISION,
+    SERVER_HOST_SIGNING_KIND,
+    SIGNED_SERVER_HOST_REVISION,
     SignatureError,
     artifact_entry,
     build_manifest,
@@ -31,6 +33,9 @@ from ciao.release_manifest import (
     verify_manifest,
     verify_signature,
 )
+from ciao.server_host import DeveloperIDSigning, developer_id_requirement
+
+TEST_TEAM = "TESTTEAM01"
 
 TRUSTED = "timestamp:1\tfile:ciaobot-engine-manifest.json"
 
@@ -62,6 +67,16 @@ def _host_entry(**overrides: Any) -> dict[str, Any]:
         "host_revision": SERVER_HOST_REVISION,
         "host_protocol": SERVER_HOST_PROTOCOL,
     }
+    entry.update(overrides)
+    return entry
+
+
+def _signed_host_entry(**overrides: Any) -> dict[str, Any]:
+    """A valid signed ``server-host`` entry: revision 5 plus its signing object."""
+    entry = _host_entry(
+        host_revision=SIGNED_SERVER_HOST_REVISION,
+        signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": TEST_TEAM},
+    )
     entry.update(overrides)
     return entry
 
@@ -433,7 +448,9 @@ def test_verify_manifest_accepts_an_unsupported_host_beside_the_wheel() -> None:
     priv, public_key, key_id = _keypair()
     future_host = _host_entry(
         filename="ciaobot-server-host-macos-universal-v2.tar.gz",
-        host_revision=5,
+        # Revision 5 is the signed policy this engine knows; the fixture names
+        # the one after it, so "future" keeps meaning unsupported.
+        host_revision=SIGNED_SERVER_HOST_REVISION + 1,
         host_protocol=3,
     )
     document = build_manifest(
@@ -535,9 +552,17 @@ def test_server_host_constants_match_the_builder() -> None:
 
     assert builder.ARCHIVE_NAME == SERVER_HOST_FILENAME
     assert builder.BUNDLE_ID == SERVER_HOST_BUNDLE_ID
-    assert builder.HOST_REVISION == SERVER_HOST_REVISION
+    assert builder.HOST_REVISION == SERVER_HOST_REVISION == 4
     assert builder.HOST_PROTOCOL_REVISION == SERVER_HOST_PROTOCOL
     assert set(builder.ARCHITECTURES) == {"arm64", "x86_64"}
+    # The signed policy is the same revision and requirement in the builder and
+    # the runtime contract; the release would otherwise sign a host this engine
+    # cannot accept.
+    assert builder.SIGNED_HOST_REVISION == SIGNED_SERVER_HOST_REVISION
+    assert (
+        builder.designated_requirement(TEST_TEAM)
+        == developer_id_requirement(TEST_TEAM)
+    )
 
 
 def test_main_build_with_server_host(tmp_path: Path) -> None:
@@ -717,3 +742,228 @@ def test_main_check_static_cli(tmp_path: Path) -> None:
     (static / "assets" / "a.js").write_text("a", encoding="utf-8")
 
     assert main(["check-static", "--static-dir", str(static)]) == 0
+
+
+# ── the explicitly signed host entry (#2329) ────────────────────────────────
+
+
+def test_legacy_host_entry_is_unchanged_without_signed_flag(tmp_path: Path) -> None:
+    # The production default is byte-for-byte what every release has published:
+    # revision 4, no signing key at all. Neither the entry nor the runtime or
+    # builder default moved.
+    payload = b"host archive bytes"
+    archive = tmp_path / SERVER_HOST_FILENAME
+    archive.write_bytes(payload)
+
+    entry = server_host_artifact_entry(archive)
+
+    assert entry == {
+        "filename": SERVER_HOST_FILENAME,
+        "kind": SERVER_HOST_KIND,
+        "platform": SERVER_HOST_PLATFORM,
+        "arch": SERVER_HOST_ARCH,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size": len(payload),
+        "bundle_id": SERVER_HOST_BUNDLE_ID,
+        "host_revision": SERVER_HOST_REVISION,
+        "host_protocol": SERVER_HOST_PROTOCOL,
+    }
+    assert "signing" not in entry
+    assert SERVER_HOST_REVISION == 4
+    from ciao import server_host
+
+    assert server_host.HOST_REVISION == 4
+    assert server_host.SCHEMA_VERSION == 1
+
+
+def test_signed_server_host_entry_round_trip(tmp_path: Path) -> None:
+    # The expected team is authenticated by the minisign signature before any
+    # consumer acts on it: the entry is selected only out of a verified manifest.
+    priv, public_key, key_id = _keypair()
+    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
+    archive = tmp_path / SERVER_HOST_FILENAME
+    archive.write_bytes(b"signed host archive")
+
+    entry = server_host_artifact_entry(
+        archive, signing=DeveloperIDSigning(TEST_TEAM)
+    )
+    assert entry["host_revision"] == SIGNED_SERVER_HOST_REVISION
+    assert entry["host_protocol"] == SERVER_HOST_PROTOCOL
+    assert entry["signing"] == {"kind": SERVER_HOST_SIGNING_KIND, "team_id": TEST_TEAM}
+    assert entry["sha256"] == hashlib.sha256(b"signed host archive").hexdigest()
+
+    document = build_manifest(
+        "1.2.3",
+        [artifact_entry(wheel, kind="wheel"), entry],
+        created="2026-09-25T10:00:00+00:00",
+    )
+    raw = json.dumps(document).encode()
+    signature = _sign(raw, priv, key_id)
+
+    # The generic verifier stays host-policy-agnostic: the wheel updater reads
+    # the same manifest on every platform.
+    verified = verify_manifest(raw, signature, public_key)
+    assert [a for a in verified["artifacts"] if a["kind"] == "wheel"] == [
+        verified["artifacts"][0]
+    ]
+    selected = select_server_host_artifact(verified)
+    assert selected["host_revision"] == SIGNED_SERVER_HOST_REVISION
+    assert selected["signing"]["team_id"] == TEST_TEAM
+
+
+def test_host_entry_requires_matching_revision_and_signing_policy() -> None:
+    # Exactly two shapes exist: revision 4 with no signing object, revision 5
+    # with exactly one valid one. Every half-policy and every malformed identity
+    # is refused by the selector.
+    def manifest(*artifacts: Any) -> dict[str, Any]:
+        return {
+            "schema": 1,
+            "version": "1.2.3",
+            "tag": "v1.2.3",
+            "artifacts": list(artifacts),
+        }
+
+    assert select_server_host_artifact(manifest(_signed_host_entry())) == (
+        _signed_host_entry()
+    )
+    assert select_server_host_artifact(manifest(_host_entry())) == _host_entry()
+
+    bad_entries: list[dict[str, Any]] = [
+        # A revision without its policy and a policy under the wrong revision.
+        _host_entry(host_revision=SIGNED_SERVER_HOST_REVISION),
+        _signed_host_entry(host_revision=SERVER_HOST_REVISION),
+        _signed_host_entry(host_revision=SIGNED_SERVER_HOST_REVISION + 1),
+        _signed_host_entry(host_protocol=True),
+        _signed_host_entry(host_protocol=3),
+        _signed_host_entry(host_revision=True),
+        # The signing object is exactly `kind` and `team_id`; more, fewer or a
+        # different kind is not this policy.
+        _signed_host_entry(signing={"kind": SERVER_HOST_SIGNING_KIND}),
+        _signed_host_entry(
+            signing={
+                "kind": SERVER_HOST_SIGNING_KIND,
+                "team_id": TEST_TEAM,
+                "identity": "Developer ID Application: Test",
+            }
+        ),
+        _signed_host_entry(signing={"kind": "apple-development", "team_id": TEST_TEAM}),
+        _signed_host_entry(signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": ""}),
+        _signed_host_entry(
+            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": "testteam01"}
+        ),
+        _signed_host_entry(
+            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": "TESTTEAM0"}
+        ),
+        _signed_host_entry(
+            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": "TESTTEAM012"}
+        ),
+        _signed_host_entry(
+            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": 1234567890}
+        ),
+        _signed_host_entry(
+            signing={"kind": SERVER_HOST_SIGNING_KIND, "team_id": True}
+        ),
+        _signed_host_entry(signing=None),
+        _signed_host_entry(signing=[TEST_TEAM]),
+        # A signing identity that is not `developer-id`, and an unknown extra
+        # host field, are not part of either shape.
+        _signed_host_entry(kind="server-host-signed"),
+        _host_entry(authority="Developer ID Application: Test"),
+    ]
+    for bad in bad_entries:
+        with pytest.raises(ValueError):
+            select_server_host_artifact(manifest(bad))
+
+
+def test_signed_team_tampering_fails_manifest_signature() -> None:
+    # The team is only trustworthy because it is inside the signed bytes. Editing
+    # it after signing produces no trusted expected-team output at all.
+    priv, public_key, key_id = _keypair()
+    honest = json.dumps(
+        build_manifest(
+            "1.2.3",
+            [_host_entry(), _signed_host_entry()],
+            created="2026-09-25T10:00:00+00:00",
+        )
+    ).encode()
+    signature = _sign(honest, priv, key_id)
+    tampered = honest.replace(TEST_TEAM.encode(), b"TESTTEAM02")
+    assert tampered != honest
+
+    with pytest.raises(SignatureError):
+        verify_manifest(tampered, signature, public_key)
+
+    # And a manifest signed over the tampered bytes is not signed by the release
+    # key at all.
+    with pytest.raises(SignatureError):
+        verify_manifest(tampered, _sign(tampered, priv, b"\x02" * 8), public_key)
+
+
+def test_main_build_with_signed_server_host(tmp_path: Path) -> None:
+    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
+    archive = tmp_path / SERVER_HOST_FILENAME
+    archive.write_bytes(b"signed host archive")
+    out = tmp_path / "ciaobot-engine-manifest.json"
+
+    assert main(
+        [
+            "build",
+            "--version",
+            "1.2.3",
+            "--out",
+            str(out),
+            "--server-host",
+            str(archive),
+            "--server-host-team-id",
+            TEST_TEAM,
+            str(wheel),
+        ]
+    ) == 0
+
+    written = json.loads(out.read_text(encoding="utf-8"))
+    host = next(a for a in written["artifacts"] if a["kind"] == SERVER_HOST_KIND)
+    assert host["host_revision"] == SIGNED_SERVER_HOST_REVISION
+    assert host["host_protocol"] == SERVER_HOST_PROTOCOL
+    assert host["signing"] == {"kind": SERVER_HOST_SIGNING_KIND, "team_id": TEST_TEAM}
+
+
+def test_main_build_refuses_a_signing_team_without_the_host(tmp_path: Path) -> None:
+    # A team alone describes no artifact: the flag is a host policy, so it is
+    # refused before anything is written.
+    wheel = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
+    out = tmp_path / "ciaobot-engine-manifest.json"
+
+    assert main(
+        [
+            "build",
+            "--version",
+            "1.2.3",
+            "--out",
+            str(out),
+            "--server-host-team-id",
+            TEST_TEAM,
+            str(wheel),
+        ]
+    ) == 1
+    assert not out.exists()
+
+    archive = tmp_path / SERVER_HOST_FILENAME
+    archive.write_bytes(b"signed host archive")
+    assert main(
+        [
+            "build",
+            "--version",
+            "1.2.3",
+            "--out",
+            str(out),
+            "--server-host",
+            str(archive),
+            "--server-host-team-id",
+            "testteam01",
+            str(wheel),
+        ]
+    ) == 1
+    assert not out.exists()

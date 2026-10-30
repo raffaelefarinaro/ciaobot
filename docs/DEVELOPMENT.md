@@ -335,6 +335,16 @@ reports as `host_exists`; a Python failure removes both the bundle and record th
 run placed. The host install is inert: it writes no launchd job itself;
 activation is `ciao setup` registering the hosted plist when a verified host
 is installed. No step requests a permission prompt.
+
+Every release today publishes the ad-hoc revision-4 host, and its record keeps the
+unchanged schema 1. The signed revision-5 policy (#2329) is opt-in end to end: an
+explicitly signed manifest entry names the expected Developer ID team, a schema-2
+record persists it, and runtime verification checks that team, the stable
+designated requirement, the hardened runtime, the secure timestamp and the one
+Apple Events entitlement offline with the read-only `/usr/bin/codesign` probes
+(`docs/SERVER_HOST_CONTRACT.md`). The installer's call site for such an entry is a
+later child; nothing here migrates an installed host, and `publish.yml` keeps
+building the un-flagged revision-4 manifest until a separately approved activation.
 A wheel-only manifest (every historical release) prints nothing from the selector
 and installs the engine exactly as before, and so does an explicit `--version`
 naming a wheel cut before the host work: the shell probes for the module first,

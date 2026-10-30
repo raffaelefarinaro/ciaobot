@@ -33,14 +33,20 @@ from ciao.server_host import (
     APP_NAME,
     ARCHITECTURES,
     BUNDLE_ID,
+    DeveloperIDSigning,
     EXECUTABLE_NAME,
     HOST_PROTOCOL,
     HOST_PROTOCOL_KEY,
     HOST_REVISION,
     ICON_NAME,
     SCHEMA_VERSION,
+    SIGNATURE_REJECTED,
+    SIGNED_BUNDLE_FILES,
+    SIGNED_HOST_REVISION,
+    SIGNED_SCHEMA_VERSION,
     HostOwnership,
     ServerHostError,
+    developer_id_requirement,
     host_move_argv,
     host_service_argv,
     inspect_host_bundle,
@@ -92,6 +98,8 @@ requires_macos_tools = pytest.mark.skipif(
 _HASH_A = "a" * 64
 _HASH_B = "b" * 64
 _CDHASH = {arch: hashlib.sha1(arch.encode()).hexdigest() for arch in ARCHITECTURES}
+#: The only team any test may use: a fake, never a real Developer ID team.
+_TEST_TEAM = "TESTTEAM01"
 
 
 # ── the constant contract ───────────────────────────────────────────────────
@@ -648,8 +656,10 @@ def test_read_record_rejects_bool_schema(tmp_path: Path) -> None:
 
 
 def test_read_record_rejects_newer_schema(tmp_path: Path) -> None:
+    # Schema 2 is the signed record and is read on purpose; the fixture names the
+    # policy *after* it, so this keeps testing an unsupported schema.
     document = _record()
-    document["schema"] = SCHEMA_VERSION + 1
+    document["schema"] = server_host.SIGNED_SCHEMA_VERSION + 1
     record = _write_record(tmp_path / "record.json", document)
     with pytest.raises(ServerHostError) as caught:
         read_host_ownership(record)
@@ -804,6 +814,7 @@ _PLIST_REL = "Contents/Info.plist"
 _EXE_REL = f"Contents/MacOS/{EXECUTABLE_NAME}"
 _ICON_REL = f"Contents/Resources/{ICON_NAME}"
 _CODESIGN_REL = "Contents/_CodeSignature/CodeResources"
+_APP_TICKET_REL = "Contents/CodeResources"
 
 
 def _make_bundle(root: Path, *, name: str = APP_NAME) -> Path:
@@ -827,29 +838,102 @@ class _FakeRunner:
 
     The bundle display mirrors real ``codesign -dv --verbose=4`` output from a
     built host: ``Identifier=``, ``Format=app bundle with Mach-O universal (...)``
-    and ``Signature=adhoc`` on stderr.
+    and ``Signature=adhoc`` on stderr. A non-ad-hoc answer prints the fields a
+    Developer ID signed host really carries; every signed-policy probe has an
+    explicit switch, so a test never gets blanket success for a command it did
+    not reason about. Per-slice overrides let one architecture fail on its own.
     """
 
     def __init__(
         self,
         *,
         verify_rc: int = 0,
+        requirement_rc: int = 0,
         adhoc: bool = True,
         identifier: str = BUNDLE_ID,
         archs: str = "x86_64 arm64",
         arch_rc: int = 0,
         cdhashes: dict[str, str] | None = None,
         raises: BaseException | None = None,
+        team_id: str = _TEST_TEAM,
+        runtime: bool = True,
+        timestamp: bool = True,
+        designated: str | None = None,
+        entitlements: dict[str, object] | None = None,
+        slices: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.commands: list[list[str]] = []
         self.kwargs: list[dict[str, Any]] = []
         self.verify_rc = verify_rc
+        self.requirement_rc = requirement_rc
         self.adhoc = adhoc
         self.identifier = identifier
         self.format = f"app bundle with Mach-O universal ({archs})"
         self.arch_rc = arch_rc
         self.cdhashes = dict(cdhashes or _CDHASH)
         self.raises = raises
+        self.team_id = team_id
+        self.runtime = runtime
+        self.timestamp = timestamp
+        self.designated = (
+            designated if designated is not None
+            else BUILD.designated_requirement(_TEST_TEAM)
+        )
+        self.entitlements = (
+            dict(entitlements)
+            if entitlements is not None
+            else {"com.apple.security.automation.apple-events": True}
+        )
+        self.slices = dict(slices or {})
+
+    def _slice(self, arch: str) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "identifier": self.identifier,
+            "team_id": self.team_id,
+            "runtime": self.runtime,
+            "timestamp": self.timestamp,
+            "cdhash": self.cdhashes.get(arch),
+            "designated": self.designated,
+            "entitlements": self.entitlements,
+            "entitlements_raw": None,
+            "display_rc": 0,
+            "entitlements_rc": 0,
+            "designated_rc": 0,
+        }
+        fields.update(self.slices.get(arch, {}))
+        return fields
+
+    def _display_text(
+        self,
+        *,
+        identifier: str,
+        cdhash: str | None,
+        team_id: str,
+        runtime: bool,
+        timestamp: bool,
+        with_format: bool,
+    ) -> str:
+        lines = [f"Identifier={identifier}"]
+        if with_format:
+            lines.append(f"Format={self.format}")
+        flags = "0x10000(runtime)" if runtime else "0x0(none)"
+        lines.append(
+            f"CodeDirectory v=20500 size=400 flags={flags} hashes=1+3 "
+            "location=embedded"
+        )
+        lines.append("Signature size=9000")
+        if self.adhoc:
+            lines.append("Signature=adhoc")
+        else:
+            lines.append("Authority=Developer ID Application: Ciaobot Test")
+            lines.append(f"TeamIdentifier={team_id}")
+            if timestamp:
+                lines.append("Timestamp=Oct 30, 2026 at 10:00:00")
+            if runtime:
+                lines.append("Runtime Version=13.0.0")
+        if cdhash:
+            lines.append(f"CDHash={cdhash}")
+        return "\n".join(lines) + "\n"
 
     def __call__(
         self, argv: list[str], **kwargs: Any
@@ -860,18 +944,59 @@ class _FakeRunner:
             raise self.raises
         args = list(argv)
         if args[:2] == [_CODESIGN, "--verify"]:
+            if "--test-requirement" in args:
+                return subprocess.CompletedProcess(args, self.requirement_rc, "", "")
             return subprocess.CompletedProcess(args, self.verify_rc, "", "")
         if args[:2] == [_CODESIGN, "-dv"]:
             if "--arch" in args:
                 arch = args[args.index("--arch") + 1]
                 if self.arch_rc != 0:
                     return subprocess.CompletedProcess(args, self.arch_rc, "", "")
-                stderr = f"CDHash={self.cdhashes[arch]}\n"
+                fields = self._slice(arch)
+                if fields["display_rc"] != 0:
+                    return subprocess.CompletedProcess(args, fields["display_rc"], "", "")
+                stderr = self._display_text(
+                    identifier=str(fields["identifier"]),
+                    cdhash=fields["cdhash"],
+                    team_id=str(fields["team_id"]),
+                    runtime=bool(fields["runtime"]),
+                    timestamp=bool(fields["timestamp"]),
+                    with_format=False,
+                )
                 return subprocess.CompletedProcess(args, 0, "", stderr)
-            stderr = f"Identifier={self.identifier}\nFormat={self.format}\n"
-            if self.adhoc:
-                stderr += "Signature=adhoc\n"
+            stderr = self._display_text(
+                identifier=self.identifier,
+                cdhash=None,
+                team_id=self.team_id,
+                runtime=self.runtime,
+                timestamp=self.timestamp,
+                with_format=True,
+            )
             return subprocess.CompletedProcess(args, 0, "", stderr)
+        if args[:2] == [_CODESIGN, "-d"] and "--entitlements" in args:
+            arch = args[args.index("--arch") + 1]
+            fields = self._slice(arch)
+            if fields["entitlements_rc"] != 0:
+                return subprocess.CompletedProcess(
+                    args, fields["entitlements_rc"], "", ""
+                )
+            raw = fields["entitlements_raw"]
+            if raw is not None:
+                return subprocess.CompletedProcess(args, 0, str(raw), "")
+            blob = fields["entitlements"]
+            text = "" if blob is None else plistlib.dumps(blob).decode("utf-8")
+            return subprocess.CompletedProcess(args, 0, text, "")
+        if args[:2] == [_CODESIGN, "-d"] and "-r-" in args:
+            arch = args[args.index("--arch") + 1]
+            fields = self._slice(arch)
+            if fields["designated_rc"] != 0:
+                return subprocess.CompletedProcess(args, fields["designated_rc"], "", "")
+            requirement = fields["designated"]
+            if requirement is None:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return subprocess.CompletedProcess(
+                args, 0, "", f"designated => {requirement}\n"
+            )
         raise AssertionError(f"unexpected native probe: {args}")
 
 
@@ -1533,3 +1658,568 @@ def test_parse_refuses_the_retired_executable_name() -> None:
     with pytest.raises(ServerHostError) as caught:
         parse_service_command([legacy, "serve", "--python", "/usr/bin/python3"])
     assert caught.value.code == server_host.INVALID_COMMAND
+
+
+# ── the explicitly signed (revision 5) host policy (#2329) ──────────────────
+
+SIGNED = DeveloperIDSigning(_TEST_TEAM)
+
+
+def _make_signed_bundle(
+    root: Path, *, revision: int = SIGNED_HOST_REVISION
+) -> Path:
+    """A Developer ID signed host bundle: the four files plus the stapled ticket."""
+    bundle = root / APP_NAME
+    (bundle / "Contents" / "MacOS").mkdir(parents=True)
+    (bundle / "Contents" / "Resources").mkdir(parents=True)
+    (bundle / "Contents" / "_CodeSignature").mkdir(parents=True)
+    (bundle / _EXE_REL).write_bytes(b"developer-id-host-binary")
+    (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
+    (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
+    (bundle / _APP_TICKET_REL).write_bytes(b"notarization-ticket")
+    with (bundle / _PLIST_REL).open("wb") as handle:
+        plistlib.dump(BUILD.bundle_info(revision), handle)
+    return bundle
+
+
+def _signed_record(bundle: Path) -> dict[str, Any]:
+    """A schema-2 record whose digests are the bundle's own bytes."""
+    document = _record(os.fspath(bundle))
+    document["schema"] = SIGNED_SCHEMA_VERSION
+    document["host_revision"] = SIGNED_HOST_REVISION
+    document["executable_sha256"] = hashlib.sha256(
+        b"developer-id-host-binary"
+    ).hexdigest()
+    document["bundle_files"] = {
+        name: hashlib.sha256((bundle / name).read_bytes()).hexdigest()
+        for name in (
+            _PLIST_REL,
+            _EXE_REL,
+            _ICON_REL,
+            _CODESIGN_REL,
+            _APP_TICKET_REL,
+        )
+    }
+    document["signing"] = {"kind": "developer-id", "team_id": _TEST_TEAM}
+    return document
+
+
+def _inspect_signed(
+    bundle: Path, runner: _FakeRunner
+) -> HostOwnership:
+    return inspect_host_bundle(
+        bundle,
+        runner=runner,
+        revision=SIGNED_HOST_REVISION,
+        protocol=HOST_PROTOCOL,
+        signing=SIGNED,
+    )
+
+
+def test_constants_match_the_builder_for_the_signed_policy() -> None:
+    # The builder signs what this runtime will accept: the signed revision and
+    # the designated requirement must be identical, or a released archive would
+    # fail its own contract. The parity is asserted here rather than importing a
+    # build script into runtime code.
+    assert server_host.SIGNED_HOST_REVISION == BUILD.SIGNED_HOST_REVISION
+    assert server_host.HOST_REVISION == HOST_REVISION == 4
+    assert server_host.SIGNED_SCHEMA_VERSION == 2
+    assert (
+        developer_id_requirement(_TEST_TEAM)
+        == BUILD.designated_requirement(_TEST_TEAM)
+    )
+    for key in ("com.apple.security.automation.apple-events",):
+        assert server_host.SIGNED_ENTITLEMENTS[key] is True
+    assert set(server_host.SIGNED_ENTITLEMENTS) == set(BUILD.RELEASE_ENTITLEMENTS)
+    assert server_host.SIGNED_BUNDLE_FILES == server_host.REQUIRED_BUNDLE_FILES | {
+        "Contents/CodeResources"
+    }
+
+
+@pytest.mark.parametrize(
+    "team",
+    ["testteam01", "TESTTEAM0", "TESTTEAM012", "", "TEST TEAM1", "TESTTEAM01\n"],
+)
+def test_developer_id_team_must_be_ten_uppercase_characters(team: str) -> None:
+    # A team is interpolated into literal requirement source, so it is validated
+    # before any text is built.
+    with pytest.raises(ServerHostError):
+        developer_id_requirement(team)
+    with pytest.raises(ServerHostError):
+        DeveloperIDSigning(team)
+
+
+def test_the_developer_id_requirement_is_stable_across_certificate_renewal() -> None:
+    # Team, bundle and the two Developer ID extensions: no leaf fingerprint, no
+    # CDHash, so a renewal within the team keeps the same logical identity.
+    requirement = developer_id_requirement(_TEST_TEAM)
+    assert f'identifier "{BUNDLE_ID}"' in requirement
+    assert "anchor apple generic" in requirement
+    assert "1.2.840.113635.100.6.2.6" in requirement
+    assert "1.2.840.113635.100.6.1.13" in requirement
+    assert f'certificate leaf[subject.OU] = "{_TEST_TEAM}"' in requirement
+    assert "cdhash" not in requirement.lower()
+    assert "H\"" not in requirement
+
+
+def test_signed_record_round_trips_with_expected_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    snapshot = _inspect_signed(bundle, _FakeRunner(adhoc=False))
+
+    assert snapshot.schema == SIGNED_SCHEMA_VERSION
+    assert snapshot.host_revision == SIGNED_HOST_REVISION
+    assert snapshot.host_protocol == HOST_PROTOCOL
+    assert snapshot.signing == SIGNED
+    assert set(snapshot.bundle_files) == SIGNED_BUNDLE_FILES
+    assert snapshot.bundle_files[_APP_TICKET_REL] == hashlib.sha256(
+        b"notarization-ticket"
+    ).hexdigest()
+
+    document = snapshot.to_record()
+    assert set(document) == set(_record()) | {"signing"}
+    assert document["signing"] == {"kind": "developer-id", "team_id": _TEST_TEAM}
+
+    parsed = read_host_ownership(
+        _write_record(tmp_path / "server-host.json", document)
+    )
+    assert parsed == snapshot
+    assert parsed.to_record() == document
+    # Immutable after the proof, like the legacy snapshot.
+    with pytest.raises(TypeError):
+        parsed.bundle_files[_PLIST_REL] = _HASH_B  # type: ignore[index]
+    with pytest.raises(TypeError):
+        parsed.per_arch_cdhashes["arm64"] = "0" * 40  # type: ignore[index]
+
+
+def test_record_rejects_schema_revision_signing_confusion(tmp_path: Path) -> None:
+    # One field of a valid signed record is broken at a time. Every case must be
+    # a refusal: the schema, the revision and the signing identity are one
+    # policy, and no half of it can stand in for the other.
+    bundle = _make_signed_bundle(tmp_path)
+
+    def _without_signing(document: dict[str, Any]) -> None:
+        document.pop("signing")
+
+    def _legacy_schema_with_signing(document: dict[str, Any]) -> None:
+        document["schema"] = SCHEMA_VERSION
+        document["host_revision"] = HOST_REVISION
+
+    def _legacy_files(document: dict[str, Any]) -> None:
+        for name in (_APP_TICKET_REL,):
+            document["bundle_files"].pop(name)
+
+    def _legacy_record_with_ticket(document: dict[str, Any]) -> None:
+        document["schema"] = SCHEMA_VERSION
+        document["host_revision"] = HOST_REVISION
+        document.pop("signing")
+        document["bundle_files"][_APP_TICKET_REL] = _HASH_B
+
+    mutations: list[Any] = [
+        _without_signing,
+        lambda d: d["signing"].__setitem__("extra", "value"),
+        lambda d: d["signing"].pop("team_id"),
+        lambda d: d["signing"].__setitem__("kind", "apple-development"),
+        lambda d: d["signing"].__setitem__("team_id", "testteam01"),
+        lambda d: d["signing"].__setitem__("team_id", "TESTTEAM0"),
+        lambda d: d["signing"].__setitem__("team_id", "TESTTEAM012"),
+        lambda d: d["signing"].__setitem__("team_id", 1234567890),
+        lambda d: d["signing"].__setitem__("team_id", True),
+        lambda d: d.__setitem__("signing", None),
+        lambda d: d.__setitem__("signing", [_TEST_TEAM]),
+        _legacy_schema_with_signing,
+        lambda d: d.__setitem__("host_revision", HOST_REVISION),
+        lambda d: d.__setitem__("host_revision", SIGNED_HOST_REVISION + 1),
+        lambda d: d.__setitem__("host_protocol", 3),
+        lambda d: d.__setitem__("schema", True),
+        lambda d: d.__setitem__("schema", SIGNED_SCHEMA_VERSION + 1),
+        _legacy_files,
+        _legacy_record_with_ticket,
+    ]
+    for mutate in mutations:
+        document = _signed_record(bundle)
+        mutate(document)
+        record = _write_record(tmp_path / "server-host.json", document)
+        with pytest.raises(ServerHostError) as caught:
+            read_host_ownership(record)
+        assert caught.value.code in (
+            server_host.INVALID_OWNERSHIP,
+            server_host.UNSUPPORTED_SCHEMA,
+        ), mutate
+
+    # Control: the untouched signed record is accepted, so the loop above is not
+    # passing because every schema-2 record is refused.
+    accepted = read_host_ownership(
+        _write_record(tmp_path / "control.json", _signed_record(bundle))
+    )
+    assert accepted.signing == SIGNED
+
+
+def test_signed_host_requires_external_developer_id_requirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The proof is the external requirement codesign evaluates against the
+    # certificate chain, not a display-text `TeamIdentifier=` claim: the probe is
+    # observed at the seam, before any snapshot exists.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    runner = _FakeRunner(adhoc=False)
+    snapshot = _inspect_signed(bundle, runner)
+
+    requirement_probes = [
+        command for command in runner.commands if "--test-requirement" in command
+    ]
+    assert len(requirement_probes) == 1
+    probe = requirement_probes[0]
+    expected = "=" + developer_id_requirement(_TEST_TEAM)
+    assert probe[probe.index("--test-requirement") + 1] == expected
+    assert "--all-architectures" in probe
+    assert probe[-1] == os.fspath(Path(os.path.realpath(bundle)))
+    assert snapshot.signing == SIGNED
+
+    # The requirement comes before the first per-slice evidence is used.
+    first_slice = next(
+        index
+        for index, command in enumerate(runner.commands)
+        if "--arch" in command
+    )
+    assert runner.commands.index(probe) < first_slice
+
+    # A wrong team, a wrong certificate chain and a wrong identifier each
+    # disprove the policy, even when every other field looks right.
+    for runner in (
+        _FakeRunner(adhoc=False, requirement_rc=1),
+        _FakeRunner(adhoc=False, team_id="OTHERTEAM1"),
+        _FakeRunner(adhoc=False, identifier="local.other"),
+        _FakeRunner(adhoc=False, verify_rc=1),
+    ):
+        with pytest.raises(ServerHostError) as caught:
+            _inspect_signed(bundle, runner)
+        assert caught.value.code == SIGNATURE_REJECTED
+
+
+def test_signed_host_checks_policy_on_every_architecture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One bad slice cannot hide behind the other: the policy is checked per
+    # architecture, and the integrity probes cover every architecture.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+
+    for arch in ARCHITECTURES:
+        for override in (
+            {"team_id": "OTHERTEAM1"},
+            {"identifier": "local.other"},
+            {"runtime": False},
+            {"timestamp": False},
+            {"cdhash": "nothex"},
+            {"display_rc": 1},
+        ):
+            runner = _FakeRunner(adhoc=False, slices={arch: override})
+            with pytest.raises(ServerHostError) as caught:
+                _inspect_signed(bundle, runner)
+            assert caught.value.code == SIGNATURE_REJECTED, (arch, override)
+
+    runner = _FakeRunner(adhoc=False)
+    _inspect_signed(bundle, runner)
+    verify_commands = [
+        command for command in runner.commands if command[:2] == [_CODESIGN, "--verify"]
+    ]
+    assert verify_commands
+    for command in verify_commands:
+        assert "--all-architectures" in command
+    probed = [
+        command[command.index("--arch") + 1]
+        for command in runner.commands
+        if "--arch" in command
+    ]
+    assert sorted(probed) == sorted(ARCHITECTURES * 3)
+
+
+def test_signed_host_requires_minimal_apple_events_entitlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The build's exact entitlement set is the only one accepted; a missing,
+    # false, coerced, extra, runtime-relaxing or malformed blob is refused.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+
+    for entitlements in (
+        None,
+        {},
+        {"com.apple.security.automation.apple-events": False},
+        {"com.apple.security.automation.apple-events": 1},
+        {"com.apple.security.automation.apple-events": "true"},
+        {"com.apple.security.cs.allow-jit": True},
+        {"com.apple.security.cs.disable-library-validation": True},
+        {"com.apple.security.cs.get-task-allow": True},
+        {
+            "com.apple.security.automation.apple-events": True,
+            "com.apple.security.cs.allow-jit": True,
+        },
+    ):
+        for arch in ARCHITECTURES:
+            runner = _FakeRunner(
+                adhoc=False, slices={arch: {"entitlements": entitlements}}
+            )
+            with pytest.raises(ServerHostError) as caught:
+                _inspect_signed(bundle, runner)
+            assert caught.value.code == SIGNATURE_REJECTED, (arch, entitlements)
+
+    for raw in ("not a plist", plistlib.dumps(["a list"]).decode("utf-8")):
+        runner = _FakeRunner(
+            adhoc=False, slices={ARCHITECTURES[0]: {"entitlements_raw": raw}}
+        )
+        with pytest.raises(ServerHostError) as caught:
+            _inspect_signed(bundle, runner)
+        assert caught.value.code == SIGNATURE_REJECTED
+
+    # The builder's release entitlement set is exactly the accepted one: the
+    # usage strings stay in Info.plist and are not part of this policy.
+    assert set(BUILD.RELEASE_ENTITLEMENTS) == set(server_host.SIGNED_ENTITLEMENTS)
+    assert BUILD.RELEASE_ENTITLEMENTS == dict(server_host.SIGNED_ENTITLEMENTS)
+    _inspect_signed(bundle, _FakeRunner(adhoc=False))
+
+
+def test_signed_host_requires_stable_designated_requirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The embedded requirement must be the stable team-scoped one the builder
+    # signs with. A code-specific or leaf-pinned requirement is refused: it
+    # would make every rebuild a different logical identity.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    canonical = BUILD.designated_requirement(_TEST_TEAM)
+    assert canonical == developer_id_requirement(_TEST_TEAM)
+
+    # The builder's own text (with its `/* exists */` annotations) passes.
+    _inspect_signed(bundle, _FakeRunner(adhoc=False, designated=canonical))
+    # So does the same requirement spelled with an explicit `exists`, which is
+    # one of the two spellings codesign prints for the same test.
+    spelled = re.sub(r"\s*/\* exists \*/", " exists", canonical)
+    assert spelled != canonical
+    _inspect_signed(bundle, _FakeRunner(adhoc=False, designated=spelled))
+
+    for designated in (
+        None,
+        f'cdhash H"{_CDHASH["arm64"]}"',
+        'certificate leaf = H"0123456789abcdef"',
+        f'identifier "{BUNDLE_ID}"',
+        BUILD.designated_requirement("OTHERTEAM1"),
+        f'{canonical} or certificate leaf = H"0123456789abcdef"',
+    ):
+        for arch in ARCHITECTURES:
+            runner = _FakeRunner(
+                adhoc=False, slices={arch: {"designated": designated}}
+            )
+            with pytest.raises(ServerHostError) as caught:
+                _inspect_signed(bundle, runner)
+            assert caught.value.code == SIGNATURE_REJECTED, (arch, designated)
+
+    runner = _FakeRunner(
+        adhoc=False, slices={ARCHITECTURES[0]: {"designated_rc": 1}}
+    )
+    with pytest.raises(ServerHostError) as caught:
+        _inspect_signed(bundle, runner)
+    assert caught.value.code == SIGNATURE_REJECTED
+
+
+@requires_posix_uid
+def test_signed_ticket_is_recorded_and_stray_files_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    runner = _FakeRunner(adhoc=False)
+    snapshot = _inspect_signed(bundle, runner)
+    record = _install_record(tmp_path / "server-host.json", snapshot)
+
+    # The ticket is ordinary immutable record material: the same bytes verify,
+    # an altered or deleted ticket does not.
+    assert verify_owned_host(bundle, ownership_path=record, runner=runner) == snapshot
+    (bundle / _APP_TICKET_REL).write_bytes(b"altered-ticket")
+    with pytest.raises(ServerHostError) as caught:
+        verify_owned_host(bundle, ownership_path=record, runner=runner)
+    assert caught.value.code == server_host.NOT_OWNED
+    (bundle / _APP_TICKET_REL).unlink()
+    with pytest.raises(ServerHostError) as caught:
+        verify_owned_host(bundle, ownership_path=record, runner=runner)
+    assert caught.value.code == server_host.INSPECTION_FAILED
+    (bundle / _APP_TICKET_REL).write_bytes(b"notarization-ticket")
+
+    # The signature's own resource is still required, and nothing else is
+    # allowed in: no free-form file list exists.
+    (bundle / _CODESIGN_REL).unlink()
+    with pytest.raises(ServerHostError) as caught:
+        _inspect_signed(bundle, _FakeRunner(adhoc=False))
+    assert caught.value.code == server_host.INSPECTION_FAILED
+    (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
+
+    (bundle / "Contents" / "Resources" / "extra.txt").write_text("x")
+    with pytest.raises(ServerHostError) as caught:
+        _inspect_signed(bundle, _FakeRunner(adhoc=False))
+    assert caught.value.code == server_host.INSPECTION_FAILED
+    (bundle / "Contents" / "Resources" / "extra.txt").unlink()
+
+    (bundle / "Contents" / "Frameworks").mkdir()
+    with pytest.raises(ServerHostError) as caught:
+        _inspect_signed(bundle, _FakeRunner(adhoc=False))
+    assert caught.value.code == server_host.INSPECTION_FAILED
+    (bundle / "Contents" / "Frameworks").rmdir()
+
+    # A production revision-4 bundle does not grow a ticket: the legacy policy
+    # keeps exactly its four files.
+    legacy = _make_bundle(tmp_path / "legacy")
+    (legacy / _APP_TICKET_REL).write_bytes(b"notarization-ticket")
+    with pytest.raises(ServerHostError) as caught:
+        inspect_host_bundle(legacy, runner=_FakeRunner())
+    assert caught.value.code == server_host.INSPECTION_FAILED
+
+
+@requires_posix_uid
+def test_owned_revision_four_remains_runtime_compatible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The production host a live install already has: a schema-1 record still
+    # verifies through the same call, runs no signed-policy probe and writes
+    # nothing. The wheel can update without changing the host.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_bundle(tmp_path)
+    runner = _FakeRunner()
+    snapshot = inspect_host_bundle(bundle, runner=runner)
+    record = _install_record(tmp_path / "server-host.json", snapshot)
+    assert snapshot.schema == SCHEMA_VERSION
+    assert snapshot.signing is None
+
+    before = sorted(path.as_posix() for path in tmp_path.rglob("*"))
+    verified = verify_owned_host(bundle, ownership_path=record, runner=runner)
+    after = sorted(path.as_posix() for path in tmp_path.rglob("*"))
+
+    assert verified == snapshot
+    assert verified.schema == SCHEMA_VERSION
+    assert verified.signing is None
+    assert before == after
+    commands = runner.commands[len(runner.commands) // 2 :]
+    for command in commands:
+        assert command[0] == _CODESIGN
+        assert "--test-requirement" not in command
+        assert "--all-architectures" not in command
+        assert "--entitlements" not in command
+        assert "-r-" not in command
+        assert "--sign" not in command
+
+
+@requires_posix_uid
+def test_signed_verification_never_downgrades_to_adhoc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The record selects the signed policy. An ad-hoc signature — even over the
+    # very bytes the record hashes — disproves it, and there is no second
+    # attempt at the legacy policy.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    snapshot = _inspect_signed(bundle, _FakeRunner(adhoc=False))
+    record = _install_record(tmp_path / "server-host.json", snapshot)
+
+    adhoc = _FakeRunner(adhoc=True, requirement_rc=1)
+    with pytest.raises(ServerHostError) as caught:
+        verify_owned_host(bundle, ownership_path=record, runner=adhoc)
+    assert caught.value.code == SIGNATURE_REJECTED
+    # The requirement was evaluated and failed; nothing fell back to the
+    # ad-hoc display check.
+    assert any("--test-requirement" in command for command in adhoc.commands)
+    assert all(command[1] != "--sign" for command in adhoc.commands)
+
+    # Re-signed bytes change the file hashes too; the policy is still what
+    # refuses, so the reason is the signature and not merely the record match.
+    (bundle / _ICON_REL).write_bytes(b"ad-hoc-resign")
+    with pytest.raises(ServerHostError) as caught:
+        verify_owned_host(
+            bundle, ownership_path=record, runner=_FakeRunner(adhoc=True)
+        )
+    assert caught.value.code == SIGNATURE_REJECTED
+
+
+@requires_posix_uid
+def test_signature_rejection_and_probe_unavailability_are_distinct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A completed probe that disproves the policy is `signature_rejected`; a
+    # probe that cannot start or hangs is `inspection_failed`. Neither
+    # authorizes activation, but a caller can tell them apart.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    record = _install_record(
+        tmp_path / "server-host.json",
+        _inspect_signed(bundle, _FakeRunner(adhoc=False)),
+    )
+
+    with pytest.raises(ServerHostError) as caught:
+        verify_owned_host(
+            bundle,
+            ownership_path=record,
+            runner=_FakeRunner(adhoc=False, requirement_rc=1),
+        )
+    assert caught.value.code == SIGNATURE_REJECTED
+
+    for raises in (
+        subprocess.TimeoutExpired(_CODESIGN, server_host.NATIVE_TIMEOUT_SECONDS),
+        FileNotFoundError(_CODESIGN),
+        OSError("the probe could not start"),
+    ):
+        with pytest.raises(ServerHostError) as caught:
+            verify_owned_host(
+                bundle, ownership_path=record, runner=_FakeRunner(raises=raises)
+            )
+        assert caught.value.code == server_host.INSPECTION_FAILED
+
+
+def test_signed_policy_needs_an_explicit_team_and_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The policy is named by the caller and never learned from the bundle: the
+    # signed revision without a team, a team under a legacy revision, and a
+    # future revision are all refusals before any probe runs.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    legacy = _make_bundle(tmp_path / "legacy")
+
+    runner = _FakeRunner(adhoc=False)
+    with pytest.raises(ServerHostError) as caught:
+        inspect_host_bundle(
+            bundle,
+            runner=runner,
+            revision=SIGNED_HOST_REVISION,
+            protocol=HOST_PROTOCOL,
+        )
+    assert caught.value.code == server_host.INSPECTION_FAILED
+    assert runner.commands == []
+
+    for revision, protocol in (
+        (HOST_REVISION, HOST_PROTOCOL),
+        (SIGNED_HOST_REVISION + 1, HOST_PROTOCOL),
+        (SIGNED_HOST_REVISION, HOST_PROTOCOL + 1),
+    ):
+        runner = _FakeRunner(adhoc=False)
+        with pytest.raises(ServerHostError):
+            inspect_host_bundle(
+                legacy if revision == HOST_REVISION else bundle,
+                runner=runner,
+                revision=revision,
+                protocol=protocol,
+                signing=SIGNED,
+            )
+        assert runner.commands == []
+
+    # A signed record cannot vouch for a revision-4 bundle either: the plist and
+    # the policy disagree.
+    with pytest.raises(ServerHostError):
+        inspect_host_bundle(
+            legacy,
+            runner=_FakeRunner(adhoc=False),
+            revision=SIGNED_HOST_REVISION,
+            protocol=HOST_PROTOCOL,
+            signing=SIGNED,
+        )
