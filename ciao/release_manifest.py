@@ -14,6 +14,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from ciao.server_host import DEVELOPER_ID_SIGNING_KIND, DeveloperIDSigning
+
 MANIFEST_NAME = "ciaobot-engine-manifest.json"
 SIGNATURE_NAME = MANIFEST_NAME + ".sig"
 SCHEMA_VERSION = 1
@@ -29,6 +31,33 @@ SERVER_HOST_REVISION = 4
 SERVER_HOST_PROTOCOL = 2
 SERVER_HOST_BUNDLE_ID = "local.ciaobot.server"
 SERVER_HOST_FILENAME = "ciaobot-server-host-macos-universal-v1.tar.gz"
+#: The opt-in signed-host policy (#2329). An explicitly Developer ID signed,
+#: notarized host is different bytes with its own recorded identity, so it gets
+#: its own revision and carries exactly one authenticated signing object. The
+#: production default above is unchanged: without the explicit flag the manifest
+#: still describes a revision-4 archive, and accepting a signed entry here does
+#: not publish one.
+SIGNED_SERVER_HOST_REVISION = 5
+#: The signing object is the one the private record accepts, so its ``kind`` is
+#: the runtime contract's constant rather than a second copy of the literal.
+SERVER_HOST_SIGNING_KIND = DEVELOPER_ID_SIGNING_KIND
+_SERVER_HOST_REQUIRED_FIELDS = frozenset(
+    {
+        "filename",
+        "kind",
+        "platform",
+        "arch",
+        "sha256",
+        "size",
+        "bundle_id",
+        "host_revision",
+        "host_protocol",
+    }
+)
+_SIGNED_SERVER_HOST_REQUIRED_FIELDS = _SERVER_HOST_REQUIRED_FIELDS | {"signing"}
+_SIGNING_FIELDS = frozenset({"kind", "team_id"})
+#: The only accepted team representation: ten uppercase letters or digits.
+_TEAM_ID_RE = re.compile(r"^[A-Z0-9]{10}$")
 # The release signing key, generated with the app updater back when the release
 # also shipped Ciaobot.app and every consumer of a signature trusted this one
 # key. The app and its verifier are gone (#656), so this is now the only copy
@@ -65,7 +94,9 @@ def artifact_entry(
     }
 
 
-def server_host_artifact_entry(path: Path) -> dict[str, Any]:
+def server_host_artifact_entry(
+    path: Path, *, signing: DeveloperIDSigning | None = None
+) -> dict[str, Any]:
     """Describe the fixed universal macOS server host archive.
 
     The entry carries the digest and size of ``path`` plus the host's fixed
@@ -73,11 +104,18 @@ def server_host_artifact_entry(path: Path) -> dict[str, Any]:
     version. ``path`` must already be named ``SERVER_HOST_FILENAME``: the
     archive name is part of the contract, so a mismatch is refused here rather
     than discovered by a manifest consumer.
+
+    Without ``signing`` the entry is exactly the historical revision-4 shape.
+    With it the entry describes the explicitly signed revision-5 host and adds
+    exactly one object, ``{"kind": "developer-id", "team_id": ...}`` — the team
+    the release authenticated, never one read from the archive.
     """
     if path.name != SERVER_HOST_FILENAME:
         raise ValueError(
             f"server host archive must be named {SERVER_HOST_FILENAME}, not {path.name!r}"
         )
+    if signing is not None and not isinstance(signing, DeveloperIDSigning):
+        raise ValueError("the server host signing identity is not a Developer ID team")
     entry = artifact_entry(
         path,
         kind=SERVER_HOST_KIND,
@@ -85,8 +123,13 @@ def server_host_artifact_entry(path: Path) -> dict[str, Any]:
         arch=SERVER_HOST_ARCH,
     )
     entry["bundle_id"] = SERVER_HOST_BUNDLE_ID
-    entry["host_revision"] = SERVER_HOST_REVISION
+    if signing is None:
+        entry["host_revision"] = SERVER_HOST_REVISION
+        entry["host_protocol"] = SERVER_HOST_PROTOCOL
+        return entry
+    entry["host_revision"] = SIGNED_SERVER_HOST_REVISION
     entry["host_protocol"] = SERVER_HOST_PROTOCOL
+    entry["signing"] = {"kind": SERVER_HOST_SIGNING_KIND, "team_id": signing.team_id}
     return entry
 
 
@@ -223,6 +266,17 @@ def _check_artifact(entry: Any) -> None:
         raise ValueError("manifest artifact is malformed")
 
 
+def _check_signing_object(value: object) -> None:
+    """Refuse any signing object other than the one exact Developer ID shape."""
+    if not isinstance(value, dict) or set(value) != _SIGNING_FIELDS:
+        raise ValueError("manifest server host signing identity is not supported")
+    if value["kind"] != SERVER_HOST_SIGNING_KIND:
+        raise ValueError("manifest server host signing identity is not supported")
+    team_id = value["team_id"]
+    if not isinstance(team_id, str) or not _TEAM_ID_RE.fullmatch(team_id):
+        raise ValueError("manifest server host signing team is not supported")
+
+
 def _check_server_host_artifact(entry: dict[str, Any]) -> None:
     """Reject a ``server-host`` entry whose fixed host identity is wrong.
 
@@ -233,6 +287,12 @@ def _check_server_host_artifact(entry: dict[str, Any]) -> None:
     ``host_protocol`` use ``type(...) is int`` so a boolean, which is an ``int``
     subclass, cannot stand in for revision ``1``; the size must also be
     positive, since a host archive is never empty.
+
+    Two policies are accepted and nothing in between: the legacy revision-4
+    entry with no ``signing`` key at all, and the signed revision-5 entry with
+    exactly one valid Developer ID signing object. A revision without its
+    policy (or the policy under the wrong revision) is refused rather than
+    guessed at, so a consumer never has to decide which half to trust.
     """
     if entry.get("platform") != SERVER_HOST_PLATFORM:
         raise ValueError("manifest server host platform is not supported")
@@ -242,10 +302,22 @@ def _check_server_host_artifact(entry: dict[str, Any]) -> None:
         raise ValueError("manifest server host filename is not supported")
     if entry.get("bundle_id") != SERVER_HOST_BUNDLE_ID:
         raise ValueError("manifest server host bundle id is not supported")
-    if (
-        type(entry.get("host_revision")) is not int
-        or entry["host_revision"] != SERVER_HOST_REVISION
-    ):
+    signed = "signing" in entry
+    required = (
+        _SIGNED_SERVER_HOST_REQUIRED_FIELDS if signed else _SERVER_HOST_REQUIRED_FIELDS
+    )
+    if set(entry) != required:
+        raise ValueError("manifest server host entry has unsupported fields")
+    revision = entry.get("host_revision")
+    if type(revision) is not int:
+        raise ValueError("manifest server host revision is not supported")
+    if signed:
+        if revision != SIGNED_SERVER_HOST_REVISION:
+            raise ValueError(
+                "manifest server host signing policy does not match its revision"
+            )
+        _check_signing_object(entry["signing"])
+    elif revision != SERVER_HOST_REVISION:
         raise ValueError("manifest server host revision is not supported")
     if (
         type(entry.get("host_protocol")) is not int
@@ -384,6 +456,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=f"optional {SERVER_HOST_FILENAME} to authenticate",
     )
+    build.add_argument(
+        "--server-host-team-id",
+        default=None,
+        help=(
+            "the Developer ID team the named server host was signed by; emits the "
+            "signed host entry instead of the production one"
+        ),
+    )
     build.add_argument("wheels", nargs="+", type=Path, help="wheels to list")
 
     verify = sub.add_parser("verify", help="Verify a signed engine manifest")
@@ -407,7 +487,13 @@ def main(argv: list[str] | None = None) -> int:
         out: Path = args.out
         wheels: list[Path] = args.wheels
         server_host: Path | None = args.server_host
+        team_id: str | None = args.server_host_team_id
         try:
+            if team_id is not None and server_host is None:
+                raise ValueError(
+                    "--server-host-team-id needs --server-host: a signing team "
+                    "describes the signed host archive, not the wheels"
+                )
             for wheel in wheels:
                 if f"-{version}-" not in wheel.name:
                     raise ValueError(f"{wheel.name} is not version {version}")
@@ -421,7 +507,10 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 if server_host.stat().st_size == 0:
                     raise ValueError(f"server host archive is empty: {server_host}")
-                artifacts.append(server_host_artifact_entry(server_host))
+                signing = DeveloperIDSigning(team_id) if team_id is not None else None
+                artifacts.append(
+                    server_host_artifact_entry(server_host, signing=signing)
+                )
             manifest = build_manifest(
                 version,
                 artifacts,

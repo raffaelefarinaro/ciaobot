@@ -38,6 +38,35 @@ accepts a host entry only when the platform, arch, filename, bundle id,
 revision, protocol and positive size all match exactly; `host_revision`/`host_protocol` reject a boolean, so `True`
 cannot stand in for revision `4`.
 
+### The explicitly signed entry
+
+Two entry shapes exist, and nothing in between. The legacy shape above is what
+every release publishes today. `--server-host-team-id` emits the signed shape
+instead, for a Developer ID signed, notarized archive built by
+`scripts/build-server-host.py`:
+
+| Field | Value |
+|---|---|
+| `host_revision` | `5` |
+| `host_protocol` | `2` |
+| `signing` | exactly `{"kind": "developer-id", "team_id": "<EXPECTED_TEAM_ID>"}` |
+
+The team is ten uppercase letters or digits, validated before any requirement
+text is built; `<EXPECTED_TEAM_ID>` is configuration notation, never a value in
+this repository. The selector refuses a signed entry under revision 4, a
+revision-5 entry with no `signing` object or with any other `kind`, extra or
+missing signing fields, a malformed team, and any of the legacy identity
+mismatches. A signing team without `--server-host` is a build error, and a
+refused build writes no manifest.
+
+Supplying the flag does **not** publish a signed host: `publish.yml` still runs
+the un-flagged build until a separately approved activation, so the release keeps
+serving revision 4. Authenticating the expected team in the manifest is what lets
+the installer persist it in the schema-2 ownership record and every later runtime
+verification state it explicitly (`docs/SERVER_HOST_CONTRACT.md`). The manifest
+signature must verify before the team is used, so editing the team after signing
+produces no trusted value.
+
 ## Wheel-only releases remain supported
 
 The host is opt-in. A manifest with no `server-host` entry is a valid schema-1
@@ -76,6 +105,17 @@ python -m ciao.release_manifest build \
   dist/ciaobot-1.2.3-py3-none-any.whl
 ```
 
+For the explicitly signed archive, add the team the build was signed by:
+
+```sh
+python -m ciao.release_manifest build \
+  --version 1.2.3 \
+  --out ciaobot-engine-manifest.json \
+  --server-host /tmp/ciaobot-server-host-build/ciaobot-server-host-macos-universal-v1.tar.gz \
+  --server-host-team-id <EXPECTED_TEAM_ID> \
+  dist/ciaobot-1.2.3-py3-none-any.whl
+```
+
 The named host archive must be a regular, non-empty file with exactly the fixed
 name; a mismatch is refused before the manifest is written, so a refused build
 leaves any existing manifest untouched. The archive itself is built separately
@@ -106,11 +146,22 @@ environment knob.
 
 ## Platform and permission identity
 
-The host is macOS 13+ universal (arm64 and x86_64 in one binary) and ad-hoc
-signed, not Developer ID signed. There is no per-user compiler at install time:
-the prebuilt archive is the artifact a user receives. Its Accessibility and
-Automation grants are tied to the exact signed bytes, so any rebuild changes the
-CDHash and can require the user to reapprove the prompt.
+The host is macOS 13+ universal (arm64 and x86_64 in one binary) and, in the
+production revision-4 archive, ad-hoc signed: there is no per-user compiler at
+install time, because the prebuilt archive is the artifact a user receives. Its
+Accessibility and Automation grants are tied to the exact signed bytes, so any
+rebuild changes the CDHash and can require the user to reapprove the prompt.
+
+The opt-in revision-5 policy is Developer ID signed and notarized instead. It
+carries the hardened runtime, a secure timestamp and exactly one entitlement
+(`com.apple.security.automation.apple-events`), and it is accepted only for the
+team the signed manifest names — the designated requirement pins the bundle, the
+Developer ID extensions and the team, never a certificate fingerprint or CDHash,
+so a certificate renewal within the team keeps the same logical identity. The
+signed policy is not published by `publish.yml` yet: the release continues to
+serve the ad-hoc revision-4 host until a separately approved activation, and a
+signed archive's real ticket layout and round trip remain a promotion gate for
+the first protected rehearsal rather than a claim made here.
 
 Revision 2 (#1249) names the executable `Ciaobot Server`, so the Login Items row reads "Ciaobot Server".
 
@@ -129,6 +180,11 @@ reads a private signal queue, so a stop that arrives just before the launch
 still prevents the spawn. The sealed bytes change, so the installer replaces a
 revision-2 (v1.6.0) or revision-3 (v1.6.1) host the same way and the user is warned
 once. The revision-2 allowance is removed one release after revision 4 ships.
+
+Revision 5 is the explicitly signed revision (#2329). It is understood by the
+manifest selector and the runtime contract but is not published: `publish.yml`
+keeps building and signing the revision-4 archive until a separately approved
+activation, and no installed host is migrated to it here.
 
 ## What this does not do
 
