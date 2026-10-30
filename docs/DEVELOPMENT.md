@@ -351,20 +351,33 @@ bytes, writes one owner-only journal at `~/.local/state/ciaobot/server-host-upgr
 with the operation nonce and this shell's pid, installs the signed host, and
 returns at phase `installed`. The shell then asks `transaction-status` whether it
 owns a pending upgrade. With one pending, the health wait requires the exact new
-`version` on the configured port (an unrelated or old engine answering is not
-proof), every later failure path — an explicit `fail`, `abort_install`, a signal,
-an unexpected `set -e` exit — gives the old pair back exactly once through
-`rollback-upgrade`, and `commit-upgrade` runs only after positive engine health
-and, in a `--migrate` hand-over, after the app's own agent has been retired. When
-a launchd job may already run out of the candidate host, the shell boots it out
-and waits for the process to exit before reverting the identity; if it cannot, the
-before-images and journal are kept and the run stays nonzero rather than claiming
-a rollback of a still-running candidate. `--no-start` never defers: it reports
-that the upgrade completes on a later normal run and leaves the previous host in
-place, and a wheel-only release or a client never touches the host at all. A
-journal left by a killed run is recovered by the next run: a live owner is a
-refusal, an abandoned one is rolled back from its own material before anything new
-is installed, and a terminal phase is only ever cleaned up, never re-rolled-back.
+`version` on the configured port *and* positive evidence that the responder is the
+engine this run started: a `startup_id` that differs from the one the port answered
+with before the service was started. A version string alone is not evidence about
+which process answered, so an unrelated or stale engine reporting the same version
+does not earn a commit. Every later failure path — an explicit `fail`,
+`abort_install`, a signal, an unexpected `set -e` exit — gives the old pair back
+exactly once through `rollback-upgrade`, and `commit-upgrade` runs only after
+positive engine health and, in a `--migrate` hand-over, after the app's own agent
+has been retired. When a launchd job may already run out of the candidate host,
+the shell boots it out, proves with `launchctl print` that the job is really gone
+and waits for the process to exit before reverting the identity. That check fails
+closed: a job launchd still holds, a process still present, or a `pgrep` that could
+not answer all keep the before-images and the journal, leave the run nonzero and
+skip the engine-definition reload rather than claiming a rollback of a
+still-running candidate. The EXIT handler also discovers the operation this shell
+owns from the journal itself (owner pid plus nonce) when the child finished the
+install before the run could record it, and keeps the journal with a spoken
+incomplete recovery when that discovery cannot be made. A commit or rollback that
+settled but could not remove its before-images reports the leftover with its own
+exit status (5) instead of failing the operation, and the next host transaction is
+refused until that material is gone. `--no-start` never defers: it reports that the
+upgrade completes on a later normal run and leaves the previous host in place, and
+a wheel-only release or a client never touches the host at all. A journal left by a
+killed run is settled by the next run: a live owner is a refusal, and an unfinished
+or abandoned one is *not* rolled back by `install` itself — the shell quiesces the
+service and calls `rollback-upgrade` before retrying, so the identity is never
+reverted under a process that may still be running.
 
 Every release today publishes the ad-hoc revision-4 host, and its record keeps the
 unchanged schema 1. The signed revision-5 policy (#2329) is opt-in end to end: an
