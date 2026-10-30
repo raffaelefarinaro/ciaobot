@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tarfile
 import time
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from collections.abc import Callable
 from typing import Any
 
@@ -858,16 +858,48 @@ def _staple_index(commands: list[list[str]]) -> int:
     )
 
 
-def _cli_with_runner(monkeypatch: pytest.MonkeyPatch, runner: Any) -> None:
-    """Keep the CLI path, inject only the toolchain runner into ``build``."""
+def _cli_targeting_darwin(monkeypatch: pytest.MonkeyPatch, runner: Any = None) -> None:
+    """Run the CLI against an explicit macOS target, optionally with a runner.
+
+    The suite tests the macOS builder, and CI runs it on Linux. Asking ``build``
+    for ``platform_name="darwin"`` is exactly what a macOS caller does; no test
+    changes the interpreter's ``sys.platform``.
+    """
     original = BUILD.build
 
-    def build_with_runner(path: Path, *, release_signing: Any = None) -> dict[str, Any]:
+    def build_targeting_darwin(
+        path: Path, *, release_signing: Any = None
+    ) -> dict[str, Any]:
+        if runner is None:
+            return original(path, platform_name="darwin", release_signing=release_signing)
         return original(
-            path, platform_name="darwin", runner=runner, release_signing=release_signing
+            path,
+            platform_name="darwin",
+            runner=runner,
+            release_signing=release_signing,
         )
 
-    monkeypatch.setattr(BUILD, "build", build_with_runner)
+    monkeypatch.setattr(BUILD, "build", build_targeting_darwin)
+
+
+def _cli_with_runner(monkeypatch: pytest.MonkeyPatch, runner: Any) -> None:
+    """Keep the CLI path, target macOS and inject only the toolchain runner."""
+    _cli_targeting_darwin(monkeypatch, runner)
+
+
+def _simulate_non_macos_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the loaded builder see Linux without touching the real ``sys``.
+
+    ``build`` reads its default platform through the module's ``sys`` global, so
+    replacing that module attribute for one test simulates a non-macOS caller
+    deterministically on any host while the interpreter's own ``sys.platform``
+    stays untouched.
+    """
+    monkeypatch.setattr(
+        BUILD,
+        "sys",
+        SimpleNamespace(platform="linux", version_info=sys.version_info),
+    )
 
 
 def test_release_entitlements_plist_is_minimal() -> None:
@@ -1588,8 +1620,16 @@ def test_release_build_verifies_final_extracted_app(tmp_path: Path) -> None:
     ],
 )
 def test_release_cli_rejects_partial_configuration(
-    tmp_path: Path, argv: list[str], fragment: str, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    argv: list[str],
+    fragment: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The suite tests the macOS builder and CI runs it on Linux, so the CLI is
+    # pointed at its macOS target explicitly. Without this, a non-macOS host
+    # answers with the platform refusal before the signing validation runs.
+    _cli_targeting_darwin(monkeypatch)
     output = tmp_path / "host"
     with pytest.raises(SystemExit) as caught:
         BUILD.main(["--output", str(output), *argv])
@@ -1653,8 +1693,14 @@ def test_release_cli_passes_complete_configuration_to_the_builder(
     ids=["bad-identity", "bad-profile"],
 )
 def test_release_cli_never_echoes_signing_inputs_on_validation_failure(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], identity: str, profile: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    identity: str,
+    profile: str,
 ) -> None:
+    # Target macOS so the signing validation itself answers on every host.
+    _cli_targeting_darwin(monkeypatch)
     output = tmp_path / "host"
     with pytest.raises(SystemExit) as caught:
         BUILD.main(
@@ -1675,6 +1721,48 @@ def test_release_cli_never_echoes_signing_inputs_on_validation_failure(
     assert SENTINEL_IDENTITY not in err
     assert SENTINEL_PROFILE not in err
     assert "Traceback" not in err
+    assert not output.exists()
+
+
+def test_release_cli_signing_validation_runs_when_the_host_is_not_macos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Regression for the CI #2332 failure: the release CLI tests must exercise
+    # the macOS signing validation even when the host is Linux. The host is
+    # simulated through the builder's module-local platform seam - the real
+    # interpreter's sys.platform is never changed.
+    output = tmp_path / "host"
+    argv = [
+        "--output",
+        str(output),
+        "--release",
+        "--signing-identity",
+        "-",
+        "--team-id",
+        RELEASE_TEAM_ID,
+        "--notary-profile",
+        RELEASE_PROFILE,
+    ]
+    _simulate_non_macos_host(monkeypatch)
+
+    # Unchanged production behaviour: an unscoped build on a non-macOS host is
+    # refused for the platform before the signing configuration is validated.
+    with pytest.raises(SystemExit) as platform_refusal:
+        BUILD.main(argv)
+    assert platform_refusal.value.code == 2
+    platform_err = capsys.readouterr().err
+    assert "requires macOS" in platform_err
+    assert not output.exists()
+
+    # With the explicit macOS target the same CLI runs the intended signing
+    # validation on this non-macOS host: the seam the release suite relies on.
+    _cli_targeting_darwin(monkeypatch)
+    with pytest.raises(SystemExit) as signing_refusal:
+        BUILD.main(argv)
+    assert signing_refusal.value.code == 2
+    signing_err = capsys.readouterr().err
+    assert "ad-hoc signature" in signing_err
+    assert "requires macOS" not in signing_err
     assert not output.exists()
 
 
