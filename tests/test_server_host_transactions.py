@@ -528,6 +528,278 @@ def test_a_status_race_where_the_owner_dies_still_refuses_the_install(
 
 
 @requires_posix_uid
+def test_the_status_race_between_two_installers_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dangerous interleaving: this installer observes no pending journal, a
+    # second installer creates one and dies before this one calls `install`. There
+    # is no rollback here - the candidate that second run started may be live - and
+    # nothing at the target is touched.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    tree, record_before = _install_legacy(tmp_path, server_host.HOST_REVISION)
+    assert server_host_install.transaction_status() == {"pending": False}
+    quiet = _tree(_bundle_path())
+
+    # Another installer, in its own process: it begins the upgrade and exits at
+    # once, so its pid is gone and its journal is abandoned.
+    _kill_at(tmp_path, "installed", "after")
+    other = server_host_install._read_upgrade_journal()
+    assert other is not None
+    assert other.owner_pid != os.getpid()
+    installed = _tree(_bundle_path())
+
+    archive, _bundle, entry = _signed_fixture(tmp_path, label="raced-signed")
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            runner=_SignedRunner(),
+            defer_commit=True,
+            owner_pid=os.getpid(),
+        )
+    assert caught.value.code == server_host_install.TRANSACTION_CONFLICT
+    # No rollback: the other operation is untouched and the candidate is still what
+    # is installed. Nothing at the target changed at all.
+    after = server_host_install._read_upgrade_journal()
+    assert after is not None
+    assert after.operation == other.operation
+    assert after.phase == other.phase
+    assert _tree(_bundle_path()) == installed
+    assert installed != quiet
+    assert _record_path().read_bytes() != record_before
+
+
+@pytest.mark.parametrize("target", ["retained", "canonical"])
+@requires_posix_uid
+def test_a_swap_between_verification_and_the_move_deletes_neither_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    # Verification says "this is the retained host" (or "this is the candidate"),
+    # and the directory is swapped for a foreign one before the rename. The rollback
+    # must notice the inode it verified is no longer there, refuse, and leave both
+    # images on disk.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    status = _start_upgrade(tmp_path)
+    backup = Path(
+        json.loads(_journal_path().read_text(encoding="utf-8"))["backup_dir"]
+    )
+    watched = (
+        backup / server_host_install._RETAINED_BUNDLE
+        if target == "retained"
+        else _bundle_path()
+    )
+    foreign = tmp_path / f"foreign-{target}"
+    server_host_install.shutil.copytree(_bundle_path(), foreign)
+    (foreign / _ICON_REL).write_bytes(b"someone else's icon")
+    real_matches = server_host_install._matches_snapshot
+    swapped: list[int] = []
+
+    def swapping_matches(bundle: Path, snapshot: Any, runner: Any) -> bool:
+        matched = real_matches(bundle, snapshot, runner)
+        if not swapped and Path(bundle) == watched and matched:
+            swapped.append(1)
+            server_host_install.shutil.rmtree(watched)
+            server_host_install.shutil.copytree(foreign, watched)
+        return matched
+
+    monkeypatch.setattr(server_host_install, "_matches_snapshot", swapping_matches)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.rollback_host_upgrade(
+            operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
+        )
+    assert swapped, "the test never swapped the watched image"
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    # Neither the foreign image that replaced the watched one nor the other image
+    # was deleted, and the journal still names the recovery material.
+    assert watched.is_dir()
+    assert (watched / _ICON_REL).read_bytes() == b"someone else's icon"
+    other = _bundle_path() if target == "retained" else backup / (
+        server_host_install._RETAINED_BUNDLE
+    )
+    assert other.is_dir()
+    assert _journal_path().exists()
+    assert server_host_install.transaction_status()["pending"] is True
+
+
+@requires_posix_uid
+def test_unsafe_terminal_cleanup_targets_are_refused_before_anything_is_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A terminal journal only deletes material it can prove. A before-image path
+    # replaced by a symlink, or by a fresh private directory this upgrade did not
+    # create, is refused - and the substituted object survives to be inspected.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    status = _start_upgrade(tmp_path)
+    backup = Path(
+        json.loads(_journal_path().read_text(encoding="utf-8"))["backup_dir"]
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("not ours", encoding="utf-8")
+
+    # (a) the before-images replaced by a symlink to another directory
+    server_host_install.shutil.rmtree(backup)
+    backup.symlink_to(outside)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.rollback_host_upgrade(
+            operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
+        )
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert backup.is_symlink()
+    assert (outside / "keep").read_text(encoding="utf-8") == "not ours"
+
+    # (b) the before-images replaced by a fresh private directory with another inode
+    backup.unlink()
+    backup.mkdir(mode=0o700)
+    os.chmod(backup, 0o700)
+    (backup / "keep").write_text("not ours either", encoding="utf-8")
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.rollback_host_upgrade(
+            operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
+        )
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert (backup / "keep").read_text(encoding="utf-8") == "not ours either"
+
+    # (c) the before-images replaced by a *copy* with the same contents: every
+    # content check would pass, so only the recorded device/inode can tell that this
+    # is not the directory the upgrade created.
+    server_host_install.shutil.rmtree(backup)
+    backup.mkdir(mode=0o700)
+    os.chmod(backup, 0o700)
+    (backup / "record").write_bytes(
+        (outside / "keep").read_bytes() * 0 + b'{"schema": 1}\n'
+    )
+    os.chmod(backup / "record", 0o600)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.commit_host_upgrade(
+            operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
+        )
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert (backup / "record").exists()
+
+    # (d) the journal itself replaced by a symlink
+    server_host_install.shutil.rmtree(backup)
+    backup.mkdir(mode=0o700)
+    journal_text = _journal_path().read_text(encoding="utf-8")
+    _journal_path().unlink()
+    _journal_path().symlink_to(outside / "keep")
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.transaction_status()
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    _journal_path().unlink()
+    _journal_path().write_text(journal_text, encoding="utf-8")
+    os.chmod(_journal_path(), 0o600)
+    assert (outside / "keep").read_text(encoding="utf-8") == "not ours"
+
+
+@requires_posix_uid
+def test_the_journal_unlink_is_bound_to_the_journal_that_was_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Cleanup runs against the file this command settled. A journal substituted
+    # after that read/write is not unlinked, because deleting it would erase another
+    # operation's only record.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    status = _start_upgrade(tmp_path)
+    journal = server_host_install._read_upgrade_journal()
+    assert journal is not None and journal.observed is not None
+    observed = journal.observed
+
+    # Another writer replaces the journal with a different file (a new inode).
+    document = json.loads(_journal_path().read_text(encoding="utf-8"))
+    server_host_install._write_private_bytes(
+        _journal_path(),
+        (json.dumps({**document, "phase": "rolled_back"}, indent=2) + "\n").encode(),
+        what="a substituted journal",
+    )
+
+    problem = server_host_install._finish_journal(journal, journal_inode=observed)
+    assert problem is not None
+    assert "not the one this command settled" in problem
+    assert _journal_path().exists()
+
+
+@requires_posix_uid
+def test_an_interrupted_terminal_cleanup_is_finished_by_the_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The before-images were removed and the journal unlink failed: a later run must
+    # finish the journal instead of refusing forever because the backup is gone.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    status = _start_upgrade(tmp_path)
+    backup = Path(
+        json.loads(_journal_path().read_text(encoding="utf-8"))["backup_dir"]
+    )
+    server_host_install.commit_host_upgrade(
+        operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
+    )
+    # Recreate the interrupted-cleanup state: a committed journal whose material is
+    # already gone.
+    server_host_install.shutil.rmtree(backup, ignore_errors=True)
+    terminal = server_host_install._read_upgrade_journal()
+    assert terminal is None  # committed + cleaned removes the journal too
+    # Build the state directly: same journal content, backup absent.
+    document = {
+        "schema": 1,
+        "operation": status["operation"],
+        "phase": "committed",
+        "owner_pid": os.getpid(),
+        "bundle_path": os.fspath(_bundle_path()),
+        "record_path": os.fspath(_record_path()),
+        "backup_dir": os.fspath(backup),
+        "backup_dev": 1,
+        "backup_inode": 1,
+        "archive_sha256": "ab" * 32,
+        "old_record_sha256": "cd" * 32,
+        "new_record_sha256": "ef" * 32,
+        "old": {
+            "schema": 1,
+            "bundle_path": os.fspath(_bundle_path()),
+            "bundle_id": server_host.BUNDLE_ID,
+            "host_revision": 4,
+            "host_protocol": 2,
+            "executable_sha256": "11" * 32,
+            "per_arch_cdhashes": {
+                arch: "22" * 20 for arch in server_host.ARCHITECTURES
+            },
+            "bundle_files": {
+                name: "33" * 32 for name in server_host.REQUIRED_BUNDLE_FILES
+            },
+        },
+        "new": json.loads(_record_path().read_text(encoding="utf-8")),
+        "policy": {
+            "revision": server_host.SIGNED_HOST_REVISION,
+            "protocol": 2,
+            "schema": server_host.SIGNED_SCHEMA_VERSION,
+            "team_id": "TESTTEAM01",
+        },
+    }
+    server_host_install._write_private_bytes(
+        _journal_path(),
+        (json.dumps(document, indent=2, sort_keys=True) + "\n").encode(),
+        what="the interrupted journal",
+    )
+
+    assert server_host_install.transaction_status() == {"pending": False}
+    archive, _bundle, entry = _signed_fixture(tmp_path, label="after-interrupted")
+    server_host_install.install_server_host(
+        archive, entry, runner=_SignedRunner(), defer_commit=True, owner_pid=os.getpid()
+    )
+    # The stale journal was finished (not rolled back), and the current signed host
+    # is still installed.
+    assert not _journal_path().exists()
+    assert (
+        server_host.verify_owned_host(_bundle_path(), runner=_SignedRunner()).host_revision
+        == server_host.SIGNED_HOST_REVISION
+    )
+
+
+@requires_posix_uid
 def test_a_settled_journal_that_cannot_be_cleaned_blocks_the_next_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

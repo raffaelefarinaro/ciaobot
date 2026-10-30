@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -607,6 +608,8 @@ case "${1:-}" in
                 if [ ! -f "$HOME/health-from-an-unrelated-server" ]; then
                     count=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
                     echo $((count + 1)) > "$HOME/engine-start-count"
+                    printf '4343\\n' > "$HOME/engine-pid"
+                    : > "$HOME/engine-started"
                 fi
                 ;;
         esac
@@ -676,6 +679,8 @@ PLIST
         if [ "${2:-}" = activate ]; then
             count=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
             echo $((count + 1)) > "$HOME/engine-start-count"
+            printf '4343\\n' > "$HOME/engine-pid"
+            : > "$HOME/engine-started"
         fi
         if [ "${2:-}" = activate ] && [ -f "$HOME/fail-installer-activate" ]; then
             printf '{"ok":false,"error":"activation refused"}\n'
@@ -689,6 +694,8 @@ PLIST
         ;;
     service)
         if [ -f "$HOME/fail-ciao-service-start" ]; then exit 1; fi
+        printf '4343\\n' > "$HOME/engine-pid"
+        : > "$HOME/engine-started"
         if [ -f "$HOME/deny-workspace-access" ]; then : > "$HOME/denial-armed"; fi
         # `health-from-an-unrelated-server`: nothing this run starts is the engine
         # answering the port, so the startup id the installer observed before the
@@ -885,7 +892,21 @@ def _harness(
         '# succeeds only for a label launchd holds, and bootstrap/bootout move it.\n'
         'case "$1" in\n'
         '    print)\n'
-        '        if [ -f "$HOME/loaded-$label" ]; then exit 0; fi\n'
+        '        if [ -f "$HOME/launchctl-print-indeterminate" ]; then\n'
+        '            printf \'launchctl: Operation not permitted\\n\' >&2\n'
+        '            exit 1\n'
+        '        fi\n'
+        '        if [ -f "$HOME/loaded-$label" ]; then\n'
+        '            printf \'%s = {\\n\' "$label"\n'
+        '            printf \'\\tactive count = 1\\n\'\n'
+        '            if [ -f "$HOME/engine-pid" ]; then\n'
+        '                printf \'\\tpid = %s\\n\' "$(cat "$HOME/engine-pid")"\n'
+        '            fi\n'
+        '            printf \'}\\n\'\n'
+        '            exit 0\n'
+        '        fi\n'
+        '        printf \'Could not find service "%s" in domain for user gui: 501\\n\' \\\n'
+        '            "$label" >&2\n'
         '        exit 113\n'
         '        ;;\n'
         '    bootstrap) : > "$HOME/loaded-$label" ;;\n'
@@ -899,6 +920,29 @@ def _harness(
         '    kill -TERM "$PPID"\n'
         'fi\n'
         'exit 0\n',
+    )
+    # The process holding the listening socket. Before anything this run starts,
+    # a pre-existing responder may or may not be there; after a start, the
+    # responder is whatever the test says. A real `lsof -t` prints one pid per line
+    # and exits nonzero when nothing matches.
+    _write_exec(
+        fakebin / "lsof",
+        "#!/bin/sh\n"
+        'printf \'lsof %s\\n\' "$*" >> "$HOME/trace.log"\n'
+        'if [ -f "$HOME/lsof-cannot-run" ]; then exit 1; fi\n'
+        'if [ -f "$HOME/engine-started" ]; then\n'
+        '    if [ -f "$HOME/listener-pid" ]; then\n'
+        '        cat "$HOME/listener-pid"\n'
+        '        exit 0\n'
+        '    fi\n'
+        '    cat "$HOME/engine-pid" 2>/dev/null || exit 1\n'
+        '    exit 0\n'
+        'fi\n'
+        'if [ -f "$HOME/pre-listener-pid" ]; then\n'
+        '    cat "$HOME/pre-listener-pid"\n'
+        '    exit 0\n'
+        'fi\n'
+        'exit 1\n',
     )
     _write_exec(fakebin / "osascript", "#!/bin/sh\nexit 1\n")
     # `plutil` reads one key out of a plist. The installer asks it for the
@@ -953,7 +997,7 @@ def _harness(
         flags=re.MULTILINE,
     )
     rewritten = re.sub(
-        r"^(PLISTBUDDY|LAUNCHCTL|OSASCRIPT|PGREP|CURL|SLEEP)=.*$",
+        r"^(PLISTBUDDY|LAUNCHCTL|OSASCRIPT|PGREP|LSOF|CURL|SLEEP)=.*$",
         lambda m: f"{m.group(1)}={fakebin / m.group(1).lower()}",
         rewritten,
         flags=re.MULTILINE,
@@ -2679,6 +2723,85 @@ def test_an_unreadable_status_retains_the_journal_and_reports_incomplete_recover
 
 @runs_the_sh_installer
 @needs_local_tools
+def test_an_indeterminate_launchctl_query_fails_closed(tmp_path: Path) -> None:
+    # `launchctl print` failed for an operational reason (a permission error, a
+    # broken tool), not because the job is gone. That is uncertainty, not proof, so
+    # the identity is not reverted and the journal is kept.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    (home / "startup-version").write_text("9.9.9\n")
+    (home / "launchctl-print-indeterminate").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "was NOT replaced by the previous host" in result.stderr
+    assert _log(harness, "native-host-transaction.log") == ""
+    assert (home / "native-host-pending").exists()
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "candidate\n"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_confirmed_absent_job_still_lets_the_rollback_proceed(tmp_path: Path) -> None:
+    # The contrast: launchd explicitly says it has no such job ("Could not find
+    # service", status 113). That *is* proof, so the rollback runs and the previous
+    # pair is restored.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    (home / "startup-version").write_text("9.9.9\n")
+    (home / "loaded-com.ciao.server").unlink()
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    transcript = _log(harness, "native-host-transaction.log")
+    assert transcript.count("rollback-upgrade") == 1
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    assert not (home / "native-host-pending").exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_failing_status_query_in_the_exit_handler_keeps_the_status(
+    tmp_path: Path,
+) -> None:
+    # The run is interrupted inside the install call, so the EXIT handler has to
+    # discover its own operation - and the status query fails. Under `set -e` an
+    # unguarded failure would abort the trap and lose the original status; the
+    # journal must stay and the run must still report the interruption.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    home = harness["home"]
+    (home / "interrupt-after-deferred-install").write_text("")
+    (home / "unreadable-status-after-install").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 130
+    assert "could not be read" in result.stderr
+    assert "NOT rolled back" in result.stderr
+    assert _log(harness, "native-host-transaction.log") == ""
+    assert (home / "native-host-pending").exists()
+    # The temporary directory was cleaned anyway, which is only reached when the
+    # trap survived the failed discovery.
+    assert not list(Path(harness["env"]["TMPDIR"]).glob("ciaobot-engine.*"))
+
+
+@runs_the_sh_installer
+@needs_local_tools
 def test_a_failed_native_rollback_stops_the_service_restoration(
     tmp_path: Path,
 ) -> None:
@@ -2714,14 +2837,14 @@ def test_a_failed_native_rollback_stops_the_service_restoration(
 def test_a_same_version_unrelated_server_does_not_commit(
     tmp_path: Path,
 ) -> None:
-    # The port keeps being answered by the same engine that answered it before
-    # this run started one, reporting the exact new version. A version string is
-    # not evidence about *which* process answered; the unchanged startup id is.
+    # The port is held by a process that is not the job launchd started, and it
+    # reports the exact new version. A version string says nothing about *which*
+    # process answered; the pid binding does.
     harness = _signed_host_harness(tmp_path)
     _defer(harness)
     _existing_install(harness)
     _engine_definition(harness)
-    (harness["home"] / "health-from-an-unrelated-server").write_text("")
+    (harness["home"] / "listener-pid").write_text("9999\n")
 
     result = _run_installer(harness, "--version", VERSION)
 
@@ -2730,6 +2853,58 @@ def test_a_same_version_unrelated_server_does_not_commit(
     transcript = _log(harness, "native-host-transaction.log")
     assert "commit-upgrade" not in transcript
     assert transcript.count("rollback-upgrade") == 1
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    # The binding really was consulted: launchd's pid and the listener's were read.
+    trace = _log(harness, "trace.log")
+    assert "launchctl print gui/%d/com.ciao.server" % os.getuid() in trace
+    assert "-iTCP:8443" in trace
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_unrelated_responder_without_an_earlier_answer_does_not_commit(
+    tmp_path: Path,
+) -> None:
+    # Nothing answered the port before this run started one, and then an unrelated
+    # same-version server appears. "No earlier answer" is not permission to accept
+    # whatever answers now: the responder has to be the job launchd started.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "listener-pid").write_text("9998\n")
+    assert not (harness["home"] / "pre-listener-pid").exists()
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "did not answer" in result.stderr
+    assert "commit-upgrade" not in _log(harness, "native-host-transaction.log")
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_changed_unrelated_responder_does_not_commit(tmp_path: Path) -> None:
+    # An unrelated server answered before the start and a *different* unrelated
+    # server answers after it. Something changed, but not into the job this run
+    # started - so nothing is committed.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "pre-listener-pid").write_text("7777\n")
+    (harness["home"] / "listener-pid").write_text("9998\n")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode != 0
+    assert "did not answer" in result.stderr
+    assert "commit-upgrade" not in _log(harness, "native-host-transaction.log")
     assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
         "legacy\n"
     )
@@ -2759,6 +2934,9 @@ def test_quiescence_fails_closed_and_retains_the_recovery_material(
     _existing_install(harness)
     _engine_definition(harness)
     home = harness["home"]
+    legacy_plist = (
+        home / "Applications/Ciaobot Server.app/Contents/Info.plist"
+    ).read_bytes()
     (home / "startup-version").write_text("9.9.9\n")
     (home / knob).write_text("")
 
@@ -2775,16 +2953,24 @@ def test_quiescence_fails_closed_and_retains_the_recovery_material(
         "candidate\n"
     )
     assert (home / "native-host-pending").exists()
+    # The retained before-images are byte-exact: nothing was half-restored while
+    # the candidate may still be running.
+    before = home / "server-host-before"
+    assert (before / "app/Contents/build").read_text() == "legacy\n"
+    assert (before / "app/Contents/Info.plist").read_bytes() == legacy_plist
+    assert (before / "record").read_text() == '{"schema": 1, "host_revision": 3}\n'
+    assert stat.S_IMODE((before / "record").stat().st_mode) == 0o600
 
 
 @runs_the_sh_installer
 @needs_local_tools
-def test_a_committed_host_with_unremovable_before_images_is_reported_not_rolled_back(
+def test_a_committed_host_with_unremovable_before_images_is_reported_and_fails(
     tmp_path: Path,
 ) -> None:
-    # The module committed the host but could not remove its retained material.
-    # That is a leftover, not a failed commit: the run succeeds, says so, and never
-    # rolls the committed host back.
+    # The module committed the host but could not remove its retained material. The
+    # settled state is kept - nothing rolls a committed host back - but the
+    # installer result is a failure, because the leftover blocks the next host
+    # transaction until a later run removes it.
     harness = _signed_host_harness(tmp_path)
     _defer(harness)
     _existing_install(harness)
@@ -2793,13 +2979,18 @@ def test_a_committed_host_with_unremovable_before_images_is_reported_not_rolled_
 
     result = _run_installer(harness, "--version", VERSION)
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
     assert "was committed, but its retained before-images could not be removed" in (
         result.stderr
     )
     transcript = _log(harness, "native-host-transaction.log")
     assert "commit-upgrade" in transcript
+    # No second attempt at either terminal command, and the committed host stays.
+    assert transcript.count("commit-upgrade") == 1
     assert "rollback-upgrade" not in transcript
+    assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "candidate\n"
+    )
 
 
 @runs_the_sh_installer

@@ -24,6 +24,7 @@ PLISTBUDDY=/usr/libexec/PlistBuddy
 LAUNCHCTL=launchctl
 OSASCRIPT=osascript
 PGREP=pgrep
+LSOF=lsof
 CURL=curl
 SLEEP=sleep
 # The port `ciao run --installer-bootstrap` and a fresh install's first engine
@@ -250,12 +251,13 @@ native_host_quiesce() {
     fi
     native_host_executable="$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
     # `bootout` reports a missing job as an error too, so its own status is not the
-    # answer; what launchd holds afterwards is. `print` exits 0 for a loaded label
-    # and nonzero for one it does not have, so a nonzero `print` is the only proof
-    # the job is really unloaded. A launchctl that cannot answer stays nonzero-less
-    # here and the process check below still has to pass.
+    # answer; what launchd holds afterwards is. Only launchd *confirming* it has no
+    # such job counts as unloaded: an operational or permission failure of the query
+    # is uncertainty and fails closed, exactly like a job it still holds.
     "$LAUNCHCTL" bootout "gui/$(id -u)/$SERVER_LABEL" 2>/dev/null || true
-    if "$LAUNCHCTL" print "gui/$(id -u)/$SERVER_LABEL" >/dev/null 2>&1; then
+    native_host_job_rc=0
+    native_host_job_state || native_host_job_rc=$?
+    if [ "$native_host_job_rc" -ne 1 ]; then
         return 1
     fi
     native_host_waited=0
@@ -303,13 +305,15 @@ native_host_rollback() {
             return 0
             ;;
         5)
-            # The pair is back; only the retained material is left. That is a
-            # leftover the next run removes, not a failed rollback - and reporting
-            # it as one would invite a second, destructive attempt.
+            # The pair is back; only the retained material is left. The operation is
+            # settled, so nothing may roll it back a second time - but the installer
+            # result is still a failure, because the transaction left material behind
+            # and the next host transaction is blocked until it is removed.
             native_host_pending=0
             native_host_service_started=0
+            native_host_install_started=0
             echo "Ciaobot engine installer: the previous Ciaobot Server host was restored, but its retained before-images could not be removed. They are kept for a later run: see $HOME/.local/state/ciaobot/server-host-upgrade.json" >&2
-            return 0
+            return 5
             ;;
     esac
     echo "Ciaobot engine installer: the previous Ciaobot Server host could NOT be fully restored. Its recoverable material is kept: see $HOME/.local/state/ciaobot/server-host-upgrade.json" >&2
@@ -335,10 +339,11 @@ native_host_commit() {
     native_host_service_started=0
     native_host_install_started=0
     if [ "$native_host_commit_rc" -eq 5 ]; then
-        # Committed, with before-images the module could not remove. The host is
-        # the signed one; only the leftover is unfinished, and a later run removes
-        # it (and refuses another upgrade until it has).
-        echo "Ciaobot engine installer: the signed Ciaobot Server host was committed, but its retained before-images could not be removed. They are kept for a later run: see $HOME/.local/state/ciaobot/server-host-upgrade.json" >&2
+        # Committed, with before-images the module could not remove. The settled
+        # state is kept (nothing rolls a committed host back), but the installer
+        # result is a failure: the leftover blocks the next host transaction until a
+        # later run removes it.
+        fail "the signed Ciaobot Server host was committed, but its retained before-images could not be removed; they are kept for a later run: see $HOME/.local/state/ciaobot/server-host-upgrade.json"
     fi
 }
 
@@ -406,19 +411,59 @@ native_host_begin() {
     native_host_install_started=0
 }
 
-native_host_capture_responder() {
-    # The engine answering on the configured port *before* this run starts one. If
-    # the same engine answers afterwards, it is not the candidate this upgrade
-    # installed, whatever version string it reports. Best effort: an absent answer
-    # records nothing and leaves the version check as the only evidence, which is
-    # the pre-existing behaviour for a port that was not serving.
-    if [ "$native_host_pending" -eq 0 ] || [ -z "${port:-}" ]; then
+native_host_job_state() {
+    # What launchd says about the engine job:
+    #   0 = it holds the job (running or not),
+    #   1 = it confirms it has no such job,
+    #   2 = the query itself failed - a permission or operational error, a missing
+    #       tool, or an answer this installer cannot read as "absent".
+    # Only 1 is proof the job is gone; everything else is uncertainty.
+    if [ -z "${LAUNCHCTL:-}" ]; then
+        return 2
+    fi
+    : > "$tmp/native-host-print-err"
+    native_host_print_rc=0
+    "$LAUNCHCTL" print "gui/$(id -u)/$SERVER_LABEL" \
+        > "$tmp/native-host-print" 2> "$tmp/native-host-print-err" \
+        || native_host_print_rc=$?
+    if [ "$native_host_print_rc" -eq 0 ]; then
         return 0
     fi
-    : > "$tmp/pre-startup-id"
-    "$CURL" -fsS "http://localhost:$port/api/startup-status" 2>/dev/null \
-        | sed -n 's/.*"startup_id":[[:space:]]*"\([^"]*\)".*/\1/p' \
-        | head -1 > "$tmp/pre-startup-id" || true
+    # launchd's documented "no such service" answer, by status or by its own text.
+    if [ "$native_host_print_rc" -eq 113 ] ||
+        grep -qF "Could not find service" "$tmp/native-host-print-err" 2>/dev/null; then
+        return 1
+    fi
+    return 2
+}
+
+native_host_job_pid() {
+    # The pid launchd reports for the engine job, or nothing at all. The caller
+    # checks `native_host_job_state` first, so an absent pid is "no process yet".
+    sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p' "$tmp/native-host-print" \
+        | head -1
+}
+
+native_host_listener_pid() {
+    # <port>: the one pid holding the listening socket, or nothing. A lookup that
+    # cannot answer, no listener, and more than one listener are all "not proven".
+    if [ -z "${LSOF:-}" ]; then
+        return 1
+    fi
+    native_host_listener_rc=0
+    "$LSOF" -nP -iTCP:"$1" -sTCP:LISTEN -t \
+        > "$tmp/native-host-listeners" 2>/dev/null || native_host_listener_rc=$?
+    if [ "$native_host_listener_rc" -ne 0 ]; then
+        return 1
+    fi
+    if [ "$(wc -l < "$tmp/native-host-listeners" | tr -d ' ')" != 1 ]; then
+        return 1
+    fi
+    native_host_listener=$(tr -d ' \n' < "$tmp/native-host-listeners")
+    case "$native_host_listener" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s\n' "$native_host_listener"
 }
 
 native_host_adopt() {
@@ -466,7 +511,9 @@ cleanup_on_exit() {
         # can land in that window. So bind the operation this shell owns from the
         # journal itself: the owner pid and the nonce are the proof, and nothing is
         # rolled back unless this process is the owner.
-        native_host_adopt
+        # `set -e` would abort the trap on a failed discovery and lose both the
+        # saved status and the temporary cleanup, so the failure is handled here.
+        native_host_adopt || true
     fi
     if [ "$native_host_pending" -ne 0 ]; then
         native_host_rollback || true
@@ -1426,10 +1473,16 @@ abort_install() {
     # A native rollback that did not finish stops the rest: reloading the previous
     # engine definition while the candidate may still be running, over before-images
     # that are the only way back, is worse than reporting an incomplete rollback.
-    if ! native_host_rollback; then
-        echo "Ciaobot engine installer: the previous Ciaobot Server host could not be restored, so the previous engine definition was NOT reloaded and nothing else was changed. The recoverable material is kept: see $HOME/.local/state/ciaobot/server-host-upgrade.json" >&2
-        fail "$1 (incomplete rollback: the previous Ciaobot Server host was not restored)"
-    fi
+    native_host_rollback_rc=0
+    native_host_rollback || native_host_rollback_rc=$?
+    case "$native_host_rollback_rc" in
+        0) ;;
+        5) ;;
+        *)
+            echo "Ciaobot engine installer: the previous Ciaobot Server host could not be restored, so the previous engine definition was NOT reloaded and nothing else was changed. The recoverable material is kept: see $HOME/.local/state/ciaobot/server-host-upgrade.json" >&2
+            fail "$1 (incomplete rollback: the previous Ciaobot Server host was not restored)"
+            ;;
+    esac
     case "$migrate_path" in
         host) rollback_host "$1" ;;
         client) rollback_client "$1" ;;
@@ -2152,11 +2205,8 @@ if [ "$migrate_path" != client ]; then
             [ -z "$fresh_suggestion" ] || set -- "$@" "--installer-suggest-workspace=$fresh_suggestion"
             # The bootstrap's activation starts the engine, which runs out of the
             # signed host this run just installed. From here a failed run has to
-            # quiesce that job before the previous host goes back, and the responder
-            # already answering the port is captured so a later answer can be told
-            # apart from it.
+            # quiesce that job before the previous host goes back.
             if [ "$native_host_pending" -ne 0 ]; then
-                native_host_capture_responder
                 native_host_service_started=1
             fi
             bootstrap_rc=0
@@ -2282,10 +2332,8 @@ print(port)
     # From here a job may be running out of the signed host this run just
     # installed: `--load-launchd` reloads the agent and starts it. A later
     # failure has to boot that job out and wait for it before the previous host is
-    # put back, so the fact is recorded before the call, not after - and so is the
-    # engine that answers the port before this run starts one.
+    # put back, so the fact is recorded before the call, not after.
     if [ "$native_host_pending" -ne 0 ] && [ "$no_start" -eq 0 ]; then
-        native_host_capture_responder
         native_host_service_started=1
     fi
     # `ciao setup` reports a workspace whose memory regions could not be set
@@ -2398,18 +2446,22 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
                         healthy=1
                         break
                     fi
-                    # Positive evidence that the responder is the candidate this
-                    # run started, not an unrelated server that happens to report
-                    # the same version: a startup id, and one that differs from the
-                    # engine that answered this port before this run started one.
-                    # The id is generated per engine start, so an unchanged one is
-                    # the same process still answering.
-                    startup_id=$(printf '%s\n' "$status" \
-                        | sed -n 's/.*"startup_id":[[:space:]]*"\([^"]*\)".*/\1/p' \
-                        | head -1)
-                    pre_startup_id=$(cat "$tmp/pre-startup-id" 2>/dev/null || true)
-                    if [ -n "$startup_id" ] &&
-                        { [ -z "$pre_startup_id" ] || [ "$startup_id" != "$pre_startup_id" ]; }; then
+                    # Positive evidence that the responder is the job this run
+                    # started: the pid launchd reports for the engine job is the one
+                    # pid holding the listening socket on the configured port. A
+                    # version string (and even a changed startup id) only says what
+                    # answered, never which process did.
+                    native_host_job_rc=0
+                    native_host_job_state || native_host_job_rc=$?
+                    native_host_job_pid_value=
+                    if [ "$native_host_job_rc" -eq 0 ]; then
+                        native_host_job_pid_value=$(native_host_job_pid)
+                    fi
+                    native_host_port_pid=$(native_host_listener_pid "$port" || true)
+                    if [ "$native_host_job_rc" -eq 0 ] &&
+                        [ -n "$native_host_job_pid_value" ] &&
+                        [ -n "$native_host_port_pid" ] &&
+                        [ "$native_host_job_pid_value" = "$native_host_port_pid" ]; then
                         healthy=1
                         break
                     fi

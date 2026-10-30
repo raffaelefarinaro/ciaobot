@@ -352,26 +352,29 @@ with the operation nonce and this shell's pid, installs the signed host, and
 returns at phase `installed`. The shell then asks `transaction-status` whether it
 owns a pending upgrade. With one pending, the health wait requires the exact new
 `version` on the configured port *and* positive evidence that the responder is the
-engine this run started: a `startup_id` that differs from the one the port answered
-with before the service was started. A version string alone is not evidence about
-which process answered, so an unrelated or stale engine reporting the same version
-does not earn a commit. Every later failure path — an explicit `fail`,
+job this run started: the pid `launchctl print` reports for the engine label must
+equal the one pid holding the listening socket (`lsof -nP -iTCP:<port>
+-sTCP:LISTEN -t`). A version string - and even a changed startup id - says only
+what answered, never which process did, so an unrelated or stale engine reporting
+the same version does not earn a commit. A lookup that cannot answer, no listener
+or more than one listener is a failure, not a pass. Every later failure path — an explicit `fail`,
 `abort_install`, a signal, an unexpected `set -e` exit — gives the old pair back
 exactly once through `rollback-upgrade`, and `commit-upgrade` runs only after
 positive engine health and, in a `--migrate` hand-over, after the app's own agent
 has been retired. When a launchd job may already run out of the candidate host,
 the shell boots it out, proves with `launchctl print` that the job is really gone
 and waits for the process to exit before reverting the identity. That check fails
-closed: a job launchd still holds, a process still present, or a `pgrep` that could
-not answer all keep the before-images and the journal, leave the run nonzero and
-skip the engine-definition reload rather than claiming a rollback of a
-still-running candidate. The EXIT handler also discovers the operation this shell
+closed: a job launchd still holds, a `launchctl print` that failed for any reason
+other than launchd confirming it has no such job, a process still present, or a
+`pgrep` that could not answer all keep the before-images and the journal, leave
+the run nonzero and skip the engine-definition reload rather than claiming a
+rollback of a still-running candidate. The EXIT handler also discovers the operation this shell
 owns from the journal itself (owner pid plus nonce) when the child finished the
 install before the run could record it, and keeps the journal with a spoken
 incomplete recovery when that discovery cannot be made. A commit or rollback that
-settled but could not remove its before-images reports the leftover with its own
-exit status (5) instead of failing the operation, and the next host transaction is
-refused until that material is gone. `--no-start` never defers: it reports that the
+settled but could not remove its before-images keeps that settled state (nothing
+rolls a committed host back) yet still makes the installer exit nonzero, and the
+next host transaction is refused until the leftover is gone. `--no-start` never defers: it reports that the
 upgrade completes on a later normal run and leaves the previous host in place, and
 a wheel-only release or a client never touches the host at all. A journal left by a
 killed run is settled by the next run: a live owner is a refusal, and an unfinished
