@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import stat
 import logging
 import os
 import uuid
@@ -65,14 +66,21 @@ class WorkspaceInstanceLock:
         if self._handle is not None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+", encoding="utf-8", newline="")
-        if os.name == "posix":
-            # The lock carries this run's pid, port, workspace and startup id.
-            # `open()` honours the umask, so a fresh lock would otherwise be
-            # group/world readable (0644 under the usual 022) and an older one
-            # keeps whatever mode it had; tighten the descriptor itself so the
-            # file is private for this and every later run (#2330).
-            _fchmod(handle.fileno(), 0o600)
+        # O_NOFOLLOW: `Path.open` would follow a substituted `server.lock` and
+        # the mode tightening below would then apply to an unrelated file. The
+        # descriptor is opened once, checked as a regular file, and only then
+        # tightened, so the lock is private for this and every later run
+        # (#2330). Modes are POSIX-only; Windows has no equivalent here.
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self.path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError(errno.EINVAL, "the runtime lock is not a regular file", str(self.path))
+            _fchmod(descriptor, 0o600)
+            handle = os.fdopen(descriptor, "a+", encoding="utf-8", newline="")
+        except BaseException:
+            os.close(descriptor)
+            raise
         try:
             lock_exclusive(handle.fileno(), blocking=False)
         except OSError as exc:
