@@ -36,18 +36,21 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 90
     environment: server-host-signing-rehearsal
-    env:
-      # Unique per run, so a leftover directory from another run can never be
-      # reused, adopted or deleted by this one.
-      REHEARSAL_DIR: ${{ runner.temp }}/server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Claim the run-scoped scratch receipt
         id: claim-scratch
+        # The path is resolved here, at step level, because GitHub does not allow
+        # the `runner` context in a job-level `env` block: doing so fails to parse
+        # the whole workflow and the run never starts. It is unique per run id and
+        # attempt, so a leftover directory from another run can never be reused,
+        # adopted or deleted by this one.
+        env:
+          REHEARSAL_DIR: ${{ runner.temp }}/server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
         # Runs before the confirmation/ref guard, because cleanup runs always()
-        # and must never trust a receipt a refused run did not clear. The path is
-        # unique per run id and attempt, so only this job can have written one.
+        # and must never trust a receipt a refused run did not clear.
         run: |
           set -euo pipefail
+          printf 'REHEARSAL_DIR=%s\n' "$REHEARSAL_DIR" >> "$GITHUB_ENV"
           rm -f "${REHEARSAL_DIR}.owned"
 
       - name: Refuse an unconfirmed or untrusted run

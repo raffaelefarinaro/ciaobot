@@ -63,6 +63,21 @@ async function measure(page: Page, scope = 'body') {
   // Never measure a layout that is still being styled: sizes read before a
   // lazy stylesheet applies are the fine-pointer ones.
   await quiesce(page)
+  // Once on macOS CI, `(pointer: coarse)` read false right after a click on
+  // the notifications bell with no navigation in between, and was true on
+  // the re-run (not reproduced in 232 local runs). Give the emulated pointer
+  // a moment to come back; if it never does, fail with what the page reports.
+  const coarse = await page.waitForFunction(() => matchMedia('(pointer: coarse)').matches, null, { timeout: 3000 })
+    .then(() => true, () => false)
+  if (!coarse) {
+    const seen = await page.evaluate(() => ({
+      anyCoarse: matchMedia('(any-pointer: coarse)').matches,
+      hover: matchMedia('(hover: hover)').matches,
+      maxTouchPoints: navigator.maxTouchPoints,
+      focused: document.activeElement?.outerHTML.slice(0, 120) ?? null,
+    }))
+    throw new Error(`page is not a coarse pointer; sizes would be fine-pointer ones: ${JSON.stringify(seen)}`)
+  }
   return page.evaluate(({ min, scope }) => {
     if (!matchMedia('(pointer: coarse)').matches) throw new Error('page is not a coarse pointer; sizes would be fine-pointer ones')
     document.querySelectorAll('details').forEach((d) => { d.open = true })
