@@ -592,6 +592,10 @@ pathlib.Path(path).write_text(
     encoding="utf-8",
 )
 LOCK
+    chmod 600 "$runtime/server.lock" 2>/dev/null || true
+    if [ -f "$HOME/lock-mode-0644" ]; then
+        chmod 644 "$runtime/server.lock" 2>/dev/null || true
+    fi
 }
 case "${1:-}" in
     setup)
@@ -977,15 +981,52 @@ def _harness(
         'fi\n'
         'exit 0\n',
     )
-    # The process holding the listening socket. Before anything this run starts,
-    # a pre-existing responder may or may not be there; after a start, the
-    # responder is whatever the test says. A real `lsof -t` prints one pid per line
-    # and exits nonzero when nothing matches.
+    # `lsof` answers the two questions the health gate asks: which single pid holds
+    # the listening socket (plain `-t`, one pid per line, nonzero when nothing
+    # matches), and which executable text a pid runs (`-d txt -Fn`, one `n` record).
+    # The listener can be replaced while a request is in flight, and the launchd
+    # job's executable can be something else entirely; both are knobs.
     _write_exec(
         fakebin / "lsof",
         "#!/bin/sh\n"
         'printf \'lsof %s\\n\' "$*" >> "$HOME/trace.log"\n'
         'if [ -f "$HOME/lsof-cannot-run" ]; then exit 1; fi\n'
+        'executable=\n'
+        'for argument in "$@"; do\n'
+        '    case "$argument" in\n'
+        '        -d) executable=1 ;;\n'
+        '    esac\n'
+        'done\n'
+        'if [ -n "$executable" ]; then\n'
+        '    if [ -f "$HOME/host-executable-indeterminate" ]; then exit 1; fi\n'
+        '    if [ -f "$HOME/host-executable-wrong" ]; then\n'
+        '        printf \'n/usr/bin/python3\\n\'\n'
+        '        exit 0\n'
+        '    fi\n'
+        '    if [ -f "$HOME/host-executable-two" ]; then\n'
+        '        printf \'n/usr/bin/python3\\n\'\n'
+        '        printf \'n/usr/bin/python3\\n\'\n'
+        '        exit 0\n'
+        '    fi\n'
+        '    printf \'p%s\\n\' "$(cat "$HOME/host-pid" 2>/dev/null || echo 4343)"\n'
+        '    printf \'n%s\\n\' \\\n'
+        '        "$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n'
+        '    exit 0\n'
+        'fi\n'
+        'if [ -f "$HOME/listener-replaced" ]; then\n'
+        '    # The socket changes owner on every lookup: an unrelated listener and\n'
+        '    # the candidate take turns, so no single request sees the same listener\n'
+        '    # on both sides of it.\n'
+        '    count=$(cat "$HOME/listener-replaced-count" 2>/dev/null || echo 0)\n'
+        '    count=$((count + 1))\n'
+        '    echo "$count" > "$HOME/listener-replaced-count"\n'
+        '    if [ $((count % 2)) -eq 1 ]; then\n'
+        '        printf \'9999\\n\'\n'
+        '    else\n'
+        '        cat "$HOME/engine-pid" 2>/dev/null || exit 1\n'
+        '    fi\n'
+        '    exit 0\n'
+        'fi\n'
         'if [ -f "$HOME/engine-started" ]; then\n'
         '    if [ -f "$HOME/listener-pid" ]; then\n'
         '        cat "$HOME/listener-pid"\n'
@@ -1022,6 +1063,20 @@ def _harness(
         'host=$(cat "$HOME/host-pid" 2>/dev/null || echo 4343)\n'
         'case "$field" in\n'
         '    ppid=)\n'
+        '        if [ -f "$HOME/deep-chain" ]; then\n'
+        '            # Six hops to the launched host: deeper than the bounded walk.\n'
+        '            case "$target" in\n'
+        '                "$engine") echo 6100 ;;\n'
+        '                6100) echo 6101 ;;\n'
+        '                6101) echo 6102 ;;\n'
+        '                6102) echo 6103 ;;\n'
+        '                6103) echo 6104 ;;\n'
+        '                6104) echo "$host" ;;\n'
+        '                "$host") echo 1 ;;\n'
+        '                *) echo 1 ;;\n'
+        '            esac\n'
+        '            exit 0\n'
+        '        fi\n'
         '        case "$target" in\n'
         '            "$engine") echo "$middle" ;;\n'
         '            "$middle") echo "$host" ;;\n'
@@ -2960,7 +3015,7 @@ def test_a_same_version_unrelated_server_does_not_commit(
     result = _run_installer(harness, "--version", VERSION)
 
     assert result.returncode != 0
-    assert "did not answer" in result.stderr
+    assert "was not proven" in result.stderr
     transcript = _log(harness, "native-host-transaction.log")
     assert "commit-upgrade" not in transcript
     assert transcript.count("rollback-upgrade") == 1
@@ -2999,7 +3054,7 @@ def test_an_unrelated_responder_without_an_earlier_answer_does_not_commit(
     result = _run_installer(harness, "--version", VERSION)
 
     assert result.returncode != 0
-    assert "did not answer" in result.stderr
+    assert "was not proven" in result.stderr
     assert "commit-upgrade" not in _log(harness, "native-host-transaction.log")
     assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
         "legacy\n"
@@ -3033,7 +3088,7 @@ def test_a_changed_unrelated_responder_does_not_commit(tmp_path: Path) -> None:
     result = _run_installer(harness, "--version", VERSION)
 
     assert result.returncode != 0
-    assert "did not answer" in result.stderr
+    assert "was not proven" in result.stderr
     assert "commit-upgrade" not in _log(harness, "native-host-transaction.log")
     assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
         "legacy\n"
@@ -3098,6 +3153,117 @@ def test_quiescence_fails_closed_and_retains_the_recovery_material(
     assert (before / "app/Contents/Info.plist").read_bytes() == legacy_plist
     assert (before / "record").read_text() == '{"schema": 1, "host_revision": 3}\n'
     assert stat.S_IMODE((before / "record").stat().st_mode) == 0o600
+
+
+def _assert_no_commit_and_legacy_pair(
+    harness: dict[str, Any], result: subprocess.CompletedProcess[str], *, step: str
+) -> None:
+    """The shared shape of every unproven-candidate failure."""
+    home = harness["home"]
+    assert result.returncode != 0
+    assert "was not proven" in result.stderr
+    assert step in result.stderr
+    transcript = _log(harness, "native-host-transaction.log")
+    assert "commit-upgrade" not in transcript
+    assert transcript.count("rollback-upgrade") == 1
+    assert (home / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
+        "legacy\n"
+    )
+    assert (home / ".local/state/ciaobot/server-host.json").read_text() == (
+        '{"schema": 1, "host_revision": 3}\n'
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_wrong_boundary_executable_does_not_commit(tmp_path: Path) -> None:
+    # The ancestry reaches launchd's pid, but that process is not running the
+    # installed host executable. On a real Mac `ps -o comm=` cannot answer this at
+    # all, which is why the executable text is read from lsof; either way, a job
+    # that is not the host is not the candidate.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "host-executable-wrong").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(harness, result, step="executable")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_indeterminate_process_lookup_does_not_commit(tmp_path: Path) -> None:
+    # `ps` could not answer at all. An unknown ancestry is not a proven one, so the
+    # before-images are not released.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "ps-cannot-run").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    # The reason names the unreadable lookup itself, not a chain that merely
+    # stopped early: "could not ask" and "asked and got nothing" are different
+    # failures for an operator.
+    _assert_no_commit_and_legacy_pair(
+        harness, result, step="readable process ancestry"
+    )
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_over_deep_ancestor_chain_does_not_commit(tmp_path: Path) -> None:
+    # The listener really is a descendant of launchd's job, but six hops away. The
+    # walk is bounded at four, so the chain does not reach the job and nothing is
+    # proven.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "deep-chain").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(harness, result, step="ancestry")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_listener_replaced_during_the_request_does_not_commit(
+    tmp_path: Path,
+) -> None:
+    # An unrelated listener answers the health request and exits; the candidate
+    # binds the socket before the second capture. The readable lock metadata would
+    # have matched, which is exactly why the listener identity is captured on both
+    # sides of the request.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "listener-replaced").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(harness, result, step="listener")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_unsafe_runtime_lock_does_not_commit(tmp_path: Path) -> None:
+    # The lock names the right engine but is group/world readable, so it is not
+    # trusted as this install's private identity.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "lock-mode-0644").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(harness, result, step="runtime lock")
 
 
 @runs_the_sh_installer

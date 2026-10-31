@@ -1264,24 +1264,47 @@ def _read_upgrade_journal() -> _UpgradeJournal | None:
 def _write_upgrade_journal(journal: _UpgradeJournal) -> tuple[int, int]:
     """Persist one journal phase durably and return the identity of what was written.
 
-    The replace creates a new inode, so the caller has to be told which file now
-    holds that phase: the later unlink is bound to exactly that file and refuses a
-    journal somebody else substituted.
+    The identity comes from the descriptor that wrote the bytes, not from a second
+    look at the pathname: the temp file is the file ``replace`` moves into place, so
+    ``fstat`` on the writing handle names exactly the inode that now holds this
+    phase. The later unlink is bound to that inode and refuses a journal somebody
+    substituted.
     """
     path = upgrade_journal_path()
     data = (json.dumps(journal.document(), indent=2, sort_keys=True) + "\n").encode(
         "utf-8"
     )
-    _write_private_bytes(path, data, what="the server host upgrade journal")
     try:
-        written = os.lstat(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        make_private_dir(path.parent)
+        descriptor, tmp_name = mkstemp_private(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
     except OSError as exc:
         raise ServerHostInstallError(
-            f"the server host upgrade journal cannot be examined after it was "
-            f"written: {exc}",
+            f"the server host upgrade journal could not be prepared: {exc}",
             code=TRANSACTION_FAILED,
         ) from exc
-    return written.st_dev, written.st_ino
+    tmp = Path(tmp_name)
+    identity: os.stat_result | None = None
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            identity = os.fstat(handle.fileno())
+        make_private(tmp)
+        replace_file(tmp, path)
+        _fsync_dir(path.parent)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the server host upgrade journal could not be written: {exc}",
+            code=TRANSACTION_FAILED,
+        ) from exc
+    finally:
+        tmp.unlink(missing_ok=True)
+    assert identity is not None
+    return identity.st_dev, identity.st_ino
 
 
 def _journal_with_phase(journal: _UpgradeJournal, phase: str) -> _UpgradeJournal:
@@ -1384,6 +1407,22 @@ def _remove_tree_at(
     entry = _dir_entry(dir_fd, name)
     if entry is None:
         return
+    if expected is not None:
+        # The root is named by the transaction's own device/inode. A regular file, a
+        # link or a different directory at that name is refused *before* any type
+        # branch can unlink it.
+        if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+            raise ServerHostInstallError(
+                f"{what} is not the directory this upgrade created, so it was not "
+                f"deleted",
+                code=TRANSACTION_FAILED,
+            )
+        if (entry.st_dev, entry.st_ino) != expected:
+            raise ServerHostInstallError(
+                f"{what} is not the directory this upgrade created, so nothing inside "
+                f"it was deleted",
+                code=TRANSACTION_FAILED,
+            )
     if stat.S_ISLNK(entry.st_mode):
         raise ServerHostInstallError(
             f"{what} contains a symlink this installer will not follow: {name}",

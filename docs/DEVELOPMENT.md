@@ -352,12 +352,24 @@ with the operation nonce and this shell's pid, installs the signed host, and
 returns at phase `installed`. The shell then asks `transaction-status` whether it
 owns a pending upgrade. With one pending, the health wait requires the exact new
 `version` on the configured port *and* positive evidence that the responder is the
-job this run started: the pid `launchctl print` reports for the engine label must
-equal the one pid holding the listening socket (`lsof -nP -iTCP:<port>
--sTCP:LISTEN -t`). A version string - and even a changed startup id - says only
-what answered, never which process did, so an unrelated or stale engine reporting
-the same version does not earn a commit. A lookup that cannot answer, no listener
-or more than one listener is a failure, not a pass. Every later failure path — an explicit `fail`,
+process instance this run started, bound to objects rather than strings:
+
+1. exactly one pid holds the listening socket before the request
+   (`lsof -nP -iTCP:<port> -sTCP:LISTEN -t`) and the same pid holds it after it, so
+   an unrelated listener cannot answer and exit in between;
+2. that pid is the `pid` in this runtime root's `server.lock`, the response's
+   `startup_id` is the lock's, and the lock itself is a regular file this user owns
+   with mode `0600`, opened without following a link, whose opened inode is the one
+   the directory listed - readable lock metadata alone proves nothing;
+3. the listener's bounded ancestor chain (`ps -o ppid=`, four hops) reaches the pid
+   `launchctl print` reports for the job, and that job's executable text
+   (`lsof -a -p <pid> -d txt -Fn`, exactly one `n` record - `ps -o comm=` only ever
+   prints the name) is the installed `Ciaobot Server`, because launchd runs the host
+   and the host `posix_spawn`s Python.
+
+A missing, ambiguous, over-deep or unreadable answer is a failure, not a pass, and
+the timeout message names the step that could not be proven (version, lock,
+listener, ancestry or executable) so the operator has a direction. Every later failure path — an explicit `fail`,
 `abort_install`, a signal, an unexpected `set -e` exit — gives the old pair back
 exactly once through `rollback-upgrade`, and `commit-upgrade` runs only after
 positive engine health and, in a `--migrate` hand-over, after the app's own agent
