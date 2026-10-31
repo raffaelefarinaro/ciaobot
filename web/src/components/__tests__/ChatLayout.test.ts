@@ -3118,7 +3118,7 @@ describe('ChatLayout chat route without a catalog entry', () => {
 
     async function mountSlot(
       paneWidth: number,
-      options: { pinned?: boolean; visible?: boolean } = {},
+      options: { pinned?: boolean; visible?: boolean; chats?: Array<Record<string, string>> } = {},
     ) {
       observers = []
       reportedWidth = paneWidth
@@ -3147,7 +3147,7 @@ describe('ChatLayout chat route without a catalog entry', () => {
 
       const store = useProjectStore()
       store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
-      store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' }] as unknown as typeof store.chats
+      store.chats = (options.chats ?? [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' }]) as unknown as typeof store.chats
       store.activeChatId = 'chat-1'
       store.bootstrapped = true
       if (options.pinned) {
@@ -3159,7 +3159,9 @@ describe('ChatLayout chat route without a catalog entry', () => {
       // The terminal's panel is asked for, and the terminal is open: the
       // pane owns that state and tells the layout about it.
       terminalPanelWanted.value = true
-      useTerminalStore().visible = options.visible !== false
+      const terminal = useTerminalStore()
+      terminal.visible = options.visible !== false
+      if (terminal.visible) terminal.target = { chatId: 'chat-1' }
 
       const { default: ChatLayout } = await import('../ChatLayout.vue')
       const wrapper = mount(ChatLayout, {
@@ -3271,6 +3273,29 @@ describe('ChatLayout chat route without a catalog entry', () => {
       // on screen.
       expect(wrapper.find('.terminal-pane').exists()).toBe(true)
       expect(wrapper.find('.terminal-pane--open').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('hides the terminal when another chat is opened', async () => {
+      const wrapper = await mountSlot(1200, {
+        chats: [
+          { chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' },
+          { chat_id: 'chat-2', project_id: 'project-1', title: 'Chat two' },
+        ],
+      })
+      const store = useProjectStore()
+      const follow = vi.spyOn(useTerminalStore(), 'followChat')
+      vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
+      expect(wrapper.find('.terminal-pane--open').exists()).toBe(true)
+
+      await wrapper.vm.$router.push('/chat/chat-2')
+      store.activeChatId = 'chat-2'
+      await flushPromises()
+
+      expect(follow).toHaveBeenCalledWith('chat-2')
+      expect(wrapper.find('.terminal-pane--open').exists()).toBe(false)
+      expect(wrapper.find('.chat-split-resizer').exists()).toBe(false)
+      expect(wrapper.find('.chat-split-side--closed').exists()).toBe(true)
       wrapper.unmount()
     })
   })

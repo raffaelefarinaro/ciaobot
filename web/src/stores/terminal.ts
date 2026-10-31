@@ -281,6 +281,16 @@ export const useTerminalStore = defineStore('terminal', () => {
   const creating = ref(false)
   /** True while a session is being ended. */
   const ending = ref(false)
+  /**
+   * Whether the latest show or hide came from a chat switch rather than from
+   * the person. The pane moves no focus for it: a navigation must not put the
+   * keyboard in a shell, nor pull it back to a control in the chat left behind.
+   */
+  const chatSwitch = ref(false)
+  /** Chats whose terminal was on screen when the person left them. Per tab, in memory. */
+  const openChats = new Set<string>()
+  /** The chat on screen as the pane last reported it; null until the first report. */
+  let shownChat: string | null = null
 
   // ── Internals ──────────────────────────────────────────────────────────
 
@@ -994,14 +1004,20 @@ export const useTerminalStore = defineStore('terminal', () => {
    * person asked for a terminal, so an empty pane would be one more click.
    * When the scope offers two folders (a linked repository beside the
    * workspace) nothing is started — the pane asks which one instead.
+   *
+   * `fromChatSwitch` marks a show that navigation caused, so the pane moves no focus.
    */
-  async function open(next: TerminalTarget, options: { ensureSession?: boolean } = {}): Promise<void> {
+  async function open(
+    next: TerminalTarget,
+    options: { ensureSession?: boolean; fromChatSwitch?: boolean } = {},
+  ): Promise<void> {
     const id = 'chatId' in next ? next.chatId : next.projectId
     if (!id || !id.trim()) {
       error.value = 'The terminal needs a chat or a project to run in.'
       phase.value = 'error'
       return
     }
+    chatSwitch.value = options.fromChatSwitch === true
     // The pane is a chunk of its own, mounted by the shell the first time a
     // terminal is asked for. Asking for it here keeps every way into the
     // terminal — the chat's button, the project's button, a future deep link
@@ -1185,12 +1201,37 @@ export const useTerminalStore = defineStore('terminal', () => {
    * the acknowledged offset, so the dropped bytes come back rather than
    * being trimmed away as if the screen had already shown them.
    */
-  function hide(): void {
+  function hide(options: { fromChatSwitch?: boolean } = {}): void {
+    chatSwitch.value = options.fromChatSwitch === true
     visible.value = false
     invalidateWorld()
     removeListeners()
     const surface = currentSurface()
     if (surface) dropQueued(surface)
+  }
+
+  /**
+   * Follow the chat on screen. The terminal belongs to the chat it was opened
+   * in, the way a pinned file does: leaving a chat hides it, and coming back
+   * shows it again only if it was on screen when the person left. `''` is a
+   * route with no chat (Home, a project, Settings). Hiding is the same detach
+   * Close does, so the shell keeps running on the engine. Coming back starts no
+   * shell: a navigation never spends one of the engine's sessions. The first
+   * report only records where the pane is: it mounts because a terminal was
+   * just asked for, and that open stands.
+   */
+  function followChat(chatId: string): void {
+    if (shownChat === chatId) return
+    const left = shownChat
+    shownChat = chatId
+    if (left === null) return
+    if (left) {
+      const scope = target.value
+      if (visible.value && scope && 'chatId' in scope && scope.chatId === left) openChats.add(left)
+      else openChats.delete(left)
+    }
+    if (visible.value) hide({ fromChatSwitch: true })
+    if (chatId && openChats.has(chatId)) void open({ chatId }, { fromChatSwitch: true })
   }
 
   /**
@@ -1512,6 +1553,8 @@ export const useTerminalStore = defineStore('terminal', () => {
     timers.clear()
     removeListeners()
     renderer = null
+    openChats.clear()
+    shownChat = null
     visible.value = false
     phase.value = 'closed'
   }
@@ -1535,9 +1578,11 @@ export const useTerminalStore = defineStore('terminal', () => {
     unlocked,
     creating,
     ending,
+    chatSwitch,
     // actions
     open,
     hide,
+    followChat,
     refreshSessions,
     createSession,
     selectSession,
