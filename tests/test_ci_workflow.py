@@ -614,6 +614,8 @@ def test_signing_rehearsal_is_manual_protected_and_no_release_upload() -> None:
     )
     for forbidden in (
         "actions/upload-artifact",
+        "actions/cache",
+        "gh release upload",
         "gh release",
         "--clobber",
         "git push",
@@ -622,12 +624,27 @@ def test_signing_rehearsal_is_manual_protected_and_no_release_upload() -> None:
         "aws s3",
     ):
         assert forbidden not in commands, (
-            f"the signing rehearsal would distribute a candidate: {forbidden!r}"
+            f"the signing rehearsal would distribute or implicitly fetch: {forbidden!r}"
         )
+    # No dependency cache and no registry audit/funding traffic: a cache action
+    # or setup-node caching uploads and downloads behind the workflow's back.
+    assert "cache:" not in commands, "the rehearsal caches dependencies"
+    assert "cache-dependency-path" not in commands
+    assert "npm ci --no-audit --no-fund" in commands
+    assert "npm audit" not in commands
+    assert 'npm_config_audit: "false"' in commands
+    assert 'npm_config_fund: "false"' in commands
     assert "continue-on-error" not in commands
-    # A cleanup step always runs and removes the runner-local candidate files.
+
+    # The scratch directory is unique per run, and cleanup only removes a
+    # directory this run created (the helper writes the ownership marker).
+    assert (
+        "server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}"
+        in commands
+    )
     assert "if: ${{ always() }}" in commands
-    assert 'rm -rf "$RUNNER_TEMP/server-host-signing-rehearsal"' in commands
+    assert '[ -f "$REHEARSAL_DIR/.rehearsal-owned" ]' in commands
+    assert 'rm -rf "$REHEARSAL_DIR"' in commands
 
     # Current repo-pinned action versions, not floating ones.
     assert "actions/checkout@v7" in workflow
@@ -640,14 +657,18 @@ def test_signing_rehearsal_is_manual_protected_and_no_release_upload() -> None:
     for name in (
         "SERVER_HOST_CERTIFICATE_P12_BASE64",
         "SERVER_HOST_CERTIFICATE_PASSWORD",
-        "SERVER_HOST_NOTARY_APPLE_ID",
-        "SERVER_HOST_NOTARY_APP_PASSWORD",
+        "SERVER_HOST_NOTARY_KEY_P8_BASE64",
+        "SERVER_HOST_NOTARY_KEY_ID",
+        "SERVER_HOST_NOTARY_ISSUER_ID",
         "SERVER_HOST_SIGNING_IDENTITY",
         "SERVER_HOST_TEAM_ID",
     ):
         assert name in signing_step, f"the signing step never receives {name}"
     assert "SERVER_HOST_SIGNING_IDENTITY: ${{ vars." in signing_step
     assert "SERVER_HOST_TEAM_ID: ${{ vars." in signing_step
+    assert "SERVER_HOST_NOTARY_KEY_ID: ${{ vars." in signing_step
+    assert "SERVER_HOST_NOTARY_ISSUER_ID: ${{ vars." in signing_step
+    assert "SERVER_HOST_NOTARY_KEY_P8_BASE64: ${{ secrets." in signing_step
     assert "set -x" not in commands
 
 
@@ -684,13 +705,10 @@ def test_signing_rehearsal_binds_source_sha_and_clean_wheel_verifier() -> None:
     helper = workflow.split("      - name: Rehearse the signed server host")[1]
     helper = helper.split("      - name: Remove runner-local")[0]
     assert "scripts/rehearse-server-host-signing.py" in helper
-    assert '--output "$RUNNER_TEMP/server-host-signing-rehearsal"' in helper
+    assert '--output "$REHEARSAL_DIR"' in helper
     assert '--python "$RUNNER_TEMP/engine-check/bin/python"' in helper
     assert "--wheel dist/ciaobot-*.whl" in helper
-    assert (
-        'cat "$RUNNER_TEMP/server-host-signing-rehearsal/summary.txt" '
-        '>> "$GITHUB_STEP_SUMMARY"' in helper
-    )
+    assert 'cat "$REHEARSAL_DIR/summary.txt" >> "$GITHUB_STEP_SUMMARY"' in helper
     assert "verification.json" not in helper, (
         "the raw runner-local report must not be echoed into the summary"
     )
@@ -707,8 +725,9 @@ def test_production_publish_remains_usable_without_apple_credentials() -> None:
     for forbidden in (
         "SERVER_HOST_CERTIFICATE_P12_BASE64",
         "SERVER_HOST_CERTIFICATE_PASSWORD",
-        "SERVER_HOST_NOTARY_APPLE_ID",
-        "SERVER_HOST_NOTARY_APP_PASSWORD",
+        "SERVER_HOST_NOTARY_KEY_P8_BASE64",
+        "SERVER_HOST_NOTARY_KEY_ID",
+        "SERVER_HOST_NOTARY_ISSUER_ID",
         "SERVER_HOST_SIGNING_IDENTITY",
         "SERVER_HOST_TEAM_ID",
     ):

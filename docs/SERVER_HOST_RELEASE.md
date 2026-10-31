@@ -159,12 +159,19 @@ run fails in the first step, before checkout and before any secret is bound to a
 step. The same step refuses any ref other than `refs/heads/develop` or
 `refs/heads/main`, so an untrusted branch never reaches the signing step.
 
+Nothing is fetched implicitly: `actions/setup-node` sets no dependency cache,
+there is no `actions/cache` step, and every npm invocation runs with
+`--no-audit --no-fund` plus `npm_config_audit=false`/`npm_config_fund=false`.
+The Apple notary submission is the only network write, and the pinned signer
+package is the only download the rehearsal names for itself.
+
 | Name | Storage | Purpose |
 |---|---|---|
 | `SERVER_HOST_CERTIFICATE_P12_BASE64` | environment secret | exported Developer ID Application identity, base64-encoded; supplied by the operator, never exported by an agent |
 | `SERVER_HOST_CERTIFICATE_PASSWORD` | environment secret | the p12 import password |
-| `SERVER_HOST_NOTARY_APPLE_ID` | environment secret | Apple ID used for notarization |
-| `SERVER_HOST_NOTARY_APP_PASSWORD` | environment secret | app-specific password for that Apple ID |
+| `SERVER_HOST_NOTARY_KEY_P8_BASE64` | environment secret | base64 of the App Store Connect API key (`.p8`) used for notarization |
+| `SERVER_HOST_NOTARY_KEY_ID` | protected environment variable | the API key identifier (an identifier, not a secret) |
+| `SERVER_HOST_NOTARY_ISSUER_ID` | protected environment variable | the App Store Connect issuer UUID (an identifier, not a secret) |
 | `SERVER_HOST_SIGNING_IDENTITY` | protected environment variable | the exact certificate selector; never "the first available identity" |
 | `SERVER_HOST_TEAM_ID` | protected environment variable | the expected ten-character team the candidate is signed by |
 | `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | the existing release manifest-signing secrets | sign the candidate manifest with the unchanged public verifier |
@@ -182,9 +189,11 @@ interpreter the release uses. The helper:
 1. validates every named input and refuses a missing one by name before it
    creates a directory, a keychain or a build;
 2. creates a temporary random-password keychain and notary profile under a fresh
-   scratch directory, makes them the user default and the only signing-identity
-   search target, imports the certificate, and bounds the key's access to
-   `codesign`;
+   per-run scratch directory, makes them the user default and the only
+   signing-identity search target, imports the certificate, bounds the
+   certificate key's access to `codesign`, decodes the App Store Connect API key
+   into an owner-only `.p8` file in that same private directory, and stores the
+   notary profile from that file;
 3. calls the explicit release build (the `--release` path, with the named
    identity, team and profile), which signs with hardened runtime, a secure
    timestamp and the tracked entitlements, requires exactly `Accepted` from
@@ -196,21 +205,71 @@ interpreter the release uses. The helper:
    exact sealed file set including `Contents/CodeResources`, `stapler validate`
    and a Gatekeeper assessment;
 5. writes a schema-2 ownership record in a separate scratch home and proves the
-   snapshot round-trips through `verify_owned_host`;
-6. builds and signs a candidate manifest with the pinned standalone
-   `@tauri-apps/cli` signer, verifies it with the installed
+   snapshot round-trips through `verify_owned_host`, run by the prepared
+   interpreter so the verifier is the installed wheel rather than a checkout;
+6. builds the candidate manifest with the prepared interpreter, installs the
+   pinned `@tauri-apps/cli` signer in its own process with install scripts
+   disabled and no signing credential in its environment, then signs the
+   manifest with that prepared executable, verifies it with the installed
    `ciao.release_manifest verify`, recomputes the archive digest after signing,
    compares it with the authenticated host entry and the single candidate wheel,
    and extracts that exact archive once more for a final inspection.
 
-Then, in `finally` on every path, the helper restores the prior default keychain
-and the entire prior search list, deletes the temporary keychain, and removes
-the exported certificate. The candidate app, archive, manifest and report stay
-in the runner's scratch directory; nothing is uploaded, published or attached
-to a release, and the Apple notary submission is the only network write. A
-failed run prints a sanitized error, writes no `verification.json`, and the
-workflow's `always()` cleanup step removes the scratch directory. No credential
-value is printed, summarized or embedded in an error, and there is no `set -x`.
+### Credentials on the command line
+
+No credential is passed in a spawned argv except one, and the tools that prompt
+are fed on stdin:
+
+- the keychain password is written twice to `security create-keychain` on stdin,
+  and once to `security unlock-keychain` and `security set-key-partition-list`;
+  it never appears with `-p` or `-k`;
+- the notary credential is an App Store Connect API key passed to
+  `notarytool store-credentials` by **file path** (`--key`), with `--key-id` and
+  `--issuer` values that are identifiers rather than secrets; every submission
+  afterwards uses only the keychain profile name. No account address, password
+  or key material is ever an argv value;
+- **one accepted residual:** `security import` takes the p12 passphrase with
+  `-P`. Apple's CLI offers no file or stdin input for it. That value is visible
+  in the process list of the same user for the duration of that single
+  short-lived import process, on an ephemeral runner, and it is not written to
+  disk, a report or a log. Every other secret is kept out of argv.
+
+The API key must be an App Store Connect API key whose role can notarize (the
+notary service rejects a key without that capability at submission time). The
+key identifier and the issuer UUID identify the key and the team; they are
+configuration, not secrets, which is why they live in protected environment
+variables while the `.p8` itself is a secret. A malformed key id, issuer or
+`.p8` (bad base64, empty, wrong PEM) fails the run before any tool starts.
+
+### Cleanup and failure reporting
+
+The scratch directory is unique per run
+(`server-host-signing-rehearsal-<run id>-<run attempt>`), and the helper writes
+a `.rehearsal-owned` marker as its first act after creating it. The decoded
+`.p8`, the p12, the keychain and the profile are all deleted in the same
+unconditional cleanup. The workflow's
+`always()` cleanup deletes only a directory carrying that marker, so a
+pre-existing path is never adopted or removed. The helper itself refuses a
+pre-existing output before writing anything.
+
+The helper installs SIGTERM and SIGINT handlers for the duration of the build.
+An interruption restores the prior default keychain and the entire prior search
+list, deletes the temporary keychain and every credential file, and then fails
+the run with a sanitized message. Each "changed" flag is set before the command
+that changes it, so a tool that is killed after applying its change is still
+undone; the last `delete-keychain` postcondition is verified on the filesystem.
+A cleanup failure is never swallowed when another exception is already in
+flight: both are reported, sanitized. The candidate app, archive, manifest and
+report stay in the runner's scratch directory; nothing is uploaded, published or
+attached to a release.
+
+On any failure after the scratch directory exists, the helper writes an
+explicitly incomplete `verification.json` (`complete: false`, the failing
+`stage`, its `code` and the steps that did complete) plus a matching
+`summary.txt`. Only fixed stage and code names appear there — never a value, an
+argv or tool output — so a failed run cannot be mistaken for a verified one. No
+credential value is printed, summarized or embedded in an error, and there is no
+`set -x`.
 
 ### Promotion gate
 

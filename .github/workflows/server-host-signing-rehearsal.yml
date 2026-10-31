@@ -36,6 +36,10 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 90
     environment: server-host-signing-rehearsal
+    env:
+      # Unique per run, so a leftover directory from another run can never be
+      # reused, adopted or deleted by this one.
+      REHEARSAL_DIR: ${{ runner.temp }}/server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Refuse an unconfirmed or untrusted run
         # Runs before checkout and before any credential is bound: an unchecked
@@ -78,17 +82,22 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
+          # No dependency cache: this rehearsal must not perform any implicit
+          # network fetch beyond the pinned packages it names itself.
           node-version: "22"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.3.2
 
       - name: Build PWA assets
         working-directory: web
+        env:
+          # No audit or funding traffic: the Apple notary submission is the
+          # only network write this workflow may make.
+          npm_config_audit: "false"
+          npm_config_fund: "false"
         run: |
-          npm ci
+          npm ci --no-audit --no-fund
           npm run build
 
       - name: Build engine wheel
@@ -104,32 +113,38 @@ jobs:
 
       - name: Rehearse the signed server host
         # Credentials are bound to this step only, by name. Nothing is printed,
-        # no step echoes a value, and the helper deletes its keychain, profile
-        # and certificate in its own unconditional cleanup.
+        # no step echoes a value, and the helper deletes its keychain, profile,
+        # certificate and decoded notary key in its own unconditional cleanup.
         env:
           SERVER_HOST_SIGNING_IDENTITY: ${{ vars.SERVER_HOST_SIGNING_IDENTITY }}
           SERVER_HOST_TEAM_ID: ${{ vars.SERVER_HOST_TEAM_ID }}
           SERVER_HOST_CERTIFICATE_P12_BASE64: ${{ secrets.SERVER_HOST_CERTIFICATE_P12_BASE64 }}
           SERVER_HOST_CERTIFICATE_PASSWORD: ${{ secrets.SERVER_HOST_CERTIFICATE_PASSWORD }}
-          SERVER_HOST_NOTARY_APPLE_ID: ${{ secrets.SERVER_HOST_NOTARY_APPLE_ID }}
-          SERVER_HOST_NOTARY_APP_PASSWORD: ${{ secrets.SERVER_HOST_NOTARY_APP_PASSWORD }}
+          SERVER_HOST_NOTARY_KEY_P8_BASE64: ${{ secrets.SERVER_HOST_NOTARY_KEY_P8_BASE64 }}
+          SERVER_HOST_NOTARY_KEY_ID: ${{ vars.SERVER_HOST_NOTARY_KEY_ID }}
+          SERVER_HOST_NOTARY_ISSUER_ID: ${{ vars.SERVER_HOST_NOTARY_ISSUER_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/engine-check/bin/python" scripts/rehearse-server-host-signing.py \
-            --output "$RUNNER_TEMP/server-host-signing-rehearsal" \
+            --output "$REHEARSAL_DIR" \
             --python "$RUNNER_TEMP/engine-check/bin/python" \
             --source-sha "$GITHUB_SHA" \
             --wheel dist/ciaobot-*.whl
           # Only the helper's sanitized summary reaches the job summary.
-          cat "$RUNNER_TEMP/server-host-signing-rehearsal/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          cat "$REHEARSAL_DIR/summary.txt" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove runner-local candidate and credential files
         # Always runs, including after a cancelled or failed step. The helper
         # also cleans up in its own finally block, so a failed step never
-        # depends on this step alone. Nothing here is uploaded anywhere.
+        # depends on this step alone. Only a directory this run created carries
+        # the marker, so a pre-existing path is never adopted or deleted.
         if: ${{ always() }}
         run: |
           set -euo pipefail
-          rm -rf "$RUNNER_TEMP/server-host-signing-rehearsal"
+          if [ -f "$REHEARSAL_DIR/.rehearsal-owned" ]; then
+            rm -rf "$REHEARSAL_DIR"
+          else
+            echo "no rehearsal-owned scratch directory to remove"
+          fi
