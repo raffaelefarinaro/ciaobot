@@ -763,6 +763,7 @@ def scan_vault(
     workspace: str = "",
     path_prefix: Path | None = None,
     registry: EntityTypeRegistry | None = None,
+    include_unheaded: bool = False,
 ) -> list[Entry]:
     """Scan one vault into entries.
 
@@ -784,6 +785,8 @@ def scan_vault(
     ``default_vault_root()`` because a caller's scan and its registry must not
     disagree about which vault is being read. The load is cached against the
     file's mtime, so a hot path pays it once.
+
+    ``include_unheaded`` keeps Markdown files with neither frontmatter nor an H1, which the index skips as placeholders. A caller that must see every note — moving a folder and repointing the links into and out of it — passes it; the index, graph and search do not.
     """
     vault_root = (vault_root or default_vault_root()).resolve()
     if registry is None:
@@ -809,7 +812,7 @@ def scan_vault(
             continue
         fm = _parse_frontmatter(text)
         h1 = _first_h1(text)
-        if not fm and not h1:
+        if not fm and not h1 and not include_unheaded:
             continue  # placeholder / .gitkeep-adjacent
 
         title = (
