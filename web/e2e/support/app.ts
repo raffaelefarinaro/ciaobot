@@ -160,6 +160,29 @@ export async function quiesce(page: Page, frames = 5): Promise<void> {
   }, frames, { polling: 'raf', timeout: 0 })
 }
 
+/**
+ * Resolve once every finite animation and transition in `locator`'s subtree
+ * has finished. Waits one frame first, so a transition the last input just
+ * triggered has started and is counted. Infinite animations (spinners,
+ * cursors) are skipped and a cancelled one counts as finished.
+ *
+ * Use it before reading the geometry (`boundingBox()`) of anything that
+ * slides, fades or resizes: a box read mid-animation disagrees with the next
+ * frame's (#2295). For DOM state after a pointer release, poll instead
+ * (`expect.poll`, #2288). `src/lib/e2eSettleReads.test.ts` fails on a
+ * one-shot read right after a release.
+ */
+export async function settled(locator: Locator): Promise<void> {
+  await locator.evaluate(async (el) => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    await Promise.all(
+      el.getAnimations({ subtree: true })
+        .filter((a) => Number.isFinite(a.effect?.getComputedTiming().endTime ?? Infinity))
+        .map((a) => a.finished.catch(() => undefined)),
+    )
+  })
+}
+
 /** The notifications bell in the expanded sidebar's brand row. */
 export const BELL = '.sidebar-brand-row .notif-bell'
 /** The same bell in the collapsed rail. */

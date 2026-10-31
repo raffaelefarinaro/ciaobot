@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
-import { COMPOSER, activeWorkspaceButton, boot, isolate } from '../support/app'
+import { COMPOSER, activeWorkspaceButton, boot, isolate, settled } from '../support/app'
 
 /**
  * The browser terminal's pane, in a real browser.
@@ -188,7 +188,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
 
   // The tile slides in (chat-tile-in); boxes read on different frames of it
   // disagree by up to the slide's 12px, so measure once it has settled.
-  await tile.evaluate(el => Promise.all(el.getAnimations({ subtree: true }).map(a => a.finished)))
+  await settled(tile)
   // Close sits top right of the header, beside the title, as the pinned
   // file tile's does — not on a row of its own under it.
   const headBox = (await pane.locator('.tp-head').boundingBox())!
@@ -218,6 +218,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   // The divider drags: the chat gives up the room and the tile takes it.
   const dividerBox = (await divider.boundingBox())!
   await dragDivider(page, divider, dividerBox.x - 100)
+  await settled(page.locator('.chat-main'))
 
   const columnAfter = (await column.boundingBox())!
   const paneAfter = (await pane.boundingBox())!
@@ -229,6 +230,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
   // Dragged as far left as it goes, the chat column stops at its 360px
   // floor: the divider cannot squeeze the conversation to a sliver.
   await dragDivider(page, divider, 120)
+  await settled(page.locator('.chat-main'))
   const columnLeft = (await column.boundingBox())!
   expect(columnLeft.width).toBeGreaterThanOrEqual(360)
   expect(columnLeft.width).toBeLessThanOrEqual(362)
@@ -238,6 +240,7 @@ test('the terminal is the pinned file tile, with the same divider', async ({ pag
 
   // Dragged as far right as it goes, the tile stops at its 360px floor.
   await dragDivider(page, divider, 2000)
+  await settled(page.locator('.chat-main'))
   const tileBox = (await tile.boundingBox())!
   expect(tileBox.width).toBeGreaterThanOrEqual(360)
   expect(tileBox.width).toBeLessThanOrEqual(362)

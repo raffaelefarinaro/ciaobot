@@ -704,7 +704,7 @@ test.describe('placing cards on a narrow, scrolled board', () => {
     await expect.poll(() => titles(page, 'In review')).toEqual(['Draft the agenda', 'Review the budget'])
     expect(sent).toHaveLength(1)
     // The page itself never scrolls sideways.
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   })
 
   test('a lane clipped by the board edge is not a drop target', async ({ page }) => {
