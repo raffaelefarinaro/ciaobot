@@ -1773,7 +1773,7 @@ def test_a_terminal_offer_refuses_an_unattended_turn(tmp_path: Path) -> None:
     assert manager.get_chat(chat.chat_id).terminal_offer is None
 
 
-@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task"])
+@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task", "restart_resume"])
 def test_a_terminal_offer_refuses_a_turn_the_person_did_not_type(
     tmp_path: Path, origin: str
 ) -> None:

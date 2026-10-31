@@ -167,6 +167,23 @@ def test_patch_applies_provider_default_models(tmp_path):
     }
 
 
+def test_resume_after_restart_is_read_and_patched(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+    client, _config = _make_client(tmp_path)
+    assert client.get("/api/settings/routines").json()["resume_after_restart"] is True
+
+    resp = client.patch(
+        "/api/settings/routines", json={"resume_after_restart": False}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["resume_after_restart"] is False
+
+    resp = client.patch(
+        "/api/settings/routines", json={"resume_after_restart": "off"}
+    )
+    assert resp.status_code == 400
+
+
 def test_patch_applies_provider_routine_models(tmp_path):
     """Per-provider insights models are stored and applied."""
     client, config = _make_client(tmp_path)

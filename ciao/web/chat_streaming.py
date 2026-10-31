@@ -145,6 +145,7 @@ class ChatStreamingHost(Protocol):
     _broker: ChatStreamBroker
     _events: EventsHub
     _snapshots: SnapshotStore
+    _shutting_down: bool
 
     def _save(self, *, reason: str = ...) -> None: ...
 
@@ -1279,6 +1280,12 @@ class ChatStreaming:
                 )
             if current_turn_index is not None:
                 self.discard_turn_perf(chat_id, current_turn_index)
+            # The turn ended in this process, so it is no longer in flight; during
+            # shutdown it did not end, and the stamp stays for the next boot (#2128).
+            if chat_meta is not None and chat_meta.turn_owner and not self._host._shutting_down:
+                chat_meta.turn_owner = ""
+                if compact:
+                    self._save_at_turn_end(chat_id)
             # ``compact`` is still set only when the last pass was the
             # compaction, which leaves the previous reply as the last one.
             if chat_meta is not None and not compact:

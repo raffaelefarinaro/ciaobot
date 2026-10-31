@@ -1106,11 +1106,14 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 # default): pwa_host (bind address), log_level, dev_mode, app_repo (source
 # checkout), with server_defaults and server_running (what the running engine
 # bound and logs at; pwa_host and log_level change only at the next start).
+# resume_after_restart (boolean, default true: at startup a chat whose turn a
+# restart or crash cut off gets one `restart_resume` turn).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # PATCH accepts only provider_default_models, provider_default_modes,
 # provider_default_thinking, provider_insights_models, pwa_host, log_level,
-# dev_mode and app_repo. The retired insights_enabled key is still accepted but
+# dev_mode, app_repo and resume_after_restart (a non-boolean value is a 400).
+# The retired insights_enabled key is still accepted but
 # ignored; any other key (including response-only fields) returns 400. Updates
 # are persisted in .runtime/app_settings.json and applied to the
 # live config immediately (no restart). Empty string clears an override back
@@ -1921,7 +1924,7 @@ An automation fires its prompt as an ordinary user turn, so without a marker it 
 
 **Injected turns (origin)**
 
-Turns the engine writes into a chat, and a retry (a user-requested one, or one the engine's deferred retry runs), carry an origin tag persisted in `ChatInfo.user_turn_origin` (`{"<turn_index>": origin}`) and rolled back with the other per-turn records when Stop cancels an unrun prompt. Values: `background_run`, `cli_task_wake`, `retry`, `schedule`, `task_delegation`, `task_resume`, `webhook`, `update_task`.
+Turns the engine writes into a chat, and a retry (a user-requested one, or one the engine's deferred retry runs), carry an origin tag persisted in `ChatInfo.user_turn_origin` (`{"<turn_index>": origin}`) and rolled back with the other per-turn records when Stop cancels an unrun prompt. Values: `background_run`, `cli_task_wake`, `restart_resume`, `retry`, `schedule`, `task_delegation`, `task_resume`, `webhook`, `update_task`. `restart_resume` is the one turn the engine sends at startup into a chat whose turn a restart or crash cut off (Settings → General, `resume_after_restart`).
 
 A client `message` frame may set only the exact optional `origin: "retry"`; other origin values have no effect. It is display metadata, not a capability or permission change. A deliberate retry is a new logical send with a fresh `send_id`; recovering that same send reuses its id and origin. Duplicate owned-turn `user_echo` responses additionally carry the **recorded** `origin` when present, never the duplicate frame's requested tag. Pending duplicates have no recorded turn yet and keep the existing response shape. The frontend's collapsed retry-notice rendering is a separate consumer of this durable field.
 - WS `user_echo` carries optional `origin` (also on a queued wake when it flushes as its own turn, and on a send-now of waiting entries that all share one); WS `steered` carries it when every steered entry shares the same origin; `GET /api/chats/{chat_id}/messages` sets `origin` on the user entry. Absent = typed by the person (or a mix). `unattended` and `steered` are unchanged and independent; an origin turn that was steered is drawn as its card, without the steered mark.
