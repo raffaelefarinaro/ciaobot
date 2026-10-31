@@ -534,15 +534,22 @@ class _ActiveChildren:
 
     def spawn(self, factory: Callable[[], Any]) -> Any:
         """Create and register a child; stop it if a signal arrived meanwhile."""
+        deferred: str | None = None
         with self._lock:
             self._spawning = True
             try:
                 child = factory()
+                # Keep ``_spawning`` set across registration: a signal delivered
+                # between the factory returning and this assignment must see
+                # "still spawning" (and defer), never a free handler that
+                # restores while the child runs unregistered.
+                self._child = child
             finally:
+                # Clear the flag and collect a deferral under the same lock, so
+                # no signal window can leave a deferred interruption unread.
                 self._spawning = False
-            self._child = child
-            deferred = self._deferred
-            self._deferred = None
+                deferred = self._deferred
+                self._deferred = None
         if deferred is not None:
             outcome = self.stop()
             suffix = (

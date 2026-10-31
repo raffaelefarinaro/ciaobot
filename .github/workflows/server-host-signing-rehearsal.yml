@@ -42,6 +42,7 @@ jobs:
       REHEARSAL_DIR: ${{ runner.temp }}/server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Claim the run-scoped scratch receipt
+        id: claim-scratch
         # Runs before the confirmation/ref guard, because cleanup runs always()
         # and must never trust a receipt a refused run did not clear. The path is
         # unique per run id and attempt, so only this job can have written one.
@@ -55,7 +56,7 @@ jobs:
         # than reporting a green skip.
         env:
           EVENT_NAME: ${{ github.event_name }}
-          CONFIRMED: ${{ inputs.confirm_no_release_upload }}
+          CONFIRMED: ${{ github.event.inputs.confirm_no_release_upload }}
           DISPATCHED_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
@@ -148,7 +149,10 @@ jobs:
         # also cleans up in its own finally block, so a failed step never
         # depends on this step alone. Only a directory this run created carries
         # the marker, so a pre-existing path is never adopted or deleted.
-        if: ${{ always() }}
+        # Delete only when the claim step actually cleared the stale receipt: a
+        # failed or cancelled claim must never let cleanup trust a pre-existing
+        # receipt left at this run's unique path.
+        if: ${{ always() && steps.claim-scratch.outcome == 'success' }}
         run: |
           set -euo pipefail
           # The helper writes this sibling receipt only after its own exclusive

@@ -648,7 +648,7 @@ def test_signing_rehearsal_is_manual_protected_and_no_release_upload() -> None:
         "server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}"
         in commands
     )
-    assert "if: ${{ always() }}" in commands
+    assert "always() && steps.claim-scratch.outcome == 'success'" in commands
     # Deleting is gated on the receipt the helper wrote after its own exclusive
     # mkdir, not on a marker string a pre-existing directory could carry.
     assert 'receipt="${REHEARSAL_DIR}.owned"' in commands
@@ -834,3 +834,108 @@ def test_signing_rehearsal_claims_the_receipt_before_the_guard() -> None:
     helper = workflow.split("      - name: Rehearse the signed server host")[1]
     helper = helper.split("      - name: Remove runner-local")[0]
     assert 'rm -f "${REHEARSAL_DIR}.owned"' not in helper
+
+
+def _cleanup_step(workflow: str) -> str:
+    return workflow[
+        workflow.index("      - name: Remove runner-local candidate and credential files") :
+    ]
+
+
+def _guard_step(workflow: str) -> str:
+    return workflow[
+        workflow.index("      - name: Refuse an unconfirmed or untrusted run") :
+        workflow.index("      - uses: actions/checkout@v7")
+    ]
+
+
+def _claim_step(workflow: str) -> str:
+    return workflow[
+        workflow.index("      - name: Claim the run-scoped scratch receipt") :
+        workflow.index("      - name: Refuse an unconfirmed or untrusted run")
+    ]
+
+
+def test_signing_rehearsal_cleanup_requires_a_successful_claim() -> None:
+    workflow = _rehearsal_workflow()
+    claim = _claim_step(workflow)
+    cleanup = _cleanup_step(workflow)
+
+    # The claim step is identifiable, cannot mask its own failure, and is the
+    # first step of the job.
+    assert "        id: claim-scratch" in claim
+    assert "continue-on-error" not in claim
+    assert workflow.index("      - name: Claim the run-scoped scratch receipt") == (
+        workflow.index("    steps:\n") + len("    steps:\n")
+    )
+
+    # Cleanup only deletes when the claim succeeded: a failed, skipped or
+    # cancelled claim leaves the condition false, so a pre-existing receipt is
+    # never trusted.
+    assert (
+        "if: ${{ always() && steps.claim-scratch.outcome == 'success' }}"
+        in cleanup
+    )
+    assert "continue-on-error" not in cleanup
+    assert 'rm -rf "$REHEARSAL_DIR"' in cleanup
+    # The id is defined exactly once, and the cleanup step follows every step
+    # that could fail or be cancelled before the claim completes.
+    assert workflow.count("id: claim-scratch") == 1
+    assert workflow.index("      - name: Claim the run-scoped scratch receipt") < workflow.index(
+        "      - name: Refuse an unconfirmed or untrusted run"
+    )
+    assert workflow.index("      - name: Claim the run-scoped scratch receipt") < workflow.index(
+        "      - uses: actions/checkout@v7"
+    )
+
+
+@pytest.mark.parametrize(
+    ("claim_outcome", "deletes"),
+    [
+        ("success", True),
+        ("failure", False),
+        ("cancelled", False),
+        ("skipped", False),
+    ],
+)
+def test_cleanup_gate_opens_only_for_a_successful_claim(
+    claim_outcome: str, deletes: bool
+) -> None:
+    # This models the workflow's step condition literally:
+    #   always() && steps.claim-scratch.outcome == 'success'
+    condition = (
+        "always() && steps.claim-scratch.outcome == 'success'"
+    )
+    assert condition in _cleanup_step(_rehearsal_workflow())
+    gate_open = "always()" in condition and (
+        claim_outcome == "success"
+        if "steps.claim-scratch.outcome == 'success'" in condition
+        else False
+    )
+    assert gate_open is deletes
+
+
+def test_dispatch_guard_binds_the_real_event_expressions() -> None:
+    # The shell harness injects CONFIRMED/DISPATCHED_REF/EVENT_NAME, so the
+    # bindings themselves must be asserted: a literal binding would keep the
+    # harness green while the real workflow trusted the wrong value.
+    step = _guard_step(_rehearsal_workflow())
+    assert "CONFIRMED: ${{ github.event.inputs.confirm_no_release_upload }}" in step
+    assert "DISPATCHED_REF: ${{ github.ref }}" in step
+    assert "EVENT_NAME: ${{ github.event_name }}" in step
+    assert step.count("CONFIRMED:") == 1
+    assert step.count("DISPATCHED_REF:") == 1
+    assert step.count("EVENT_NAME:") == 1
+    for literal in (
+        'CONFIRMED: "true"',
+        "CONFIRMED: 'true'",
+        "CONFIRMED: true",
+        'DISPATCHED_REF: "refs/heads/develop"',
+        'EVENT_NAME: "workflow_dispatch"',
+    ):
+        assert literal not in step
+
+    # And the guard consumes exactly the bound names.
+    script = _dispatch_guard_script()
+    for name in ("CONFIRMED", "DISPATCHED_REF", "EVENT_NAME"):
+        assert f'"${name}"' in script, name

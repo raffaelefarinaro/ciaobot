@@ -411,8 +411,9 @@ the only network write.
 
 The helper creates a temporary random-password keychain and notary profile in a
 per-run scratch directory it created itself, records that exact path in a
-sibling receipt (cleared by the workflow's first step, before the guard, so it
-can only describe this job), and restores the prior default keychain and the
+sibling receipt (cleared by the workflow's first `claim-scratch` step, before
+the guard and gated so cleanup runs only when that claim succeeded, so it can
+only describe this job), and restores the prior default keychain and the
 whole prior search list. An interruption first terminates and reaps the
 in-flight tool where the process is still schedulable, and a signal during a
 running restore — first or later — is deferred until cleanup finishes. It deletes its certificate, decoded

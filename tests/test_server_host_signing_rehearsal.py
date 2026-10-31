@@ -101,6 +101,18 @@ ENTITLEMENTS_XML = (
 PARTITION_LIST = "apple-tool:,apple:,codesign:"
 ENTITLEMENTS_PATH = ROOT / "native" / "server-host" / "ServerHost.entitlements.plist"
 
+#: The canonical Developer ID designated requirement for the fixture team,
+#: written out independently of ``ciao.server_host`` (the same literal is pinned
+#: in ``tests/test_server_host.py``). Deriving it from the shared function would
+#: let one change move both the expectation and the product.
+EXPECTED_DESIGNATED_REQUIREMENT = (
+    'identifier "local.ciaobot.server"'
+    " and anchor apple generic"
+    " and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */"
+    " and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */"
+    ' and certificate leaf[subject.OU] = "ABCDE12345"'
+)
+
 
 def _app_of(path: Path) -> Path:
     """The app bundle a path lives in; fails if it is not inside one."""
@@ -111,12 +123,16 @@ def _app_of(path: Path) -> Path:
 
 
 def _load(name: str, path: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
+    # Compile the current source directly: a cached ``__pycache__`` bytecode
+    # file can otherwise be reused when the script is edited (or restored) with
+    # the same size and mtime second, and the trace-based signal test needs the
+    # exact bytes on disk.
+    module = ModuleType(name)
+    module.__file__ = str(path)
     # Dataclasses resolve annotations through sys.modules[cls.__module__].
     sys.modules[name] = module
-    spec.loader.exec_module(module)
+    source = path.read_text(encoding="utf-8")
+    exec(compile(source, str(path), "exec"), module.__dict__)
     return module
 
 
@@ -624,7 +640,10 @@ class FakeToolchain:
     def _codesign(
         self, cmd: list[str], kwargs: dict[str, Any]
     ) -> subprocess.CompletedProcess[str]:
-        requirement = SERVER_HOST.developer_id_requirement(self.team_id)
+        assert self.team_id == TEAM_ID, (
+            "the pinned requirement literal describes the fixture team"
+        )
+        requirement = EXPECTED_DESIGNATED_REQUIREMENT
         if cmd[1] == "--force":
             # The one release signature: identity, runtime, timestamp, the
             # tracked entitlements and the exact canonical requirement.
@@ -693,7 +712,7 @@ class FakeToolchain:
             return self._done(
                 cmd,
                 kwargs,
-                stdout=f"designated => {SERVER_HOST.developer_id_requirement(self.team_id)}\n",
+                stdout=f"designated => {EXPECTED_DESIGNATED_REQUIREMENT}\n",
             )
         raise AssertionError(f"unexpected codesign argv: {cmd}")
 
@@ -2091,6 +2110,197 @@ def test_child_that_never_exits_is_reported_as_unreaped(
         _run_rehearsal(tmp_path, fake)
     assert "could not be reaped" in str(caught.value)
     assert "interrupted by SIGINT" in str(caught.value)
+
+
+def test_signal_between_creation_and_registration_is_deferred(
+    tmp_path: Path, macos: None
+) -> None:
+    # The only gap left in spawn() is between the factory returning and the
+    # child being assigned. A signal there must still be treated as "still
+    # spawning": neither a registered child nor a free handler may restore while
+    # the freshly created process runs unregistered.
+    import linecache
+
+    tracker = REHEARSAL._ActiveChildren()
+    events: list[tuple[str, str]] = []
+    child = FakeChild(events, "boundary")
+    fired = {"done": False}
+
+    def tracer(frame: Any, event: str, arg: Any) -> Any:
+        if (
+            not fired["done"]
+            and event == "line"
+            and frame.f_code is REHEARSAL._ActiveChildren.spawn.__code__
+            and "self._child = child"
+            in linecache.getline(frame.f_code.co_filename, frame.f_lineno)
+        ):
+            fired["done"] = True
+            assert tracker.stop("SIGTERM") == "spawning"
+        return tracer
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        with pytest.raises(REHEARSAL.RehearsalError) as caught:
+            tracker.spawn(lambda: child)
+    finally:
+        sys.settrace(previous)
+    assert fired["done"], "the registration boundary was never reached"
+    assert "interrupted by SIGTERM" in str(caught.value)
+    assert child.terminated
+    assert ("reaped", "boundary") in events
+
+
+def _fake_popen(
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[tuple[Any, ...]],
+    *,
+    wait_behaviour: str = "exit",
+    returncode: int = 0,
+    on_communicate: Any = None,
+) -> None:
+    """A controlled Popen: no tool runs, every lifecycle step is recorded."""
+
+    class FakePopen:
+        def __init__(self, cmd: list[str], **kwargs: Any) -> None:
+            self.args = list(cmd)
+            self.kwargs = dict(kwargs)
+            self.pid = 4242
+            self.returncode = returncode
+            self.waits = 0
+            events.append(("spawn", list(cmd), dict(kwargs)))
+
+        def communicate(
+            self, input: str | None = None, timeout: float | None = None
+        ) -> tuple[str, str]:
+            events.append(("communicate", input, timeout))
+            if on_communicate is not None:
+                # The child is in flight: this is where a signal arrives.
+                on_communicate()
+            return ("captured-out", "captured-err")
+
+        def terminate(self) -> None:
+            events.append(("terminate",))
+
+        def kill(self) -> None:
+            events.append(("kill",))
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.waits += 1
+            events.append(("wait", self.waits, timeout))
+            if wait_behaviour == "never" or (
+                wait_behaviour == "first" and self.waits == 1
+            ):
+                raise subprocess.TimeoutExpired(self.args, timeout or 0)
+            return self.returncode
+
+    monkeypatch.setattr(REHEARSAL.subprocess, "Popen", FakePopen)
+
+
+def test_process_runner_registers_the_child_and_stop_reaps_it(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[tuple[Any, ...]] = []
+    children = REHEARSAL._ActiveChildren()
+    outcome: dict[str, Any] = {}
+
+    def stop_while_running() -> None:
+        outcome["stop"] = children.stop("SIGTERM")
+
+    _fake_popen(monkeypatch, events, on_communicate=stop_while_running)
+    runner = REHEARSAL._ProcessRunner(children)
+
+    result = runner(
+        ["/bin/echo", "hello"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={"HOME": "/tmp"},
+        cwd=tmp_path,
+        input="prompt\n",
+    )
+    assert result.returncode == 0
+    assert result.stdout == "captured-out"
+    assert result.stderr == "captured-err"
+    assert result.args == ["/bin/echo", "hello"]
+    # Created through the tracker, with the environment and cwd it was given.
+    assert events[0][0] == "spawn"
+    assert events[0][1] == ["/bin/echo", "hello"]
+    assert events[0][2]["env"] == {"HOME": "/tmp"}
+    assert events[0][2]["cwd"] == str(tmp_path)
+    assert events[1] == ("communicate", "prompt\n", 30)
+    # The registered child is exactly the one stop terminates and reaps, and it
+    # was registered while the command was still running.
+    assert outcome["stop"] is None
+    assert ("terminate",) in events
+    assert any(event[0] == "wait" for event in events)
+
+
+def test_process_runner_stop_kills_a_child_that_ignores_terminate(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[tuple[Any, ...]] = []
+    children = REHEARSAL._ActiveChildren()
+    outcome: dict[str, Any] = {}
+
+    def stop_while_running() -> None:
+        outcome["stop"] = children.stop("SIGTERM")
+
+    _fake_popen(
+        monkeypatch,
+        events,
+        wait_behaviour="first",
+        on_communicate=stop_while_running,
+    )
+    runner = REHEARSAL._ProcessRunner(children)
+    runner(["/bin/true"], check=True, timeout=30)
+    assert outcome["stop"] is None
+    assert ("terminate",) in events
+    assert ("kill",) in events
+
+
+def test_process_runner_stop_reports_a_child_that_never_exits(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[tuple[Any, ...]] = []
+    children = REHEARSAL._ActiveChildren()
+    outcome: dict[str, Any] = {}
+
+    def stop_while_running() -> None:
+        outcome["stop"] = children.stop("SIGTERM")
+
+    _fake_popen(
+        monkeypatch,
+        events,
+        wait_behaviour="never",
+        on_communicate=stop_while_running,
+    )
+    runner = REHEARSAL._ProcessRunner(children)
+    runner(["/bin/true"], check=True, timeout=30)
+    assert outcome["stop"] == "unreaped"
+    assert ("kill",) in events
+    assert len([event for event in events if event[0] == "wait"]) == 2
+
+
+def test_process_runner_check_semantics_match_subprocess_run(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[tuple[Any, ...]] = []
+    _fake_popen(monkeypatch, events, returncode=7)
+    children = REHEARSAL._ActiveChildren()
+    runner = REHEARSAL._ProcessRunner(children)
+
+    # check=False is how the notary submission reads a JSON status.
+    unchecked = runner(["/bin/false"], check=False, timeout=30)
+    assert unchecked.returncode == 7
+    assert unchecked.stdout == "captured-out"
+
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        runner(["/bin/false"], check=True, timeout=30)
+    assert caught.value.returncode == 7
+    assert caught.value.output == "captured-out"
+    assert caught.value.stderr == "captured-err"
 
 
 # --- sanitized failure report ----------------------------------------------

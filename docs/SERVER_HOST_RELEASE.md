@@ -247,10 +247,12 @@ The scratch directory is unique per run
 (`server-host-signing-rehearsal-<run id>-<run attempt>`). The helper creates it
 with an exclusive `mkdir`, writes a `.rehearsal-owned` marker immediately after,
 and then records the exact created path in a sibling `.owned` receipt. The
-workflow's first step — before the confirmation and ref guard, because cleanup
-runs `always()` — clears any stale receipt at that path. Cleanup deletes only the
-path named by the receipt, so a pre-existing directory is not adopted even if it
-already contains a marker. The receipt is evidence that this job reached the
+workflow's first step (`claim-scratch`) — before the confirmation and ref guard,
+because cleanup runs `always()` — clears any stale receipt at that path. Cleanup
+runs only when that claim step **succeeded** (`always() && steps.claim-scratch.outcome
+== 'success'`), so a failed or cancelled claim cannot open deletion; it then
+deletes only the path named by the receipt, so a pre-existing directory is not
+adopted even if it already contains a marker. The receipt is evidence that this job reached the
 claim step, not cryptographic proof against a hostile pre-existing file written
 to the same unique path before the job started; on a single-tenant runner that
 is outside the threat model. An interruption between the `mkdir` and the marker
