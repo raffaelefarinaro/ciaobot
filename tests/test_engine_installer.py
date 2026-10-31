@@ -1008,6 +1008,12 @@ def _harness(
         '        printf \'n/usr/bin/python3\\n\'\n'
         '        exit 0\n'
         '    fi\n'
+        '    if [ -f "$HOME/host-executable-mixed" ]; then\n'
+        '        printf \'n/usr/bin/python3\\n\'\n'
+        '        printf \'n%s\\n\' \\\n'
+        '            "$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n'
+        '        exit 0\n'
+        '    fi\n'
         '    printf \'p%s\\n\' "$(cat "$HOME/host-pid" 2>/dev/null || echo 4343)"\n'
         '    printf \'n%s\\n\' \\\n'
         '        "$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n'
@@ -3190,6 +3196,61 @@ def test_a_wrong_boundary_executable_does_not_commit(tmp_path: Path) -> None:
     result = _run_installer(harness, "--version", VERSION)
 
     _assert_no_commit_and_legacy_pair(harness, result, step="executable")
+
+
+def test_the_engine_runtime_lock_is_created_private_under_a_typical_umask(
+    tmp_path: Path,
+) -> None:
+    # The installer's health gate refuses a runtime lock that is not 0600, so the
+    # engine has to *create* it that way: `open()` honours the umask, and the usual
+    # 022 would leave a fresh lock group/world readable without the fchmod in
+    # `WorkspaceInstanceLock.acquire`. The harness chmods its fake lock explicitly,
+    # so this exercises the real engine code instead of that fixture.
+    if sys.platform == "win32":
+        pytest.skip("a POSIX mode is what this asserts")
+    from ciao.instance_lock import WorkspaceInstanceLock
+
+    runtime = tmp_path / "Ciaobot" / ".runtime"
+    runtime.mkdir(parents=True)
+    lock = WorkspaceInstanceLock(
+        runtime, workspace_root=tmp_path / "Ciaobot", port=8443
+    )
+    previous_umask = os.umask(0o022)
+    try:
+        lock.acquire()
+    finally:
+        os.umask(previous_umask)
+    try:
+        info = os.lstat(lock.path)
+        assert stat.S_ISREG(info.st_mode)
+        assert stat.S_IMODE(info.st_mode) == 0o600
+        assert info.st_uid == os.getuid()
+        metadata = json.loads(lock.path.read_text(encoding="utf-8"))
+        assert metadata["status"] == "running"
+        assert metadata["pid"] == os.getpid()
+        assert metadata["port"] == 8443
+        assert metadata["startup_id"] == lock.startup_id
+    finally:
+        lock.release()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_ambiguous_executable_lookup_does_not_commit(tmp_path: Path) -> None:
+    # `lsof -d txt` reports two `n` records and one of them *is* the installed host.
+    # A parser that accepted any matching record would pass this; the contract is
+    # exactly one record, so an ambiguous answer proves nothing.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "host-executable-mixed").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(
+        harness, result, step="exactly one executable text record"
+    )
 
 
 @runs_the_sh_installer

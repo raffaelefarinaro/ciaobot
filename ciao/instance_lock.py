@@ -9,7 +9,7 @@ import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import Callable, TextIO
 
 from ciao.os_support.locks import lock_exclusive, unlock
 
@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _fchmod(fd: int, mode: int) -> None:
+    """Tighten one open descriptor, where the platform has ``fchmod``.
+
+    The lock is POSIX-only in practice, but this module is imported on Windows,
+    where ``os.fchmod`` does not exist. Read it through ``getattr`` and type the
+    result locally, the same seam ``ciao.server_host._getuid`` uses; a platform
+    without it is a no-op here because no Windows path reaches this call.
+    """
+    tighten: Callable[[int, int], None] | None = getattr(os, "fchmod", None)
+    if tighten is not None:
+        tighten(fd, mode)
 
 
 class WorkspaceAlreadyRunningError(RuntimeError):
@@ -53,6 +66,13 @@ class WorkspaceInstanceLock:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+", encoding="utf-8", newline="")
+        if os.name == "posix":
+            # The lock carries this run's pid, port, workspace and startup id.
+            # `open()` honours the umask, so a fresh lock would otherwise be
+            # group/world readable (0644 under the usual 022) and an older one
+            # keeps whatever mode it had; tighten the descriptor itself so the
+            # file is private for this and every later run (#2330).
+            _fchmod(handle.fileno(), 0o600)
         try:
             lock_exclusive(handle.fileno(), blocking=False)
         except OSError as exc:
