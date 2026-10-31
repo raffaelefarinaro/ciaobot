@@ -49,10 +49,10 @@ FRESH_PORT=8443
 # reviewed sha256 and passed the member allowlist: the private staged copy this
 # run extracted. A native-mode install must take this rather than a PATH uv.
 verified_uv=
-# Set immediately before the legacy publish's single exclusive create and
-# cleared once the published file is confirmed, so a failure takes back only a
-# path that write made.
+# Set once the legacy publish's exclusive create has returned success, together
+# with the inode it produced, so a later failure takes back only that file.
 uv_created=0
+uv_inode=
 version=
 workspace=
 no_start=0
@@ -1134,56 +1134,83 @@ publish_verified_uv() {
     #
     # The publish is one exclusive create straight at the destination: no
     # temporary and no rename. `set -C` has the shell open the path with O_EXCL,
-    # so any pre-existing path - a regular file, a directory, a symlink, a
-    # dangling symlink, a hardlink to a file elsewhere - makes the open fail and
-    # nothing is written, followed or truncated. `mv` is not usable here: on BSD
-    # it follows a destination that is a directory or a symlink to one and moves
-    # the file inside, which both misses the intended path and overwrites
-    # whatever already carries that name there. This branch only runs when this
-    # Mac has no uv at all, so the destination does not legitimately exist.
+    # so a destination that already exists - a regular file, a directory, a
+    # symlink, a dangling symlink, a hardlink to a file elsewhere - fails the
+    # open, which is what refuses it; the check above only gives that refusal a
+    # clearer message for the shapes that are not a regular file, and a regular
+    # file is left to the create, because a check would leave a window where the
+    # create's own EEXIST does not. `mv` is not usable here: on BSD it follows a
+    # destination that is a directory or a symlink to one and moves the file
+    # inside, overwriting whatever already carries that name there. This branch
+    # only runs when this Mac has no uv at all, so the destination does not
+    # legitimately exist.
+    #
+    # Nothing is deleted that this run did not create. The ownership flag is set
+    # only once the exclusive create has returned success, so a create refused
+    # by a file another process put there leaves that file alone, and a create
+    # that fails part-way leaves its own half-written file rather than risk
+    # unlinking somebody else's. What may be taken back later is only a file
+    # whose inode is the one recorded right after the create.
+    #
+    # The chmod is the one step that names a path instead of holding the file it
+    # wrote, so the created inode is captured before it and re-checked after it:
+    # a symlink substituted in that window is detected, and the run refuses
+    # without deleting anything. That is detection, not isolation - this is the
+    # residual nothing here closes: a same-user writer that can already write
+    # ~/.local/bin can win any check at this path, so these checks raise the cost
+    # of an accident and a substitution, and they do not claim to stop an owner.
     [ -n "$verified_uv" ] || fail "no verified uv to publish"
     uv_bin_dir="$HOME/.local/bin"
     mkdir -p "$uv_bin_dir" || fail "could not create $uv_bin_dir"
     uv_dest="$uv_bin_dir/uv"
-    # The destination is read once before the write, and what is here is a
-    # refusal rather than something to replace: the flag below then means "this
-    # run's write is the only thing that may have created this path", and a
-    # failure may take back only what that write left behind.
+    # Read once before the write, only to refuse the shapes that are not a
+    # regular file with a message naming them. Anything regular is the create's
+    # decision, not this check's.
     if [ -L "$uv_dest" ] || [ -d "$uv_dest" ] || { [ -e "$uv_dest" ] && [ ! -f "$uv_dest" ]; }; then
         fail "refusing to replace $uv_dest: it is not a regular file"
     fi
-    if [ -e "$uv_dest" ]; then
-        fail "refusing to overwrite $uv_dest: it already exists"
-    fi
-    uv_created=1
+    uv_created=0
+    uv_inode=
     if ! (set -C; umask 077; cat "$verified_uv" > "$uv_dest"); then
-        discard_published_uv
+        # A path here is not this run's to touch, whether the create was refused
+        # by somebody else's file or left a half-written one of its own: the
+        # flag is still clear, so nothing is discarded either way.
+        if [ -e "$uv_dest" ] || [ -L "$uv_dest" ]; then
+            fail "could not publish the verified uv at $uv_dest: it already exists"
+        fi
         fail "could not publish the verified uv at $uv_dest"
+    fi
+    # The create returned success: from here this path holds the file this run
+    # made, and only a file with this inode may be taken back.
+    uv_created=1
+    uv_inode=$(ls -i "$uv_dest" 2>/dev/null | awk 'NR == 1 {print $1}') || uv_inode=
+    if [ -L "$uv_dest" ] || [ -z "$uv_inode" ]; then
+        fail "the published uv at $uv_dest is not the regular file this run created"
     fi
     if ! chmod 700 "$uv_dest"; then
         discard_published_uv
         fail "could not protect $uv_dest"
     fi
-    # What landed has to be the regular file this write made. A symlink or a
-    # directory standing at the path is something this run did not create, so it
-    # is left exactly where it is.
-    if [ -L "$uv_dest" ] || [ ! -f "$uv_dest" ]; then
-        discard_published_uv
-        fail "the published uv at $uv_dest is not a regular file"
+    uv_inode_now=$(ls -i "$uv_dest" 2>/dev/null | awk 'NR == 1 {print $1}') || uv_inode_now=
+    if [ -L "$uv_dest" ] || [ "$uv_inode_now" != "$uv_inode" ]; then
+        # Refused, not repaired: the path is no longer the file this run made,
+        # so it is somebody else's now and is left exactly where it is.
+        fail "the published uv at $uv_dest changed while it was being published"
     fi
+    uv_created=0
     # Publishing is for the next run: $uv is deliberately left on $verified_uv,
     # the private staged copy. Reopening the published path here would let a
     # replacement of ~/.local/bin/uv after these checks decide which uv the rest
     # of this install executes.
-    uv_created=0
 }
 
 discard_published_uv() {
-    # Take back only a regular file this run's exclusive create made: the flag
-    # is set immediately before that write and cleared once the publish holds.
-    # A directory, a symlink or anything that was already at the path when this
-    # run looked is somebody else's and is never unlinked.
-    if [ "$uv_created" -eq 1 ] && [ -f "$uv_dest" ] && [ ! -L "$uv_dest" ]; then
+    # Take back only the file this run's exclusive create made: the flag is set
+    # after that create returned success, and the inode has to be the one
+    # recorded then. A path replaced by anything else in between - a symlink, a
+    # foreign regular file - is left where the writer put it.
+    if [ "$uv_created" -eq 1 ] && [ -n "$uv_inode" ] && [ -f "$uv_dest" ] && [ ! -L "$uv_dest" ] &&
+        [ "$(ls -i "$uv_dest" 2>/dev/null | awk 'NR == 1 {print $1}')" = "$uv_inode" ]; then
         rm -f "$uv_dest"
     fi
 }

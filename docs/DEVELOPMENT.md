@@ -257,14 +257,24 @@ The verified staged executable is what a native-mode install takes; the staged
 copy is published to `~/.local/bin/uv` only on the legacy missing-uv path, so
 bootstrapping never replaces a uv the machine already has. That publish is one
 exclusive create straight at the destination (`set -C`, i.e. `O_EXCL`), with no
-temporary and no rename: any path already there — a regular file, a directory, a
-symlink, a dangling symlink, a hardlink to a file elsewhere — makes the create
-fail, and nothing is written, followed or moved into it. `mv` is not used,
+temporary and no rename: a path already there — a regular file, a directory, a
+symlink, a dangling symlink, a hardlink to a file elsewhere — is refused, by the
+create's own `EEXIST` or by a check that only exists to name the shape, and
+nothing is written, followed or moved into it. `mv` is not used,
 because on BSD it follows a destination that is a directory or a symlink to one
-and moves the file inside. A failed or unconfirmed publish unlinks only the path
-that write created, never one that was already there. The run that publishes
-also keeps executing the private staged copy: reopening `~/.local/bin/uv` would
-let a later substitution of that path decide which uv the install runs.
+and moves the file inside. Nothing is deleted that the run did not create: the
+ownership flag is set only after the create succeeds, the inode it produced is
+recorded, and only a file with that inode is ever taken back — so a create
+refused by somebody else's file leaves it alone, and a create that fails
+part-way leaves its own half-written file for the next run to refuse. The
+`chmod` names the path rather than holding the descriptor the create wrote, so
+the inode is re-read after it: a symlink substituted in that window is detected
+and the run refuses without deleting anything. That is detection, not isolation,
+and a same-user writer that already owns `~/.local/bin` is the residual these
+checks cannot close.
+The run that publishes also keeps executing the private staged copy: reopening
+`~/.local/bin/uv` would let a later substitution of that path decide which uv
+the install runs.
 There is no piped shell installer in this path. The trust root for the archive
 is the reviewed digest table plus TLS to GitHub: uv publishes no minisign or
 Apple signature for these assets, and the installer does not claim one.

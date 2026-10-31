@@ -6777,11 +6777,16 @@ def test_legacy_missing_uv_publishes_the_verified_copy(tmp_path: Path) -> None:
 PUBLISH_SENTINEL = b"do not touch\n"
 
 
+PUBLISH_SENTINEL = b"do not touch\n"
+
+
 def _run_publish(
     tmp_path: Path,
     *,
     dest_kind: str | None = None,
     fail_write: bool = False,
+    chmod_fails: bool = False,
+    race: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     """Run the shipped publish step against a prepared destination.
 
@@ -6792,8 +6797,12 @@ def _run_publish(
     own name, so a publish that moved or wrote *through* the destination would
     land on it - the fixtures assert it is never written or deleted.
 
-    `fail_write` makes the copy fail after the destination has been created, so
-    the cleanup path is exercised on a file this invocation did make.
+    `race` substitutes the destination from inside a double, at the one window a
+    test needs: "symlink-before-copy" replaces it from the `cat` that fills the
+    created file, "symlink-before-chmod" and "file-before-chmod" replace it from
+    the `chmod` that follows. `fail_write` makes the copy fail after the
+    destination was created, and `chmod_fails` makes the protect step fail while
+    the created file is still this run's.
     """
     home = tmp_path / "home"
     bin_dir = home / ".local" / "bin"
@@ -6811,6 +6820,7 @@ def _run_publish(
     same_named.write_bytes(PUBLISH_SENTINEL)
     target_file = home / "existing-target"
     target_file.write_bytes(PUBLISH_SENTINEL)
+    target_mode = stat.S_IMODE(target_file.stat().st_mode)
 
     dest = bin_dir / "uv"
     if dest_kind == "file":
@@ -6827,18 +6837,36 @@ def _run_publish(
         dest.symlink_to(home / "nowhere")
     elif dest_kind is not None:
         raise AssertionError(f"unknown destination kind: {dest_kind}")
+    dest_inode = dest.lstat().st_ino if os.path.lexists(dest) else None
 
-    if fail_write:
-        # The destination's own redirection has already created and opened the
-        # file by the time this runs, so a short write followed by a failure is
-        # exactly "this run made the path and then could not fill it".
+    real_cat = shlex.quote(shutil.which("cat") or "cat")
+    real_chmod = shlex.quote(shutil.which("chmod") or "chmod")
+    plant_symlink = (
+        'rm -f "$PUBLISH_DEST"\n'
+        'ln -s "$HOME/existing-target" "$PUBLISH_DEST"\n'
+    )
+    plant_file = (
+        'rm -f "$PUBLISH_DEST"\n'
+        'printf "foreign\\n" > "$PUBLISH_DEST"\n'
+    )
+    # The create's own redirection has already opened the destination by the
+    # time `cat` runs, so a double there acts inside the window between the
+    # create and everything the function does to the path afterwards.
+    if race == "symlink-before-copy":
         _write_exec(
             fakebin / "cat",
-            "#!/bin/sh\n"
-            f"printf 'cat %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
-            "printf 'partial\\n'\n"
-            "exit 1\n",
+            "#!/bin/sh\n" + plant_symlink + f"exec {real_cat} \"$@\"\n",
         )
+    elif fail_write:
+        _write_exec(fakebin / "cat", "#!/bin/sh\nprintf 'partial\\n'\nexit 1\n")
+    if chmod_fails or race in ("symlink-before-chmod", "file-before-chmod"):
+        plant = ""
+        if race == "symlink-before-chmod":
+            plant = plant_symlink
+        elif race == "file-before-chmod":
+            plant = plant_file
+        tail = "exit 1\n" if chmod_fails else f'exec {real_chmod} "$@"\n'
+        _write_exec(fakebin / "chmod", "#!/bin/sh\n" + plant + tail)
 
     body = "\n".join(
         [
@@ -6859,6 +6887,7 @@ def _run_publish(
         **os.environ,
         "HOME": str(home),
         "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+        "PUBLISH_DEST": str(dest),
     }
     result = subprocess.run(
         ["sh", "-c", body], env=env, capture_output=True, text=True, check=False
@@ -6867,9 +6896,11 @@ def _run_publish(
         "home": home,
         "bin_dir": bin_dir,
         "dest": dest,
+        "dest_inode": dest_inode,
         "target_dir": target_dir,
         "same_named": same_named,
         "target_file": target_file,
+        "target_mode": target_mode,
         "staged": staged,
     }
 
@@ -6902,14 +6933,28 @@ def test_publish_creates_only_the_destination(tmp_path: Path) -> None:
 
 
 def test_publish_writes_the_destination_in_one_exclusive_create() -> None:
-    """No temp and no rename: `mv` on BSD follows a destination directory."""
+    """No temp, no rename, and ownership claimed only after the create."""
     source = _function_source("publish_verified_uv")
+    create = source.index('(set -C; umask 077; cat "$verified_uv" > "$uv_dest")')
 
-    assert '(set -C; umask 077; cat "$verified_uv" > "$uv_dest")' in source
     assert "mv " not in source
     assert "uv_dest.new" not in source
-    # The post-check that decides whether the write landed on a regular file.
-    assert '[ -L "$uv_dest" ] || [ ! -f "$uv_dest" ]' in source
+    # Nothing in the publish deletes: a failed create never reaches a cleanup,
+    # because the ownership flag is still clear at that point.
+    assert "rm " not in source
+    assert source.index("uv_created=0") < create < source.index("uv_created=1")
+    assert source.index("discard_published_uv") > source.index("uv_created=1")
+    # The inode the create produced is recorded before the chmod and re-read
+    # after it, so a symlink substituted in that window is detected.
+    first = source.index('ls -i "$uv_dest"')
+    protect = source.index("chmod 700")
+    assert first < protect < source.rindex('ls -i "$uv_dest"')
+
+    discard = _function_source("discard_published_uv")
+    # Only a file whose inode is the one this run created may be taken back.
+    assert '[ "$uv_created" -eq 1 ]' in discard
+    assert "uv_inode" in discard
+    assert "rm -f" in discard
 
 
 @runs_the_sh_installer
@@ -6921,8 +6966,9 @@ def test_publish_writes_the_destination_in_one_exclusive_create() -> None:
         ("symlink-to-directory", "not a regular file"),
         ("dangling-symlink", "not a regular file"),
         ("directory", "not a regular file"),
-        # A regular file - or a hardlink to one elsewhere - is refused too: the
-        # exclusive create would either truncate it or write through the link.
+        # A regular file - or a hardlink to one elsewhere - is refused by the
+        # exclusive create itself, which is the only atomic answer to whether
+        # the path is free.
         ("file", "already exists"),
         ("hardlink", "already exists"),
     ],
@@ -6941,6 +6987,7 @@ def test_publish_refuses_any_preexisting_destination(
     elif dest_kind == "hardlink":
         # Still the same inode it was linked to, and still linked to it.
         assert paths["dest"].stat().st_nlink == 2
+        assert paths["dest"].stat().st_ino == paths["dest_inode"]
         assert paths["dest"].read_bytes() == PUBLISH_SENTINEL
     elif dest_kind == "dangling-symlink":
         assert paths["dest"].is_symlink()
@@ -6950,20 +6997,100 @@ def test_publish_refuses_any_preexisting_destination(
     elif dest_kind == "symlink":
         assert paths["dest"].is_symlink()
     else:
+        assert paths["dest"].stat().st_ino == paths["dest_inode"]
         assert paths["dest"].read_bytes() == PUBLISH_SENTINEL
 
 
 @runs_the_sh_installer
-def test_publish_takes_back_only_what_it_created(tmp_path: Path) -> None:
-    """A failed write removes its own half-written file and nothing else."""
+@pytest.mark.parametrize("dest_kind", ["file", "hardlink"])
+def test_publish_never_deletes_a_destination_it_did_not_create(
+    tmp_path: Path, dest_kind: str
+) -> None:
+    """A create refused by someone else's file leaves that file exactly there.
+
+    A regular file skips the non-regular pre-check, so the refusal comes from
+    the exclusive create - the branch where claiming ownership before the create
+    unlinked a file this run had not made.
+    """
+    result, paths = _run_publish(tmp_path, dest_kind=dest_kind)
+
+    assert result.returncode != 0
+    # The security property first: somebody else's file is still there, still
+    # the same inode, still its own bytes.
+    assert paths["dest"].exists()
+    assert paths["dest"].stat().st_ino == paths["dest_inode"]
+    assert paths["dest"].read_bytes() == PUBLISH_SENTINEL
+    if dest_kind == "hardlink":
+        assert paths["dest"].stat().st_nlink == 2
+    _assert_publish_touched_nothing_else(paths)
+    assert "already exists" in result.stderr
+
+
+@runs_the_sh_installer
+def test_publish_leaves_a_failed_create_for_the_next_run(tmp_path: Path) -> None:
+    """A create that failed is not proof of ownership, so nothing is unlinked."""
     result, paths = _run_publish(tmp_path, fail_write=True)
 
     assert result.returncode != 0
-    assert "could not publish" in result.stderr
-    assert not paths["dest"].exists()
+    # The half-written file is left where it is: this run cannot prove it made
+    # it, and the next run refuses the path instead of writing over it.
+    assert paths["dest"].is_file()
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o600
+    _assert_publish_touched_nothing_else(paths)
+    assert "already exists" in result.stderr
+
+
+@runs_the_sh_installer
+def test_publish_takes_back_only_its_own_file_when_chmod_fails(tmp_path: Path) -> None:
+    """With the inode still this run's, a failed chmod removes its own file."""
+    result, paths = _run_publish(tmp_path, chmod_fails=True)
+
+    assert result.returncode != 0
+    assert "could not protect" in result.stderr
     assert list(paths["bin_dir"].iterdir()) == []
     assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
     assert paths["same_named"].read_bytes() == PUBLISH_SENTINEL
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_symlink_substituted_before_the_copy(tmp_path: Path) -> None:
+    """A link planted right after the create is refused, and nothing is deleted."""
+    result, paths = _run_publish(tmp_path, race="symlink-before-copy")
+
+    assert result.returncode != 0
+    assert "not the regular file this run created" in result.stderr
+    # The substituted link is left where the writer put it.
+    assert paths["dest"].is_symlink()
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    # The chmod never ran, so it could not have followed the link.
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+    _assert_publish_touched_nothing_else(paths)
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_symlink_substituted_before_the_chmod(tmp_path: Path) -> None:
+    """A link that appears between the create and the chmod is detected after it."""
+    result, paths = _run_publish(tmp_path, race="symlink-before-chmod")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    assert paths["dest"].is_symlink()
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    # Nothing is deleted on a mismatch: the link stays where the writer put it.
+    _assert_publish_touched_nothing_else(paths)
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_file_substituted_before_the_chmod(tmp_path: Path) -> None:
+    """A foreign file swapped in before the chmod is refused and left alone."""
+    result, paths = _run_publish(tmp_path, race="file-before-chmod")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == b"foreign\n"
+    _assert_publish_touched_nothing_else(paths)
 
 
 def test_trust_boundary_is_not_per_user_isolation() -> None:
@@ -6976,8 +7103,6 @@ def test_trust_boundary_is_not_per_user_isolation() -> None:
     )
     assert "not per-user isolation" in doc
     assert "the same user" in doc
-
-
 
 
 @needs_local_tools
