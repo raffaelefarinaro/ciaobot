@@ -29,7 +29,7 @@ import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Iterable, Sequence
 from urllib.parse import unquote
 
@@ -251,6 +251,98 @@ def is_reserved_bookkeeping(rel_to_root: Path) -> bool:
         and parts[-2].casefold() == "workspace"
         and rel_to_root.name.casefold() in RESERVED_UNINDEXED_FILES
     )
+
+
+# `.ciaoignore` at the vault root lists generated paths (script and schedule
+# output) that are not notes. Rules are gitignore-style, stdlib only:
+# - one pattern per line; blank lines and lines starting with `#` are ignored;
+# - `*` and `?` stay within one path segment; `**` as a whole segment spans
+#   directories; every other character is literal (no `!` negation, no classes);
+# - a pattern without `/` matches at any depth; one containing `/` is anchored
+#   at the vault root (a leading `/` only anchors);
+# - a trailing `/` matches directories only;
+# - a path is ignored when a rule matches it or one of its parent directories;
+# - matching is case-insensitive and uses the path's `as_posix()`.
+VAULT_IGNORE_FILE = ".ciaoignore"
+
+
+@dataclass(frozen=True)
+class _IgnoreRule:
+    regex: re.Pattern[str]
+    directory_only: bool
+
+
+def _glob_to_regex(pattern: str) -> re.Pattern[str]:
+    segments = pattern.split("/")
+    pieces: list[str] = []
+    for index, segment in enumerate(segments):
+        last = index == len(segments) - 1
+        if segment == "**":
+            pieces.append(".+" if last else "(?:[^/]+/)*")
+            continue
+        body = "".join(
+            "[^/]*" if char == "*" else "[^/]" if char == "?" else re.escape(char)
+            for char in segment
+        )
+        pieces.append(body if last else body + "/")
+    return re.compile("".join(pieces), re.IGNORECASE)
+
+
+def _parse_ignore_line(line: str) -> _IgnoreRule | None:
+    pattern = line.strip()
+    if not pattern or pattern.startswith("#"):
+        return None
+    directory_only = pattern.endswith("/")
+    pattern = pattern.rstrip("/")
+    if not pattern:
+        return None
+    if pattern.startswith("/"):
+        pattern = pattern.lstrip("/")
+    elif "/" not in pattern:
+        pattern = f"**/{pattern}"
+    return _IgnoreRule(_glob_to_regex(pattern), directory_only)
+
+
+@dataclass(frozen=True)
+class VaultIgnore:
+    """A vault's `.ciaoignore`: generated paths that are not notes."""
+
+    rules: tuple[_IgnoreRule, ...] = ()
+
+    def matches(self, rel_path: PurePath) -> bool:
+        if not self.rules:
+            return False
+        # The instance's own as_posix(): wrapping it in PurePath() on POSIX would
+        # keep a Windows path's backslashes.
+        posix = rel_path.as_posix()
+        parts = posix.split("/")
+        directories = ["/".join(parts[:i]) for i in range(1, len(parts))]
+        for rule in self.rules:
+            candidates = directories if rule.directory_only else [*directories, posix]
+            if any(rule.regex.fullmatch(candidate) for candidate in candidates):
+                return True
+        return False
+
+
+def load_vault_ignore(vault_root: Path) -> VaultIgnore:
+    """Rules from ``<vault_root>/.ciaoignore``; none when the file is absent.
+
+    Any other read failure propagates: a lint that silently ignored a broken
+    ignore file would report a different vault than the one configured.
+    """
+    try:
+        text = (Path(vault_root) / VAULT_IGNORE_FILE).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except FileNotFoundError:
+        return VaultIgnore()
+    rules: list[_IgnoreRule] = []
+    for line in text.splitlines():
+        rule = _parse_ignore_line(line)
+        if rule is not None:
+            rules.append(rule)
+    return VaultIgnore(tuple(rules))
+
 
 # The stock vocabulary, read off the shipped category list
 # (`ciao/stock/entity-types.yaml`) so the file is the one place a category is
@@ -698,10 +790,14 @@ def scan_vault(
         registry = load_entity_types(vault_root)
     dir_type_map = registry.dir_type_map()
     prefix = VAULT_RENDER_PREFIX if path_prefix is None else Path(path_prefix)
+    ignore = load_vault_ignore(vault_root)
     entries: list[Entry] = []
     for md_path in sorted(vault_root.rglob("*.md")):
         rel_from_vault = md_path.relative_to(vault_root)
         if is_excluded(rel_from_vault):
+            continue
+        # `.ciaoignore`: script and schedule output, not notes (#2249).
+        if ignore.matches(rel_from_vault):
             continue
         # MEMORY.md stays curated; INDEX.md and VOCABULARY.md are this
         # script's own output. None of them are notes.

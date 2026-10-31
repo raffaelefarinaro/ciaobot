@@ -914,3 +914,81 @@ def test_strip_references_keeps_the_notes_own_line_endings(tmp_path: Path, eol: 
         "---", "type: project", "related: [People/Ana]", "people:",
         "  - People/Mo", "  - People/Ana", "---", "# Foo", "", "With Mo.", "",
     ])
+
+
+# ---- .ciaoignore ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        ("PROMPT.md", "automations/a/PROMPT.md", True),
+        ("PROMPT.md", "PROMPT.md", True),
+        ("prompt.md", "automations/a/PROMPT.md", True),
+        ("automations/*/PROMPT.md", "automations/a/PROMPT.md", True),
+        ("automations/*/PROMPT.md", "automations/a/b/PROMPT.md", False),
+        ("automations/**/report.md", "automations/adoption-report/raw/2026-10/report.md", True),
+        ("automations/**/report.md", "automations/report.md", True),
+        ("report_text_*.md", "automations/adoption-report/raw/2026-10/report_text_1.md", True),
+        (
+            "Workspace/email-triage/proposals/????-??-??.md",
+            "Workspace/email-triage/proposals/2026-10-31.md",
+            True,
+        ),
+        (
+            "Workspace/email-triage/proposals/????-??-??.md",
+            "Workspace/email-triage/proposals/notes.md",
+            False,
+        ),
+        ("Workspace/sdk-analyst-feedback/pkg/", "Workspace/sdk-analyst-feedback/pkg/a.md", True),
+        ("Workspace/sdk-analyst-feedback/pkg/", "Workspace/sdk-analyst-feedback/pkg.md", False),
+        ("pkg/", "a/pkg/b/c.md", True),
+        ("pkg/", "a/pkg", False),
+        ("/report.md", "report.md", True),
+        ("/report.md", "sub/report.md", False),
+        ("automations/adoption-report/raw", "automations/adoption-report/raw/2026/report.md", True),
+        ("a/**", "a/b/c.md", True),
+        ("automations/**", "People/Ada.md", False),
+        ("[ab].md", "[ab].md", True),
+        ("[ab].md", "a.md", False),
+    ],
+)
+def test_vault_ignore_glob_rules(tmp_path: Path, pattern: str, path: str, expected: bool):
+    (tmp_path / ".ciaoignore").write_text(pattern + "\n", encoding="utf-8")
+    assert vi.load_vault_ignore(tmp_path).matches(Path(path)) is expected
+
+
+def test_vault_ignore_skips_comments_and_blank_lines(tmp_path: Path):
+    (tmp_path / ".ciaoignore").write_text("# comment\n\n   \nPROMPT.md\n", encoding="utf-8")
+    ignore = vi.load_vault_ignore(tmp_path)
+    assert len(ignore.rules) == 1
+    assert ignore.matches(Path("x/PROMPT.md"))
+
+
+def test_vault_ignore_missing_file_matches_nothing(tmp_path: Path):
+    ignore = vi.load_vault_ignore(tmp_path)
+    assert ignore.rules == ()
+    assert ignore.matches(Path("a.md")) is False
+
+
+def test_vault_ignore_normalises_windows_paths(tmp_path: Path):
+    from pathlib import PureWindowsPath
+
+    (tmp_path / ".ciaoignore").write_text("automations/*/PROMPT.md\n", encoding="utf-8")
+    ignore = vi.load_vault_ignore(tmp_path)
+    assert ignore.matches(PureWindowsPath("automations\\x\\PROMPT.md")) is True
+
+
+def test_scan_vault_skips_ciaoignore_matches(tmp_path: Path):
+    _write(
+        tmp_path / "People" / "Mo.md",
+        "---\nname: Mo\ntype: person\n---\n# Mo\n",
+    )
+    _write(tmp_path / "automations" / "x" / "report.md", "# Report\n")
+    # Control: without a .ciaoignore the generated report is a Memory Map entry.
+    assert "memory-vault/automations/x/report.md" in {e.path_key for e in _scan(tmp_path)}
+
+    (tmp_path / ".ciaoignore").write_text("automations/\n", encoding="utf-8")
+    keys = {e.path_key for e in _scan(tmp_path)}
+    assert "memory-vault/automations/x/report.md" not in keys
+    assert "memory-vault/People/Mo.md" in keys
