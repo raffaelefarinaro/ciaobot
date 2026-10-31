@@ -248,8 +248,9 @@ The bootstrap has its own, narrower trust root. A machine that already has a
 missing `uv` is installed, from the pinned archive for its architecture:
 `https://github.com/astral-sh/uv/releases/download/0.12.17/uv-<triple>.tar.gz`.
 The installer compares that archive with a sha256 reviewed into
-`scripts/install-engine.sh` and only then reads the member list: exactly one
-`uv-<triple>/` directory, one regular `uv-<triple>/uv` and optionally one
+`scripts/install-engine.sh` and only then reads the member list: at most one
+`uv-<triple>/` directory (a tar producer may omit the directory entry; the exact
+`uv` file is what is extracted), one regular `uv-<triple>/uv` and optionally one
 regular `uv-<triple>/uvx`, with only `uv` extracted into a fresh 0700 staging
 directory. Any other member, a link, a duplicate, an absolute
 or `..` path, or an ambiguous name is a refusal that extracts and runs nothing.
@@ -262,28 +263,62 @@ symlink, a dangling symlink, a hardlink to a file elsewhere — is refused, by t
 create's own `EEXIST` or by a check that only exists to name the shape, and
 nothing is written, followed or moved into it. `mv` is not used,
 because on BSD it follows a destination that is a directory or a symlink to one
-and moves the file inside. Nothing is deleted that the run did not create: the
-ownership flag is set only after the create succeeds, the inode it produced is
-recorded, and only a file with that inode is ever taken back — so a create
-refused by somebody else's file leaves it alone, and a create that fails
-part-way leaves its own half-written file for the next run to refuse. The
-`chmod` names the path rather than holding the descriptor the create wrote, so
-the inode is re-read after it: a symlink substituted in that window is detected
-and the run refuses without deleting anything. That is detection, not isolation,
-and a same-user writer that already owns `~/.local/bin` is the residual these
-checks cannot close.
+and moves the file inside. The write, the executable bit and the final identity
+check all happen through the descriptor that create returned, in one subshell
+that holds it open until they are done: the bytes go to the descriptor, and the
+mode is set with `chmod 700 /dev/fd/3`, so a symlink or a regular file
+substituted at the path is never written to, followed or made executable. The
+created inode is read from that descriptor too, never from the path, and the
+path is checked against it once more before the descriptor closes; a mismatch is
+a refusal that leaves whatever is there where it is. The descriptor also keeps
+that inode allocated while the check runs, so the created file's number cannot
+be reused by a file substituted at the path (a substitute necessarily carries a
+different inode). The path is read with `lstat` and the descriptor with GNU
+`stat -L`; the BSD or GNU spelling is chosen from the kernel instead of trying
+one and falling back to the other, because GNU reads `stat -f` as filesystem
+status and `%i` as an extra operand: it prints that status to stdout and only
+then fails on the missing operand, so a `||` fallback would find the status
+already there to compare as if it were an inode. The digest check runs
+`/usr/bin/shasum` and the identity check `/usr/bin/stat`, never a command chosen
+by `PATH`, and the digest is read from `shasum`'s own output rather than piped
+through another PATH-resolved parser.
+Ownership is claimed only after the create has returned and the descriptor's
+inode has been read, and a
+failed write takes back its own partial file only while the path still lstat's
+to that same inode — so a create refused by somebody else's file leaves it
+alone, and a substituted file found by that check is left where its writer put
+it. A write failure this run observes is taken back; a run that is killed or
+loses power after the create can leave an empty or partial file that the next
+run refuses. The next run never guesses and never unlinks it: its failure names
+the path, says to inspect it and hash it, and suggests removal only when the
+operator is sure it is that interrupted leftover. That check and the `rm` are
+separate syscalls, so a same-user writer
+who replaces the path in between can still have their file removed; a
+substitution made before the check is not. That is safety against substitution,
+not isolation, and the residual it cannot close is the same-user writer: a
+process that already owns `~/.local/bin` can replace the path after the final
+check, before the next run, and none of this is per-user isolation.
 The run that publishes also keeps executing the private staged copy: reopening
 `~/.local/bin/uv` would let a later substitution of that path decide which uv
 the install runs.
+That publish is at user scope — a directory this user owns, with no privileged
+write — and it is deliberately outside every transaction this installer runs: it
+happens before the release manifest is even fetched, and the migration receipt
+does not carry it. A `--migrate` that fails gives back the plists, the shim, the
+install receipt and the tool environment it snapshotted, and leaves the
+published `uv` where it is. That is a rollback of the migration, not of the
+machine, and it is not a promise of full rollback. It is also the intended
+outcome: the file was authenticated before it was written, it is the first uv on
+a Mac that had none, and the next run reusing it is what the publish is for.
 There is no piped shell installer in this path. The trust root for the archive
 is the reviewed digest table plus TLS to GitHub: uv publishes no minisign or
 Apple signature for these assets, and the installer does not claim one.
 The 0700 scratch directory that holds the archive and the staged copy is not
 per-user isolation: it excludes other users, but a process running as the same
-user can replace the archive between the `shasum` check and the tar read, or
-swap the staged copy before it runs. The digest table and TLS bound what the
-network can hand this script; nothing here defends against code already running
-as this user.
+user can replace the archive between the `/usr/bin/shasum` check and the tar
+read, or swap the staged copy before it runs. The digest table and TLS bound
+what the network can hand this script; nothing here defends against code already
+running as this user.
 Bumping `UV_VERSION` means replacing all six digests in the same review, and no
 checksum is fetched at install time. The bootstrap proves only that the
 archive matches the embedded digest; it does not authenticate anything that
@@ -298,7 +333,9 @@ of the two plists, the shim, the install receipt and any existing uv tool
 environment in `~/.local/state/ciaobot/migration/before/` (an absent file is
 recorded as absent, so a rollback removes only what the migration created, and
 the tool environment is copied only when one is already there — the common
-hand-over from the retired app has none), and refuses to touch anything if that
+hand-over from the retired app has none; a `uv` this run bootstrapped is not one
+of the before-images, see above), and refuses to touch that engine or its
+service if the
 app is still running 20 s after it was asked to quit. It then either
 repoints `com.ciao.server` at the new engine and, only once that engine answers
 with the version just installed, retires the app's own agent — restoring the

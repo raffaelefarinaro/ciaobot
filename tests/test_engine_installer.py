@@ -61,6 +61,21 @@ needs_local_tools = pytest.mark.skipif(
 )
 
 
+def _system_tool(name: str) -> str:
+    """The command the shipped script pins on macOS, when this runner has it.
+
+    The installer names `/usr/bin/stat` and `/usr/bin/shasum` explicitly so a
+    user-writable directory earlier on PATH cannot choose them. The fixtures run
+    that same absolute path when it exists, so the tests exercise the production
+    target rather than a differently-resolved copy; only a runner without it
+    falls back to the command the environment provides.
+    """
+    pinned = Path("/usr/bin") / name
+    if pinned.is_file():
+        return str(pinned)
+    return shutil.which(name) or name
+
+
 def _function_source(name: str) -> str:
     """Extract one top-level shell function, closing brace included."""
     lines = SCRIPT_TEXT.splitlines()
@@ -170,10 +185,28 @@ def test_verification_happens_before_install() -> None:
     # Handing a wheel to a tool environment and only then discovering it is not
     # the one the release signed would be no check at all, so both the signature
     # verification and the digest comparison have to come first.
+    #
+    # Both are anchored to the wheel, not to the first `shasum -a 256` in the
+    # file: the uv bootstrap (#2338) hashes its archive earlier, and an anchor on
+    # that digest would pass this test on a check that never looked at the wheel.
+    signature = SCRIPT_TEXT.index("$(read_manifest)")
+    # The digest command may be the pinned `$SHASUM`, but the *wheel* has to be
+    # the file it hashes: the uv bootstrap hashes its own archive earlier.
+    wheel_digest_line = next(
+        line
+        for line in SCRIPT_TEXT.splitlines()
+        if line.startswith("actual_sha=$(") and '"$wheel"' in line
+    )
+    wheel_digest = SCRIPT_TEXT.index(wheel_digest_line)
+    comparison = SCRIPT_TEXT.index('[ "$actual_sha" = "$wheel_sha" ]')
     install = SCRIPT_TEXT.index("tool install --force")
 
-    assert SCRIPT_TEXT.index("$(read_manifest)") < install
-    assert SCRIPT_TEXT.index("shasum -a 256") < install
+    assert '"$wheel"' in wheel_digest_line
+    assert '"$SHASUM"' in wheel_digest_line
+    assert signature < wheel_digest
+    # That digest is compared with the value the signed manifest printed, which
+    # is what makes checking it before the install mean anything.
+    assert wheel_digest < comparison < install
 
 
 def test_setup_reloads_launch_agent_before_start() -> None:
@@ -922,7 +955,11 @@ def _harness(
     fakebin.mkdir()
     # `uname` answers per flag: the installer asks `-s` for its macOS guard and
     # `-m` for the uv archive it may bootstrap. Answering "Darwin" to both, as
-    # this stub used to, would make the architecture unknowable.
+    # this stub used to, would make the architecture unknowable. This fixture is
+    # the whole-script macOS simulation, so `-s` is Darwin on every runner; the
+    # uv stub below keeps it out of the publish path. The publish and inode
+    # helpers have their own fixtures, which keep the running kernel's name so
+    # they choose the real `stat` spelling.
     _write_exec(
         fakebin / "uname",
         "#!/bin/sh\n"
@@ -934,6 +971,17 @@ def _harness(
     )
     _write_exec(fakebin / "sw_vers", '#!/bin/sh\n[ "$1" = "-productVersion" ] && echo 14.5\n')
     _write_exec(fakebin / "uv", _fake_uv())
+    # The pinned system tools are rewritten to these wrappers above; they only
+    # delegate, so the shipped digest and identity commands are still the real
+    # ones on the runner.
+    _write_exec(
+        fakebin / "stat",
+        f"#!/bin/sh\nexec {shlex.quote(_system_tool('stat'))} \"$@\"\n",
+    )
+    _write_exec(
+        fakebin / "shasum",
+        f"#!/bin/sh\nexec {shlex.quote(_system_tool('shasum'))} \"$@\"\n",
+    )
     _write_exec(
         fakebin / "curl", _CURL_STUB.replace("__CURL__", shutil.which("curl") or "curl")
         .replace("__VERSION__", VERSION)
@@ -1171,6 +1219,25 @@ def _harness(
         r"^(PLISTBUDDY|LAUNCHCTL|OSASCRIPT|PGREP|LSOF|PS|CURL|SLEEP)=.*$",
         lambda m: f"{m.group(1)}={fakebin / m.group(1).lower()}",
         rewritten,
+        flags=re.MULTILINE,
+    )
+    # The publish's system tools are pinned to absolute macOS paths in the
+    # shipped script. This whole-script fixture simulates a Mac on every runner,
+    # so point them at the runner's real tools: the publish path itself is kept
+    # out of these runs by the `uv` stub, but the wheel and host digests still
+    # have to be computed.
+    rewritten = re.sub(
+        r"^STAT=.*$",
+        f"STAT={fakebin / 'stat'}",
+        rewritten,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    rewritten = re.sub(
+        r"^SHASUM=.*$",
+        f"SHASUM={fakebin / 'shasum'}",
+        rewritten,
+        count=1,
         flags=re.MULTILINE,
     )
     # A fresh install probes its port with the engine's own bind; 8443 is
@@ -4234,7 +4301,9 @@ def test_migrate_refuses_running_app_after_timeout(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "still running" in result.stderr
-    assert "nothing on this Mac has been changed" in result.stderr
+    # The before-images and the receipt have already been written by this point,
+    # so the message may only claim the engine and its service are unchanged.
+    assert "engine and its service are unchanged" in result.stderr
     assert "tool install" not in _log(harness, "uv-calls.log")
     # Not one label was booted out or disabled, and the receipt says why rather
     # than claiming a migration that did not happen.
@@ -6420,11 +6489,21 @@ UV_SHA256 = {
 }
 
 UV_EXECUTED = "uv-executed.log"
-UV_BOOTSTRAP_BODY = (
-    "#!/bin/sh\n" f"printf 'executed\\n' >> \"$HOME/{UV_EXECUTED}\"\n"
-).encode()
 UVX_EXECUTED = "uvx-executed.log"
-UVX_BODY = b"#!/bin/sh\nprintf 'executed\\n' >> \"$HOME/uvx-executed.log\"\n"
+# Each archive executable records every run at a fixed path this harness passes
+# in the environment, and again under HOME. The fixed path cannot be redirected
+# by a run that changes HOME, so an execution attempt is traced even when the
+# rest of the environment is not what the fixture expected.
+UV_BOOTSTRAP_BODY = (
+    "#!/bin/sh\n"
+    'printf \'uv\\n\' >> "${UV_EXEC_TRACE:-/dev/null}"\n'
+    f"printf 'executed\\n' >> \"$HOME/{UV_EXECUTED}\"\n"
+).encode()
+UVX_BODY = (
+    "#!/bin/sh\n"
+    'printf \'uvx\\n\' >> "${UV_EXEC_TRACE:-/dev/null}"\n'
+    f"printf 'executed\\n' >> \"$HOME/{UVX_EXECUTED}\"\n"
+).encode()
 
 
 def _uv_archive(
@@ -6477,6 +6556,9 @@ def _uv_entries(triple: str) -> list[tuple[str, str, bytes]]:
 def _assert_nothing_executed(paths: dict[str, Any]) -> None:
     """Neither archive executable ran: each would have left its own marker."""
     home: Path = paths["home"]
+    trace: Path = paths["exec_trace"]
+    recorded = trace.read_text(encoding="utf-8") if trace.exists() else ""
+    assert recorded == "", f"the archive's executables ran: {recorded!r}"
     assert not (home / UV_EXECUTED).exists(), "the archive's uv was executed"
     assert not (home / UVX_EXECUTED).exists(), "the archive's uvx was executed"
 
@@ -6512,6 +6594,30 @@ def _uv_bootstrap_digest_source(digests: dict[str, str]) -> str:
     return rewritten
 
 
+def _kernel_uname_stub(arch: str) -> str:
+    """A `uname` double that fakes the archive architecture and nothing else.
+
+    The bootstrap fixture parametrizes the uv triple, so `uname -m` has to
+    answer the requested `arch`. Every other flag - notably `-s`, which the
+    inode helpers use to pick BSD or GNU `stat` - has to come from the running
+    kernel. A stub that answered Darwin on a Linux runner would send the
+    helpers to GNU `stat -f`, which is filesystem status rather than an inode:
+    it prints the status to stdout and then fails on the stray `%i`, so the
+    identity check would compare whatever that status printed. The full-script
+    fixture simulates the Darwin host
+    separately, for the installer's own platform guard, and its uv stub keeps
+    that run out of the publish path.
+    """
+    real_uname = shlex.quote(shutil.which("uname") or "uname")
+    return (
+        "#!/bin/sh\n"
+        'case "${1:-}" in\n'
+        f"    -m) echo {shlex.quote(arch)} ;;\n"
+        f'    *) exec {real_uname} "$@" ;;\n'
+        "esac\n"
+    )
+
+
 def _uv_bootstrap_run(
     tmp_path: Path,
     *,
@@ -6520,11 +6626,14 @@ def _uv_bootstrap_run(
     digests: dict[str, str],
     download: bool = True,
     entry: str = "bootstrap_verified_uv",
+    poison_awk: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     """Run the shipped bootstrap functions against `archive`, hermetically.
 
     `entry` is the function called by name: the helper alone, or the shipped
-    `find_uv` missing-uv branch that also publishes it.
+    `find_uv` missing-uv branch that also publishes it. `poison_awk` puts a
+    lying `awk` first on PATH; the digest check must not parse `shasum` output
+    through a command PATH can choose.
     """
     home = tmp_path / "home"
     (home / ".local" / "bin").mkdir(parents=True, exist_ok=True)
@@ -6534,16 +6643,13 @@ def _uv_bootstrap_run(
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir()
     trace = tmp_path / "trace.log"
+    exec_trace = tmp_path / "exec-trace.log"
 
-    _write_exec(
-        fakebin / "uname",
-        "#!/bin/sh\n"
-        'case "${1:-}" in\n'
-        f"    -m) echo {arch} ;;\n"
-        "    -s) echo Darwin ;;\n"
-        "    *) echo Darwin ;;\n"
-        "esac\n",
-    )
+    _write_exec(fakebin / "uname", _kernel_uname_stub(arch))
+    if poison_awk:
+        # A PATH-chosen parser must not be able to replace the digest `shasum`
+        # printed with the one the table expects.
+        _write_exec(fakebin / "awk", "#!/bin/sh\nprintf '%s\\n' " + "0" * 64 + "\n")
     # A curl double: it records the request, then serves the fixture (or
     # refuses), so no test reaches GitHub.
     download_body = (
@@ -6589,6 +6695,10 @@ def _uv_bootstrap_run(
         f"tmp={shlex.quote(str(tmp))}",
         f"CURL={shlex.quote(str(fakebin / 'curl'))}",
         f"TAR={shlex.quote(str(fakebin / 'tar'))}",
+        # The shipped script pins these to the macOS system paths. The fixtures
+        # use the runner's real commands so this exercises the same command line.
+        f"STAT={shlex.quote(_system_tool('stat'))}",
+        f"SHASUM={shlex.quote(_system_tool('shasum'))}",
         f"UV_VERSION={UV_VERSION}",
         "verified_uv=",
         _function_source("fail"),
@@ -6599,7 +6709,10 @@ def _uv_bootstrap_run(
     if entry != "bootstrap_verified_uv":
         # The helper alone must be runnable without the publishing branch, so
         # its tests cannot pass by borrowing that code.
+        body_parts.append(_function_source("path_inode"))
+        body_parts.append(_function_source("descriptor_inode"))
         body_parts.append(_function_source("publish_verified_uv"))
+        body_parts.append(_function_source("write_published_uv"))
         body_parts.append(_function_source("discard_published_uv"))
     if entry == "find_uv":
         body_parts.append(_function_source("find_uv"))
@@ -6619,12 +6732,17 @@ def _uv_bootstrap_run(
     )
     result = subprocess.run(
         ["sh", "-c", body],
-        env={**os.environ, "HOME": str(home), "PATH": path},
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": path,
+            "UV_EXEC_TRACE": str(exec_trace),
+        },
         capture_output=True,
         text=True,
         check=False,
     )
-    return result, {"home": home, "tmp": tmp, "trace": trace}
+    return result, {"home": home, "tmp": tmp, "trace": trace, "exec_trace": exec_trace}
 
 
 def _tar_trace(trace: Path) -> list[str]:
@@ -6650,11 +6768,30 @@ def _tar_extractions(trace: Path) -> list[str]:
     ]
 
 
+def _assert_only_uv_extracted(paths: dict[str, Any], triple: str) -> None:
+    """Exactly one extraction, naming the uv member and never uvx.
+
+    The tar double normalizes any extraction spelling, so this asserts which
+    members and archive were requested rather than how the flags were written.
+    """
+    extractions = _tar_extractions(paths["trace"])
+    assert len(extractions) == 1, extractions
+    requested = extractions[0].split()
+    assert f"uv-{triple}/uv" in requested
+    assert f"{paths['tmp']}/uv-{triple}.tar.gz" in requested
+    assert "uvx" not in extractions[0]
+
+
 def test_uv_bootstrap_digest_table_matches_reviewed_01217_assets() -> None:
     """The six literals are the trust root: a typo here authenticates nothing."""
     assert re.search(r"^UV_VERSION=0\.12\.17$", SCRIPT_TEXT, re.MULTILINE)
-    # The allowlist inspection must not use a tar chosen by PATH.
+    # The allowlist inspection must not use a tar chosen by PATH, and neither the
+    # digest check nor the identity check may use a PATH-chosen command.
     assert re.search(r"^TAR=/usr/bin/tar$", SCRIPT_TEXT, re.MULTILINE)
+    assert re.search(r"^STAT=/usr/bin/stat$", SCRIPT_TEXT, re.MULTILINE)
+    assert re.search(r"^SHASUM=/usr/bin/shasum$", SCRIPT_TEXT, re.MULTILINE)
+    assert 'shasum -a 256' not in SCRIPT_TEXT
+    assert re.search(r"(?m)^\s*stat\s", SCRIPT_TEXT) is None
     body = "\n".join(
         [
             _function_source("fail"),
@@ -6708,11 +6845,33 @@ def test_uv_bootstrap_verifies_before_execution(
     ) in trace
     assert "--proto =https" in trace
     assert "--proto-redir =https" in trace
-    extractions = _tar_extractions(paths["trace"])
-    assert extractions == [
-        f"extract -xOf {paths['tmp']}/uv-{triple}.tar.gz uv-{triple}/uv"
-    ]
-    assert "uvx" not in " ".join(extractions)
+    _assert_only_uv_extracted(paths, triple)
+
+
+@needs_local_tools
+def test_uv_bootstrap_digest_does_not_trust_a_path_awk(tmp_path: Path) -> None:
+    """A lying `awk` earlier on PATH cannot substitute the reviewed digest.
+
+    The digest is the trust root, so it is compared from `shasum`'s own output
+    rather than through a parser the caller's PATH chooses. A pipeline through
+    `awk` here would let that double answer with the expected digest and
+    authenticate an archive that never matched it.
+    """
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(tmp_path / "uv.tar.gz", _uv_entries(triple))
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path,
+        arch="arm64",
+        archive=archive,
+        digests=_fixture_digests(archive),
+        poison_awk=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (paths["tmp"] / "uv-bootstrap" / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    _assert_only_uv_extracted(paths, triple)
+    _assert_nothing_executed(paths)
 
 
 @needs_local_tools
@@ -6775,9 +6934,10 @@ def test_legacy_missing_uv_publishes_the_verified_copy(tmp_path: Path) -> None:
 
 
 PUBLISH_SENTINEL = b"do not touch\n"
-
-
-PUBLISH_SENTINEL = b"do not touch\n"
+# A mode no publish may change: 0640 is neither the 0600 an exclusive create
+# with umask 077 leaves nor the 0700 the published uv has to carry, so a test
+# that sees it afterwards knows a path-based write or chmod reached the file.
+PUBLISH_VICTIM_MODE = 0o640
 
 
 def _run_publish(
@@ -6787,6 +6947,7 @@ def _run_publish(
     fail_write: bool = False,
     chmod_fails: bool = False,
     race: str | None = None,
+    home: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
     """Run the shipped publish step against a prepared destination.
 
@@ -6798,33 +6959,51 @@ def _run_publish(
     land on it - the fixtures assert it is never written or deleted.
 
     `race` substitutes the destination from inside a double, at the one window a
-    test needs: "symlink-before-copy" replaces it from the `cat` that fills the
-    created file, "symlink-before-chmod" and "file-before-chmod" replace it from
-    the `chmod` that follows. `fail_write` makes the copy fail after the
-    destination was created, and `chmod_fails` makes the protect step fail while
-    the created file is still this run's.
+    test needs: "symlink-before-copy" and "file-before-copy" replace it from the
+    `cat` that fills the created file, "symlink-before-chmod" and
+    "file-before-chmod" replace it from the `chmod` that follows, and
+    "file-before-copy-fail" both substitutes and fails the write so the cleanup
+    path is exercised with a file it does not own. "file-before-identity" makes
+    the `stat` that reads the created inode plant a stranger's file first, so the
+    identity is sampled after a substitution. "identity-unreadable" makes that
+    same `stat` fail outright, which is the status-11 branch: nothing can prove
+    the created file is this run's, so nothing is claimed or taken back.
+    `fail_write` makes the copy fail
+    after the destination was created, and `chmod_fails` makes the protect step
+    fail while the created file is still this run's. `home` reuses an existing
+    HOME, so a test can run the next install over a failed one.
     """
-    home = tmp_path / "home"
+    home = tmp_path / "home" if home is None else home
     bin_dir = home / ".local" / "bin"
-    bin_dir.mkdir(parents=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
     staged = tmp_path / "staged-uv"
     staged.write_bytes(UV_BOOTSTRAP_BODY)
     staged.chmod(0o700)
     fakebin = tmp_path / "fakebin"
-    fakebin.mkdir()
+    fakebin.mkdir(exist_ok=True)
+    # A retry over the same fixture must not inherit the previous run's doubles.
+    for stale in ("cat", "chmod", "stat"):
+        (fakebin / stale).unlink(missing_ok=True)
     trace = tmp_path / "trace.log"
 
     target_dir = home / "existing-dir"
-    target_dir.mkdir()
+    target_dir.mkdir(exist_ok=True)
     same_named = target_dir / "uv"
     same_named.write_bytes(PUBLISH_SENTINEL)
     target_file = home / "existing-target"
     target_file.write_bytes(PUBLISH_SENTINEL)
+    target_file.chmod(PUBLISH_VICTIM_MODE)
     target_mode = stat.S_IMODE(target_file.stat().st_mode)
 
     dest = bin_dir / "uv"
     if dest_kind == "file":
         dest.write_bytes(PUBLISH_SENTINEL)
+    elif dest_kind == "empty-file":
+        # What an interrupted exclusive publish leaves behind: the create
+        # succeeded, then the process died before (or while) the verified bytes
+        # were written. 0600 is the mode umask 077 gave the create.
+        dest.write_bytes(b"")
+        dest.chmod(0o600)
     elif dest_kind == "hardlink":
         os.link(target_file, dest)
     elif dest_kind == "directory":
@@ -6841,6 +7020,7 @@ def _run_publish(
 
     real_cat = shlex.quote(shutil.which("cat") or "cat")
     real_chmod = shlex.quote(shutil.which("chmod") or "chmod")
+    real_stat = shlex.quote(_system_tool("stat"))
     plant_symlink = (
         'rm -f "$PUBLISH_DEST"\n'
         'ln -s "$HOME/existing-target" "$PUBLISH_DEST"\n'
@@ -6848,14 +7028,44 @@ def _run_publish(
     plant_file = (
         'rm -f "$PUBLISH_DEST"\n'
         'printf "foreign\\n" > "$PUBLISH_DEST"\n'
+        f'chmod {PUBLISH_VICTIM_MODE:o} "$PUBLISH_DEST"\n'
     )
-    # The create's own redirection has already opened the destination by the
-    # time `cat` runs, so a double there acts inside the window between the
-    # create and everything the function does to the path afterwards.
+    # The destination is still empty when `cat` runs: the publish has just
+    # created it and holds its descriptor. A double there acts inside the window
+    # between that create and everything the function does with the file, which
+    # is where a path-based write or chmod could still be fooled.
     if race == "symlink-before-copy":
         _write_exec(
             fakebin / "cat",
             "#!/bin/sh\n" + plant_symlink + f"exec {real_cat} \"$@\"\n",
+        )
+    elif race == "file-before-copy":
+        _write_exec(
+            fakebin / "cat",
+            "#!/bin/sh\n" + plant_file + f"exec {real_cat} \"$@\"\n",
+        )
+    elif race == "file-before-copy-fail":
+        # The write fails after a stranger's file has taken the path, so the
+        # cleanup has to prove ownership before it removes anything.
+        _write_exec(fakebin / "cat", "#!/bin/sh\n" + plant_file + "exit 1\n")
+    elif race == "file-before-identity":
+        # The substitution happens before the identity is sampled at all: the
+        # `stat` that reads it plants the stranger's file first, then reports the
+        # descriptor it was asked about. A path-sampled identity would record the
+        # stranger; a descriptor-bound one still reports the created file.
+        _write_exec(
+            fakebin / "stat",
+            "#!/bin/sh\n" + plant_file + f'exec {real_stat} "$@"\n',
+        )
+    elif race == "identity-unreadable":
+        # Only the descriptor read fails; every other `stat` this publish could
+        # make still answers, so the run is refused for the one reason under
+        # test and not because the fixture broke the tool.
+        _write_exec(
+            fakebin / "stat",
+            "#!/bin/sh\n"
+            'for arg in "$@"; do [ "$arg" = /dev/fd/3 ] && exit 1; done\n'
+            f'exec {real_stat} "$@"\n',
         )
     elif fail_write:
         _write_exec(fakebin / "cat", "#!/bin/sh\nprintf 'partial\\n'\nexit 1\n")
@@ -6868,16 +7078,31 @@ def _run_publish(
         tail = "exit 1\n" if chmod_fails else f'exec {real_chmod} "$@"\n'
         _write_exec(fakebin / "chmod", "#!/bin/sh\n" + plant + tail)
 
+    # Only the two identity-race knobs need a `stat` double; every other run
+    # uses the real command the shipped script would use.
+    stat_tool = (
+        fakebin / "stat"
+        if race in ("file-before-identity", "identity-unreadable")
+        else Path(_system_tool("stat"))
+    )
+
     body = "\n".join(
         [
             "set -eu",
             f"HOME={shlex.quote(str(home))}",
             f"verified_uv={shlex.quote(str(staged))}",
+            # The shipped script pins this to the macOS system path; a race test
+            # that needs a `stat` double points it at the double instead.
+            f"STAT={shlex.quote(str(stat_tool))}",
+            f"SHASUM={shlex.quote(_system_tool('shasum'))}",
             # find_uv's missing-uv branch: the bootstrap helper has already set
             # both of these to the private staged copy before publishing.
             "uv=$verified_uv",
             _function_source("fail"),
+            _function_source("path_inode"),
+            _function_source("descriptor_inode"),
             _function_source("publish_verified_uv"),
+            _function_source("write_published_uv"),
             _function_source("discard_published_uv"),
             "publish_verified_uv",
             'printf "uv=%s\\n" "$uv"',
@@ -6915,6 +7140,256 @@ def _assert_publish_touched_nothing_else(paths: dict[str, Any]) -> None:
     assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
 
 
+def _run_inode_functions(script: str) -> subprocess.CompletedProcess[str]:
+    """Run the shipped inode helpers in a plain POSIX shell, nothing else.
+
+    Only the two functions are extracted, so this exercises the shipped text
+    without the bootstrap, the download, or the publish around it.
+    """
+    body = "\n".join(
+        [
+            "set -eu",
+            f"STAT={shlex.quote(_system_tool('stat'))}",
+            _function_source("path_inode"),
+            _function_source("descriptor_inode"),
+            script,
+        ]
+    )
+    return subprocess.run(
+        ["sh", "-c", body], capture_output=True, text=True, check=False
+    )
+
+
+@runs_the_sh_installer
+def test_path_inode_reads_the_path_with_lstat(tmp_path: Path) -> None:
+    """The path helper reports the path's own inode, in decimal and nothing else.
+
+    A final symlink is not followed: the link's lstat inode is what a
+    substituted destination has to be compared against. A stat spelling that
+    printed filesystem information instead would show up as an extra or
+    non-decimal line here.
+    """
+    target = tmp_path / "target"
+    target.write_bytes(b"target\n")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+
+    result = _run_inode_functions(
+        f"path_inode {shlex.quote(str(target))}\n"
+        f"path_inode {shlex.quote(str(link))}\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        str(target.lstat().st_ino),
+        str(link.lstat().st_ino),
+    ]
+    assert link.lstat().st_ino != target.lstat().st_ino
+
+
+@runs_the_sh_installer
+def test_path_inode_prints_nothing_when_the_path_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """A failed read is a failed command, not a guessed number on stdout."""
+    missing = tmp_path / "missing"
+
+    result = _run_inode_functions(f"path_inode {shlex.quote(str(missing))}")
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
+@runs_the_sh_installer
+def test_descriptor_inode_reads_the_open_file_not_the_descriptor(
+    tmp_path: Path,
+) -> None:
+    """The descriptor helper returns the open file's inode on macOS and on GNU.
+
+    GNU exposes /dev/fd/N as a symlink into /proc/self/fd, so lstat'ing it gives
+    the link's inode and only a following `stat -L` gives the file's; macOS
+    resolves the descriptor itself. After the path is replaced the descriptor
+    still names the file this process opened, which is what makes the identity
+    it recorded trustworthy.
+    """
+    opened = tmp_path / "opened"
+    opened.write_bytes(b"opened\n")
+    original = opened.lstat().st_ino
+    moved = tmp_path / "moved"
+
+    result = _run_inode_functions(
+        "exec 3< " + shlex.quote(str(opened)) + "\n"
+        'if [ -L /dev/fd/3 ]; then printf "symlink\\n"; else printf "not-symlink\\n"; fi\n'
+        'printf "%s\\n" "$(descriptor_inode /dev/fd/3)"\n'
+        'printf "%s\\n" "$(path_inode /dev/fd/3)"\n'
+        f"mv {shlex.quote(str(opened))} {shlex.quote(str(moved))}\n"
+        f"printf 'foreign\\n' > {shlex.quote(str(opened))}\n"
+        'printf "%s\\n" "$(descriptor_inode /dev/fd/3)"\n'
+        f'printf "%s\\n" "$(path_inode {shlex.quote(str(opened))})"\n'
+        "exec 3<&-\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+    kind, descriptor_before, path_before, descriptor_after, path_after = (
+        result.stdout.splitlines()
+    )
+    assert int(descriptor_before) == original
+    assert int(descriptor_after) == original
+    assert moved.lstat().st_ino == original
+    replacement = opened.lstat().st_ino
+    assert int(path_after) == replacement
+    assert replacement != original
+    if sys.platform == "darwin":
+        # macOS resolves /dev/fd/N to the open file, so lstat'ing it is already
+        # the file's inode - the fdesc node is not a symlink.
+        assert kind == "not-symlink"
+        assert int(path_before) == original
+    else:
+        # GNU's path helper lstat's the /proc/self/fd symlink; only the
+        # descriptor helper follows it to the created file.
+        assert kind == "symlink"
+        assert int(path_before) != original
+
+
+@runs_the_sh_installer
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="GNU stat -f is filesystem status; -f -c prints the id, and macOS has BSD stat",
+)
+def test_path_inode_is_not_gnu_filesystem_status(tmp_path: Path) -> None:
+    """On GNU, -f is filesystem status and cannot stand in for an inode.
+
+    GNU reads `stat -f '%i'` as filesystem status plus an extra operand: it
+    prints the status of the real file to stdout and then exits nonzero because
+    no file named `%i` exists. A helper written as `stat -f ... || stat -c ...`
+    would therefore leave that status on stdout before the fallback ran.
+    `stat -f -c '%i'` is the filesystem id; the helper has to choose the kernel's
+    spelling up front instead.
+    """
+    target = tmp_path / "target"
+    target.write_bytes(b"target\n")
+    fs_id = subprocess.run(
+        ["stat", "-f", "-c", "%i", str(target)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    result = _run_inode_functions(f"path_inode {shlex.quote(str(target))}")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(target.lstat().st_ino)
+    # The filesystem id is hexadecimal and is not this file's inode. (Equality
+    # would be a one-in-2**64 coincidence; the inode assertion above is the
+    # real one.)
+    assert int(result.stdout.strip()) != int(fs_id, 16)
+
+    # The fallback spelling itself is why the kernel picks instead: it fails,
+    # but only after it has already put output on stdout for the real operand.
+    fallback = subprocess.run(
+        ["stat", "-f", "%i", str(target)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert fallback.returncode != 0
+    assert fallback.stdout != ""
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize("arch", ["arm64", "x86_64"])
+def test_bootstrap_fixture_fakes_only_the_archive_architecture(
+    tmp_path: Path, arch: str
+) -> None:
+    """`uname -m` is the fixture's; `uname -s` has to stay the running kernel.
+
+    The inode helpers choose their `stat` spelling from `uname -s`. If this
+    double answered Darwin on a Linux runner, `path_inode` would run GNU
+    `stat -f`, which prints filesystem status rather than an inode and then
+    fails on the stray `%i`, so the identity checks would compare whatever was
+    printed instead of testing anything.
+    """
+    stub = tmp_path / "uname"
+    _write_exec(stub, _kernel_uname_stub(arch))
+
+    machine = subprocess.run(
+        [str(stub), "-m"], capture_output=True, text=True, check=True
+    )
+    kernel = subprocess.run(
+        [str(stub), "-s"], capture_output=True, text=True, check=True
+    )
+
+    assert machine.stdout.strip() == arch
+    assert kernel.stdout.strip() == os.uname().sysname
+
+
+@runs_the_sh_installer
+def test_descriptor_writes_and_protects_after_the_path_is_replaced(
+    tmp_path: Path,
+) -> None:
+    """The operation the publish relies on: fd 3 still names the created file.
+
+    The destination is created, a stranger replaces the path so the created
+    inode is unlinked, and the bytes and the mode still have to reach the file
+    this run opened - never the file now at the path. On GNU, `/dev/fd/3` is a
+    link into `/proc/self/fd`, whose magic link resolves to the open file even
+    after unlink, and on macOS the fdesc entry names it directly. This test runs
+    on both and fails rather than skips if that stops holding: the publish's
+    write, chmod and identity check all depend on it.
+    """
+    opened = tmp_path / "opened"
+    opened.write_bytes(b"created by this run\n")
+    opened.chmod(0o600)
+    original = opened.lstat().st_ino
+    moved = tmp_path / "moved"
+    replacement_mode = 0o640
+
+    result = _run_inode_functions(
+        "exec 3> " + shlex.quote(str(opened)) + "\n"
+        f"mv {shlex.quote(str(opened))} {shlex.quote(str(moved))}\n"
+        f"printf 'foreign\\n' > {shlex.quote(str(opened))}\n"
+        f"chmod {replacement_mode:o} {shlex.quote(str(opened))}\n"
+        "printf 'written through the descriptor\\n' >&3\n"
+        "chmod 700 /dev/fd/3\n"
+        'printf "%s\\n" "$(descriptor_inode /dev/fd/3)"\n'
+        "exec 3>&-\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert int(result.stdout.strip()) == original
+    # The write and the chmod went to the file this run opened, which is now
+    # only reachable through the path it was moved to.
+    assert moved.read_bytes() == b"written through the descriptor\n"
+    assert stat.S_IMODE(moved.stat().st_mode) == 0o700
+    # The stranger's file kept its own bytes and its own mode.
+    assert opened.read_bytes() == b"foreign\n"
+    assert stat.S_IMODE(opened.stat().st_mode) == replacement_mode
+
+
+def test_inode_helpers_choose_stat_flavour_before_running_it() -> None:
+    """No `stat -f || stat -c`: the kernel name picks the spelling up front."""
+    path = _function_source("path_inode")
+    descriptor = _function_source("descriptor_inode")
+    for source in (path, descriptor):
+        assert "|| stat" not in source
+        assert "uname -s" in source
+    # The command is the pinned `$STAT`, not whatever PATH resolves first: a
+    # user-writable directory earlier on PATH must not decide the identity check.
+    assert '"$STAT" -f \'%i\' "$1"' in path
+    assert '"$STAT" -c \'%i\' "$1"' in path
+    assert "stat -L" not in path
+    assert '"$STAT" -f \'%i\' "$1"' in descriptor
+    assert '"$STAT" -L -c \'%i\' "$1"' in descriptor
+    # The identity is the descriptor's; the destination is only ever lstat'ed.
+    write = _function_source("write_published_uv")
+    assert "descriptor_inode /dev/fd/3" in write
+    assert 'path_inode "$uv_dest"' in write
+    assert 'path_inode "$uv_dest"' in _function_source("discard_published_uv")
+    assert "file_inode" not in SCRIPT_TEXT
+
+
 @runs_the_sh_installer
 def test_publish_creates_only_the_destination(tmp_path: Path) -> None:
     """A missing uv is published in place: one file, 0700, nothing beside it."""
@@ -6926,35 +7401,143 @@ def test_publish_creates_only_the_destination(tmp_path: Path) -> None:
     assert not dest.is_symlink()
     assert dest.read_bytes() == UV_BOOTSTRAP_BODY
     assert stat.S_IMODE(dest.stat().st_mode) == 0o700
-    assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
+    # The clean control for the substitution tests: the same harness, with no
+    # double in the way, touches no fixture path and publishes only the uv.
+    _assert_publish_touched_nothing_else(paths)
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
     # Publishing is for the next run: this one keeps executing the private
     # staged copy, so a substitution of the published path cannot reach it.
     assert f"uv={paths['staged']}" in result.stdout
 
 
-def test_publish_writes_the_destination_in_one_exclusive_create() -> None:
-    """No temp, no rename, and ownership claimed only after the create."""
-    source = _function_source("publish_verified_uv")
-    create = source.index('(set -C; umask 077; cat "$verified_uv" > "$uv_dest")')
+@runs_the_sh_installer
+def test_publish_takes_back_only_its_own_partial_after_a_failed_write(
+    tmp_path: Path,
+) -> None:
+    """A write that fails leaves no blocking partial: the next run publishes."""
+    home = tmp_path / "home"
+    failed, paths = _run_publish(tmp_path, fail_write=True, home=home)
 
-    assert "mv " not in source
-    assert "uv_dest.new" not in source
-    # Nothing in the publish deletes: a failed create never reaches a cleanup,
-    # because the ownership flag is still clear at that point.
-    assert "rm " not in source
-    assert source.index("uv_created=0") < create < source.index("uv_created=1")
-    assert source.index("discard_published_uv") > source.index("uv_created=1")
-    # The inode the create produced is recorded before the chmod and re-read
-    # after it, so a symlink substituted in that window is detected.
-    first = source.index('ls -i "$uv_dest"')
-    protect = source.index("chmod 700")
-    assert first < protect < source.rindex('ls -i "$uv_dest"')
+    assert failed.returncode != 0
+    assert "could not publish" in failed.stderr
+    # The descriptor proved the half-written file was this run's, so it is
+    # taken back instead of blocking every later install.
+    assert list(paths["bin_dir"].iterdir()) == []
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
 
-    discard = _function_source("discard_published_uv")
-    # Only a file whose inode is the one this run created may be taken back.
-    assert '[ "$uv_created" -eq 1 ]' in discard
-    assert "uv_inode" in discard
-    assert "rm -f" in discard
+    # The retry over the same HOME starts from a clean ~/.local/bin and works.
+    result, paths = _run_publish(tmp_path, home=home)
+
+    assert result.returncode == 0, result.stderr
+    assert paths["dest"].read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o700
+    assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
+
+
+@runs_the_sh_installer
+def test_publish_claims_nothing_when_the_identity_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    """No inode, no ownership: status 11 leaves the file it made alone.
+
+    The publish only takes a file back while the descriptor still proves that
+    file is this run's. When `stat` cannot read the descriptor there is no such
+    proof, so `write_published_uv` returns 11 before it claims (`uv_created`
+    stays 0), copies, chmods or discards anything. The empty 0600 file the
+    exclusive create made is left at the path and the run refuses, naming the
+    publish rather than a write or a mode it never attempted.
+    """
+    home = tmp_path / "home"
+    failed, paths = _run_publish(tmp_path, race="identity-unreadable", home=home)
+
+    assert failed.returncode != 0
+    # Status 11's own message, not the write (12), protect (13) or mismatch (14)
+    # one: a run that reports any of those here would have claimed the file.
+    assert "could not identify the published uv" in failed.stderr
+    assert "could not publish" not in failed.stderr
+    # The create's file is still there, empty, with the mode umask 077 gave it:
+    # no bytes from the staged uv, and no 0700.
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == b""
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o600
+    # Untouched: the staged copy was never read out to the destination.
+    assert paths["staged"].read_bytes() == UV_BOOTSTRAP_BODY
+    _assert_publish_touched_nothing_else(paths)
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+
+    # And nothing later quietly deletes it either: a retry over the same HOME
+    # refuses the path instead of unlinking a file it cannot prove it made. That
+    # is the cost of status 11, pinned here so a "clean up the leftover" change
+    # cannot start unlinking somebody else's file on this branch.
+    retry, retry_paths = _run_publish(tmp_path, home=home)
+
+    assert retry.returncode != 0
+    assert "already exists" in retry.stderr
+    assert retry_paths["dest"].read_bytes() == b""
+    assert stat.S_IMODE(retry_paths["dest"].stat().st_mode) == 0o600
+
+
+@runs_the_sh_installer
+def test_publish_keeps_a_substituted_file_when_its_own_write_fails(
+    tmp_path: Path,
+) -> None:
+    """Cleanup never unlinks a path that is no longer the created inode."""
+    result, paths = _run_publish(tmp_path, race="file-before-copy-fail")
+
+    assert result.returncode != 0
+    assert "could not publish" in result.stderr
+    # Somebody else's file is still there, with its own bytes and its own mode.
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == b"foreign\n"
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == PUBLISH_VICTIM_MODE
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_regular_file_substituted_while_writing(
+    tmp_path: Path,
+) -> None:
+    """A stranger's regular file can neither take this run's bytes nor its mode.
+
+    This is the race a path-sampled identity missed: the destination is a
+    regular file again by the time anything reads the path, so only the
+    descriptor the create returned can say the write went somewhere else.
+    """
+    result, paths = _run_publish(tmp_path, race="file-before-copy")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    # Not overwritten with the staged uv, and not chmodded to 0700.
+    assert paths["dest"].read_bytes() == b"foreign\n"
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == PUBLISH_VICTIM_MODE
+    _assert_publish_touched_nothing_else(paths)
+
+
+@runs_the_sh_installer
+def test_publish_does_not_sample_identity_from_the_path(tmp_path: Path) -> None:
+    """A substitution made before the identity is read cannot become the identity.
+
+    The `stat` double plants a stranger's file at the destination on every call,
+    including the one that reads the created inode. The identity still has to be
+    the descriptor's file, so the run refuses and the stranger keeps its bytes
+    and its mode.
+    """
+    result, paths = _run_publish(tmp_path, race="file-before-identity")
+
+    assert result.returncode != 0
+    assert "changed while it was being published" in result.stderr
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == b"foreign\n"
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == PUBLISH_VICTIM_MODE
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
 
 
 @runs_the_sh_installer
@@ -7027,29 +7610,60 @@ def test_publish_never_deletes_a_destination_it_did_not_create(
 
 
 @runs_the_sh_installer
-def test_publish_leaves_a_failed_create_for_the_next_run(tmp_path: Path) -> None:
-    """A create that failed is not proof of ownership, so nothing is unlinked."""
-    result, paths = _run_publish(tmp_path, fail_write=True)
+def test_publish_refuses_an_interrupted_leftover_with_actionable_guidance(
+    tmp_path: Path,
+) -> None:
+    """A leftover from an interrupted publish is reported, never auto-removed.
+
+    The create can succeed and the process die before (or while) the verified
+    bytes are written, leaving an empty 0600 file this run cannot prove it made.
+    The next run must leave it alone and tell the operator how to decide whether
+    it is safe to remove by hand - not guess, and not delete it for them.
+    """
+    home = tmp_path / "home"
+    result, paths = _run_publish(tmp_path, dest_kind="empty-file", home=home)
 
     assert result.returncode != 0
-    # The half-written file is left where it is: this run cannot prove it made
-    # it, and the next run refuses the path instead of writing over it.
+    assert "already exists" in result.stderr
+    assert "interrupted" in result.stderr
+    # The guidance has to say both what to inspect and that removal is only for
+    # a confirmed leftover; a bare "already exists" leaves the operator stuck.
+    assert "inspect" in result.stderr.lower()
+    assert "only if you are sure" in result.stderr.lower()
+    assert "remove" in result.stderr.lower()
+    # And the file is still exactly what the interrupted run left: same inode,
+    # no bytes, still 0600. Nothing here unlinks a file it cannot prove it made.
     assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].stat().st_ino == paths["dest_inode"]
+    assert paths["dest"].read_bytes() == b""
     assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o600
     _assert_publish_touched_nothing_else(paths)
-    assert "already exists" in result.stderr
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
 
 
 @runs_the_sh_installer
 def test_publish_takes_back_only_its_own_file_when_chmod_fails(tmp_path: Path) -> None:
-    """With the inode still this run's, a failed chmod removes its own file."""
-    result, paths = _run_publish(tmp_path, chmod_fails=True)
+    """With the descriptor still proving the inode, a failed chmod removes it."""
+    home = tmp_path / "home"
+    result, paths = _run_publish(tmp_path, chmod_fails=True, home=home)
 
     assert result.returncode != 0
     assert "could not protect" in result.stderr
     assert list(paths["bin_dir"].iterdir()) == []
     assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
     assert paths["same_named"].read_bytes() == PUBLISH_SENTINEL
+
+    # The partial was taken back, so the retry over the same HOME is not
+    # blocked by it and publishes the verified uv.
+    result, paths = _run_publish(tmp_path, home=home)
+
+    assert result.returncode == 0, result.stderr
+    assert paths["dest"].read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o700
+    assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
+    _assert_publish_touched_nothing_else(paths)
 
 
 @runs_the_sh_installer
@@ -7058,31 +7672,35 @@ def test_publish_refuses_a_symlink_substituted_before_the_copy(tmp_path: Path) -
     result, paths = _run_publish(tmp_path, race="symlink-before-copy")
 
     assert result.returncode != 0
-    assert "not the regular file this run created" in result.stderr
+    assert "changed while it was being published" in result.stderr
     # The substituted link is left where the writer put it.
     assert paths["dest"].is_symlink()
     assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
-    # The chmod never ran, so it could not have followed the link.
+    # The mode change went through the descriptor, so it never reached the link
+    # or the file the link names.
     assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
     _assert_publish_touched_nothing_else(paths)
 
 
 @runs_the_sh_installer
 def test_publish_refuses_a_symlink_substituted_before_the_chmod(tmp_path: Path) -> None:
-    """A link that appears between the create and the chmod is detected after it."""
+    """A link that appears before the chmod is detected, and its victim keeps its mode."""
     result, paths = _run_publish(tmp_path, race="symlink-before-chmod")
 
     assert result.returncode != 0
     assert "changed while it was being published" in result.stderr
     assert paths["dest"].is_symlink()
     assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    # The regression: a chmod naming the path would have followed the link and
+    # changed the victim's mode to 0700. The descriptor kept it untouched.
+    assert stat.S_IMODE(paths["target_file"].stat().st_mode) == paths["target_mode"]
     # Nothing is deleted on a mismatch: the link stays where the writer put it.
     _assert_publish_touched_nothing_else(paths)
 
 
 @runs_the_sh_installer
 def test_publish_refuses_a_file_substituted_before_the_chmod(tmp_path: Path) -> None:
-    """A foreign file swapped in before the chmod is refused and left alone."""
+    """A foreign file swapped in before the chmod is refused, bytes and mode intact."""
     result, paths = _run_publish(tmp_path, race="file-before-chmod")
 
     assert result.returncode != 0
@@ -7090,6 +7708,8 @@ def test_publish_refuses_a_file_substituted_before_the_chmod(tmp_path: Path) -> 
     assert paths["dest"].is_file()
     assert not paths["dest"].is_symlink()
     assert paths["dest"].read_bytes() == b"foreign\n"
+    # A path-based chmod would have made the stranger's file executable.
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == PUBLISH_VICTIM_MODE
     _assert_publish_touched_nothing_else(paths)
 
 
@@ -7103,6 +7723,62 @@ def test_trust_boundary_is_not_per_user_isolation() -> None:
     )
     assert "not per-user isolation" in doc
     assert "the same user" in doc
+
+
+def test_no_refusal_claims_an_untouched_machine_after_the_uv_publish() -> None:
+    """`find_uv` can publish a uv before any later refusal message.
+
+    Every "nothing on this Mac has been changed" left in the flow would be a
+    false claim on a Mac that had no uv: the publish is a real write, and it is
+    deliberately outside the migration transaction. The messages now name the
+    engine and its service, which are what the migration would have replaced.
+    """
+    for stale in (
+        "nothing on this Mac has been changed",
+        "nothing has been changed",
+        "nothing was changed",
+        "nothing is changed at all",
+    ):
+        assert stale not in SCRIPT_TEXT
+
+    # The same section must not overclaim that an interrupted publish is
+    # cleaned up by the next run, nor that the publish is part of the rollback.
+    doc = " ".join(
+        (REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split()
+    )
+    assert "a half-written file does not block the next install" not in doc
+    assert "at most one `uv-<triple>/` directory" in doc
+    assert "not a promise of full rollback" in doc
+
+
+def test_migrate_help_does_not_call_the_published_uv_a_before_image() -> None:
+    """A uv this run published is outside the migration and survives a rollback.
+
+    Before-images are the two LaunchAgents, the shim, the install receipt and any
+    uv tool environment that already existed. The help used to say "before-images
+    of all of those" over a list that included `~/.local/bin/uv`, promising a
+    rollback that the code does not perform.
+    """
+    usage = SCRIPT_TEXT[SCRIPT_TEXT.index("Usage: install-engine.sh") :]
+    usage = usage[: usage.index("\nUSAGE")]
+    text = " ".join(usage.split())
+
+    assert "Before-images of all of those" not in text
+    assert (
+        "Before-images of the LaunchAgents, the shim, the install receipt and "
+        "any existing uv tool environment are kept in "
+        "~/.local/state/ciaobot/migration/before/"
+    ) in text
+    assert (
+        "a uv this run had to publish is not one of them and stays after a "
+        "rollback"
+    ) in text
+
+    doc = " ".join(
+        (REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split()
+    )
+    assert "a `uv` this run bootstrapped is not one of the before-images" in doc
+    assert "leaves the published `uv` where it is" in doc
 
 
 @needs_local_tools
@@ -7215,14 +7891,7 @@ UNSAFE_UV_ARCHIVES: list[
     ),
     (
         lambda triple: _uv_entries(triple) + [(f"uv-{triple}/", "dir", b"")],
-        "exactly one",
-    ),
-    (
-        lambda triple: [
-            entry for entry in _uv_entries(triple)
-            if entry[0] != f"uv-{triple}/"
-        ],
-        "exactly one",
+        "more than one",
     ),
 ]
 
@@ -7289,47 +7958,77 @@ def test_uv_bootstrap_accepts_an_archive_without_uvx(tmp_path: Path) -> None:
     stage = paths["tmp"] / "uv-bootstrap"
     assert [entry.name for entry in stage.iterdir()] == ["uv"]
     assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
-    assert _tar_extractions(paths["trace"]) == [
-        f"extract -xOf {paths['tmp']}/uv-{triple}.tar.gz uv-{triple}/uv"
+    _assert_only_uv_extracted(paths, triple)
+    _assert_nothing_executed(paths)
+
+
+@needs_local_tools
+def test_uv_bootstrap_accepts_an_archive_without_the_directory(
+    tmp_path: Path,
+) -> None:
+    """A tar producer may omit the directory entry; the `uv` member is enough.
+
+    The allowlist is still exact - at most one directory entry, exactly one
+    regular `uv` and optionally one regular `uvx` - but requiring the directory
+    would refuse an otherwise genuine archive that lists only its files.
+    """
+    triple = "aarch64-apple-darwin"
+    entries = [
+        entry for entry in _uv_entries(triple)
+        if entry[0] != f"uv-{triple}/"
     ]
+    archive = _uv_archive(tmp_path / "uv.tar.gz", entries)
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode == 0, result.stderr
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert [entry.name for entry in stage.iterdir()] == ["uv"]
+    assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    _assert_only_uv_extracted(paths, triple)
     _assert_nothing_executed(paths)
 
 
 @pytest.mark.parametrize(
-    ("name", "kind", "archive_format", "reason"),
+    ("name", "kind", "archive_format", "reasons"),
     [
         # PAX and GNU store a long name in an extension member; the long entry
         # is still not one of the three allowed names.
         (
             "uv-aarch64-apple-darwin/" + "a" * 140,
-            "file", tarfile.PAX_FORMAT, "unexpected member",
+            "file", tarfile.PAX_FORMAT, ("unexpected member",),
         ),
         (
             "uv-aarch64-apple-darwin/" + "b" * 140,
-            "file", tarfile.GNU_FORMAT, "unexpected member",
+            "file", tarfile.GNU_FORMAT, ("unexpected member",),
         ),
         # A `./` segment and a trailing slash must not be normalized into an
         # allowed name.
         (
             "uv-aarch64-apple-darwin/./uv",
-            "file", tarfile.USTAR_FORMAT, "unexpected member",
+            "file", tarfile.USTAR_FORMAT, ("unexpected member",),
         ),
         (
             "uv-aarch64-apple-darwin/uv/",
-            "dir", tarfile.USTAR_FORMAT, "unexpected member",
+            "dir", tarfile.USTAR_FORMAT, ("unexpected member",),
         ),
         # tar escapes a newline into `\n` in some listings and splits it into
-        # two lines in others; one of the allowed names must not be assembled
-        # out of a single hostile member either way.
+        # two lines in others. On this platform it is escaped, so the name is
+        # refused; a listing that split it instead would duplicate the allowed
+        # `uv` name and be refused by the count. Either way one hostile member
+        # cannot be assembled into an allowed one, and no extraction is made.
         (
             "uv-aarch64-apple-darwin/uv\nuv-aarch64-apple-darwin/uvx",
-            "file", tarfile.USTAR_FORMAT, None,
+            "file", tarfile.USTAR_FORMAT,
+            ("unsafe member name", "exactly one", "ambiguous"),
         ),
         # A backslash is an escape in some listings and an ordinary byte in
         # others; it is never inside the allowlist.
         (
             "uv-aarch64-apple-darwin/uv\\x",
-            "file", tarfile.USTAR_FORMAT, "unsafe member name",
+            "file", tarfile.USTAR_FORMAT, ("unsafe member name",),
         ),
     ],
 )
@@ -7339,7 +8038,7 @@ def test_uv_bootstrap_rejects_relocated_or_ambiguous_names(
     name: str,
     kind: str,
     archive_format: int,
-    reason: str | None,
+    reasons: tuple[str, ...],
 ) -> None:
     """Names tar could normalize, join or split are refused before extraction."""
     triple = "aarch64-apple-darwin"
@@ -7354,8 +8053,7 @@ def test_uv_bootstrap_rejects_relocated_or_ambiguous_names(
     )
 
     assert result.returncode != 0, result.stdout
-    if reason is not None:
-        assert reason in result.stderr
+    assert any(reason in result.stderr for reason in reasons), result.stderr
     assert not (paths["home"] / ".local" / "bin" / "uv").exists()
     assert not (paths["tmp"] / "uv-bootstrap").exists()
     assert _tar_extractions(paths["trace"]) == []

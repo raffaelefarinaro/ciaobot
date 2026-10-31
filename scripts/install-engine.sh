@@ -12,9 +12,14 @@ set -eu
 # archive and the staged executable sit in a mode-0700 scratch directory, which
 # is not per-user isolation. It keeps other users out, and it does not stop a
 # process running as the same user, which can still replace the archive between
-# the `shasum` check and the tar read, or swap the staged copy before it runs.
-# The reviewed digest table plus TLS bound what the network can hand this
-# script; code already running as this user is outside that boundary.
+# the /usr/bin/shasum check and the tar read, or swap the staged copy before it
+# runs.
+# The legacy publish writes the verified uv, and sets its mode, through the
+# descriptor its exclusive create returned, so a link substituted at
+# ~/.local/bin/uv is refused rather than followed; a same-user writer can still
+# replace that path after the publish returns. The reviewed digest table plus
+# TLS bound what the network can hand this script; code already running as this
+# user is outside that boundary.
 
 repo=raffaelefarinaro/ciaobot
 release_base=${CIAO_RELEASE_BASE_URL:-https://github.com/$repo/releases/download}
@@ -42,6 +47,13 @@ SLEEP=sleep
 # The system tar, never whatever PATH resolves: a user-writable tar earlier on
 # PATH must not decide what the uv allowlist inspection sees.
 TAR=/usr/bin/tar
+# The macOS system stat and shasum, never whatever PATH resolves first. `shasum`
+# is the command that authenticates the uv archive and the release artifacts, so
+# a user-writable directory earlier on PATH must not be able to answer the
+# digest check; `stat` is the identity check on the published uv, so the same
+# applies. The test harness rewrites these lines in its copy of the script.
+STAT=/usr/bin/stat
+SHASUM=/usr/bin/shasum
 # The port `ciao run --installer-bootstrap` and a fresh install's first engine
 # serve on: ciao.config's `pwa_port` default.
 FRESH_PORT=8443
@@ -49,8 +61,9 @@ FRESH_PORT=8443
 # reviewed sha256 and passed the member allowlist: the private staged copy this
 # run extracted. A native-mode install must take this rather than a PATH uv.
 verified_uv=
-# Set once the legacy publish's exclusive create has returned success, together
-# with the inode it produced, so a later failure takes back only that file.
+# Set inside the legacy publish's subshell once its exclusive create has
+# returned success, together with the inode read from that descriptor, so a
+# failure while the descriptor is still open takes back only that file.
 uv_created=0
 uv_inode=
 version=
@@ -159,14 +172,19 @@ Installs the Ciaobot engine for the current user with uv; the PWA is its UI.
   --migrate            Move an engine Ciaobot.app currently manages to this
                        installer. The workspace, its .env and the runtime root
                        are left untouched: only the LaunchAgents, the shim, the
-                       uv tool environment and ~/.local/state/ciaobot/ change.
-                       Before-images of all of those are kept in
-                       ~/.local/state/ciaobot/migration/before/, and any failure
-                       after the install puts the old engine back. If Ciaobot.app
-                       is still running 20s after it is asked to quit, nothing
-                       is changed at all. A hand-over keeps the workspace that
-                       engine runs in: --workspace may only name that same
-                        existing workspace, and no workspace is ever created.
+                       uv tool environment, ~/.local/bin/uv when this Mac had no
+                       uv, and ~/.local/state/ciaobot/ change.
+                       Before-images of the LaunchAgents, the shim, the install
+                       receipt and any existing uv tool environment are kept in
+                       ~/.local/state/ciaobot/migration/before/; a uv this run
+                       had to publish is not one of them and stays after a
+                       rollback. Any failure after the install puts the old
+                       engine back. If Ciaobot.app
+                       is still running 20s after it is asked to quit, the run
+                       stops with that engine and its service unchanged. A
+                       hand-over keeps the workspace that engine runs in:
+                       --workspace may only name that same existing workspace,
+                       and no workspace is ever created.
   --no-modify-path     Do not add ciao to a shell startup file.
   --as-host            With --migrate: treat this Mac as the host, even when its
                        node state cannot be read or trusted.
@@ -378,10 +396,10 @@ native_host_recover() {
     # any loaded engine job is conservatively quiesced first: the disk may already
     # be the candidate.
     if ! native_host_status > "$tmp/native-host-status"; then
-        fail "the Ciaobot Server host upgrade state cannot be read safely; nothing on this Mac has been changed"
+        fail "the Ciaobot Server host upgrade state cannot be read safely; the Ciaobot engine and its service have not been changed"
     fi
     if ! read_native_host_status "$tmp/native-host-status"; then
-        fail "the Ciaobot Server host upgrade state is malformed; nothing on this Mac has been changed"
+        fail "the Ciaobot Server host upgrade state is malformed; the Ciaobot engine and its service have not been changed"
     fi
     if [ "$native_status_pending" -eq 0 ]; then
         return 0
@@ -947,10 +965,12 @@ if [ "$migrate" -eq 0 ] && { [ "$as_host" -ne 0 ] || [ -n "$as_client" ]; }; the
     fail "--as-host and --as-client require --migrate"
 fi
 
-for command in curl shasum mktemp uname awk sw_vers; do
+for command in curl mktemp uname awk sw_vers; do
     command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
 [ -x "$TAR" ] || fail "required command not found: $TAR"
+[ -x "$STAT" ] || fail "required command not found: $STAT"
+[ -x "$SHASUM" ] || fail "required command not found: $SHASUM"
 
 [ "$(uname -s)" = "Darwin" ] || fail "this installer supports macOS; Linux servers use docs/LINUX.md"
 
@@ -1003,6 +1023,10 @@ download() {
 # for the uv archive, which carries no minisign or Apple signature. Change
 # UV_VERSION and this whole table as one review unit, and never fetch a
 # checksum at install time - the reviewed literals are what authenticate it.
+# At review time the two Darwin archives were downloaded from
+# https://github.com/astral-sh/uv/releases/download/0.12.17/ and matched both the
+# release's sha256.sum and the GitHub asset digests; each lists
+# uv-<triple>/, uv-<triple>/uv and uv-<triple>/uvx.
 uv_archive_sha256() {
     case "$1" in
         uv-aarch64-apple-darwin.tar.gz) printf '%s\n' 85f00cbdc6dd3e97eba4c31b4d014375a9fdfe8f570023b84e5102fc3456896b ;;
@@ -1041,13 +1065,17 @@ bootstrap_verified_uv() {
         "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$uv_asset" \
         -o "$uv_archive" || fail "could not download the uv archive"
     [ -f "$uv_archive" ] || fail "the downloaded uv archive is not a regular file"
-    uv_actual=$(shasum -a 256 "$uv_archive" | awk '{print $1}')
+    uv_digest=$("$SHASUM" -a 256 "$uv_archive") || fail "could not hash the uv archive"
+    uv_actual=${uv_digest%% *}
     [ "$uv_actual" = "$uv_expected" ] \
         || fail "the uv archive does not match its reviewed sha256"
 
-    # The archive's one expected directory, its `uv`, and optionally `uvx`.
-    # Names are a finite ASCII allowlist, so an unusual name, a duplicate, an
-    # absolute path or a `..` component is a refusal, not a parsing problem.
+    # The archive's expected directory (optional: a tar producer may list only
+    # the files), its `uv`, and optionally `uvx`. Names are a finite ASCII
+    # allowlist, so an unusual name, a duplicate, an absolute path or a `..`
+    # component is a refusal, not a parsing problem. At most one directory
+    # entry is allowed; its absence is not evidence of anything, because the
+    # exact `uv` member below is what is extracted.
     uv_dir=${uv_asset%.tar.gz}
     uv_member="$uv_dir/uv"
     uv_listing="$tmp/uv-archive.members"
@@ -1074,7 +1102,7 @@ bootstrap_verified_uv() {
             *) fail "the uv archive has an unexpected member: $uv_name" ;;
         esac
     done < "$uv_listing"
-    [ "$uv_dirs" -eq 1 ] || fail "the uv archive must contain exactly one $uv_dir/ directory"
+    [ "$uv_dirs" -le 1 ] || fail "the uv archive must not contain more than one $uv_dir/ directory"
     [ "$uv_files" -eq 1 ] || fail "the uv archive must contain exactly one $uv_member"
     [ "$uv_uvx" -le 1 ] || fail "the uv archive has more than one uvx member"
 
@@ -1127,6 +1155,42 @@ bootstrap_verified_uv() {
     verified_uv="$uv_staged"
 }
 
+path_inode() {
+    # The inode the path itself names, read with lstat so a final symlink is not
+    # followed: a link planted at the destination reports its own inode and can
+    # never pass as the file this run created.
+    #
+    # BSD `stat` takes a format with -f, GNU `stat` with -c, and trying one and
+    # falling back to the other is not safe: GNU reads `-f` as filesystem status,
+    # treats `%i` as one more operand, prints that status to stdout and only then
+    # fails on the missing `%i`. A `||` fallback would run with that output
+    # already on stdout, and a caller reading it would compare that status as if
+    # it were an inode. The kernel name picks the spelling explicitly, before
+    # anything is printed. This installer refuses non-Darwin hosts; the GNU
+    # branch is the one the Linux test runner exercises.
+    if [ "$(uname -s)" = Darwin ]; then
+        "$STAT" -f '%i' "$1" 2>/dev/null
+    else
+        "$STAT" -c '%i' "$1" 2>/dev/null
+    fi
+}
+
+descriptor_inode() {
+    # The inode of the file an open descriptor names, not of the descriptor.
+    # macOS resolves /dev/fd/N to the open file; on GNU, /dev/fd/N is a symlink
+    # into /proc/self/fd, so -L is required or this would return the symlink's
+    # own inode. The installer's own platform is macOS, where the fdesc
+    # filesystem reports its own device, so callers compare inodes only and
+    # never a device. That is sound because the descriptor is still open while
+    # the comparison runs, which keeps the inode allocated and stops another
+    # file from being created under the same number.
+    if [ "$(uname -s)" = Darwin ]; then
+        "$STAT" -f '%i' "$1" 2>/dev/null
+    else
+        "$STAT" -L -c '%i' "$1" 2>/dev/null
+    fi
+}
+
 publish_verified_uv() {
     # Put the verified staged uv where the installer has always left it. Only
     # the legacy missing-uv path calls this; the bootstrap helper itself never
@@ -1142,23 +1206,35 @@ publish_verified_uv() {
     # create's own EEXIST does not. `mv` is not usable here: on BSD it follows a
     # destination that is a directory or a symlink to one and moves the file
     # inside, overwriting whatever already carries that name there. This branch
-    # only runs when this Mac has no uv at all, so the destination does not
-    # legitimately exist.
+    # runs only when this Mac has no uv at all, so the destination does not
+    # normally exist. It can still be a leftover from an interrupted earlier run:
+    # the create leaves an empty 0600 file if the process dies before the verified
+    # bytes are written. That file is never removed automatically.
     #
-    # Nothing is deleted that this run did not create. The ownership flag is set
-    # only once the exclusive create has returned success, so a create refused
-    # by a file another process put there leaves that file alone, and a create
-    # that fails part-way leaves its own half-written file rather than risk
-    # unlinking somebody else's. What may be taken back later is only a file
-    # whose inode is the one recorded right after the create.
+    # The subshell below opens that create and keeps the descriptor for the whole
+    # publish: the bytes are written and the executable bit is set through it,
+    # and the path is not named again until the last check. A symlink substituted
+    # at the path is therefore never followed by the write or the chmod - it is
+    # only ever detected, and the run then refuses and leaves it where it is.
+    # Keeping the create in this subshell also confines a redirection error to
+    # it, which matters because `exec` with a failed redirection is fatal to a
+    # POSIX shell. The status codes 11-14 are what write_published_uv reports;
+    # any other failure is the exclusive create refusing the path.
     #
-    # The chmod is the one step that names a path instead of holding the file it
-    # wrote, so the created inode is captured before it and re-checked after it:
-    # a symlink substituted in that window is detected, and the run refuses
-    # without deleting anything. That is detection, not isolation - this is the
-    # residual nothing here closes: a same-user writer that can already write
-    # ~/.local/bin can win any check at this path, so these checks raise the cost
-    # of an accident and a substitution, and they do not claim to stop an owner.
+    # Ownership of the destination is claimed only after the create has
+    # returned and only once the descriptor's own inode has been read: a create
+    # refused by somebody else's file leaves that file alone, and a failed write
+    # takes back a file only while the path still lstat's to that descriptor's
+    # inode. That check-then-remove is not atomic, so a same-user writer who
+    # replaces the path in that window can still have their file unlinked; the
+    # ordinary case, and every substitution that happens before the check, does
+    # not touch their file.
+    #
+    # The residual this cannot close is the same-user writer: a process that can
+    # already write ~/.local/bin can replace the path after the final check and
+    # before the next run, and none of this is per-user isolation. The descriptor
+    # makes the write and the chmod safe against substitution; it cannot make the
+    # directory owner trustworthy.
     [ -n "$verified_uv" ] || fail "no verified uv to publish"
     uv_bin_dir="$HOME/.local/bin"
     mkdir -p "$uv_bin_dir" || fail "could not create $uv_bin_dir"
@@ -1171,47 +1247,86 @@ publish_verified_uv() {
     fi
     uv_created=0
     uv_inode=
-    if ! (set -C; umask 077; cat "$verified_uv" > "$uv_dest"); then
-        # A path here is not this run's to touch, whether the create was refused
-        # by somebody else's file or left a half-written one of its own: the
-        # flag is still clear, so nothing is discarded either way.
-        if [ -e "$uv_dest" ] || [ -L "$uv_dest" ]; then
-            fail "could not publish the verified uv at $uv_dest: it already exists"
-        fi
-        fail "could not publish the verified uv at $uv_dest"
-    fi
-    # The create returned success: from here this path holds the file this run
-    # made, and only a file with this inode may be taken back.
-    uv_created=1
-    uv_inode=$(ls -i "$uv_dest" 2>/dev/null | awk 'NR == 1 {print $1}') || uv_inode=
-    if [ -L "$uv_dest" ] || [ -z "$uv_inode" ]; then
-        fail "the published uv at $uv_dest is not the regular file this run created"
-    fi
-    if ! chmod 700 "$uv_dest"; then
-        discard_published_uv
-        fail "could not protect $uv_dest"
-    fi
-    uv_inode_now=$(ls -i "$uv_dest" 2>/dev/null | awk 'NR == 1 {print $1}') || uv_inode_now=
-    if [ -L "$uv_dest" ] || [ "$uv_inode_now" != "$uv_inode" ]; then
-        # Refused, not repaired: the path is no longer the file this run made,
-        # so it is somebody else's now and is left exactly where it is.
-        fail "the published uv at $uv_dest changed while it was being published"
-    fi
-    uv_created=0
+    uv_publish_status=0
+    ( umask 077; set -C; exec 3> "$uv_dest" || exit 1; write_published_uv ) ||
+        uv_publish_status=$?
+    case "$uv_publish_status" in
+        0) ;;
+        11) fail "could not identify the published uv at $uv_dest" ;;
+        12) fail "could not publish the verified uv at $uv_dest" ;;
+        13) fail "could not protect $uv_dest" ;;
+        14) fail "the published uv at $uv_dest changed while it was being published" ;;
+        *)
+            # The exclusive create did not return: the path was already taken,
+            # or could not be opened at all. Either way nothing here wrote to it.
+            if [ -e "$uv_dest" ] || [ -L "$uv_dest" ]; then
+                fail "could not publish the verified uv at $uv_dest: it already exists. This installer never removes a file it did not create in this run. Inspect it first: ls -l \"$uv_dest\"; \"$SHASUM\" -a 256 \"$uv_dest\". Only if you are sure it is an empty or partial leftover from an interrupted uv bootstrap - for example mode 0600 and no bytes - remove it and re-run the installer. If it is a working uv, leave it where it is."
+            fi
+            fail "could not publish the verified uv at $uv_dest"
+            ;;
+    esac
     # Publishing is for the next run: $uv is deliberately left on $verified_uv,
     # the private staged copy. Reopening the published path here would let a
     # replacement of ~/.local/bin/uv after these checks decide which uv the rest
     # of this install executes.
 }
 
+write_published_uv() {
+    # Runs only inside publish_verified_uv's subshell, with fd 3 the exclusive
+    # create of the destination and close on exec not set. Everything it does
+    # names either that descriptor or nothing, so the identity it records is the
+    # file the create made, whatever later occupies the path.
+    #
+    # Returns 0 on success, and otherwise: 11 when the descriptor's inode cannot
+    # be read, 12 when the write fails, 13 when the mode cannot be set, and 14
+    # when the path no longer refers to the created file. Only 12 and 13 attempt
+    # a cleanup, and discard_published_uv re-checks the path against the inode
+    # before removing anything.
+    uv_created=0
+    uv_inode=
+    uv_inode=$(descriptor_inode /dev/fd/3) || uv_inode=
+    if [ -z "$uv_inode" ]; then
+        # Without the inode there is no way to prove this file is ours later, so
+        # the path is left alone. `stat` is a required tool, so this is a
+        # last-resort branch, not a normal failure.
+        return 11
+    fi
+    # From here the file is this run's: the open descriptor keeps its inode
+    # allocated, so no other file can appear at the path under the same number.
+    uv_created=1
+    if ! cat "$verified_uv" >&3; then
+        # A short file is not a usable uv and would block every later install;
+        # take it back while the descriptor still proves it is this run's.
+        discard_published_uv
+        return 12
+    fi
+    if ! chmod 700 /dev/fd/3; then
+        discard_published_uv
+        return 13
+    fi
+    uv_inode_now=$(path_inode "$uv_dest") || uv_inode_now=
+    if [ -L "$uv_dest" ] || [ -z "$uv_inode_now" ] || [ "$uv_inode_now" != "$uv_inode" ]; then
+        # Refused, not repaired: the path is somebody else's now, and both the
+        # write and the chmod already went to the descriptor, so that file was
+        # neither overwritten nor made executable.
+        return 14
+    fi
+    uv_created=0
+}
+
 discard_published_uv() {
-    # Take back only the file this run's exclusive create made: the flag is set
-    # after that create returned success, and the inode has to be the one
-    # recorded then. A path replaced by anything else in between - a symlink, a
-    # foreign regular file - is left where the writer put it.
+    # Take back only the file this run's exclusive create made: called while the
+    # publish still holds its descriptor, so uv_inode is that file's inode and
+    # cannot have been reused. The path is checked with lstat and has to be a
+    # regular file with that inode; a symlink, a foreign regular file or a
+    # directory substituted in between is left where the writer put it.
+    #
+    # That check and the `rm` are two syscalls, not one: a writer running as this
+    # same user can replace the path in between, and then `rm` unlinks their file.
+    # This narrows the window; it does not close it, and no shell loop can.
     if [ "$uv_created" -eq 1 ] && [ -n "$uv_inode" ] && [ -f "$uv_dest" ] && [ ! -L "$uv_dest" ] &&
-        [ "$(ls -i "$uv_dest" 2>/dev/null | awk 'NR == 1 {print $1}')" = "$uv_inode" ]; then
-        rm -f "$uv_dest"
+        [ "$(path_inode "$uv_dest")" = "$uv_inode" ]; then
+        rm -f "$uv_dest" 2>/dev/null || true
     fi
 }
 
@@ -1397,16 +1512,16 @@ backup_before() {
     fi
     before_server_plist=$(snapshot_file \
         "$HOME/Library/LaunchAgents/$SERVER_LABEL.plist" "$SERVER_LABEL.plist") \
-        || fail "could not copy $migration_dir/before/$SERVER_LABEL.plist aside; nothing has been changed"
+        || fail "could not copy $migration_dir/before/$SERVER_LABEL.plist aside; the migration has not started and the Ciaobot engine is unchanged"
     before_desktop_plist=$(snapshot_file \
         "$HOME/Library/LaunchAgents/$DESKTOP_LABEL.plist" "$DESKTOP_LABEL.plist") \
-        || fail "could not copy $migration_dir/before/$DESKTOP_LABEL.plist aside; nothing has been changed"
+        || fail "could not copy $migration_dir/before/$DESKTOP_LABEL.plist aside; the migration has not started and the Ciaobot engine is unchanged"
     before_shim=$(snapshot_file "$HOME/.local/bin/ciao" ciao) \
-        || fail "could not copy $migration_dir/before/ciao aside; nothing has been changed"
+        || fail "could not copy $migration_dir/before/ciao aside; the migration has not started and the Ciaobot engine is unchanged"
     before_install_receipt=$(snapshot_file "$install_receipt" install-receipt.json) \
-        || fail "could not copy $migration_dir/before/install-receipt.json aside; nothing has been changed"
+        || fail "could not copy $migration_dir/before/install-receipt.json aside; the migration has not started and the Ciaobot engine is unchanged"
     before_tool_env=$(snapshot_tool_env) \
-        || fail "could not copy $migration_dir/before/tool-env aside; nothing has been changed"
+        || fail "could not copy $migration_dir/before/tool-env aside; the migration has not started and the Ciaobot engine is unchanged"
     migration_started_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 }
 
@@ -2375,7 +2490,8 @@ fi
 
 wheel="$tmp/$wheel_name"
 download "$base/$wheel_name" "$wheel" || fail "could not download $wheel_name"
-actual_sha=$(shasum -a 256 "$wheel" | awk '{print $1}')
+actual_sha=$("$SHASUM" -a 256 "$wheel") || fail "could not hash $wheel_name"
+actual_sha=${actual_sha%% *}
 [ "$actual_sha" = "$wheel_sha" ] || fail "downloaded wheel does not match the signed manifest"
 actual_size=$(wc -c < "$wheel" | tr -d ' ')
 [ "$actual_size" = "$wheel_size" ] || fail "downloaded wheel does not match the signed manifest"
@@ -2394,7 +2510,7 @@ if [ "$migrate" -ne 0 ]; then
     load_migration_receipt
     refuse_unusable_receipt
     if migration_matches_install; then
-        echo "This Mac was already migrated ($receipt_phase); nothing to do."
+        echo "This Mac was already migrated ($receipt_phase); no migration action is needed."
         exit 0
     fi
     # A settled receipt that does not describe this Mac is re-run from the
@@ -2456,8 +2572,8 @@ fi
 # Acquiring the host runs the B1 inspector's native codesign probes, so it only
 # happens once the signed archive's digest and size are known to be the manifest
 # key it already trusts. It runs after the read-only preflight, so a refusal
-# there still leaves this Mac untouched, and never on a client, which runs no
-# engine to host. Installation is inert: it writes no launchd job itself;
+# there still leaves the Ciaobot engine untouched, and never on a client, which
+# runs no engine to host. Installation is inert: it writes no launchd job itself;
 # `ciao setup` is what registers the plist when a verified host is installed.
 host_entry=
 if [ "$migrate_path" != client ] &&
@@ -2487,7 +2603,8 @@ if [ -n "$host_entry" ]; then
     fi
     host="$tmp/$host_name"
     download "$base/$host_name" "$host" || fail "could not download $host_name"
-    actual_sha=$(shasum -a 256 "$host" | awk '{print $1}')
+    actual_sha=$("$SHASUM" -a 256 "$host") || fail "could not hash $host_name"
+    actual_sha=${actual_sha%% *}
     [ "$actual_sha" = "$host_sha" ] || fail "downloaded server host does not match the signed manifest"
     actual_size=$(wc -c < "$host" | tr -d ' ')
     [ "$actual_size" = "$host_size" ] || fail "downloaded server host does not match the signed manifest"
@@ -2617,14 +2734,14 @@ if [ "$migrate" -ne 0 ]; then
             # here on the engine this Mac is running is the one being replaced.
             backup_before
             migration_receipt started \
-                || fail "could not record the migration state; nothing on this Mac has been changed"
+                || fail "could not record the migration state; the Ciaobot engine and its service have not been changed"
             # Still before anything is disabled, booted out or overwritten: a
             # desktop that will not quit is a live writer, and the honest
             # answer is to stop with its engine exactly as it was.
             if ! quit_desktop_app; then
-                migration_receipt started "Ciaobot.app was still running 20s after it was asked to quit; nothing was changed" \
+                migration_receipt started "Ciaobot.app was still running 20s after it was asked to quit; the Ciaobot engine and its service were unchanged" \
                     || true
-                fail "Ciaobot.app is still running 20s after it was asked to quit, so nothing on this Mac has been changed. Quit it (or run: osascript -e 'tell application id \"local.ciaobot.app\" to quit') and re-run with --migrate"
+                fail "Ciaobot.app is still running 20s after it was asked to quit, so its engine and its service are unchanged. Quit it (or run: osascript -e 'tell application id \"local.ciaobot.app\" to quit') and re-run with --migrate"
             fi
             migration_active=1
             ;;
