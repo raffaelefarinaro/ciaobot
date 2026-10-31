@@ -57,7 +57,7 @@ test.describe('workspace reorder', () => {
 
     await expect(page.locator('.settings-main [role="status"][aria-live="polite"]'))
       .toHaveText('Moved Gamma to position 2 of 3')
-    expect(await switcherOrder(page)).toEqual(['Alpha', 'Gamma', 'Beta'])
+    await expect.poll(() => switcherOrder(page)).toEqual(['Alpha', 'Gamma', 'Beta'])
   })
 
   test('the row menu Move up reorders and returns focus to the handle', async ({ page }) => {

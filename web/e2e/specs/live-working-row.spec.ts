@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { COMPOSER, boot, horizontalOverflow, isolate } from '../support/app'
+import { COMPOSER, boot, horizontalOverflow, isolate, settled } from '../support/app'
 
 // Real layout is essential here: jsdom cannot establish a single visual line,
 // slide motion, a 44px touch target, or overflow at phone width / browser zoom.
@@ -45,11 +45,7 @@ for (const phone of [false, true]) {
     await expect(row).toHaveAttribute('aria-expanded', 'true')
     await expect(page.locator('.trace-block.live .trace-body')).toContainText('first.md')
     await expect(page.locator('.trace-block.live .trace-body')).toContainText('second.md')
-    await row.evaluate(async (element) => {
-      await Promise.all(element.getAnimations({ subtree: true })
-        .filter(animation => animation.effect?.getTiming().iterations !== Infinity)
-        .map(animation => animation.finished.catch(() => {})))
-    })
+    await settled(row)
     await page.screenshot({ path: info.outputPath('working-expanded.png') })
     await page.keyboard.press('Space')
     await expect(row).toHaveAttribute('aria-expanded', 'false')
