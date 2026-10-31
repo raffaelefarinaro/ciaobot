@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 import os
+
+# A Ciaobot chat (or the bundled app's launcher) exports its own CIAO_*
+# settings - vault root, workspace, agent token, CIAO_BUNDLED_APP - and
+# PWA_AUTH_TOKEN to every command it runs, this suite included. Drop them
+# before any `ciao` module is imported, so code reading them at import time
+# sees a clean environment too; pytest-xdist workers inherit the cleaned one.
+# Tests that need one set it with monkeypatch.
+INHERITED_ENV_PREFIXES = ("CIAO_", "PWA_")
+for _name in [name for name in os.environ if name.startswith(INHERITED_ENV_PREFIXES)]:
+    del os.environ[_name]
+
 import sys
 import pytest
 from pathlib import Path
@@ -143,18 +154,6 @@ def _reset_exported_dotenv() -> None:
     ciao_config.reset_exported_dotenv()
     yield
     ciao_config.reset_exported_dotenv()
-
-
-@pytest.fixture(autouse=True)
-def _drop_inherited_bundled_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ignore ``CIAO_BUNDLED_APP`` inherited from a Ciaobot.app agent shell.
-
-    The bundled launcher exports it, so every command a Ciaobot chat runs -
-    including this suite - inherits it, and ``detect_install_mode`` would call
-    the test process a packaged app (``admin_deploy`` then refuses up front).
-    Tests that need it set it explicitly.
-    """
-    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
 
 
 @pytest.fixture(autouse=True)
