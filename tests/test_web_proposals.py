@@ -4553,3 +4553,66 @@ def test_history_rows_carry_a_seeded_reason(tmp_path: Path) -> None:
     rows = _client(config).get("/api/proposals/history").json()["rows"]
 
     assert rows[0]["reason"] == "one-off"
+
+
+def test_list_without_rehome_rows_skips_the_vault_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rehome-free list must not pay for the multi-vault rehome scan."""
+    config = _default_vault(tmp_path)
+    calls: list[int] = []
+
+    def counting_scan(*args: Any, **kwargs: Any) -> list[Any]:
+        calls.append(1)
+        return []
+
+    monkeypatch.setattr(
+        "ciao.web.proposal_service.vault_rehome.detect_misfiled_people", counting_scan
+    )
+
+    resp = _client(config).get("/api/proposals")
+
+    assert resp.status_code == 200
+    assert len(resp.json()["rows"]) == 3
+    assert calls == []
+
+
+def test_list_with_rehome_rows_scans_the_vault_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two rehome rows share one vault scan, not one scan per row."""
+    from ciao import vault_rehome
+
+    config = _per_root_config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "People").mkdir(parents=True, exist_ok=True)
+    _rerooted_vault(config, tmp_path)
+    for name in ("Mo", "Christian"):
+        (config.workspace_vault_root("personal") / "People" / f"{name}.md").write_text(
+            f"---\ntype: person\ntags:\n  - person\n  - colleague\n---\n# {name}\n",
+            encoding="utf-8",
+        )
+    _write_queue(config, "personal", (
+        "## curation pass\n\n"
+        "- [rehome] Re-home `personal/People/Mo.md` to `work/People/Mo.md`? "
+        "Uncertain.  _(from: vault-rehome)_\n"
+        "- [rehome] Re-home `personal/People/Christian.md` to `work/People/Christian.md`? "
+        "Uncertain.  _(from: vault-rehome)_\n"
+    ))
+    real_scan = vault_rehome.detect_misfiled_people
+    calls: list[int] = []
+
+    def counting_scan(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "ciao.web.proposal_service.vault_rehome.detect_misfiled_people", counting_scan
+    )
+
+    rows = _client(config).get("/api/proposals").json()["rows"]
+
+    rehome_rows = [r for r in rows if r["kind"] == "rehome"]
+    assert len(rehome_rows) == 2
+    assert all(isinstance(r["rehome"], dict) for r in rehome_rows)
+    assert len(calls) == 1

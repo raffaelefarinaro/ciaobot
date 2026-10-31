@@ -970,7 +970,8 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
     """
     rows: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
-    rehome = _rehome_signal(config)
+    # Computed lazily: a full vault scan that only move_file (rehome) rows read.
+    rehome: dict[str, dict[str, Any]] | None = None
     ws_names = list(config.workspace_names())
 
     for workspace in config.workspace_names():
@@ -1024,6 +1025,8 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # Rehome rows: expose the live signal. The destination named
                     # in the bullet is a guess unless the tags justify it, and a
                     # dual-tag note names more than one candidate.
+                    if rehome is None:
+                        rehome = _rehome_signal(config)
                     signal = _rehome_lookup(rehome, bullet.text, ws_names)
                     row["rehome"] = {
                         # The note this row is about, so a UI can show a name and
