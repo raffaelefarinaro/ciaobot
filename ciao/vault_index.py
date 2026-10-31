@@ -332,7 +332,7 @@ def load_vault_ignore(vault_root: Path) -> VaultIgnore:
     """
     try:
         text = (Path(vault_root) / VAULT_IGNORE_FILE).read_text(
-            encoding="utf-8", errors="replace"
+            encoding="utf-8-sig", errors="replace"
         )
     except FileNotFoundError:
         return VaultIgnore()

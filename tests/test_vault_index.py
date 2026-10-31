@@ -965,6 +965,12 @@ def test_vault_ignore_skips_comments_and_blank_lines(tmp_path: Path):
     assert ignore.matches(Path("x/PROMPT.md"))
 
 
+def test_vault_ignore_reads_a_file_saved_with_a_bom(tmp_path: Path):
+    # Some Windows editors write a UTF-8 BOM; it must not swallow the first rule.
+    (tmp_path / ".ciaoignore").write_bytes(b"\xef\xbb\xbfautomations/\n")
+    assert vi.load_vault_ignore(tmp_path).matches(Path("automations/x/report.md"))
+
+
 def test_vault_ignore_missing_file_matches_nothing(tmp_path: Path):
     ignore = vi.load_vault_ignore(tmp_path)
     assert ignore.rules == ()
