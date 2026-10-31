@@ -1611,6 +1611,15 @@ class ProjectChatManager:
             baseline_chats if isinstance(baseline_chats, dict) else {},
             current_chats if isinstance(current_chats, dict) else {},
         )
+        # Nothing this manager holds differs from what it last wrote, so the
+        # merge would reproduce the file as it is. Read paths such as
+        # list_projects() end in a save; rewriting the multi-megabyte registry
+        # there held the event loop for about a second on every sidebar fetch.
+        if not (
+            self._has_mutations(project_mutations)
+            or self._has_mutations(chat_mutations)
+        ):
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with _state_file_lock(self._path):
             latest = self._read_latest_payload()
