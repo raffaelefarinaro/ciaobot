@@ -11,6 +11,15 @@ from ciao import job_runs as jr
 from ciao import transcripts
 from types import SimpleNamespace
 
+# A Ciaobot chat exports the live install's settings and credentials into every
+# command it runs, this suite included. Tests that build a config or call the
+# CLI would read those values instead of their own fixtures, so drop them once,
+# before any test module is collected. Tests that need a value set it with
+# monkeypatch.setenv (#2356).
+_INHERITED_ENV_PREFIXES = ("CIAO_", "PWA_", "GWS_")
+for _key in [key for key in os.environ if key.startswith(_INHERITED_ENV_PREFIXES)]:
+    del os.environ[_key]
+
 # Captured before any fixture runs, so the guard test can prove no test sees it.
 REAL_HOME = Path.home()
 
