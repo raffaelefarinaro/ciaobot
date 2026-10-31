@@ -139,13 +139,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          # A failed stage exits non-zero, but the helper still writes a
+          # sanitized summary.txt (stage and code only). Capture the status,
+          # report that summary to the job, then propagate the failure: a red
+          # run must say why it failed without echoing the raw report.
+          status=0
           "$RUNNER_TEMP/engine-check/bin/python" scripts/rehearse-server-host-signing.py \
             --output "$REHEARSAL_DIR" \
             --python "$RUNNER_TEMP/engine-check/bin/python" \
             --source-sha "$GITHUB_SHA" \
-            --wheel dist/ciaobot-*.whl
+            --wheel dist/ciaobot-*.whl || status=$?
           # Only the helper's sanitized summary reaches the job summary.
-          cat "$REHEARSAL_DIR/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$REHEARSAL_DIR/summary.txt" ]; then
+            cat "$REHEARSAL_DIR/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
 
       - name: Remove runner-local candidate and credential files
         # Always runs, including after a cancelled or failed step. The helper
