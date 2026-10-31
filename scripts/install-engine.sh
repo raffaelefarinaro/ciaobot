@@ -2,11 +2,11 @@
 set -eu
 
 # One-line installer for the Ciaobot engine alone (no Ciaobot.app), #562.
-# The engine manifest and wheel are verified against the release minisign key
-# embedded below before anything runs. A missing uv is bootstrapped from the
-# pinned uv release archive whose sha256 is reviewed into this file and fetched
-# over TLS: that archive carries no minisign or Apple signature, and the Python
-# interpreter uv fetches afterwards is not signature-authenticated either.
+# The engine manifest signature and the wheel digest are checked separately,
+# after the bootstrap below. A missing uv is bootstrapped from the pinned
+# release archive, which has to match the sha256 embedded in this file and is
+# fetched over HTTPS; uv publishes no minisign or Apple signature for it.
+# Python and the packages uv fetches afterwards have no digest pinned here.
 
 repo=raffaelefarinaro/ciaobot
 release_base=${CIAO_RELEASE_BASE_URL:-https://github.com/$repo/releases/download}
@@ -31,6 +31,9 @@ LSOF=lsof
 PS=ps
 CURL=curl
 SLEEP=sleep
+# The system tar, never whatever PATH resolves: a user-writable tar earlier on
+# PATH must not decide what the uv allowlist inspection sees.
+TAR=/usr/bin/tar
 # The port `ciao run --installer-bootstrap` and a fresh install's first engine
 # serve on: ciao.config's `pwa_port` default.
 FRESH_PORT=8443
@@ -932,9 +935,10 @@ if [ "$migrate" -eq 0 ] && { [ "$as_host" -ne 0 ] || [ -n "$as_client" ]; }; the
     fail "--as-host and --as-client require --migrate"
 fi
 
-for command in curl shasum mktemp uname awk sw_vers tar; do
+for command in curl shasum mktemp uname awk sw_vers; do
     command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
+[ -x "$TAR" ] || fail "required command not found: $TAR"
 
 [ "$(uname -s)" = "Darwin" ] || fail "this installer supports macOS; Linux servers use docs/LINUX.md"
 
@@ -1035,7 +1039,7 @@ bootstrap_verified_uv() {
     uv_dir=${uv_asset%.tar.gz}
     uv_member="$uv_dir/uv"
     uv_listing="$tmp/uv-archive.members"
-    LC_ALL=C tar -P -tf "$uv_archive" > "$uv_listing" 2>/dev/null \
+    LC_ALL=C "$TAR" -P -tf "$uv_archive" > "$uv_listing" 2>/dev/null \
         || fail "could not list the uv archive"
     [ -s "$uv_listing" ] || fail "the uv archive has no members"
     uv_dirs=0
@@ -1067,7 +1071,7 @@ bootstrap_verified_uv() {
     # is checked against the name it belongs to. Both listings must agree on
     # the member count, or the listing is ambiguous and nothing is extracted.
     uv_types="$tmp/uv-archive.types"
-    LC_ALL=C tar -P -tvf "$uv_archive" > "$uv_types" 2>/dev/null \
+    LC_ALL=C "$TAR" -P -tvf "$uv_archive" > "$uv_types" 2>/dev/null \
         || fail "could not inspect the uv archive"
     [ "$(wc -l < "$uv_types")" -eq "$(wc -l < "$uv_listing")" ] \
         || fail "the uv archive listing is ambiguous"
@@ -1100,7 +1104,7 @@ bootstrap_verified_uv() {
     (umask 077 && mkdir "$uv_stage") || fail "could not create a private uv staging directory"
     chmod 700 "$uv_stage" || fail "could not protect the uv staging directory"
     uv_staged="$uv_stage/uv"
-    if ! (set -C; LC_ALL=C tar -xOf "$uv_archive" "$uv_member" > "$uv_staged" 2>/dev/null); then
+    if ! (set -C; LC_ALL=C "$TAR" -xOf "$uv_archive" "$uv_member" > "$uv_staged" 2>/dev/null); then
         fail "could not extract $uv_member from the uv archive"
     fi
     [ -f "$uv_staged" ] && [ ! -L "$uv_staged" ] \
@@ -1119,17 +1123,32 @@ publish_verified_uv() {
     uv_bin_dir="$HOME/.local/bin"
     mkdir -p "$uv_bin_dir" || fail "could not create $uv_bin_dir"
     uv_dest="$uv_bin_dir/uv"
-    if [ -L "$uv_dest" ] || { [ -e "$uv_dest" ] && [ ! -f "$uv_dest" ]; }; then
-        fail "refusing to replace $uv_dest: it is not a regular file"
-    fi
+    # The temporary lives beside the destination so the publish is one rename.
+    # O_EXCL (set -C) refuses a path someone planted instead of following or
+    # truncating it, and the content is written through that same redirection
+    # so there is no window between creating the file and filling it.
     uv_publish="$uv_dest.new.$$"
-    rm -f "$uv_publish"
-    if ! (umask 077 && cp "$verified_uv" "$uv_publish"); then
-        rm -f "$uv_publish"
-        fail "could not stage the verified uv next to $uv_dest"
+    if ! (set -C; umask 077; cat "$verified_uv" > "$uv_publish"); then
+        fail "could not create $uv_publish exclusively"
     fi
     chmod 700 "$uv_publish" || { rm -f "$uv_publish"; fail "could not protect $uv_publish"; }
-    mv -f "$uv_publish" "$uv_dest" || { rm -f "$uv_publish"; fail "could not publish the verified uv at $uv_dest"; }
+    # Check the destination at the operation boundary, immediately before the
+    # rename: a symlink or a directory is refused, not replaced or moved into.
+    if [ -L "$uv_dest" ] || [ -d "$uv_dest" ] || { [ -e "$uv_dest" ] && [ ! -f "$uv_dest" ]; }; then
+        rm -f "$uv_publish"
+        fail "refusing to replace $uv_dest: it is not a regular file"
+    fi
+    if ! mv -f "$uv_publish" "$uv_dest"; then
+        rm -f "$uv_publish"
+        fail "could not publish the verified uv at $uv_dest"
+    fi
+    # A directory substituted for the destination between the check and the
+    # rename makes mv move the file inside it, so the result is not a regular
+    # uv. Check what actually landed, and take our file back out.
+    if [ -L "$uv_dest" ] || [ ! -f "$uv_dest" ]; then
+        rm -f "$uv_dest/${uv_publish##*/}"
+        fail "the published uv at $uv_dest is not a regular file"
+    fi
     uv="$uv_dest"
 }
 

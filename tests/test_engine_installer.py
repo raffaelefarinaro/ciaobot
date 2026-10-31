@@ -6423,16 +6423,24 @@ UV_EXECUTED = "uv-executed.log"
 UV_BOOTSTRAP_BODY = (
     "#!/bin/sh\n" f"printf 'executed\\n' >> \"$HOME/{UV_EXECUTED}\"\n"
 ).encode()
+UVX_EXECUTED = "uvx-executed.log"
+UVX_BODY = b"#!/bin/sh\nprintf 'executed\\n' >> \"$HOME/uvx-executed.log\"\n"
 
 
-def _uv_archive(path: Path, entries: list[tuple[str, str, bytes]]) -> Path:
+def _uv_archive(
+    path: Path,
+    entries: list[tuple[str, str, bytes]],
+    *,
+    archive_format: int = tarfile.USTAR_FORMAT,
+) -> Path:
     """Write a gzip tar of `(name, kind, payload)` entries.
 
     `kind` is "file", "dir", "symlink", "hardlink" or "fifo"; for the two link
-    kinds `payload` is the link target. The format is USTAR so the listing has
-    no pax extension members that would read as unexpected archive members.
+    kinds `payload` is the link target. The format is USTAR by default so a
+    fixture has no extension members; PAX and GNU long-name fixtures pass their
+    own format explicitly.
     """
-    with tarfile.open(path, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
+    with tarfile.open(path, "w:gz", format=archive_format) as archive:
         for name, kind, payload in entries:
             info = tarfile.TarInfo(name)
             if kind == "file":
@@ -6462,8 +6470,15 @@ def _uv_entries(triple: str) -> list[tuple[str, str, bytes]]:
     return [
         (f"uv-{triple}/", "dir", b""),
         (f"uv-{triple}/uv", "file", UV_BOOTSTRAP_BODY),
-        (f"uv-{triple}/uvx", "file", b"#!/bin/sh\nexit 0\n"),
+        (f"uv-{triple}/uvx", "file", UVX_BODY),
     ]
+
+
+def _assert_nothing_executed(paths: dict[str, Any]) -> None:
+    """Neither archive executable ran: each would have left its own marker."""
+    home: Path = paths["home"]
+    assert not (home / UV_EXECUTED).exists(), "the archive's uv was executed"
+    assert not (home / UVX_EXECUTED).exists(), "the archive's uvx was executed"
 
 
 def _fixture_digests(archive: Path) -> dict[str, str]:
@@ -6547,12 +6562,25 @@ def _uv_bootstrap_run(
         "done\n"
         '[ -n "$out" ] || exit 2\n' + download_body,
     )
-    # A tar double: every inspection and extraction is recorded, then the real
-    # system tar does the work, so the tests exercise the shipped invocation.
+    # A tar double: every invocation is recorded, plus a normalized "extract"
+    # line when any extraction spelling is requested, so a check does not
+    # depend on how the flags happen to be spelled. The real system tar then
+    # does the work, so the tests exercise the shipped invocation.
     _write_exec(
         fakebin / "tar",
         "#!/bin/sh\n"
         f"printf 'tar %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+        "extracting=0\n"
+        'for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        "        --extract|--get) extracting=1 ;;\n"
+        "        --*) ;;\n"
+        '        -*) case "$arg" in *x*) extracting=1 ;; esac ;;\n'
+        "    esac\n"
+        "done\n"
+        'if [ "$extracting" -eq 1 ]; then\n'
+        f"    printf 'extract %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+        "fi\n"
         f'exec {shlex.quote(shutil.which("tar") or "tar")} "$@"\n',
     )
 
@@ -6560,6 +6588,7 @@ def _uv_bootstrap_run(
         "set -eu",
         f"tmp={shlex.quote(str(tmp))}",
         f"CURL={shlex.quote(str(fakebin / 'curl'))}",
+        f"TAR={shlex.quote(str(fakebin / 'tar'))}",
         f"UV_VERSION={UV_VERSION}",
         "verified_uv=",
         _function_source("fail"),
@@ -6606,9 +6635,25 @@ def _tar_trace(trace: Path) -> list[str]:
     ]
 
 
+def _tar_extractions(trace: Path) -> list[str]:
+    """Extraction attempts as the tar double normalized them.
+
+    The double recognizes `-x...`, `--extract` and `--get`, so a test does not
+    depend on the shipped spelling of the extraction flag.
+    """
+    if not trace.exists():
+        return []
+    return [
+        line for line in trace.read_text(encoding="utf-8").splitlines()
+        if line.startswith("extract ")
+    ]
+
+
 def test_uv_bootstrap_digest_table_matches_reviewed_01217_assets() -> None:
     """The six literals are the trust root: a typo here authenticates nothing."""
     assert re.search(r"^UV_VERSION=0\.12\.17$", SCRIPT_TEXT, re.MULTILINE)
+    # The allowlist inspection must not use a tar chosen by PATH.
+    assert re.search(r"^TAR=/usr/bin/tar$", SCRIPT_TEXT, re.MULTILINE)
     body = "\n".join(
         [
             _function_source("fail"),
@@ -6649,7 +6694,7 @@ def test_uv_bootstrap_verifies_before_execution(
     assert [entry.name for entry in stage.iterdir()] == ["uv"]
     assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
     assert stat.S_IMODE((stage / "uv").stat().st_mode) == 0o700
-    assert not (paths["home"] / UV_EXECUTED).exists()
+    _assert_nothing_executed(paths)
     # The helper returns the private staged executable and publishes nothing.
     assert f"uv={stage / 'uv'}" in result.stdout
     assert f"verified_uv={stage / 'uv'}" in result.stdout
@@ -6662,9 +6707,9 @@ def test_uv_bootstrap_verifies_before_execution(
     ) in trace
     assert "--proto =https" in trace
     assert "--proto-redir =https" in trace
-    extractions = [line for line in _tar_trace(paths["trace"]) if " -x" in line]
+    extractions = _tar_extractions(paths["trace"])
     assert extractions == [
-        f"tar -xOf {paths['tmp']}/uv-{triple}.tar.gz uv-{triple}/uv"
+        f"extract -xOf {paths['tmp']}/uv-{triple}.tar.gz uv-{triple}/uv"
     ]
     assert "uvx" not in " ".join(extractions)
 
@@ -6694,7 +6739,7 @@ def test_uv_bootstrap_leaves_an_existing_uv_untouched(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert existing.read_bytes() == sentinel
     assert stat.S_IMODE(existing.stat().st_mode) == 0o750
-    assert not (home / UV_EXECUTED).exists()
+    _assert_nothing_executed(paths)
     stage = paths["tmp"] / "uv-bootstrap"
     assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
     assert f"verified_uv={stage / 'uv'}" in result.stdout
@@ -6721,7 +6766,149 @@ def test_legacy_missing_uv_publishes_the_verified_copy(tmp_path: Path) -> None:
     stage = paths["tmp"] / "uv-bootstrap"
     assert f"uv={dest}" in result.stdout
     assert f"verified_uv={stage / 'uv'}" in result.stdout
-    assert not (paths["home"] / UV_EXECUTED).exists()
+    _assert_nothing_executed(paths)
+
+
+def _run_publish(
+    tmp_path: Path,
+    *,
+    dest_kind: str | None = None,
+    mv_race: str | None = None,
+    plant_temp: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    """Run the shipped publish step against a prepared destination directory.
+
+    The test copy pins the temp suffix so a test can plant the exact path the
+    function will create. `mv_race` swaps the destination from inside an `mv`
+    double immediately before the real move, which is the race the boundary
+    check and the post-move check have to survive.
+    """
+    home = tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    staged = tmp_path / "staged-uv"
+    staged.write_bytes(UV_BOOTSTRAP_BODY)
+    staged.chmod(0o700)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    trace = tmp_path / "trace.log"
+
+    dest = bin_dir / "uv"
+    target = home / "existing-target"
+    target.write_bytes(b"do not touch\n")
+    if dest_kind == "symlink":
+        dest.symlink_to(target)
+    elif dest_kind == "directory":
+        dest.mkdir()
+
+    publish_source = _function_source("publish_verified_uv").replace("$$", "4242")
+    temp = bin_dir / "uv.new.4242"
+    if plant_temp == "file":
+        temp.write_bytes(b"planted\n")
+    elif plant_temp == "symlink":
+        temp.symlink_to(target)
+
+    _write_exec(
+        fakebin / "mv",
+        "#!/bin/sh\n"
+        f"printf 'mv %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+        "# The destination is the last argument whether or not flags precede it.\n"
+        'for mv_dest in "$@"; do :; done\n'
+        'case "${RACE:-}" in\n'
+        '    symlink) rm -f "$mv_dest"; ln -s "$HOME/existing-target" "$mv_dest" ;;\n'
+        '    directory) rm -f "$mv_dest"; mkdir "$mv_dest" ;;\n'
+        "esac\n"
+        f'exec {shlex.quote(shutil.which("mv") or "mv")} "$@"\n',
+    )
+
+    body = "\n".join(
+        [
+            "set -eu",
+            f"HOME={shlex.quote(str(home))}",
+            f"verified_uv={shlex.quote(str(staged))}",
+            _function_source("fail"),
+            publish_source,
+            "publish_verified_uv",
+            'printf "uv=%s\\n" "$uv"',
+        ]
+    )
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+    }
+    if mv_race is not None:
+        env["RACE"] = mv_race
+    result = subprocess.run(
+        ["sh", "-c", body], env=env, capture_output=True, text=True, check=False
+    )
+    return result, {
+        "home": home,
+        "bin_dir": bin_dir,
+        "dest": dest,
+        "target": target,
+        "temp": temp,
+    }
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize("dest_kind", ["symlink", "directory"])
+def test_publish_refuses_a_non_regular_destination(
+    tmp_path: Path, dest_kind: str
+) -> None:
+    """A symlink or directory at the destination is refused, not followed."""
+    result, paths = _run_publish(tmp_path, dest_kind=dest_kind)
+
+    assert result.returncode != 0
+    assert "not a regular file" in result.stderr
+    assert paths["target"].read_bytes() == b"do not touch\n"
+    assert not paths["temp"].exists()
+    if dest_kind == "symlink":
+        assert paths["dest"].is_symlink()
+    else:
+        assert paths["dest"].is_dir()
+        assert list(paths["dest"].iterdir()) == []
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize("plant", ["file", "symlink"])
+def test_publish_creates_its_temp_exclusively(tmp_path: Path, plant: str) -> None:
+    """A planted temp path is refused, never followed or truncated."""
+    result, paths = _run_publish(tmp_path, plant_temp=plant)
+
+    assert result.returncode != 0
+    assert "exclusively" in result.stderr
+    assert paths["target"].read_bytes() == b"do not touch\n"
+    assert not paths["dest"].exists()
+    if plant == "file":
+        assert paths["temp"].read_bytes() == b"planted\n"
+    else:
+        assert paths["temp"].is_symlink()
+
+
+@runs_the_sh_installer
+def test_publish_refuses_a_directory_substituted_at_the_move(tmp_path: Path) -> None:
+    """If the destination becomes a directory after the check, nothing lands."""
+    result, paths = _run_publish(tmp_path, mv_race="directory")
+
+    assert result.returncode != 0
+    assert "not a regular file" in result.stderr
+    assert paths["dest"].is_dir()
+    # The moved file is taken back out of the substituted directory.
+    assert list(paths["dest"].iterdir()) == []
+
+
+@runs_the_sh_installer
+def test_publish_survives_a_symlink_substituted_at_the_move(tmp_path: Path) -> None:
+    """A symlink planted just before the rename is replaced, never followed."""
+    result, paths = _run_publish(tmp_path, mv_race="symlink")
+
+    assert result.returncode == 0, result.stderr
+    assert paths["dest"].is_file()
+    assert not paths["dest"].is_symlink()
+    assert paths["dest"].read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o700
+    assert paths["target"].read_bytes() == b"do not touch\n"
 
 
 @needs_local_tools
@@ -6743,7 +6930,7 @@ def test_uv_bootstrap_mismatch_executes_nothing(tmp_path: Path) -> None:
     assert not (paths["home"] / ".local" / "bin" / "uv").exists()
     assert not (paths["tmp"] / "uv-bootstrap").exists()
     assert _tar_trace(paths["trace"]) == []
-    assert not (paths["home"] / UV_EXECUTED).exists()
+    _assert_nothing_executed(paths)
 
 
 UNSAFE_UV_ARCHIVES: list[
@@ -6812,6 +6999,37 @@ UNSAFE_UV_ARCHIVES: list[
         ],
         "non-regular",
     ),
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"uv-{triple}/uvx", "file", UVX_BODY)],
+        "more than one uvx",
+    ),
+    (
+        lambda triple: [
+            (name, "dir" if name == f"uv-{triple}/uvx" else kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "unexpected member",
+    ),
+    (
+        lambda triple: [
+            (name, "symlink", b"uv") if name == f"uv-{triple}/uvx"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "non-regular",
+    ),
+    (
+        lambda triple: _uv_entries(triple) + [(f"uv-{triple}/", "dir", b"")],
+        "exactly one",
+    ),
+    (
+        lambda triple: [
+            entry for entry in _uv_entries(triple)
+            if entry[0] != f"uv-{triple}/"
+        ],
+        "exactly one",
+    ),
 ]
 
 
@@ -6834,8 +7052,8 @@ def test_uv_bootstrap_rejects_unsafe_archive_members(
     assert reason in result.stderr
     assert not (paths["home"] / ".local" / "bin" / "uv").exists()
     assert not (paths["tmp"] / "uv-bootstrap").exists()
-    assert not [line for line in _tar_trace(paths["trace"]) if " -x" in line]
-    assert not (paths["home"] / UV_EXECUTED).exists()
+    assert _tar_extractions(paths["trace"]) == []
+    _assert_nothing_executed(paths)
 
 
 @needs_local_tools
@@ -6857,6 +7075,97 @@ def test_uv_bootstrap_rejects_unknown_architecture(tmp_path: Path) -> None:
     assert _tar_trace(paths["trace"]) == []
     # Neither the curl double nor the tar double ran: nothing was downloaded.
     assert not paths["trace"].exists()
+
+
+@needs_local_tools
+def test_uv_bootstrap_accepts_an_archive_without_uvx(tmp_path: Path) -> None:
+    """uvx is optional; an archive with only the directory and uv is valid."""
+    triple = "aarch64-apple-darwin"
+    entries = [
+        entry for entry in _uv_entries(triple)
+        if entry[0] != f"uv-{triple}/uvx"
+    ]
+    archive = _uv_archive(tmp_path / "uv.tar.gz", entries)
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode == 0, result.stderr
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert [entry.name for entry in stage.iterdir()] == ["uv"]
+    assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    assert _tar_extractions(paths["trace"]) == [
+        f"extract -xOf {paths['tmp']}/uv-{triple}.tar.gz uv-{triple}/uv"
+    ]
+    _assert_nothing_executed(paths)
+
+
+@pytest.mark.parametrize(
+    ("name", "kind", "archive_format", "reason"),
+    [
+        # PAX and GNU store a long name in an extension member; the long entry
+        # is still not one of the three allowed names.
+        (
+            "uv-aarch64-apple-darwin/" + "a" * 140,
+            "file", tarfile.PAX_FORMAT, "unexpected member",
+        ),
+        (
+            "uv-aarch64-apple-darwin/" + "b" * 140,
+            "file", tarfile.GNU_FORMAT, "unexpected member",
+        ),
+        # A `./` segment and a trailing slash must not be normalized into an
+        # allowed name.
+        (
+            "uv-aarch64-apple-darwin/./uv",
+            "file", tarfile.USTAR_FORMAT, "unexpected member",
+        ),
+        (
+            "uv-aarch64-apple-darwin/uv/",
+            "dir", tarfile.USTAR_FORMAT, "unexpected member",
+        ),
+        # tar escapes a newline into `\n` in some listings and splits it into
+        # two lines in others; one of the allowed names must not be assembled
+        # out of a single hostile member either way.
+        (
+            "uv-aarch64-apple-darwin/uv\nuv-aarch64-apple-darwin/uvx",
+            "file", tarfile.USTAR_FORMAT, None,
+        ),
+        # A backslash is an escape in some listings and an ordinary byte in
+        # others; it is never inside the allowlist.
+        (
+            "uv-aarch64-apple-darwin/uv\\x",
+            "file", tarfile.USTAR_FORMAT, "unsafe member name",
+        ),
+    ],
+)
+@needs_local_tools
+def test_uv_bootstrap_rejects_relocated_or_ambiguous_names(
+    tmp_path: Path,
+    name: str,
+    kind: str,
+    archive_format: int,
+    reason: str | None,
+) -> None:
+    """Names tar could normalize, join or split are refused before extraction."""
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(
+        tmp_path / "uv.tar.gz",
+        _uv_entries(triple) + [(name, kind, b"x")],
+        archive_format=archive_format,
+    )
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode != 0, result.stdout
+    if reason is not None:
+        assert reason in result.stderr
+    assert not (paths["home"] / ".local" / "bin" / "uv").exists()
+    assert not (paths["tmp"] / "uv-bootstrap").exists()
+    assert _tar_extractions(paths["trace"]) == []
+    _assert_nothing_executed(paths)
 
 
 def _run_find_uv_selection(

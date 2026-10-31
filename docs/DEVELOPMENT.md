@@ -260,11 +260,12 @@ There is no piped shell installer in this path. The trust root for the archive
 is the reviewed digest table plus TLS to GitHub: uv publishes no minisign or
 Apple signature for these assets, and the installer does not claim one.
 Bumping `UV_VERSION` means replacing all six digests in the same review, and no
-checksum is fetched at install time. The engine manifest and wheel keep their
-separate minisign verification; the Python interpreter and packages `uv run`
-fetches afterwards (cryptography included) are authenticated by uv's own hashes
-over TLS, not by the engine key, so this is not supply-chain-wide signature
-coverage.
+checksum is fetched at install time. The bootstrap proves only that the
+archive matches the embedded digest; it does not authenticate anything that
+archive's `uv` later downloads. The engine manifest signature and the wheel
+digest are verified separately after the bootstrap. Python and the packages
+`uv run` fetches (cryptography included) are not covered by the engine key and
+have no independently pinned hash in this installer.
 
 `--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
