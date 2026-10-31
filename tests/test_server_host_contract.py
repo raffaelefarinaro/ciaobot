@@ -2349,6 +2349,194 @@ def test_signed_host_requires_stable_designated_requirement(
     assert caught.value.code == SIGNATURE_REJECTED
 
 
+def _printed_designated_requirement(ou_clause: str) -> str:
+    """A designated requirement in ``codesign -d -r-`` printer form.
+
+    The clauses are written out literally rather than built from
+    :func:`developer_id_requirement`: a test that derives its expectation from
+    the product cannot catch the product changing its mind about the same
+    requirement. Only the leaf OU test varies, because that is the one clause
+    whose value spelling the printer chooses.
+    """
+    return (
+        'identifier "local.ciaobot.server"'
+        " and anchor apple generic"
+        " and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */"
+        " and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */"
+        f" and certificate leaf[subject.OU] {ou_clause}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("team", "ou_clause"),
+    [
+        # Real `codesign -d -r-` output for a letter-leading team: an
+        # identifier-shaped value is a bare token, so the printer drops the
+        # quotes the requirement was signed with.
+        ("AXBFS96Y9F", "= AXBFS96Y9F"),
+        # Real output for a digit-leading team: it cannot be a bare token, so
+        # the printer keeps the quotes.
+        ("9ZGFBWLSYP", '= "9ZGFBWLSYP"'),
+    ],
+)
+def test_signed_host_accepts_the_canonical_printer_ou_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, team: str, ou_clause: str
+) -> None:
+    # Failure #41217566791: the builder embeds the requirement with the team
+    # quoted, but `codesign -d -r-` prints a letter-leading team without quotes.
+    # Both spellings are the same requirement, so the readback must be accepted.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    designated = _printed_designated_requirement(ou_clause)
+    runner = _FakeRunner(
+        adhoc=False, team_id=team, expected_team=team, designated=designated
+    )
+
+    snapshot = _inspect_signed(bundle, runner, signing=DeveloperIDSigning(team))
+
+    assert snapshot.signing == DeveloperIDSigning(team)
+
+
+def test_signed_host_accepts_only_the_printer_spelling_of_a_digit_leading_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # For a digit-leading team the printer keeps the quotes the requirement was
+    # signed with, because the value is not a bare token. The expected team is
+    # the digit-leading one on both sides, so the quoted spelling is accepted
+    # for its own sake and the identical bare spelling is refused for its own
+    # spelling — not because a foreign team masked the comparison.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    team = "9ZGFBWLSYP"
+    signing = DeveloperIDSigning(team)
+    canonical = _printed_designated_requirement(f'= "{team}"')
+
+    accepted = _FakeRunner(
+        adhoc=False, team_id=team, expected_team=team, designated=canonical
+    )
+    assert _inspect_signed(bundle, accepted, signing=signing).signing == signing
+
+    bare = _FakeRunner(
+        adhoc=False,
+        team_id=team,
+        expected_team=team,
+        designated=_printed_designated_requirement(f"= {team}"),
+    )
+    with pytest.raises(ServerHostError) as caught:
+        _inspect_signed(bundle, bare, signing=signing)
+    assert caught.value.code == SIGNATURE_REJECTED
+
+
+def test_signed_host_refuses_any_other_ou_spelling_or_clause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the optional quotes around one identifier-shaped leaf OU value are
+    # normalized. A foreign team, an extra alternative, a missing clause, a
+    # pinned CDHash and a quoted string that swallows clause text all remain
+    # different requirements and are refused.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    team = "AXBFS96Y9F"
+    canonical = _printed_designated_requirement(f"= {team}")
+    assert canonical != developer_id_requirement(team)
+
+    hash_value = _CDHASH[ARCHITECTURES[0]]
+    refusals = [
+        ("foreign team", _printed_designated_requirement("= OTHERTEAM1")),
+        ("foreign quoted team", _printed_designated_requirement('= "9ZGFBWLSYP"')),
+        (
+            "extra alternative",
+            f'{canonical} or certificate leaf = H"{hash_value}"',
+        ),
+        (
+            "missing identifier",
+            canonical.replace('identifier "local.ciaobot.server" and ', ""),
+        ),
+        ("missing anchor", canonical.replace(" and anchor apple generic", "")),
+        (
+            "missing CA extension",
+            canonical.replace(
+                " and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */",
+                "",
+            ),
+        ),
+        (
+            "missing leaf extension",
+            canonical.replace(
+                " and certificate leaf[field.1.2.840.113635.100.6.1.13]"
+                " /* exists */",
+                "",
+            ),
+        ),
+        ("missing OU clause", _printed_designated_requirement("")),
+        ("pinned CDHash", f'{canonical} and cdhash H"{hash_value}"'),
+        (
+            "quoted clause text",
+            _printed_designated_requirement(
+                f'= "{team} or anchor apple generic"'
+            ),
+        ),
+    ]
+    for label, designated in refusals:
+        runner = _FakeRunner(
+            adhoc=False, team_id=team, expected_team=team, designated=designated
+        )
+        with pytest.raises(ServerHostError) as caught:
+            _inspect_signed(bundle, runner, signing=DeveloperIDSigning(team))
+        assert caught.value.code == SIGNATURE_REJECTED, label
+
+    # Control: the canonical printer spelling is still accepted, so the loop
+    # above is not passing because every designated requirement is refused.
+    control = _FakeRunner(
+        adhoc=False, team_id=team, expected_team=team, designated=canonical
+    )
+    _inspect_signed(bundle, control, signing=DeveloperIDSigning(team))
+
+
+@pytest.mark.parametrize(
+    ("label", "designated"),
+    [
+        (
+            "comment inside the quoted identifier",
+            developer_id_requirement(_TEST_TEAM).replace(
+                f'"{BUNDLE_ID}"',
+                f'"{BUNDLE_ID[:8]}/* not a comment */{BUNDLE_ID[8:]}"',
+            ),
+        ),
+        (
+            "comment inside the quoted leaf OU",
+            developer_id_requirement(_TEST_TEAM).replace(
+                f'"{_TEST_TEAM}"',
+                f'"{_TEST_TEAM[:4]}/* not a comment */{_TEST_TEAM[4:]}"',
+            ),
+        ),
+        (
+            "comment inside the bare leaf OU token",
+            _printed_designated_requirement(f"= {_TEST_TEAM}").replace(
+                f"= {_TEST_TEAM}",
+                f"= {_TEST_TEAM[:4]}/* not a comment */{_TEST_TEAM[4:]}",
+            ),
+        ),
+    ],
+)
+def test_signed_host_refuses_comment_markers_inside_an_identifier_or_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str, designated: str
+) -> None:
+    # Requirement comments are stripped before comparison, but a marker inside
+    # an identifier or team value is part of that value. Deleting it would
+    # compare a different value, so such a readback is refused rather than
+    # normalized into a match — including when the marker replaces nothing, as
+    # an empty-string strip would.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_signed_bundle(tmp_path)
+    runner = _FakeRunner(adhoc=False, designated=designated)
+
+    with pytest.raises(ServerHostError) as caught:
+        _inspect_signed(bundle, runner)
+
+    assert caught.value.code == SIGNATURE_REJECTED, label
+
+
 def test_signed_host_refuses_duplicate_or_conflicting_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

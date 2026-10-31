@@ -1386,11 +1386,28 @@ def _per_arch_cdhashes(executable: Path, runner: Runner) -> dict[str, str]:
 _REQUIREMENT_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _FIELD_EXISTS_RE = re.compile(r"(certificate (?:leaf|[0-9]+)\[[^\]]*\]) exists\b")
 
+#: ``codesign -d -r-`` prints the leaf OU team bare when the value is a bare
+#: token (a letter followed by letters or digits) and quoted when it is not (a
+#: digit-leading team), while the builder always writes it quoted. Both are the
+#: same test, so the one optional pair of quotes around an identifier-shaped
+#: value is normalized. The clause around it, and every other value, stay
+#: exactly as printed.
+_OU_VALUE_RE = re.compile(
+    r"(certificate leaf\[subject\.OU\]\s*=\s*)"
+    r'(?:"([A-Za-z][A-Za-z0-9]*)"|([A-Za-z][A-Za-z0-9]*))'
+)
+
+
+def _bare_ou_value(match: re.Match[str]) -> str:
+    """The leaf OU test with its optional identifier-shaped quotes removed."""
+    return f"{match.group(1)}{match.group(2) or match.group(3)}"
+
 
 def _normalized_requirement(text: str) -> str:
     without_comments = _REQUIREMENT_COMMENT_RE.sub(" ", text)
     without_exists = _FIELD_EXISTS_RE.sub(r"\1", without_comments)
-    return " ".join(without_exists.split())
+    canonical_ou = _OU_VALUE_RE.sub(_bare_ou_value, without_exists)
+    return " ".join(canonical_ou.split())
 
 
 def _refuse_signed(message: str) -> NoReturn:

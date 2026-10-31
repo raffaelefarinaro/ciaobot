@@ -181,6 +181,15 @@ certificate fingerprint or CDHash, so a renewal within the same team keeps the
 same logical identity — and a code-specific or leaf-pinned designated
 requirement is refused rather than accepted as a stable upgrade identity.
 
+The builder writes the team quoted. `codesign -d -r-` prints that same leaf OU
+test with the quotes dropped when the value is a bare token — a letter followed
+by letters or digits — and keeps them when it is not, as for a digit-leading
+team. The readback therefore treats one optional pair of quotes around an
+identifier-shaped leaf `subject.OU` value as the same test. Normalizing it does
+not change the team value, so a foreign team remains a different requirement,
+and a bare spelling of a digit-leading team is not a form the printer can
+produce and is refused.
+
 Where the expected team comes from, and where it does not:
 
 1. the release manifest names it, and the manifest's minisign signature must
@@ -204,7 +213,12 @@ The signed policy requires, on the bundle and on **every** slice:
 - the hardened-runtime CodeDirectory flag (`CS_RUNTIME`, `0x10000`), not merely a
   `Runtime Version=` line, and a secure timestamp;
 - the canonical designated requirement (comments and `exists` spellings are
-  normalized; identifiers, teams and hashes are not);
+  normalized; identifiers, teams and hashes are not). `codesign -d -r-` prints
+  an identifier-shaped leaf `subject.OU` value without the quotes the builder
+  signs with (a digit-leading team keeps them), so exactly that one optional
+  pair of quotes is normalized — the team value itself never changes, and a
+  comment marker inside a quoted identifier or team value is not the canonical
+  form and is refused;
 - exactly one entitlement, `{"com.apple.security.automation.apple-events": true}`.
   A missing, false, coerced (`1` is not `true`), extra, runtime-relaxing
   (JIT, debugger, disabled library validation, `get-task-allow`) or malformed

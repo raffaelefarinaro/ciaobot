@@ -113,6 +113,15 @@ EXPECTED_DESIGNATED_REQUIREMENT = (
     ' and certificate leaf[subject.OU] = "ABCDE12345"'
 )
 
+#: What `codesign -d -r-` prints for the same requirement: the printer drops
+#: the quotes around an identifier-shaped team, so the readback is bare. A fake
+#: that answers with the signing source spelling hides that canonical form — it
+#: hid failure #41217566791 — while the builder and `--test-requirement` still
+#: take the quoted source text.
+PRINTED_DESIGNATED_REQUIREMENT = EXPECTED_DESIGNATED_REQUIREMENT.replace(
+    '= "ABCDE12345"', "= ABCDE12345"
+)
+
 
 def _app_of(path: Path) -> Path:
     """The app bundle a path lives in; fails if it is not inside one."""
@@ -712,7 +721,7 @@ class FakeToolchain:
             return self._done(
                 cmd,
                 kwargs,
-                stdout=f"designated => {EXPECTED_DESIGNATED_REQUIREMENT}\n",
+                stdout=f"designated => {PRINTED_DESIGNATED_REQUIREMENT}\n",
             )
         raise AssertionError(f"unexpected codesign argv: {cmd}")
 
