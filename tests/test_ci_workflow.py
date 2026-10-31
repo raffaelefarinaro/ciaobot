@@ -541,7 +541,7 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
 
     windows = by_name["windows"]
     assert (
-        "WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}"
+        "WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}"
         in windows
     )
     steps = dict(re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - |\Z)", windows))
@@ -557,6 +557,32 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
         "install.ps1 end-to-end install and uninstall (advisory)",
     ):
         assert full in steps[name], f"{name!r} is not gated on WINDOWS_FULL"
+
+
+def test_windows_full_label_opts_a_develop_pr_in() -> None:
+    # #2360: a develop PR labelled windows-full runs the full Windows suites.
+    # The label is read from the event payload, so the pull_request trigger
+    # must keep no `types:` filter: a `labeled` type would rerun all of CI on
+    # every label change.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    on_block = workflow.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+    pull_request_block = on_block.split("  pull_request:", 1)[1]
+    assert "types:" not in pull_request_block
+
+    jobs = re.split(r"(?m)^  (?=[a-z-]+:\n)", workflow.split("\njobs:\n", 1)[1])
+    by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
+    windows_full = [
+        line
+        for line in by_name["windows"].splitlines()
+        if line.strip().startswith("WINDOWS_FULL:")
+    ]
+    assert len(windows_full) == 1
+    assert (
+        "contains(github.event.pull_request.labels.*.name, 'windows-full')"
+        in windows_full[0]
+    )
 
 
 def _rehearsal_workflow() -> str:
@@ -939,3 +965,41 @@ def test_dispatch_guard_binds_the_real_event_expressions() -> None:
     script = _dispatch_guard_script()
     for name in ("CONFIRMED", "DISPATCHED_REF", "EVENT_NAME"):
         assert f'"${name}"' in script, name
+
+def test_workflow_expressions_are_valid_for_github() -> None:
+    """A `runner` context in a job-level `env` block fails to parse the workflow.
+
+    GitHub then refuses the dispatch with 422 and the run never starts, which no
+    text assertion over the file previously noticed.
+    """
+    workflow_path = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "server-host-signing-rehearsal.yml"
+    )
+    lines = workflow_path.read_text(encoding="utf-8").splitlines()
+    in_jobs = False
+    job_indent: int | None = None
+    in_job_env = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if stripped == "jobs:":
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        if indent == 2:
+            job_indent = indent
+            in_job_env = False
+            continue
+        if job_indent is not None and indent == job_indent + 2 and stripped == "env:":
+            in_job_env = True
+            continue
+        if job_indent is not None and indent <= job_indent + 2:
+            if stripped != "env:":
+                in_job_env = False
+        if in_job_env:
+            assert "runner." not in stripped, (
+                "a job-level env value may not use the runner context: " + stripped
+            )

@@ -29,6 +29,7 @@ from ciao.web.routes_mcp import (
     mcp_usage_endpoint,
 )
 from ciao.web.auth import AuthMiddleware, make_serializer
+from ciao.web.loop_watchdog import EventLoopWatchdog, InFlightRequests, RequestTimingMiddleware
 from ciao.web.request_limits import ApiRequestBodyLimitMiddleware
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
@@ -805,7 +806,11 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
             )
         routes.append(Route("/{path:path}", _spa_catchall))
 
+    # One registry per app, shared by the timing middleware and the loop watchdog.
+    in_flight_requests = InFlightRequests()
     middleware = [
+        # Outermost, so the timing covers auth and body limits too.
+        Middleware(RequestTimingMiddleware, registry=in_flight_requests),
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer),
         Middleware(ApiRequestBodyLimitMiddleware),
@@ -836,9 +841,12 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
             """Close every shell the browser terminal still holds."""
             await terminal_sessions.shutdown()
 
+        watchdog = EventLoopWatchdog(in_flight_requests)
+        watchdog.start()
         try:
             yield
         finally:
+            await watchdog.stop()
             # Shutdown runs even if the lifespan exits by raising or
             # cancellation (not just a normal shutdown message), so provider
             # subprocesses are not leaked across an
@@ -863,6 +871,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
 
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.serializer = serializer
+    app.state.in_flight_requests = in_flight_requests
     app.state.config = config
     app.state.installer_bootstrap = installer_bootstrap
     app.state.installer_run_id = installer_run_id
