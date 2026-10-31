@@ -173,10 +173,18 @@ def _digest(path: Path) -> tuple[str, int]:
 class FakeChild:
     """One in-flight tool process, as the rehearsal's tracker sees it."""
 
-    def __init__(self, events: list[tuple[str, str]], family: str, *, ignore_terminate: bool = False) -> None:
+    def __init__(
+        self,
+        events: list[tuple[str, str]],
+        family: str,
+        *,
+        ignore_terminate: bool = False,
+        refuse_to_exit: bool = False,
+    ) -> None:
         self.events = events
         self.family = family
         self.ignore_terminate = ignore_terminate
+        self.refuse_to_exit = refuse_to_exit
         self.terminated = False
         self.killed = False
         self.waits = 0
@@ -187,6 +195,8 @@ class FakeChild:
 
     def wait(self, timeout: float | None = None) -> int:
         self.waits += 1
+        if self.refuse_to_exit:
+            raise subprocess.TimeoutExpired(self.family, timeout or 0)
         if self.ignore_terminate and self.waits == 1:
             raise subprocess.TimeoutExpired(self.family, timeout or 0)
         self.events.append(("reaped", self.family))
@@ -248,6 +258,7 @@ class FakeToolchain:
         on_command: Any = None,
         children: Any = None,
         child_ignore_terminate: bool = False,
+        child_refuse_to_exit: bool = False,
     ) -> None:
         self.team_id = team_id
         self.identity = identity
@@ -289,6 +300,7 @@ class FakeToolchain:
             children if children is not None else REHEARSAL._ActiveChildren()
         )
         self.child_ignore_terminate = child_ignore_terminate
+        self.child_refuse_to_exit = child_refuse_to_exit
         self.events: list[tuple[str, str]] = []
         self.built_app: Path | None = None
         self.zip_path: Path | None = None
@@ -311,7 +323,10 @@ class FakeToolchain:
         self.calls.append((list(cmd), dict(kwargs)))
         family = self._family(cmd)
         child = FakeChild(
-            self.events, family, ignore_terminate=self.child_ignore_terminate
+            self.events,
+            family,
+            ignore_terminate=self.child_ignore_terminate,
+            refuse_to_exit=self.child_refuse_to_exit,
         )
         self.children.register(child)
         self.events.append(("start", family))
@@ -1987,6 +2002,95 @@ def test_second_signal_during_cleanup_is_deferred(
     assert restored_default == [PRIOR_DEFAULT]
     assert any(cmd[:2] == ["security", "delete-keychain"] for cmd in fake.commands)
     assert not (tmp_path / "rehearsal" / "credentials").exists()
+
+
+def _signal_during_key_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, bool]:
+    """Deliver the first SIGINT while the decoded key is being unlinked."""
+    key_path = tmp_path / "rehearsal" / "credentials" / "notary-key.p8"
+    sent = {"once": False}
+    real_unlink = Path.unlink
+
+    def unlink_then_signal(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path == key_path and not sent["once"]:
+            sent["once"] = True
+            signal.raise_signal(signal.SIGINT)
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_then_signal)
+    return sent
+
+
+def test_first_signal_during_ordinary_cleanup_keeps_the_key_deleted(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = _signal_during_key_unlink(tmp_path, monkeypatch)
+    fake = FakeToolchain()
+    with pytest.raises(REHEARSAL.RehearsalError) as caught:
+        _run_rehearsal(tmp_path, fake)
+    # The signal was deferred: cleanup finished, then the run failed.
+    assert "interrupted" in str(caught.value)
+    assert "cleanup also failed" not in str(caught.value)
+    assert sent["once"]
+    assert not (tmp_path / "rehearsal" / "credentials" / "notary-key.p8").exists()
+    restored_search, restored_default = _restore_commands(fake.commands)
+    assert restored_search == PRIOR_SEARCH
+    assert restored_default == [PRIOR_DEFAULT]
+    assert any(cmd[:2] == ["security", "delete-keychain"] for cmd in fake.commands)
+
+
+def test_first_signal_during_cleanup_keeps_the_original_failure(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent = _signal_during_key_unlink(tmp_path, monkeypatch)
+    fake = FakeToolchain(sign_rc=1)
+    with pytest.raises(REHEARSAL.RehearsalError) as caught:
+        _run_rehearsal(tmp_path, fake)
+    # The build failure is still the reported failure; cleanup was not abandoned.
+    assert "signature could not be applied" in str(caught.value)
+    assert "cleanup also failed" not in str(caught.value)
+    assert sent["once"]
+    assert not (tmp_path / "rehearsal" / "credentials" / "notary-key.p8").exists()
+    restored_search, restored_default = _restore_commands(fake.commands)
+    assert restored_search == PRIOR_SEARCH
+    assert restored_default == [PRIOR_DEFAULT]
+
+
+def test_stop_of_a_partially_registered_process_defers_and_reaps(
+    tmp_path: Path, macos: None
+) -> None:
+    tracker = REHEARSAL._ActiveChildren()
+    events: list[tuple[str, str]] = []
+    child = FakeChild(events, "spawned")
+
+    def factory() -> FakeChild:
+        # The signal handler runs while the process is being created.
+        assert tracker.stop("SIGTERM") == "spawning"
+        return child
+
+    with pytest.raises(REHEARSAL.RehearsalError) as caught:
+        tracker.spawn(factory)
+    assert "interrupted by SIGTERM" in str(caught.value)
+    assert child.terminated
+    assert ("reaped", "spawned") in events
+
+
+def test_child_that_never_exits_is_reported_as_unreaped(
+    tmp_path: Path, macos: None
+) -> None:
+    sent = {"once": False}
+
+    def interrupt(cmd: list[str], _kwargs: dict[str, Any]) -> None:
+        if cmd[:3] == ["codesign", "--force", "--sign"] and not sent["once"]:
+            sent["once"] = True
+            signal.raise_signal(signal.SIGINT)
+
+    fake = FakeToolchain(on_command=interrupt, child_refuse_to_exit=True)
+    with pytest.raises(REHEARSAL.RehearsalError) as caught:
+        _run_rehearsal(tmp_path, fake)
+    assert "could not be reaped" in str(caught.value)
+    assert "interrupted by SIGINT" in str(caught.value)
 
 
 # --- sanitized failure report ----------------------------------------------

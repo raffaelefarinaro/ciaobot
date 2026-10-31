@@ -41,6 +41,14 @@ jobs:
       # reused, adopted or deleted by this one.
       REHEARSAL_DIR: ${{ runner.temp }}/server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Claim the run-scoped scratch receipt
+        # Runs before the confirmation/ref guard, because cleanup runs always()
+        # and must never trust a receipt a refused run did not clear. The path is
+        # unique per run id and attempt, so only this job can have written one.
+        run: |
+          set -euo pipefail
+          rm -f "${REHEARSAL_DIR}.owned"
+
       - name: Refuse an unconfirmed or untrusted run
         # Runs before checkout and before any credential is bound: an unchecked
         # confirmation, another event or an untrusted ref fails this run rather
@@ -127,9 +135,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          # Nothing at this run's receipt path can predate this step: the helper
-          # records the directory it created, and cleanup trusts only that.
-          rm -f "${REHEARSAL_DIR}.owned"
           "$RUNNER_TEMP/engine-check/bin/python" scripts/rehearse-server-host-signing.py \
             --output "$REHEARSAL_DIR" \
             --python "$RUNNER_TEMP/engine-check/bin/python" \

@@ -247,28 +247,34 @@ The scratch directory is unique per run
 (`server-host-signing-rehearsal-<run id>-<run attempt>`). The helper creates it
 with an exclusive `mkdir`, writes a `.rehearsal-owned` marker immediately after,
 and then records the exact created path in a sibling `.owned` receipt. The
-helper step clears that receipt before it starts, so nothing at the receipt path
-can predate this run. The workflow's `always()` cleanup deletes only the path
-named by the receipt, so a pre-existing directory is never adopted or removed
-even if it already contains a marker (or a planted receipt). An interruption
-between the `mkdir` and the marker leaves no receipt, so the directory is not
-deleted either; the helper also refuses a pre-existing output or receipt before
-writing anything.
+workflow's first step — before the confirmation and ref guard, because cleanup
+runs `always()` — clears any stale receipt at that path. Cleanup deletes only the
+path named by the receipt, so a pre-existing directory is not adopted even if it
+already contains a marker. The receipt is evidence that this job reached the
+claim step, not cryptographic proof against a hostile pre-existing file written
+to the same unique path before the job started; on a single-tenant runner that
+is outside the threat model. An interruption between the `mkdir` and the marker
+leaves no receipt, so the directory is not deleted either; the helper also
+refuses a pre-existing output or receipt before writing anything.
 
 The helper installs SIGTERM and SIGINT handlers for the duration of the build.
 An interruption first terminates and reaps the in-flight tool process (killing
 it if it ignores the termination), and only then restores the prior default
-keychain and the entire prior search list. A second signal during cleanup is
-deferred so the restore finishes; the run still fails with a sanitized message.
-Each "changed" flag is set before the command that changes it and cleared only
-after its restore succeeds, so a retry still attempts a setting that failed. The
-last `delete-keychain` postcondition is verified on the filesystem, and the p12,
-the decoded `.p8`, the keychain and the profile are deleted by independent
-attempts: a p12 that cannot be unlinked never leaves the API key behind. A
-cleanup failure is never swallowed when another exception is already in flight:
-both are reported, sanitized. The candidate app, archive, manifest and report
-stay in the runner's scratch directory; nothing is uploaded, published or
-attached to a release.
+keychain and the entire prior search list — where the process is still
+schedulable. A child that still has not exited after the post-kill wait is
+reported as unreaped rather than treated as stopped; SIGKILL cannot be handled
+at all. A signal that arrives while a restore is already running, on the normal
+cleanup path or after a failure, is deferred: cleanup finishes, the decoded key
+and the other credentials are deleted, and the run then fails with a sanitized
+message. Each "changed" flag is set before the command that changes it and
+cleared only after its restore succeeds, so a retry still attempts a setting
+that failed. The last `delete-keychain` postcondition is verified on the
+filesystem, and the p12, the decoded `.p8`, the keychain and the profile are
+deleted by independent attempts: a p12 that cannot be unlinked never leaves the
+API key behind. A cleanup failure is never swallowed when another exception is
+already in flight: both are reported, sanitized. The candidate app, archive,
+manifest and report stay in the runner's scratch directory; nothing is uploaded,
+published or attached to a release.
 
 Every *recoverable* path deletes the credentials, including build, notarization,
 manifest and verification failures, an interruption and a cleanup command that

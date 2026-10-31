@@ -511,11 +511,18 @@ class _ActiveChildren:
     ``notarytool`` child is still applying its own change. The handler asks this
     registry to terminate and reap the child first; production registers the
     real ``Popen`` and tests register a handle with the same protocol.
+
+    The lock is re-entrant because the handler runs on the same thread that may
+    be holding it while a process is being created. ``spawn`` holds it across
+    create-and-register, so a signal delivered in that window defers instead of
+    deadlocking, and the process is terminated as soon as it is registered.
     """
 
     def __init__(self) -> None:
         self._child: Any = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._spawning = False
+        self._deferred: str | None = None
 
     def register(self, child: Any) -> None:
         with self._lock:
@@ -525,19 +532,51 @@ class _ActiveChildren:
         with self._lock:
             self._child = None
 
-    def stop(self) -> None:
-        """Terminate and reap the active child, killing it if it will not exit."""
+    def spawn(self, factory: Callable[[], Any]) -> Any:
+        """Create and register a child; stop it if a signal arrived meanwhile."""
         with self._lock:
+            self._spawning = True
+            try:
+                child = factory()
+            finally:
+                self._spawning = False
+            self._child = child
+            deferred = self._deferred
+            self._deferred = None
+        if deferred is not None:
+            outcome = self.stop()
+            suffix = (
+                "; the interrupted tool could not be reaped"
+                if outcome == "unreaped"
+                else ""
+            )
+            raise RehearsalError(
+                f"the rehearsal was interrupted by {deferred}{suffix}"
+            ) from None
+        return child
+
+    def stop(self, interrupt: str | None = None) -> str | None:
+        """Terminate and reap the active child.
+
+        Returns ``None`` when there was no child or it was reaped, ``"spawning"``
+        when a process is still being created and cannot be stopped yet, and
+        ``"unreaped"`` when a killed child still has not exited.
+        """
+        with self._lock:
+            if self._spawning:
+                if interrupt is not None:
+                    self._deferred = interrupt
+                return "spawning"
             child, self._child = self._child, None
         if child is None:
-            return
+            return None
         try:
             child.terminate()
         except OSError:
             pass
         try:
             child.wait(timeout=CHILD_REAP_SECONDS)
-            return
+            return None
         except subprocess.TimeoutExpired:
             pass
         try:
@@ -546,9 +585,9 @@ class _ActiveChildren:
             pass
         try:
             child.wait(timeout=CHILD_REAP_SECONDS)
+            return None
         except subprocess.TimeoutExpired:
-            # Nothing more we can do; the runner discards the machine.
-            pass
+            return "unreaped"
 
 
 class _ProcessRunner:
@@ -569,16 +608,17 @@ class _ProcessRunner:
         cwd: Path | None = None,
         input: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=None if env is None else dict(env),
-            cwd=None if cwd is None else str(cwd),
+        process = self._children.spawn(
+            lambda: subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=None if env is None else dict(env),
+                cwd=None if cwd is None else str(cwd),
+            )
         )
-        self._children.register(process)
         try:
             stdout, stderr = process.communicate(input, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -757,6 +797,11 @@ class _SigningKeychain:
         # keychain, the profile and the p12.
         _write_private(self.notary_key, self.credentials.notary_key)
 
+    @property
+    def restoring(self) -> bool:
+        """Whether a restore is already running on this session."""
+        return self._restoring
+
     def restore(self) -> list[str]:
         """Put back the prior keychain state and delete every credential.
 
@@ -867,25 +912,36 @@ def _temporary_signing_keychain(
     def manage() -> Iterator[tuple[Path, str]]:
         session = _SigningKeychain(output, credentials, runner)
         previous_handlers: dict[int, Any] = {}
-        state = {"interrupting": False, "deferred": False}
+        state: dict[str, Any] = {"interrupting": False, "deferred_signal": None}
 
         def interrupted(signum: int, _frame: Any) -> None:
             name = signal.Signals(signum).name
-            if state["interrupting"]:
-                # A second signal while cleanup is running: defer it so the
-                # restore finishes, then exit through the first interruption.
-                state["deferred"] = True
+            # Never start a second restore: one may already be running on the
+            # ordinary cleanup path. Defer it and let the running restore finish;
+            # the run then fails after cleanup, with the key deleted.
+            if state["interrupting"] or session.restoring:
+                state["deferred_signal"] = name
                 return
             state["interrupting"] = True
             # Never restore while the interrupted tool may still be applying a
             # change: terminate it and reap it first.
-            children.stop()
+            outcome = children.stop(name)
+            if outcome == "spawning":
+                # The process is still being created; spawn() stops it as soon
+                # as it is registered and raises the interruption itself.
+                state["deferred_signal"] = name
+                return
             problems = session.restore()
             suffix = (
                 "; cleanup also failed: " + "; ".join(problems) if problems else ""
             )
-            if state["deferred"]:
-                suffix += "; a later signal was deferred until cleanup finished"
+            if outcome == "unreaped":
+                suffix += "; the interrupted tool could not be reaped"
+            if state["deferred_signal"] is not None:
+                suffix += (
+                    f"; a later signal ({state['deferred_signal']}) was deferred "
+                    "until cleanup finished"
+                )
             raise RehearsalError(
                 f"the rehearsal was interrupted by {name}{suffix}"
             ) from None
@@ -916,6 +972,16 @@ def _temporary_signing_keychain(
                 # Only a clean body reaches here; a failure keeps its own stage.
                 progress.enter("cleanup")
             problems = session.restore()
+            if state["deferred_signal"] is not None:
+                suffix = (
+                    "; cleanup also failed: " + "; ".join(problems)
+                    if problems
+                    else ""
+                )
+                raise RehearsalError(
+                    "the rehearsal was interrupted by "
+                    f"{state['deferred_signal']} after cleanup finished{suffix}"
+                ) from None
             if problems:
                 raise RehearsalError(
                     "the rehearsal finished but cleanup failed: "

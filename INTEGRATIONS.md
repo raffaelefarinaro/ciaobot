@@ -411,14 +411,16 @@ the only network write.
 
 The helper creates a temporary random-password keychain and notary profile in a
 per-run scratch directory it created itself, records that exact path in a
-sibling receipt (cleared by the workflow before the helper starts, so it can
-only describe this run), and restores the prior default keychain and the whole
-prior search list. An interruption first terminates and reaps the in-flight tool, and
-a second signal during cleanup is deferred. It deletes its certificate, decoded
+sibling receipt (cleared by the workflow's first step, before the guard, so it
+can only describe this job), and restores the prior default keychain and the
+whole prior search list. An interruption first terminates and reaps the
+in-flight tool where the process is still schedulable, and a signal during a
+running restore — first or later — is deferred until cleanup finishes. It deletes its certificate, decoded
 API key, keychain and profile by independent attempts on every recoverable path,
 including an interrupted build and build, notarization, manifest or verification
-failures; an unrecoverable failure (SIGKILL, a filesystem error) is reported and
-may leave material in the run-scoped directory, which the runner discards. Credentials stay out of
+failures; an unrecoverable failure (SIGKILL, a filesystem error, a child that
+never exits) is reported and may leave material in the run-scoped directory,
+which the runner discards. Credentials stay out of
 argv: the keychain password is fed to `security` on stdin and the App Store
 Connect API key is passed to `notarytool` as the path to an owner-only file, with
 one accepted residual — `security import -P` takes the p12 passphrase in one

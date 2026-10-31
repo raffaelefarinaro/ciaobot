@@ -716,10 +716,8 @@ def test_signing_rehearsal_binds_source_sha_and_clean_wheel_verifier() -> None:
     helper = workflow.split("      - name: Rehearse the signed server host")[1]
     helper = helper.split("      - name: Remove runner-local")[0]
     assert "scripts/rehearse-server-host-signing.py" in helper
-    assert 'rm -f "${REHEARSAL_DIR}.owned"' in helper
-    assert helper.index('rm -f "${REHEARSAL_DIR}.owned"') < helper.index(
-        "scripts/rehearse-server-host-signing.py"
-    )
+    # The receipt is claimed in an earlier step, before the guard can refuse.
+    assert 'rm -f "${REHEARSAL_DIR}.owned"' not in helper
     assert '--output "$REHEARSAL_DIR"' in helper
     assert '--python "$RUNNER_TEMP/engine-check/bin/python"' in helper
     assert "--wheel dist/ciaobot-*.whl" in helper
@@ -819,3 +817,20 @@ def test_dispatch_guard_refuses_untrusted_refs_and_unconfirmed_runs(
         result.stdout,
         result.stderr,
     )
+
+
+def test_signing_rehearsal_claims_the_receipt_before_the_guard() -> None:
+    # Cleanup runs always(), so the stale receipt must be cleared before the
+    # confirmation/ref guard: otherwise a refused run could leave a planted
+    # matching receipt that cleanup then trusts.
+    workflow = _rehearsal_workflow()
+    claim = workflow.index("      - name: Claim the run-scoped scratch receipt")
+    guard = workflow.index("      - name: Refuse an unconfirmed or untrusted run")
+    assert claim < guard
+    claim_step = workflow[claim:guard]
+    assert 'rm -f "${REHEARSAL_DIR}.owned"' in claim_step
+    assert "secrets." not in claim_step, "the claim step must not receive a secret"
+
+    helper = workflow.split("      - name: Rehearse the signed server host")[1]
+    helper = helper.split("      - name: Remove runner-local")[0]
+    assert 'rm -f "${REHEARSAL_DIR}.owned"' not in helper
