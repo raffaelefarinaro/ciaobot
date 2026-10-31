@@ -26,8 +26,9 @@ permissions:
 # gates — every module imports and `mypy ciao` passes natively on win32, which
 # is where POSIX-only calls get caught — in about two minutes. The Windows
 # pytest and vitest suites and the install.ps1 checks take over a quarter of an
-# hour on a hosted runner, so they run on the post-merge push to develop and on
-# release PRs into main. /ciao-release refuses to cut while that push run is red.
+# hour on a hosted runner, so they run on the post-merge push to develop, on
+# release PRs into main, and on a develop PR labelled `windows-full`.
+# /ciao-release refuses to cut while that push run is red.
 jobs:
   linux-server:
     runs-on: ubuntu-24.04
