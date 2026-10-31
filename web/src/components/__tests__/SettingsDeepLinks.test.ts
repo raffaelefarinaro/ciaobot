@@ -272,6 +272,26 @@ describe('Settings > Workspace File access deep link', () => {
     }
   })
 
+  it('a same-address navigation does not scroll to or refocus File access again', async () => {
+    const { wrapper, router } = await mountSettings(target('work'))
+    try {
+      await settle()
+      expect(document.activeElement?.id).toBe('workspace-file-access-work')
+      scrollTo.mockClear()
+      const other = document.createElement('button')
+      document.body.append(other)
+      other.focus()
+
+      await router.push({ path: OVERVIEW, hash: '#file-access', force: true })
+      await settle()
+
+      expect(scrollTo).not.toHaveBeenCalled()
+      expect(document.activeElement).toBe(other)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('waits for a delayed workspace list before switching', async () => {
     state.defer = true
     const { wrapper, router } = await mountSettings()

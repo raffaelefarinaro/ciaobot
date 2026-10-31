@@ -118,7 +118,8 @@ web/
                            drag can cancel.
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
-                          useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices,
+                          useMcpServers, useModalFocus, useOverlayBackEntry (one history entry per open
+                          overlay; Back closes it), useWorkspaceAdmin, useProviderChoices,
                           useGwsAccounts, useHomeNoticeWindows, useDragSort: the pointer drag-sort engine
                           for the task lanes and the sidebar's project list; there is no drag handle, so
                           `surfaceHandlers` lets a row's own non-interactive content drag on a fine pointer (a
