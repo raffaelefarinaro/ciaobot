@@ -1564,8 +1564,14 @@ _KILL_AFTER_RENAME_CHILD = """
 import os
 import sys
 
-# The host is a macOS bundle; the child models that on any CI platform.
+# The host is a macOS bundle; the child models that on any CI platform. The
+# extended-ACL question is native: on a host without the macOS API the harness
+# supplies its own answer rather than reaching for a missing symbol.
 sys.platform = "darwin"
+
+from tests.macos_acl_simulation import install_hermetic_macos_acl
+
+install_hermetic_macos_acl()
 
 from pathlib import Path
 
