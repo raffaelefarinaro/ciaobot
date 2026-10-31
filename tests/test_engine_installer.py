@@ -551,6 +551,48 @@ EOF
 #!/bin/sh
 printf 'ciao %s\n' "$*" >> "$HOME/trace.log"
 printf '%s\n' "$*" >> "$HOME/ciao-calls.log"
+# One engine start: a fresh run id, the launched `Ciaobot Server` process launchd
+# holds, the Python child that holds the socket, and the runtime lock that names
+# both - the identity the installer's health gate binds to.
+engine_start() {
+    if [ -f "$HOME/unrelated-responder" ]; then
+        # Something else answers the port; nothing of ours started. The unrelated
+        # responder's own run id changes, which is what makes a "changed unrelated
+        # responder" observable.
+        printf 'ffffffffffff4ccc8dddeeeeeeeeee02\n' > "$HOME/unrelated-startup-id"
+        return 0
+    fi
+    count=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    echo "$count" > "$HOME/engine-start-count"
+    printf '4343\n' > "$HOME/host-pid"
+    printf '5151\n' > "$HOME/engine-pid"
+    printf '4747\n' > "$HOME/engine-parent-pid"
+    : > "$HOME/engine-started"
+    runtime=$1/.runtime
+    mkdir -p "$runtime"
+    "__PYTHON__" - "$runtime/server.lock" "$count" "$2" "$1" <<'LOCK'
+import json
+import pathlib
+import sys
+
+path, count, port, workspace = sys.argv[1:5]
+runtime = pathlib.Path(path).parent
+pathlib.Path(path).write_text(
+    json.dumps(
+        {
+            "pid": 5151,
+            "port": int(port),
+            "workspace": workspace,
+            "runtime": str(runtime),
+            "status": "running",
+            "startup_id": "aaaaaaaabbbb4ccc8dddeeeeeeeeee%02d" % int(count),
+        }
+    ),
+    encoding="utf-8",
+)
+LOCK
+}
 case "${1:-}" in
     setup)
         # An interrupted install, the way a user hits Ctrl-C or the laptop lid
@@ -605,12 +647,14 @@ case "${1:-}" in
         # new startup id.
         case " $* " in
             *" --load-launchd "*)
-                if [ ! -f "$HOME/health-from-an-unrelated-server" ]; then
-                    count=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
-                    echo $((count + 1)) > "$HOME/engine-start-count"
-                    printf '4343\\n' > "$HOME/engine-pid"
-                    : > "$HOME/engine-started"
-                fi
+                setup_workspace=$HOME/Ciaobot
+                previous=
+                for argument in "$@"; do
+                    if [ "$previous" = "--workspace" ]; then setup_workspace=$argument; fi
+                    previous=$argument
+                done
+                engine_start "$setup_workspace" \
+                    "$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)"
                 ;;
         esac
         if [ -n "$program" ]; then
@@ -677,10 +721,8 @@ PLIST
         ;;
     installer)
         if [ "${2:-}" = activate ]; then
-            count=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
-            echo $((count + 1)) > "$HOME/engine-start-count"
-            printf '4343\\n' > "$HOME/engine-pid"
-            : > "$HOME/engine-started"
+            engine_start "$(cat "$HOME/bootstrap-workspace" 2>/dev/null || echo "$HOME/Ciaobot")" \
+                "$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)"
         fi
         if [ "${2:-}" = activate ] && [ -f "$HOME/fail-installer-activate" ]; then
             printf '{"ok":false,"error":"activation refused"}\n'
@@ -694,16 +736,15 @@ PLIST
         ;;
     service)
         if [ -f "$HOME/fail-ciao-service-start" ]; then exit 1; fi
-        printf '4343\\n' > "$HOME/engine-pid"
-        : > "$HOME/engine-started"
+        service_workspace=$HOME/Ciaobot
+        previous=
+        for argument in "$@"; do
+            if [ "$previous" = "--workspace" ]; then service_workspace=$argument; fi
+            previous=$argument
+        done
+        engine_start "$service_workspace" \
+            "$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)"
         if [ -f "$HOME/deny-workspace-access" ]; then : > "$HOME/denial-armed"; fi
-        # `health-from-an-unrelated-server`: nothing this run starts is the engine
-        # answering the port, so the startup id the installer observed before the
-        # start keeps answering.
-        if [ ! -f "$HOME/health-from-an-unrelated-server" ]; then
-            count=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
-            echo $((count + 1)) > "$HOME/engine-start-count"
-        fi
         ;;
     setup-url)
         echo "http://localhost:8443/?setup=tok"
@@ -762,6 +803,11 @@ engine_port=$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)
 # reports the same version.
 engine_start=$(cat "$HOME/engine-start-count" 2>/dev/null || echo 0)
 startup_id=$(printf 'aaaaaaaabbbb4ccc8dddeeeeeeeeee%02d' "$engine_start")
+if [ -f "$HOME/unrelated-responder" ]; then
+    startup_id=$(cat "$HOME/unrelated-startup-id" 2>/dev/null \\
+        || echo ffffffffffff4ccc8dddeeeeeeeeee01)
+fi
+
 response_output=
 previous=
 for arg in "$@"; do
@@ -776,6 +822,16 @@ for arg in "$@"; do
                 *":$engine_port/"*) ;;
                 *) exit 7 ;;
             esac
+            if [ -f "$HOME/no-pre-responder" ] && [ ! -f "$HOME/engine-started" ]; then
+                # Only the installer's own pre-start capture carries this marker;
+                # the port availability check has to keep seeing an answer.
+                probe=$(ls -d "${TMPDIR:-/tmp}"/ciaobot-engine.* 2>/dev/null | head -1)
+                if [ -n "$probe" ] && [ -f "$probe/pre-responder-probe" ]; then
+                    printf 'responder=absent\\n' >> "$HOME/responders.log"
+                    exit 7
+                fi
+            fi
+            printf 'responder=%s\\n' "$startup_id" >> "$HOME/responders.log"
             # macOS denied the workspace folder: the supervisor writes its one
             # denial line and exits, so the engine never answers this probe again.
             # Armed only once the service was started, like the real prompt, so the
@@ -899,8 +955,8 @@ def _harness(
         '        if [ -f "$HOME/loaded-$label" ]; then\n'
         '            printf \'%s = {\\n\' "$label"\n'
         '            printf \'\\tactive count = 1\\n\'\n'
-        '            if [ -f "$HOME/engine-pid" ]; then\n'
-        '                printf \'\\tpid = %s\\n\' "$(cat "$HOME/engine-pid")"\n'
+        '            if [ -f "$HOME/host-pid" ]; then\n'
+        '                printf \'\\tpid = %s\\n\' "$(cat "$HOME/host-pid")"\n'
         '            fi\n'
         '            printf \'}\\n\'\n'
         '            exit 0\n'
@@ -943,6 +999,47 @@ def _harness(
         '    exit 0\n'
         'fi\n'
         'exit 1\n',
+    )
+    # The process table the health check walks: the engine's Python child, an
+    # intermediate parent, and the `Ciaobot Server` process launchd spawned. The
+    # job pid is never the socket holder, exactly as on a real install.
+    _write_exec(
+        fakebin / "ps",
+        "#!/bin/sh\n"
+        'printf \'ps %s\\n\' "$*" >> "$HOME/trace.log"\n'
+        'if [ -f "$HOME/ps-cannot-run" ]; then exit 1; fi\n'
+        'field=\n'
+        'target=\n'
+        'while [ "$#" -gt 0 ]; do\n'
+        '    case "$1" in\n'
+        '        -o) field=$2; shift 2 ;;\n'
+        '        -p) target=$2; shift 2 ;;\n'
+        '        *) shift ;;\n'
+        '    esac\n'
+        'done\n'
+        'engine=$(cat "$HOME/engine-pid" 2>/dev/null || echo 5151)\n'
+        'middle=$(cat "$HOME/engine-parent-pid" 2>/dev/null || echo 4747)\n'
+        'host=$(cat "$HOME/host-pid" 2>/dev/null || echo 4343)\n'
+        'case "$field" in\n'
+        '    ppid=)\n'
+        '        case "$target" in\n'
+        '            "$engine") echo "$middle" ;;\n'
+        '            "$middle") echo "$host" ;;\n'
+        '            "$host") echo 1 ;;\n'
+        '            *) echo 1 ;;\n'
+        '        esac\n'
+        '        ;;\n'
+        '    comm=)\n'
+        '        if [ "$target" = "$host" ]; then\n'
+        '            printf \'%s\\n\' \\\n'
+        '                "$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n'
+        '        else\n'
+        '            printf \'python3.13\\n\'\n'
+        '        fi\n'
+        '        ;;\n'
+        '    *) exit 1 ;;\n'
+        'esac\n'
+        'exit 0\n',
     )
     _write_exec(fakebin / "osascript", "#!/bin/sh\nexit 1\n")
     # `plutil` reads one key out of a plist. The installer asks it for the
@@ -997,7 +1094,7 @@ def _harness(
         flags=re.MULTILINE,
     )
     rewritten = re.sub(
-        r"^(PLISTBUDDY|LAUNCHCTL|OSASCRIPT|PGREP|LSOF|CURL|SLEEP)=.*$",
+        r"^(PLISTBUDDY|LAUNCHCTL|OSASCRIPT|PGREP|LSOF|PS|CURL|SLEEP)=.*$",
         lambda m: f"{m.group(1)}={fakebin / m.group(1).lower()}",
         rewritten,
         flags=re.MULTILINE,
@@ -2505,6 +2602,19 @@ def test_pending_native_upgrade_commits_only_after_exact_engine_health(
     assert _trace_index(healthy, "native-host-commit") > _last_health_index(healthy)
     assert _log(healthy, "trace.log").count("native-host-commit") == 1
     assert not (healthy["home"] / "native-host-pending").exists()
+    # The responder really changed between the pre-start probe and the health
+    # answer, and the one that passed is the engine run the runtime lock names.
+    home = healthy["home"]
+    responders = (home / "responders.log").read_text().splitlines()
+    assert len(responders) >= 2
+    assert responders[0] != responders[-1]
+    lock = json.loads((home / "Ciaobot/.runtime/server.lock").read_text())
+    assert responders[-1] == f"responder={lock['startup_id']}"
+    # The launched host and the socket holder are distinct processes, as on a real
+    # install: launchd runs `Ciaobot Server`, which posix_spawns Python.
+    assert (home / "host-pid").read_text().strip() != (
+        home / "engine-pid"
+    ).read_text().strip()
 
 
 @runs_the_sh_installer
@@ -2844,6 +2954,7 @@ def test_a_same_version_unrelated_server_does_not_commit(
     _defer(harness)
     _existing_install(harness)
     _engine_definition(harness)
+    (harness["home"] / "unrelated-responder").write_text("")
     (harness["home"] / "listener-pid").write_text("9999\n")
 
     result = _run_installer(harness, "--version", VERSION)
@@ -2856,10 +2967,18 @@ def test_a_same_version_unrelated_server_does_not_commit(
     assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
         "legacy\n"
     )
-    # The binding really was consulted: launchd's pid and the listener's were read.
-    trace = _log(harness, "trace.log")
-    assert "launchctl print gui/%d/com.ciao.server" % os.getuid() in trace
-    assert "-iTCP:8443" in trace
+    # The scenario is a genuinely different engine run: its own startup id answers
+    # while this install's runtime lock names another, and the launched host and the
+    # socket holder are distinct processes.
+    home = harness["home"]
+    # Nothing of this install's ever started, so no runtime lock exists, and the
+    # port answered a foreign run both before the start and during the health wait.
+    assert not (home / "Ciaobot/.runtime/server.lock").exists()
+    responders = (home / "responders.log").read_text().splitlines()
+    foreign = "responder=ffffffffffff4ccc8dddeeeeeeeeee01"
+    assert foreign in responders
+    assert responders[-1].startswith("responder=ffffffffff")
+    assert "responder=absent" not in responders
 
 
 @runs_the_sh_installer
@@ -2874,8 +2993,8 @@ def test_an_unrelated_responder_without_an_earlier_answer_does_not_commit(
     _defer(harness)
     _existing_install(harness)
     _engine_definition(harness)
-    (harness["home"] / "listener-pid").write_text("9998\n")
-    assert not (harness["home"] / "pre-listener-pid").exists()
+    (harness["home"] / "unrelated-responder").write_text("")
+    (harness["home"] / "no-pre-responder").write_text("")
 
     result = _run_installer(harness, "--version", VERSION)
 
@@ -2885,6 +3004,14 @@ def test_an_unrelated_responder_without_an_earlier_answer_does_not_commit(
     assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
         "legacy\n"
     )
+    # The pre-start response really was absent, and the post-start one is somebody
+    # else's: a scenario with no earlier answer is not permission to accept it.
+    responders = (harness["home"] / "responders.log").read_text().splitlines()
+    # The pre-start capture itself was answered by nothing, and the health wait then
+    # saw somebody else's run: the absent answer is what that scenario exercises.
+    assert "responder=absent" in responders
+    assert responders.index("responder=absent") < len(responders) - 1
+    assert responders[-1].startswith("responder=ffffffffff")
 
 
 @runs_the_sh_installer
@@ -2897,8 +3024,11 @@ def test_a_changed_unrelated_responder_does_not_commit(tmp_path: Path) -> None:
     _defer(harness)
     _existing_install(harness)
     _engine_definition(harness)
+    (harness["home"] / "unrelated-responder").write_text("")
     (harness["home"] / "pre-listener-pid").write_text("7777\n")
-    (harness["home"] / "listener-pid").write_text("9998\n")
+    (harness["home"] / "unrelated-startup-id").write_text(
+        "ffffffffffff4ccc8dddeeeeeeeeee01\n"
+    )
 
     result = _run_installer(harness, "--version", VERSION)
 
@@ -2907,6 +3037,14 @@ def test_a_changed_unrelated_responder_does_not_commit(tmp_path: Path) -> None:
     assert "commit-upgrade" not in _log(harness, "native-host-transaction.log")
     assert (harness["home"] / "Applications/Ciaobot Server.app/Contents/build").read_text() == (
         "legacy\n"
+    )
+    # Both responses were observed and they differ: something changed on the port,
+    # but not into the engine run this install started.
+    responders = (harness["home"] / "responders.log").read_text().splitlines()
+    assert any(entry.endswith("01") for entry in responders)
+    assert responders[-1].endswith("02")
+    assert responders.index(next(e for e in responders if e.endswith("01"))) < (
+        len(responders) - 1
     )
 
 

@@ -848,6 +848,18 @@ def _read_private_bytes(path: Path, *, what: str) -> bytes:
     because the retained record has to be the bytes the verified snapshot was
     read from, not whatever is there later.
     """
+    return _read_private_bytes_and_identity(path, what=what)[0]
+
+
+def _read_private_bytes_and_identity(
+    path: Path, *, what: str
+) -> tuple[bytes, tuple[int, int]]:
+    """Read a private file and return its bytes *and* the inode that supplied them.
+
+    The identity is taken from the open descriptor (``fstat``) that was compared
+    with the ``lstat`` result, so a later action can bind itself to exactly the file
+    the bytes came from instead of to whatever the name holds then.
+    """
     try:
         checked = os.lstat(path)
     except OSError as exc:
@@ -889,9 +901,10 @@ def _read_private_bytes(path: Path, *, what: str) -> bytes:
             raise ServerHostInstallError(
                 f"{what} changed while it was being read", code=TRANSACTION_FAILED
             )
+        identity = (opened.st_dev, opened.st_ino)
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            return handle.read()
+            return handle.read(), identity
     except OSError as exc:
         raise ServerHostInstallError(
             f"{what} is unreadable: {exc}", code=TRANSACTION_FAILED
@@ -1235,20 +1248,17 @@ def _decode_journal(document: Mapping[str, Any]) -> _UpgradeJournal:
 def _read_upgrade_journal() -> _UpgradeJournal | None:
     """The journal, or ``None`` when there is none. Corrupt state is a refusal."""
     path = upgrade_journal_path()
-    try:
-        checked = os.lstat(path)
-    except FileNotFoundError:
+    if not os.path.lexists(path):
         return None
-    except OSError as exc:
-        raise ServerHostInstallError(
-            f"the server host upgrade journal cannot be examined: {exc}",
-            code=TRANSACTION_FAILED,
-        ) from exc
-    raw = _read_private_bytes(path, what="the server host upgrade journal")
+    raw, identity = _read_private_bytes_and_identity(
+        path, what="the server host upgrade journal"
+    )
     journal = _decode_journal(
         _strict_document(raw, what="the server host upgrade journal")
     )
-    return dataclasses.replace(journal, observed=(checked.st_dev, checked.st_ino))
+    # The identity comes from the descriptor that supplied these bytes, not from a
+    # separate look at the name.
+    return dataclasses.replace(journal, observed=identity)
 
 
 def _write_upgrade_journal(journal: _UpgradeJournal) -> tuple[int, int]:
@@ -1353,12 +1363,23 @@ def _require_private_dir_entry(
         )
 
 
-def _remove_tree_at(dir_fd: int, name: str, *, what: str) -> None:
+def _remove_tree_at(
+    dir_fd: int,
+    name: str,
+    *,
+    what: str,
+    expected: tuple[int, int] | None = None,
+) -> None:
     """Delete one entry inside an open directory, never following a link.
 
     The whole tree is drained through directory descriptors: a name is only ever
     resolved relative to the descriptor of the directory that was verified, so a
-    swap at a pathname cannot redirect the deletion to a different tree.
+    swap at a pathname cannot redirect the deletion to a different tree. For the
+    root, ``expected`` is the device/inode this transaction recorded, compared
+    against the *opened* directory before anything inside it is drained - a
+    substitute created between the caller's check and this open is refused with its
+    contents intact. Each child is re-identified immediately before it is unlinked,
+    and the final ``rmdir`` is bound to the directory that was opened.
     """
     entry = _dir_entry(dir_fd, name)
     if entry is None:
@@ -1372,6 +1393,16 @@ def _remove_tree_at(dir_fd: int, name: str, *, what: str) -> None:
         if not stat.S_ISREG(entry.st_mode):
             raise ServerHostInstallError(
                 f"{what} contains an entry this installer will not delete: {name}",
+                code=TRANSACTION_FAILED,
+            )
+        guarded = _dir_entry(dir_fd, name)
+        if guarded is None or (guarded.st_dev, guarded.st_ino) != (
+            entry.st_dev,
+            entry.st_ino,
+        ):
+            raise ServerHostInstallError(
+                f"{what} changed before {name!r} could be removed; nothing more was "
+                f"deleted",
                 code=TRANSACTION_FAILED,
             )
         try:
@@ -1395,8 +1426,28 @@ def _remove_tree_at(dir_fd: int, name: str, *, what: str) -> None:
                 f"{what} changed while it was being removed; nothing more was deleted",
                 code=TRANSACTION_FAILED,
             )
+        if expected is not None and (
+            opened.st_dev,
+            opened.st_ino,
+        ) != expected:
+            raise ServerHostInstallError(
+                f"{what} is not the directory this upgrade created, so nothing inside "
+                f"it was deleted",
+                code=TRANSACTION_FAILED,
+            )
         for child in sorted(os.listdir(child_fd)):
             _remove_tree_at(child_fd, child, what=what)
+        # The final rmdir names the entry again: require it to still be the
+        # directory that was opened (and drained) before removing it.
+        drained = _dir_entry(dir_fd, name)
+        if drained is None or (drained.st_dev, drained.st_ino) != (
+            opened.st_dev,
+            opened.st_ino,
+        ):
+            raise ServerHostInstallError(
+                f"{what} changed while it was being removed; its name was left alone",
+                code=TRANSACTION_FAILED,
+            )
     finally:
         os.close(child_fd)
     try:
@@ -1756,19 +1807,34 @@ def _restore_old_pair(journal: _UpgradeJournal, runner: Runner) -> None:
                         code=TRANSACTION_FAILED,
                     ) from exc
                 moved = _dir_entry(retired_fd, APP_NAME)
+                if moved is None or (moved.st_dev, moved.st_ino) != candidate_identity:
+                    raise ServerHostInstallError(
+                        f"the host at {bundle} did not move as it was verified, so "
+                        f"neither image was removed; the previous host and record are "
+                        f"kept at {backup}",
+                        code=TRANSACTION_FAILED,
+                    )
+                if not _matches_snapshot(retired / APP_NAME, journal.new_record, runner):
+                    raise ServerHostInstallError(
+                        f"the host moved aside from {bundle} is not the signed "
+                        f"candidate this upgrade installed, so neither image was "
+                        f"removed; the before-images are kept at {backup}",
+                        code=TRANSACTION_FAILED,
+                    )
+                # The object that was inspected has to be the object that moved: it
+                # is re-identified through the open descriptor *after* the
+                # inspection, so a swap during the inspection is refused rather than
+                # left to be deleted later.
+                inspected = _dir_entry(retired_fd, APP_NAME)
             finally:
                 os.close(retired_fd)
-            if moved is None or (moved.st_dev, moved.st_ino) != candidate_identity:
+            if inspected is None or (
+                inspected.st_dev,
+                inspected.st_ino,
+            ) != candidate_identity:
                 raise ServerHostInstallError(
-                    f"the host at {bundle} did not move as it was verified, so neither "
-                    f"image was removed; the previous host and record are kept at "
-                    f"{backup}",
-                    code=TRANSACTION_FAILED,
-                )
-            if not _matches_snapshot(retired / APP_NAME, journal.new_record, runner):
-                raise ServerHostInstallError(
-                    f"the host moved aside from {bundle} is not the signed candidate "
-                    f"this upgrade installed, so neither image was removed; the "
+                    f"the moved signed host at {retired} is not the object this "
+                    f"rollback verified, so neither image was removed; the "
                     f"before-images are kept at {backup}",
                     code=TRANSACTION_FAILED,
                 )
@@ -1813,6 +1879,19 @@ def _restore_old_pair(journal: _UpgradeJournal, runner: Runner) -> None:
                 raise ServerHostInstallError(
                     f"the host now at {bundle} is not the one this upgrade replaced; "
                     f"the before-images are kept at {backup}",
+                    code=TRANSACTION_FAILED,
+                )
+            # Same binding for the image that was put back: what was inspected is
+            # re-identified through the directory descriptor before its record is
+            # written over it.
+            inspected = _dir_entry(parent_fd, APP_NAME)
+            if inspected is None or (inspected.st_dev, inspected.st_ino) != (
+                retained_identity
+            ):
+                raise ServerHostInstallError(
+                    f"the previous host inspected at {bundle} is not the object this "
+                    f"rollback moved, so its record is not written over it; the "
+                    f"before-images are kept at {backup}",
                     code=TRANSACTION_FAILED,
                 )
         _fsync_dir(bundle.parent)
@@ -1888,7 +1967,10 @@ def _finish_journal(
                 return str(exc)
             try:
                 _remove_tree_at(
-                    parent_fd, backup.name, what=f"the before-images at {backup}"
+                    parent_fd,
+                    backup.name,
+                    what=f"the before-images at {backup}",
+                    expected=(journal.backup_dev, journal.backup_inode),
                 )
             except ServerHostInstallError as exc:
                 return f"{exc}; they are kept"
@@ -2516,20 +2598,26 @@ def _install_now(
             shutil.rmtree(stage, ignore_errors=True)
 
 
-def _require_settled_material(journal: _UpgradeJournal) -> bool:
+def _require_settled_material(
+    journal: _UpgradeJournal, *, require_record: bool
+) -> bool:
     """Prove the before-image directory before a terminal command acts on it.
 
     A committed or rolled-back operation may still own a directory inside the
-    bundle's parent, and this installer may delete it. When it is there, everything
-    is checked - the exact nonce-derived name, device/inode, owner, mode, no link,
-    and the retained record's own checks - before the command reads, verifies or
-    releases anything.
+    bundle's parent, and this installer may delete it. When it is there, its
+    identity is checked - the exact nonce-derived name, device/inode, owner, mode
+    and no link. A directory that is *absent* is the normal state after an
+    interrupted cleanup (the before-images were removed, then the journal unlink
+    failed), so it is not an error: the caller may finish the journal and the retry
+    stays idempotent.
 
-    A directory that is *absent* is the normal state after an interrupted cleanup
-    (the before-images were removed, then the journal unlink failed), so it is not
-    an error here: the caller may finish the journal and the retry stays
-    idempotent. Substituted material is still refused. Returns whether the
-    before-images were present.
+    ``require_record`` says whether the retained record still has to be there. For a
+    terminal phase it need not be - a cleanup that removed the record and then
+    failed must be resumable - but anything that *is* still there is validated, so
+    substituted material is refused either way. An unfinished rollback passes
+    ``True``: it has to restore from that record, so its absence is a refusal.
+
+    Returns whether the before-image directory was present.
     """
     bundle = journal.bundle_path
     try:
@@ -2546,36 +2634,46 @@ def _require_settled_material(journal: _UpgradeJournal) -> bool:
     finally:
         os.close(parent_fd)
     if entry is None:
+        if require_record:
+            raise ServerHostInstallError(
+                f"the before-images at {journal.backup_dir} are gone, so the previous "
+                f"host cannot be restored; the journal is kept",
+                code=TRANSACTION_FAILED,
+            )
         return False
     parent_fd, backup_fd = _open_verified_backup(journal)
     try:
-        for name in (_RETAINED_RECORD,):
-            entry = _dir_entry(backup_fd, name)
-            if entry is None:
+        record_entry = _dir_entry(backup_fd, _RETAINED_RECORD)
+        if record_entry is None:
+            if require_record:
                 raise ServerHostInstallError(
                     f"the retained host ownership record at "
-                    f"{journal.backup_dir / name} is gone; nothing was changed",
-                    code=TRANSACTION_FAILED,
-                )
-            if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
-                raise ServerHostInstallError(
-                    f"the retained host ownership record at "
-                    f"{journal.backup_dir / name} is not a regular file; nothing was "
+                    f"{journal.backup_dir / _RETAINED_RECORD} is gone; nothing was "
                     f"changed",
                     code=TRANSACTION_FAILED,
                 )
-            if hasattr(os, "getuid") and entry.st_uid != _getuid():
+        else:
+            if stat.S_ISLNK(record_entry.st_mode) or not stat.S_ISREG(
+                record_entry.st_mode
+            ):
                 raise ServerHostInstallError(
                     f"the retained host ownership record at "
-                    f"{journal.backup_dir / name} is not owned by this user; nothing "
-                    f"was changed",
+                    f"{journal.backup_dir / _RETAINED_RECORD} is not a regular file; "
+                    f"nothing was changed",
                     code=TRANSACTION_FAILED,
                 )
-            if stat.S_IMODE(entry.st_mode) & 0o077:
+            if hasattr(os, "getuid") and record_entry.st_uid != _getuid():
                 raise ServerHostInstallError(
                     f"the retained host ownership record at "
-                    f"{journal.backup_dir / name} is group/other accessible; nothing "
-                    f"was changed",
+                    f"{journal.backup_dir / _RETAINED_RECORD} is not owned by this "
+                    f"user; nothing was changed",
+                    code=TRANSACTION_FAILED,
+                )
+            if stat.S_IMODE(record_entry.st_mode) & 0o077:
+                raise ServerHostInstallError(
+                    f"the retained host ownership record at "
+                    f"{journal.backup_dir / _RETAINED_RECORD} is group/other "
+                    f"accessible; nothing was changed",
                     code=TRANSACTION_FAILED,
                 )
     finally:
@@ -2652,7 +2750,7 @@ def commit_host_upgrade(
         # Every path this command may release is proved before anything is
         # verified, written or deleted - terminal recovery included.
         _require_canonical_targets(journal)
-        _require_settled_material(journal)
+        _require_settled_material(journal, require_record=False)
         if journal.phase == "committed":
             # Already settled: only the cleanup is outstanding, and the unlink is
             # bound to the journal file that was just read.
@@ -2735,17 +2833,12 @@ def rollback_host_upgrade(
                 code=TRANSACTION_CONFLICT,
             )
         _require_canonical_targets(journal)
-        material = _require_settled_material(journal)
-        if journal.phase == "rolled_back":
+        settled = journal.phase == "rolled_back"
+        _require_settled_material(journal, require_record=not settled)
+        if settled:
             # Settled and possibly already cleaned: finish the journal only.
             _raise_on_leftover(_finish_journal(journal))
             return
-        if not material:
-            raise ServerHostInstallError(
-                f"the before-images at {journal.backup_dir} are gone, so the previous "
-                f"host cannot be restored; the journal is kept",
-                code=TRANSACTION_FAILED,
-            )
         if journal.owner_pid != pid and _pid_alive(journal.owner_pid):
             raise ServerHostInstallError(
                 f"installer process {journal.owner_pid} is still upgrading the "
