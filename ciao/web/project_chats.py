@@ -3155,6 +3155,8 @@ class ProjectChatManager:
                     raise ValueError(
                         f"vault_folder {vault_folder!r} resolves outside the projects tree."
                     )
+                if dst.exists():
+                    raise ValueError(f"A completed project folder named {vault_folder!r} already exists.")
                 _append_project_closure(
                     src,
                     vault_folder,

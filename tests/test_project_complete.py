@@ -830,7 +830,26 @@ def test_complete_move_failure_leaves_backlinks_and_project(tmp_path: Path) -> N
     ):
         pcm.complete_project(proj.project_id)
 
+    # The closure section is appended to the project doc before the move, and a
+    # failed move does not take it back out. That is pre-existing behaviour and out
+    # of scope here, so the project doc is deliberately not compared byte-for-byte.
     assert journal.read_bytes() == before
     assert folder.is_dir()
     assert not completed.exists()
+    assert proj.project_id in pcm._projects
+
+
+def test_complete_refuses_existing_destination_without_touching_the_project(tmp_path: Path) -> None:
+    folder = _make_work_project_folder(tmp_path, "foo")
+    completed = tmp_path / "memory-vault" / "work" / "projects" / "completed" / "foo"
+    completed.mkdir(parents=True)
+    before = (folder / "foo.md").read_bytes()
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "foo")
+
+    with patch.object(pcm, "enqueue_project_closure", return_value=None), pytest.raises(ValueError):
+        pcm.complete_project(proj.project_id)
+
+    assert (folder / "foo.md").read_bytes() == before
     assert proj.project_id in pcm._projects
