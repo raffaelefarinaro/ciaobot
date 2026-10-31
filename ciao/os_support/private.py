@@ -21,11 +21,14 @@ On POSIX the strict verifiers require the inode's owner to be the process's
 effective uid, not just the mode. On macOS they also read the file's extended
 ACL through ``acl_get_fd_np`` and refuse any allow entry whose principal is not
 the effective user (deny entries are harmless and ignored). This closes the
-case where a mode ``0o600`` file still has ``everyone allow read``. Linux POSIX
-ACLs (``system.posix_acl_access``) are *not* inspected; the strict verifier
-there checks owner and mode only. On Windows strict additionally requires the
-file's owner SID to be the current account, alongside the protected DACL that
-``is_private_descriptor`` already checks.
+case where a mode ``0o600`` file still has ``everyone allow read``. Reading that
+ACL is a native dependency: if the macOS ACL API is unavailable the strict
+verifiers raise ``OSError`` rather than answering "no extended ACL", so their
+callers refuse the file instead of treating an unverified ACL as permission.
+Linux POSIX ACLs (``system.posix_acl_access``) are *not* inspected; the strict
+verifier there checks owner and mode only. On Windows strict additionally
+requires the file's owner SID to be the current account, alongside the
+protected DACL that ``is_private_descriptor`` already checks.
 
 ``is_owned_descriptor`` and ``descriptor_acl_grants_another_account`` expose
 those two pieces for callers that need a different mode rule (for example an
@@ -452,7 +455,6 @@ else:
         import ctypes
         import errno
 
-        _libc = ctypes.CDLL(None, use_errno=True)
         _ACL_TYPE_EXTENDED = 0x100
         _ACL_FIRST_ENTRY = 0
         _ACL_NEXT_ENTRY = -1
@@ -460,30 +462,75 @@ else:
         _ACL_EXTENDED_DENY = 2
         _ACL_GUID_SIZE = 16
 
-        _acl_get_fd_np = _libc.acl_get_fd_np
-        _acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
-        _acl_get_fd_np.restype = ctypes.c_void_p
-        _acl_get_entry = _libc.acl_get_entry
-        _acl_get_entry.argtypes = [
-            ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)
-        ]
-        _acl_get_entry.restype = ctypes.c_int
-        _acl_get_tag_type = _libc.acl_get_tag_type
-        _acl_get_tag_type.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
-        _acl_get_tag_type.restype = ctypes.c_int
-        _acl_get_qualifier = _libc.acl_get_qualifier
-        _acl_get_qualifier.argtypes = [ctypes.c_void_p]
-        _acl_get_qualifier.restype = ctypes.c_void_p
-        _acl_free = _libc.acl_free
-        _acl_free.argtypes = [ctypes.c_void_p]
-        _acl_free.restype = ctypes.c_int
-        _mbr_uid_to_uuid = _libc.mbr_uid_to_uuid
-        _mbr_uid_to_uuid.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_ubyte * 16)]
-        _mbr_uid_to_uuid.restype = ctypes.c_int
+        def _bind(libc: Any, name: str, argtypes: list[Any], restype: Any) -> Any:
+            """``libc``'s ``name``, or ``OSError`` if this host has no such call.
 
-        def _effective_user_guid() -> bytes:
+            The error is an ``OSError`` because every caller already turns one
+            into "could not inspect" rather than into a private verdict: a
+            missing ACL API must fail the check closed, never answer "no ACL".
+            """
+            try:
+                function = getattr(libc, name)
+            except AttributeError as exc:
+                raise OSError(
+                    errno.ENOSYS,
+                    f"the native ACL API is unavailable: libc has no {name}",
+                ) from exc
+            function.argtypes = argtypes
+            function.restype = restype
+            return function
+
+        class _MacosAcl:
+            """libc's extended-ACL calls, bound on the first strict check.
+
+            Binding is deferred so importing this module never requires the
+            macOS ACL API. A test that models Darwin on another host imports
+            cleanly and replaces :func:`_acl_grants_another_account` with a
+            hermetic reader (see ``tests/macos_acl_simulation.py``); on a real
+            Mac the first strict check binds the real calls, and a missing call
+            raises ``OSError`` so that check fails closed.
+            """
+
+            def __init__(self) -> None:
+                libc = ctypes.CDLL(None, use_errno=True)
+                self.get_fd_np = _bind(
+                    libc, "acl_get_fd_np", [ctypes.c_int, ctypes.c_int], ctypes.c_void_p
+                )
+                self.get_entry = _bind(
+                    libc,
+                    "acl_get_entry",
+                    [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)],
+                    ctypes.c_int,
+                )
+                self.get_tag_type = _bind(
+                    libc,
+                    "acl_get_tag_type",
+                    [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)],
+                    ctypes.c_int,
+                )
+                self.get_qualifier = _bind(
+                    libc, "acl_get_qualifier", [ctypes.c_void_p], ctypes.c_void_p
+                )
+                self.free = _bind(libc, "acl_free", [ctypes.c_void_p], ctypes.c_int)
+                self.uid_to_uuid = _bind(
+                    libc,
+                    "mbr_uid_to_uuid",
+                    [ctypes.c_uint, ctypes.POINTER(ctypes.c_ubyte * _ACL_GUID_SIZE)],
+                    ctypes.c_int,
+                )
+
+        _macos_acl: _MacosAcl | None = None
+
+        def _macos_acl_calls() -> _MacosAcl:
+            """The bound ACL calls, or ``OSError`` if this host has no ACL API."""
+            global _macos_acl
+            if _macos_acl is None:
+                _macos_acl = _MacosAcl()
+            return _macos_acl
+
+        def _effective_user_guid(acl: _MacosAcl) -> bytes:
             guid = (ctypes.c_ubyte * _ACL_GUID_SIZE)()
-            if _mbr_uid_to_uuid(os.geteuid(), ctypes.byref(guid)) != 0:
+            if acl.uid_to_uuid(os.geteuid(), ctypes.byref(guid)) != 0:
                 error = ctypes.get_errno()
                 raise OSError(error, os.strerror(error))
             return bytes(guid)
@@ -495,33 +542,38 @@ else:
             naming another principal is a grant. An unrecognised tag is refused
             because it may grant. No extended ACL at all is the common case and
             is not an error.
+
+            This is the native seam: a test that models macOS on a host without
+            these calls replaces it with a hermetic answer instead of letting
+            the host's libc decide.
             """
-            acl = _acl_get_fd_np(fd, _ACL_TYPE_EXTENDED)
+            acl_api = _macos_acl_calls()
+            acl = acl_api.get_fd_np(fd, _ACL_TYPE_EXTENDED)
             if not acl:
                 error = ctypes.get_errno()
                 if error == errno.ENOENT:
                     return False
                 raise OSError(error, os.strerror(error))
             try:
-                owner = _effective_user_guid()
+                owner = _effective_user_guid(acl_api)
                 entry = ctypes.c_void_p()
                 selector = _ACL_FIRST_ENTRY
                 while True:
-                    if _acl_get_entry(acl, selector, ctypes.byref(entry)) != 0:
+                    if acl_api.get_entry(acl, selector, ctypes.byref(entry)) != 0:
                         error = ctypes.get_errno()
                         if error == errno.EINVAL:
                             return False  # no more entries
                         raise OSError(error, os.strerror(error))
                     selector = _ACL_NEXT_ENTRY
                     tag = ctypes.c_int()
-                    if _acl_get_tag_type(entry, ctypes.byref(tag)) != 0:
+                    if acl_api.get_tag_type(entry, ctypes.byref(tag)) != 0:
                         error = ctypes.get_errno()
                         raise OSError(error, os.strerror(error))
                     if tag.value == _ACL_EXTENDED_DENY:
                         continue
                     if tag.value != _ACL_EXTENDED_ALLOW:
                         return True
-                    qualifier = _acl_get_qualifier(entry)
+                    qualifier = acl_api.get_qualifier(entry)
                     if not qualifier:
                         error = ctypes.get_errno()
                         raise OSError(error, os.strerror(error))
@@ -529,9 +581,9 @@ else:
                         if ctypes.string_at(qualifier, _ACL_GUID_SIZE) != owner:
                             return True
                     finally:
-                        _acl_free(qualifier)
+                        acl_api.free(qualifier)
             finally:
-                _acl_free(acl)
+                acl_api.free(acl)
 
     else:
 
@@ -551,7 +603,9 @@ else:
         """Whether the descriptor's platform ACL allows anyone but this user.
 
         macOS reads the extended ACL. Other POSIX systems answer ``False``;
-        their POSIX ACLs are not inspected (see the module docstring).
+        their POSIX ACLs are not inspected (see the module docstring). On macOS
+        an unavailable ACL API raises ``OSError`` instead of answering ``False``:
+        callers must treat that as "could not inspect" and refuse the path.
         """
         return _acl_grants_another_account(fd)
 
@@ -561,7 +615,8 @@ else:
         It is ``0o600`` (or ``0o700`` for a directory), owned by the effective
         uid, and — on macOS — carries no extended ACL allow entry for another
         principal. Read from the descriptor, so it describes the inode the
-        caller opened.
+        caller opened. An unavailable native ACL API raises ``OSError`` rather
+        than passing the file as private.
         """
         st = os.fstat(fd)
         if st.st_uid != os.geteuid():

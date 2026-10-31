@@ -292,6 +292,10 @@ import sys
 
 sys.platform = "darwin"
 
+from tests.macos_acl_simulation import install_hermetic_macos_acl
+
+install_hermetic_macos_acl()
+
 from pathlib import Path
 
 from ciao import server_host_install
@@ -346,6 +350,10 @@ import sys
 
 sys.platform = "darwin"
 
+from tests.macos_acl_simulation import install_hermetic_macos_acl
+
+install_hermetic_macos_acl()
+
 from ciao import server_host_install
 
 from tests.test_server_host_install import _SignedRunner
@@ -384,6 +392,10 @@ import os
 import sys
 
 sys.platform = "darwin"
+
+from tests.macos_acl_simulation import install_hermetic_macos_acl
+
+install_hermetic_macos_acl()
 
 from ciao import server_host_install
 
@@ -425,6 +437,10 @@ import sys
 import time
 
 sys.platform = "darwin"
+
+from tests.macos_acl_simulation import install_hermetic_macos_acl
+
+install_hermetic_macos_acl()
 
 from pathlib import Path
 
