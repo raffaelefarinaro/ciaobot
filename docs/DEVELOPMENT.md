@@ -126,6 +126,67 @@ macOS LaunchAgent/Windows scheduled task is found, and also refuses if the
 service query cannot verify absence. Export-directory overrides do not affect
 the live service paths checked by this guard.
 
+#2339 adds a native classifier (`install_discovery.classify_native_install`)
+beside that guard, but **nothing calls it in production in this issue**. It
+separates `fresh` from `configured` (a live definition or job, a completed
+workspace, or an explicit disabled launchd override), `partial` (a receipt, uv
+tool directory, `ciao` shim, setup marker, server host, the migration transaction
+or its `before/` images, the host-upgrade journal `server-host-upgrade.json`, or
+an interrupted handoff result) and `unknown` (a failed query, unreadable marker,
+dangling-symlink ancestor or inherited redirect).
+
+The permanent sibling lock `server-host-upgrade.lock` is deliberately not
+partial evidence. Every mutating host command creates it and never removes it,
+so an idle, empty, correctly owned lock proves only that some host command once
+ran, not that Ciaobot was installed. The classifier opens the existing file
+read-only (never `O_CREAT`, never truncating or writing), requires a regular
+file with the installer's owner and no group/other bits, and probes it with one
+non-blocking `flock`: **held** is a concurrent host mutation and **unsafe** is
+an unreadable, linked, non-empty or foreign-owned shape — both are `unknown`.
+An idle lock contributes no evidence. The probe briefly holds an idle lock, so
+it must be the single pre-mutation scan, not a poll. The migration transaction,
+its `before/` images, the host-upgrade journal and the host ownership record
+stay `partial`: the classifier never deletes, rolls back or rewrites them, and
+recovery is the operator's explicit use of the existing migration/transaction
+commands.
+
+Precedence is configured > unknown > partial > fresh, and unknown is never
+fresh. `partial`, `unknown` and a held-lock (concurrent) answer all refuse a
+native install; none is permission to remove what was found and reinstall
+silently. There is also no current-run or run-id exemption — a handoff result or
+marker written by this process is still evidence, because path presence is not
+ownership. The workspace search is finite (`cwd`, `~/Ciaobot` and an explicit
+suggestion, never a disk walk), so a complete workspace elsewhere is not
+`configured` evidence.
+
+The classifier reads the two documents it interprets — a workspace `.env` and
+the install receipt — through its own bounded, no-follow, non-blocking
+descriptor, never through the legacy guard's `read_text`. A FIFO, socket, device,
+symlink or a file with a second hard link where either belongs, a file over the
+64 KiB limit, a file that is replaced or rewritten during the read, undecodable
+text, or an unreadable path is `unknown`, not `partial` and never `fresh`; so is
+a symlink or a file where `~/.local/state/ciaobot` (the directory holding the
+receipt, migration transaction, host-upgrade journal and lock) should be. The
+legacy guard's semantics are unchanged.
+
+A `fresh` classification is not an activation permit, and the setup child
+cannot recover one by calling the classifier again: by the time the child runs,
+the installer parent has already created the uv tool directory, the `ciao` shim,
+the workspace and often the receipt, so the same scan answers `partial` or
+`configured` even though this run created every one of those paths. #2340
+therefore owns the native entry point on **both** sides of the handoff, and
+neither the parent's decision nor a path allowlist of "things this installer
+creates" is sufficient proof — a same-UID writer can pre-create any path on that
+list. The parent must establish current-run ownership from owner-private,
+run-id-bound evidence before it mutates anything, the setup child must do the
+same for the artifacts it finds rather than asking for a fresh answer, and both
+must re-check every known surface immediately before their writes instead of
+trusting the earlier scan. Those checks narrow the window but do not make it
+atomic: a same-UID writer can interleave between a check and the write it
+guards, so the classifier, the parent's current-run ownership and the child's
+re-checks are evidence and refusal points, not a guarantee that the race is
+closed. Tests: `tests/test_native_install_classifier.py`.
+
 The supported macOS release path is the one-line installer:
 
 ```bash
@@ -212,6 +273,86 @@ manager. The installer parent then runs `ciao installer activate --run-id
 recorded definition is the live one, that definition names the same destination,
 and the destination is a completed workspace; otherwise it reports what is
 uncertain and starts nothing.
+
+That legacy schema-1 path is unchanged. #2339 isolates a native handoff in
+`ciao/native_handoff.py`, using the same `~/.ciao/installer-bootstrap/handoff.json`
+file but **schema 2 only**; it is not imported by the CLI, routes, legacy
+installer or any production caller until #2340 supplies an explicit native
+context and wires both sides of it — the setup child's schema-2 recording and
+the installer parent's activation. Its result additionally records the
+definition's sha256, the program the definition actually executes and the
+interpreter it runs with both device/inode/size/mtime identities, and the
+definition's environment. The native path implements macOS only: a Windows
+backend is refused explicitly before a result is read or written, and the
+legacy Windows installer path is unchanged. The definition is the authority: a
+direct `ciao` console is a script whose program is the script and whose
+interpreter is the absolute Python on its shebang. `resolve_console_interpreter`
+accepts only that one absolute, Python-named form and refuses `env`, relative,
+argument-bearing or missing shebangs; #2340 must call it before setup mutates a
+workspace. Native activation re-establishes all of them, parses the same bytes
+that produced the digest, and requires the real template's job semantics: the
+fixed key set with every template key present, `com.ciao.server`, the matching
+direct/hosted `AssociatedBundleIdentifiers`, `RunAtLoad`/`KeepAlive` true, the
+exact workspace logs, `SERVER_NOFILE_TARGET` resource limits, the recorded
+four-key environment compared exactly (including `PATH` — there is no separate
+path allowlist, because the digest already binds the bytes and a
+runtime-derived PATH policy would narrow the legacy wizard's persisted
+development PATH), no direct `ExitTimeOut` but the hosted one, the recorded
+program and interpreter, or the canonical owned host's exact `serve --python`
+command. macOS then calls `macos_service.load_fresh_agent`, which digests the
+definition before the first qualified absence probe and again immediately
+before one `launchctl bootstrap`, and refuses an explicit disabled override
+through the read-only `launchctl print-disabled` listing without ever enabling,
+unloading or reloading anything. Both strict readers share
+`ciao/os_support/definition.py`: `O_BINARY` where available, a byte count equal
+to the opened size, and the inode/size/mtime rechecks. The schema-2 result and
+the definition both go through that reader; the result's privacy is checked on
+the opened descriptor with the strict verifier (owned by the effective user,
+exact mode, and on macOS no extended-ACL allow entry for another principal),
+and activation's default completed-workspace
+check reads the legacy `.env` through it too, so a FIFO where `.env` belongs is
+a refusal rather than a hung parent. The scratch chain — the home directory,
+`~/.ciao` and `~/.ciao/installer-bootstrap` — is validated as well: no component
+may be a symlink, all must belong to the current user, an ancestor may not be
+group/other-writable, and the scratch directory itself must be `0700`. A
+missing `~/.ciao` or scratch directory is created privately; a pre-existing one
+is judged and never chmod'ed, so an unsafe one is refused.
+
+That chain must already be private before the bootstrap child starts, because
+the child itself cannot create it that way: its launcher
+`mkdir(parents=True, exist_ok=True)` and
+`CiaoConfig.from_env(installer_bootstrap=True)` create a missing
+`~/.ciao/installer-bootstrap` at the process umask (normally `0755`), which the
+native recorder then refuses. #2339 therefore exposes
+`native_handoff.prepare_bootstrap_scratch()`, the parent's narrow preparation
+step: it creates only the missing chain components `0700`, never creates or
+changes the home directory, and fails closed on a pre-existing symlinked,
+foreign-owned, group/other-writable `~/.ciao` or a scratch directory that is not
+exactly `0700`, leaving it unchanged. **#2340 must call it after the read-only
+fresh-install preflight and before spawning the bootstrap child** — never
+before the preflight, and never as a repair for an existing installation. The
+legacy config is not changed and no production caller runs the preparation in
+this issue. Creating the directory privately is not current-run ownership: a
+same-UID writer can create an owner-only name first, so #2340 still has to bind
+it to run-bound evidence. The legacy
+`is_set_up_workspace` keeps its `read_text` for every existing caller. Native activation still parses the same
+bytes it digested. The launchctl absence
+and disabled-listing shapes were recorded from read-only probes on one current
+macOS and fail closed, but have not been validated across the supported macOS
+releases; #2340 must do that before wiring activation. There is no native
+Windows loader: task XML carries no port and the legacy registration path
+forces an overwrite, so a Windows record or activation fails closed rather than
+falling back to the legacy backend loader, and the legacy Windows installer is
+unchanged.
+
+A schema-1 result is refused by the native reader and a schema-2 result by the
+legacy reader. The stat identities are evidence, not a security guarantee: a
+same-UID writer can rewrite a file in place to the same size and restore its
+mtime, and the digest/identity checks and the service manager's (or the later
+`exec`'s) open remain separate steps, so the checks narrow the race and do not
+close it. Tests: `tests/test_native_handoff.py`, `tests/test_definition_read.py`,
+`tests/test_macos_service_native.py`, `tests/test_service_login_strict.py` and
+`tests/test_native_install_classifier.py`.
 
 A fresh macOS install classifies the machine before creating anything: with no
 engine definition and no configured workspace it skips folder creation,

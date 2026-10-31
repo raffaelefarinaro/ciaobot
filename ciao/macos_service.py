@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 from xml.parsers.expat import ExpatError
 
+from ciao.os_support.definition import (
+    MAX_DEFINITION_BYTES,
+    read_definition,
+)
 from ciao.port_in_use import (
     PORT_IN_USE_EXIT_CODE,
     clear_port_in_use,
@@ -61,6 +65,19 @@ START_SETTLE_TIMEOUT_S = 30.0
 # bounds the whole wait, not the sum of stalled probes.
 START_PROBE_TIMEOUT_S = 2.0
 START_POLL_INTERVAL_S = 0.5
+# How long one `launchctl print` probe may take. It answers from launchd's
+# in-memory registry; a launchd that does not answer is uncertainty, not
+# absence, and must not be waited on forever.
+JOB_PROBE_TIMEOUT_S = 10.0
+# How long one fresh `launchctl bootstrap` may take. It registers a job; it
+# never waits for the engine to come up (setup's RunAtLoad starts that, and the
+# caller verifies readiness separately), so this bounds a stuck launchd only.
+FRESH_ACTIVATION_TIMEOUT_S = 20.0
+# The system launchctl by absolute path. The new native activation paths use
+# this so a caller-controlled PATH cannot substitute another program; the
+# legacy load/reload path below is unchanged and still invokes ``launchctl`` by
+# name.
+LAUNCHCTL = "/bin/launchctl"
 SERVER_LOCK_NAME = "server.lock"
 # Test seam: the teardown poll sleeps through this, so tests run without waiting.
 _sleep: Callable[[float], None] = time.sleep
@@ -132,6 +149,116 @@ def load_agent(definition: Path) -> int:
         ["launchctl", "load", "-w", str(definition)],
         check=False,
     ).returncode
+
+
+def _definition_digest(definition: Path) -> str:
+    """The sha256 of exactly the regular file at ``definition``.
+
+    The read is :func:`ciao.os_support.definition.read_definition`, shared with
+    the native handoff so the two digests cannot drift: it is binary where the
+    platform has ``O_BINARY``, rejects a size that the read did not cover, and
+    refuses a missing, special, replaced or changed file.
+    """
+    return read_definition(definition, max_bytes=MAX_DEFINITION_BYTES).sha256
+
+
+def _require_definition_digest(definition: Path, expected_sha256: str) -> None:
+    if _definition_digest(definition) != expected_sha256:
+        raise RuntimeError(
+            f"the service definition changed after setup recorded it: {definition}"
+        )
+
+
+def load_fresh_agent(definition: Path, *, expected_sha256: str) -> int:
+    """Bootstrap the server job from exactly the definition the handoff recorded.
+
+    Fresh activation only. The job must be *proven* absent in this user's GUI
+    domain through :func:`server_job_absent` (the qualified
+    ``launchctl print gui/<uid>/<label>`` probe; ``launchctl list`` is
+    unqualified and its silence is not absence), so this never unloads, boots
+    out, reloads or kickstarts a job that is already registered — an
+    intervening job is a refusal, never something to replace. The definition
+    is digested before the first probe and again after all its probes,
+    immediately before submission, so changed bytes, a symlink, a FIFO or an
+    inode/mtime race refuse without a slow probe widening the gap between the
+    last check and launchd's open. A failed, unqualified or other-domain probe
+    answer, a nonzero bootstrap and a timeout refuse as well.
+
+    A launchd override that disables the label still answers "not found" to
+    the probe, so absence alone is not freshness. The read-only
+    ``launchctl print-disabled gui/<uid>`` listing is consulted before the
+    bootstrap: an explicit disabled label is existing service configuration, not
+    a fresh install, and clearing it is the operator's decision. This function
+    therefore never calls ``launchctl enable``; it refuses and names the action
+    for the operator. That is a deliberate limit of fresh-only activation, not a
+    transient failure to retry.
+
+    Atomicity limit: the digest check and launchd opening the pathname are two
+    separate steps. A same-UID writer can replace the bytes between the last
+    check and launchd's open, and launchd has no compare-and-bootstrap call, so
+    the check narrows that window and does not close it. Bootstrap-only
+    semantics are what keep a *concurrently registered* job from being
+    unloaded or replaced.
+
+    A success does not kickstart: setup's ``RunAtLoad`` starts the fresh job,
+    and the caller verifies the engine separately. Returns 0 on success.
+
+    Version note: the accepted absence answer and the ``print-disabled`` shape
+    were recorded from read-only probes on one current macOS. The readers pin
+    exactly what those probes printed and refuse everything else, but they have
+    not been validated against every macOS release. #2340 must exercise them on
+    the supported macOS range before native activation is wired in; until then
+    an unfamiliar answer is a refusal, never a guessed absence.
+    """
+    if re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        raise ValueError(
+            "the expected service definition digest is not a lowercase sha256"
+        )
+    _require_definition_digest(definition, expected_sha256)
+    if not server_job_absent():
+        raise RuntimeError(f"{SERVER_LABEL} is already registered with launchd")
+    if launchd_override_disabled():
+        override = f"gui/{_getuid()}/{SERVER_LABEL}"
+        raise RuntimeError(
+            f"{SERVER_LABEL} is disabled in gui/{_getuid()} and fresh activation "
+            "will not change that override. Enable it yourself if that is what "
+            f"you want: launchctl enable {override}"
+        )
+    # Last, after all the probes: the override query may take ten seconds, so
+    # hashing before it would leave that whole window open before launchd
+    # opens the pathname. This check is the closest one to that open.
+    _require_definition_digest(definition, expected_sha256)
+    try:
+        completed = subprocess.run(
+            [LAUNCHCTL, "bootstrap", f"gui/{_getuid()}", str(definition)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=FRESH_ACTIVATION_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"Could not bootstrap {SERVER_LABEL}: {exc}") from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        if re.search(r"service is disabled\b", detail, re.IGNORECASE):
+            # A disabled override in the user's domain is existing service
+            # configuration. Fresh activation must not clear it with
+            # `launchctl enable` — that is the operator's decision — so it
+            # fails closed with the exact action they can take.
+            raise RuntimeError(
+                f"launchctl bootstrap failed: {detail}; {SERVER_LABEL} is "
+                f"disabled in gui/{_getuid()} and fresh activation will not "
+                "change that override. Enable it yourself if that is what you "
+                f"want: launchctl enable gui/{_getuid()}/{SERVER_LABEL}"
+            )
+        raise RuntimeError(
+            f"launchctl bootstrap failed: {detail}"
+            if detail
+            else f"launchctl bootstrap failed for {SERVER_LABEL}"
+        )
+    return 0
 
 
 def schedule_server_handoff() -> bool:
@@ -218,6 +345,27 @@ def hosted_service_python(arguments: object) -> str | None:
     except ServerHostError:
         return None
     return parsed.python if parsed.mode == "hosted" else None
+
+
+def host_interpreter_for(engine: str) -> str:
+    """The interpreter a verified host must serve, from the setup program.
+
+    ``ciao.cli._host_engine_interpreter`` applies exactly this rule when it
+    renders a hosted definition: a host cannot serve the ``ciao`` console —
+    its own parser demands a python executable — so setup renders this
+    process's interpreter for that one documented console name and passes
+    anything else through, where the host renderer refuses it with the reason.
+    This function is the same rule for the native handoff, which records the
+    interpreter the hosted definition actually serves.
+
+    The direct shape does not use this mapping. A direct console definition
+    runs the console script itself, and the kernel then runs the interpreter
+    named on its first line; :func:`ciao.native_handoff.resolve_console_interpreter`
+    reads that interpreter so the result can identify both files.
+    """
+    if Path(engine).name.lower() == "ciao":
+        return sys.executable
+    return engine
 
 
 def service_python_path(arguments: object) -> str:
@@ -366,6 +514,137 @@ def server_job_registered() -> bool:
     if completed.returncode != 0:
         raise RuntimeError(f"launchctl list failed: {(completed.stderr or '').strip()}")
     return SERVER_LABEL in parse_launchctl_list(completed.stdout or "")
+
+
+#: launchd's one recognized "this job is not here" answer. It names the job and
+#: the domain; anything else — a different label, a different or prefixed uid,
+#: a generic failure — is uncertainty, not absence.
+_ABSENT_JOB_LINE = re.compile(
+    r'Could not find service "(?P<label>[^"]+)" in domain for user gui: '
+    r"(?P<uid>\d+)"
+)
+
+#: The status launchd pairs with the absence line. A different status is a
+#: different fact even when the text looks right.
+_ABSENT_JOB_STATUS = 113
+
+#: The preamble a current macOS launchctl writes before the absence line. It is
+#: part of the exact answer, not tolerated noise: recorded from a read-only
+#: probe of a label that does not exist (`Bad request.` then the line, exit
+#: 113). An older launchctl writes the line alone.
+_ABSENT_JOB_PREFIXES = ("Bad request.\n", "")
+
+
+def _confirmed_absent_answer(
+    completed: subprocess.CompletedProcess[str], *, label: str, uid: int
+) -> bool:
+    """Whether this is exactly launchd's absence answer for label+uid.
+
+    The known answer is the absence line, optionally preceded by exactly one
+    ``Bad request.`` line, on stderr, with empty stdout and exit status 113.
+    A foreign label, a neighbouring or prefixed uid, an extra line, output on
+    the other stream and any other status all refuse.
+    """
+    if completed.returncode != _ABSENT_JOB_STATUS or (completed.stdout or "").strip():
+        return False
+    text = (completed.stderr or "").strip()
+    for prefix in _ABSENT_JOB_PREFIXES:
+        if not text.startswith(prefix):
+            continue
+        match = _ABSENT_JOB_LINE.fullmatch(text[len(prefix) :])
+        if (
+            match is not None
+            and match.group("label") == label
+            and int(match.group("uid")) == uid
+        ):
+            return True
+    return False
+
+
+def server_job_absent(*, uid: int | None = None) -> bool:
+    """Whether launchd proves the server job is absent from this user's domain.
+
+    ``launchctl print gui/<uid>/<label>`` asks the qualified question that
+    ``launchctl bootstrap gui/<uid>`` acts on. ``True`` is returned only for
+    launchd's exact absence answer for *this* label and *this* domain at its
+    known status 113: a current launchctl writes ``Bad request.`` then
+    ``Could not find service "<label>" in domain for user gui: <uid>``, an older
+    one the line alone. A job dump answers ``False`` (the job is there). Any
+    other status, a wrong label, a prefixed uid (``gui: 5010`` for 501), another
+    domain, extra or unrelated output, a failed query or a timeout raises:
+    uncertainty is not absence.
+    """
+    resolved_uid = _getuid() if uid is None else uid
+    try:
+        completed = subprocess.run(
+            [LAUNCHCTL, "print", f"gui/{resolved_uid}/{SERVER_LABEL}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=JOB_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"Could not probe {SERVER_LABEL} in gui/{resolved_uid}: {exc}"
+        ) from exc
+    if completed.returncode == 0:
+        return False
+    if _confirmed_absent_answer(completed, label=SERVER_LABEL, uid=resolved_uid):
+        return True
+    detail = ((completed.stderr or "") + (completed.stdout or "")).strip()
+    raise RuntimeError(
+        f"launchd did not confirm {SERVER_LABEL} absent from gui/{resolved_uid}"
+        + (f": {detail}" if detail else "")
+    )
+
+
+def launchd_override_disabled(*, uid: int | None = None) -> bool:
+    """Whether launchd's user-domain override explicitly disables the job.
+
+    ``launchctl print-disabled gui/<uid>`` is the only query for the per-label
+    override, and it is read-only. A readable listing that does not name
+    :data:`SERVER_LABEL` answers ``False``; an explicit ``disabled``/``true``
+    entry answers ``True``. A failed query, a timeout, malformed output or a
+    label listed more than once raises: uncertainty is not an answer, and a
+    caller deciding whether a job may be started must not guess.
+
+    This function never enables, disables, loads, unloads or otherwise changes
+    the override; it only reads it.
+    """
+    resolved_uid = _getuid() if uid is None else uid
+    domain = f"gui/{resolved_uid}"
+    try:
+        completed = subprocess.run(
+            [LAUNCHCTL, "print-disabled", domain],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=JOB_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"Could not read launchd overrides for {domain}: {exc}"
+        ) from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            f"launchctl print-disabled {domain} failed"
+            + (f": {detail}" if detail else "")
+        )
+    # Local import: service_login owns the one reader for the real output shape
+    # and imports this module at module level.
+    from ciao.service_login import strict_disabled_override
+
+    state = strict_disabled_override(completed.stdout or "", SERVER_LABEL)
+    if state is None:
+        raise RuntimeError(
+            f"launchctl print-disabled {domain} returned output that cannot be read"
+        )
+    return state
 
 
 def _loaded_job(

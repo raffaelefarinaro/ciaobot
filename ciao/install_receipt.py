@@ -78,12 +78,28 @@ def read_receipt(path: Path | None = None) -> InstallReceipt | None:
     raising, so a corrupt receipt degrades the install mode to "unknown" instead
     of breaking startup. Unknown extra keys are ignored, which keeps an older
     engine able to read a receipt written by a newer installer.
+
+    This keeps the startup reader's permissive path semantics (it follows a
+    link and reads whatever text is there). A caller that must not block or
+    must not trust the path — the native install classifier — reads the bytes
+    itself under its own bounded, no-follow rules and passes them to
+    :func:`parse_receipt`.
     """
     target = path or default_receipt_path()
     try:
         raw = target.read_text(encoding="utf-8")
     except (OSError, ValueError):
         return None
+    return parse_receipt(raw)
+
+
+def parse_receipt(raw: str) -> InstallReceipt | None:
+    """The receipt described by already-read text, or None when it is unusable.
+
+    The schema validation lives here so a strict caller that reads the bytes
+    through its own descriptor cannot drift from the startup reader:
+    :func:`read_receipt` is the permissive file read plus this parse.
+    """
     try:
         parsed: Any = json.loads(raw)
     except ValueError:

@@ -365,13 +365,13 @@ test('a chat with no repository opens the terminal too', async ({ page }) => {
 
 test('the terminal belongs to the chat: it hides on a switch and comes back with its shell', async ({ page }) => {
   await boot(page, NO_REPO_CHAT_PATH, COMPOSER)
-  // The fixture's shells outlive a spec within one worker, so count against
-  // what was already there.
+  // The fixture's shells outlive a spec within one worker, and opening adopts
+  // a shell an earlier spec left for this chat, so the count is taken once the
+  // terminal is open: the claim is that coming back starts nothing.
   const countSessions = () => page.evaluate(async () => {
     const res = await fetch('/__fixture__/terminal')
     return (await res.json()).sessions.length as number
   })
-  const before = await countSessions()
 
   await page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
   const pane = page.locator('.terminal-pane')
@@ -383,6 +383,7 @@ test('the terminal belongs to the chat: it hides on a switch and comes back with
   await page.keyboard.type(`echo ${OUTPUT}`)
   await page.keyboard.press('Enter')
   await expect(surface).toContainText(OUTPUT)
+  const open = await countSessions()
 
   // Another chat: the terminal is hidden and the slot is the chat's again.
   await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
@@ -396,7 +397,7 @@ test('the terminal belongs to the chat: it hides on a switch and comes back with
   await expect(pane).toBeVisible()
   await expect(pane.getByRole('tab')).toHaveCount(1)
   await expect(surface).toContainText(OUTPUT)
-  expect(await countSessions()).toBe(before + 1)
+  expect(await countSessions()).toBe(open)
   const focusInPane = await page.evaluate(() => !!document.activeElement?.closest('.terminal-pane'))
   expect(focusInPane).toBe(false)
 
