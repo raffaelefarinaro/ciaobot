@@ -7976,7 +7976,8 @@ async def list_proposals(request: Request) -> JSONResponse:
     record is surfaced under the same ``rows`` list with ``kind: "skill"``.
     """
     config = request.app.state.config
-    rows, _by_id = proposal_service._scan_proposal_rows(config)
+    # Off the event loop: the scan is blocking file I/O.
+    rows, _by_id = await asyncio.to_thread(proposal_service._scan_proposal_rows, config)
     return JSONResponse({"rows": rows})
 
 
