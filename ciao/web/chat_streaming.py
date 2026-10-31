@@ -453,6 +453,19 @@ class ChatStreaming:
 
         task.add_done_callback(_clear)
 
+    def _save_at_turn_end(self, chat_id: str) -> None:
+        """Persist the registry at turn end without letting a failed write skip teardown.
+
+        ``_save`` replaces the state file, and on Windows that can fail while another
+        process briefly holds it. A raise in ``drive``'s ``finally`` skipped
+        ``stream.finish()``, so the chat streamed forever. The in-memory state is
+        already right; the next successful save persists it.
+        """
+        try:
+            self._host._save()
+        except OSError:
+            logger.exception("chat registry save failed at turn end for %s", chat_id)
+
     async def drive(
         self,
         *,
@@ -1291,7 +1304,7 @@ class ChatStreaming:
                 # A terminal SSE frame is not proof that a native V2 permission
                 # was delivered. Keep the persisted card until the response
                 # endpoint returns success or an authoritative stale result.
-                self._host._save()
+                self._save_at_turn_end(chat_id)
             repo_loc: dict[str, Any] | None = None
             refresh_cancelled = False
             current = asyncio.current_task()
@@ -1320,7 +1333,7 @@ class ChatStreaming:
                 drain_chat = self._host._chats.get(chat_id)
                 if drain_chat is not None:
                     drain_chat.pending_queue = [*drain_chat.pending_queue, *draining]
-                    self._host._save()
+                    self._save_at_turn_end(chat_id)
                     stream.publish_queue_state(drain_chat.pending_queue)
             stream.finish()
             self._host._broker.clear(chat_id, stream)
@@ -1357,7 +1370,7 @@ class ChatStreaming:
                         self._host._clear_chat_retry(chat_now)
                     chat_now.last_activity_at = chat_service._now_iso()
                     chat_now.last_snippet = snippet
-                    self._host._save()
+                    self._save_at_turn_end(chat_id)
                 title = chat_now.title if chat_now else "Ciaobot"
                 # A turn the user moved to the background (#1413) ends on an interim
                 # reply whatever its wording; the wake carries the real result.
