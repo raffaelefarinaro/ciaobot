@@ -190,6 +190,36 @@ describe('useOverlayBackEntry', () => {
     expect(marker()).toBe(id)
   })
 
+  it('a failed entry push costs that overlay its entry, not navigation', async () => {
+    const h = current = await mountHost()
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(h.router.options.history, 'push').mockImplementationOnce(() => { throw new Error('boom') })
+    h.open.value = true
+    await flushPromises()
+    h.open.value = false
+    await flushPromises()
+    await h.router.push('/tasks')
+    expect(window.location.pathname).toBe('/tasks')
+    expect(h.router.currentRoute.value.path).toBe('/tasks')
+    expect(error).toHaveBeenCalledWith('[overlay-back]', expect.any(Error))
+  })
+
+  it('closing after a replace that moved the address clears the marker and keeps the entry', async () => {
+    const h = current = await mountHost()
+    h.open.value = true
+    await flushPromises()
+    await h.router.replace('/tasks')
+    await flushPromises()
+    const go = vi.spyOn(h.router.options.history, 'go')
+    const after = h.afterEach.mock.calls.length
+    h.open.value = false
+    await flushPromises()
+    expect(marker()).toBeNull()
+    expect(window.location.pathname).toBe('/tasks')
+    expect(go).not.toHaveBeenCalled()
+    expect(h.afterEach.mock.calls.length).toBe(after)
+  })
+
   it('unmounting with an open overlay releases its entry', async () => {
     const h = current = await mountHost()
     h.open.value = true

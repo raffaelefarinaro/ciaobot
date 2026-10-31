@@ -50,6 +50,10 @@ interface OverlayHistory {
 let installed: OverlayHistory | null = null
 let seq = 0
 
+function logFailure(err: unknown): void {
+  console.error('[overlay-back]', err)
+}
+
 function marker(state: OverlayHistory): string | null {
   const value = state.router.options.history.state?.[OVERLAY_STATE_KEY]
   return typeof value === 'string' ? value : null
@@ -104,7 +108,7 @@ function claim(state: OverlayHistory, close: () => Promise<boolean>): OverlayEnt
     state.router.options.history.push(entry.fullPath, { [OVERLAY_STATE_KEY]: entry.id })
     entry.live = true
     state.stack.push(entry)
-  })
+  }).catch(logFailure) // a failed push costs this overlay its entry, not navigation
   return entry
 }
 
@@ -124,7 +128,7 @@ function release(state: OverlayHistory, entry: OverlayEntry): void {
       const timer = window.setTimeout(done, LAND_TIMEOUT_MS)
       window.addEventListener('popstate', done)
     })
-  })
+  }).catch(logFailure) // a rejected `settling` would block every later navigation
 }
 
 export function useOverlayBackEntry(isOpen: () => boolean, close: () => Promise<boolean>): void {
