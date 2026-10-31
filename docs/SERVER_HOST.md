@@ -303,10 +303,26 @@ builder and tests never edit TCC and never remove a grant.
 
 The explicit release mode above is the alternative: a Developer ID signature
 with hardened runtime, a secure timestamp and a notarized, stapled ticket. It
-does not change what production publishing or the installer does today; that
-adoption is a later child. A Developer ID host is also a different signed byte
-set, so it still means one new permission decision for the user when it
-replaces an ad-hoc host.
+does not change what production publishing does or what production installs
+today; that adoption is a later, protected rehearsal. A Developer ID host is also
+a different signed byte set, so it still means one new permission decision for
+the user when it replaces an ad-hoc host.
+
+An owned ad-hoc revision-2/3/4 host is migrated to the signed revision-5 one
+automatically, but only when an authenticated manifest explicitly selects it and
+only through the durable transaction (#2330): the previous app and its exact
+ownership record are kept until the new engine has answered with its own version
+on the configured port, and every later failure puts both back exactly.
+`--no-start` never migrates: it keeps the previous host and says the upgrade
+completes on a later normal run. Before anything is replaced the user is told,
+once, that macOS may ask again for Accessibility and Automation and for access to
+Desktop, Documents and Downloads, and that existing grants are not transferred
+automatically - a Developer ID signature is a new identity to TCC, and this
+installer neither moves nor manufactures a grant. The candidate's launchd job, if
+this run already started one, is booted out and its process waited for before the
+old bytes go back: an identity is never reverted under a still-running candidate,
+and such a run reports an incomplete rollback with its preserved before-images
+rather than a rollback it did not perform.
 
 ## Workspaces in Desktop, Documents and Downloads
 
@@ -415,7 +431,7 @@ If the user answers *Don't Allow* to "Ciaobot Server would like to access files 
 
 The user sees the line in `ciao service status` (text and `--json`, field `workspace_access_denied`), in the installer when its health wait fails, and in the file itself. The message names System Settings, Privacy & Security, Files and Folders, Ciaobot Server.
 
-Exit 78 passes through the host unchanged: it is neither a stop code nor a launch failure. launchd relaunches the job after its ~10 s throttle, so once the switch is turned on the engine comes up on its own and the next passing probe deletes the file. On a host migration the installer rolls back and the previous engine keeps running until access is granted and the installer is rerun.
+Exit 78 passes through the host unchanged: it is neither a stop code nor a launch failure. launchd relaunches the job after its ~10 s throttle, so once the switch is turned on the engine comes up on its own and the next passing probe deletes the file. On a host migration the installer rolls back and the previous engine keeps running until access is granted and the installer is rerun. The same holds for a signed-host migration (#2330): a denial during its health wait is a failed transaction, so the previous host and its record are restored (after the candidate's job is quiesced) instead of leaving a signed host with no working engine. A grant given to the ad-hoc host does not follow the Developer ID build - the user may have to allow the folder again for the new identity.
 
 To bring the prompt back for testing: `tccutil reset SystemPolicyDocumentsFolder local.ciaobot.server` (Desktop: `SystemPolicyDesktopFolder`, Downloads: `SystemPolicyDownloadsFolder`).
 

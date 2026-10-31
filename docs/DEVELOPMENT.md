@@ -319,16 +319,21 @@ if one is present it downloads `ciaobot-server-host-macos-universal-v1.tar.gz`,
 checks its SHA-256 and size against the signed entry, and asks the wheel's module to
 install it. The module re-checks the archive, extracts it under `filter="data"`,
 inspects the staged `Ciaobot Server.app` with the B1 contract (plist identity and
-the read-only `/usr/bin/codesign` probes), writes the owner-only record at
+the read-only `/usr/bin/codesign` probes) under the policy the entry *selects* — the
+production revision-4 ad-hoc host, or the signed revision-5 host with the Developer
+ID team the release authenticated — writes the owner-only record at
 `~/.local/state/ciaobot/server-host.json` (`0600` in a `0700` directory) from the
 staged snapshot — **before** the atomic rename to `~/Applications/Ciaobot Server.app`
 — and re-verifies the installed host with `verify_owned_host`. It runs after the
-read-only preflight and never on a `--migrate --as-client` Mac. An existing verified
-host is a no-op. Only a refusal about the release — a manifest that did not verify,
-or an archive that does not match its signed digest — stops the run; every other
-host refusal (a disk full, a `codesign` probe that timed out, a bundle at the target
-the module cannot prove it owns) warns (module exit 3) and the engine install
-continues, because the host is optional and inert and must not abort the one-liner.
+read-only preflight and never on a `--migrate --as-client` Mac. An existing host
+whose record proves the same policy is a no-op. Only a refusal about the release — a
+manifest that did not verify, an archive that does not match its signed digest, or a
+signed identity the local record contradicts — stops the run; every other host
+refusal (a disk full, a `codesign` probe that timed out, a bundle at the target the
+module cannot prove it owns) warns (module exit 3) and the engine install continues,
+because the host is optional and inert and must not abort the one-liner. A completed
+probe that *disproved* the signed identity (`signature_rejected`) is never in that
+warn set: it aborts before the engine or the service is touched.
 Because the record is written before the rename, a process killed in that window
 leaves a consistent, verified host rather than a recordless bundle every later run
 reports as `host_exists`; a Python failure removes both the bundle and record the
@@ -336,15 +341,76 @@ run placed. The host install is inert: it writes no launchd job itself;
 activation is `ciao setup` registering the hosted plist when a verified host
 is installed. No step requests a permission prompt.
 
+Replacing an owned legacy host with the signed one is the one host change that is
+a *transaction*, because the previous app and its exact ownership record have to
+survive until the engine this run installs has answered healthily — which is
+after the installer module has returned (#2330). A normal (start-enabled) run
+passes `--defer-commit --owner-pid "$$"`: the module keeps the old bundle in a
+nonce-derived dotted directory beside the target, keeps the exact old record
+bytes, writes one owner-only journal at `~/.local/state/ciaobot/server-host-upgrade.json`
+with the operation nonce and this shell's pid, installs the signed host, and
+returns at phase `installed`. The shell then asks `transaction-status` whether it
+owns a pending upgrade. With one pending, the health wait requires the exact new
+`version` on the configured port *and* positive evidence that the responder is the
+process instance this run started, bound to objects rather than strings:
+
+1. exactly one pid holds the listening socket before the request
+   (`lsof -nP -iTCP:<port> -sTCP:LISTEN -t`) and the same pid holds it after it, so
+   an unrelated listener cannot answer and exit in between;
+2. that pid is the `pid` in this runtime root's `server.lock`, the response's
+   `startup_id` is the lock's, and the lock itself is a regular file this user owns
+   with mode `0600`, opened without following a link, whose opened inode is the one
+   the directory listed - readable lock metadata alone proves nothing;
+3. the listener's bounded ancestor chain (`ps -o ppid=`, four hops) reaches the pid
+   `launchctl print` reports for the job, and that job's executable text
+   (`lsof -a -p <pid> -d txt -Fn`, exactly one `n` record - `ps -o comm=` only ever
+   prints the name) is the installed `Ciaobot Server`, because launchd runs the host
+   and the host `posix_spawn`s Python.
+
+A missing, ambiguous, over-deep or unreadable answer is a failure, not a pass, and
+the timeout message names the step that could not be proven (version, lock,
+listener, ancestry or executable) so the operator has a direction. Every later failure path — an explicit `fail`,
+`abort_install`, a signal, an unexpected `set -e` exit — gives the old pair back
+exactly once through `rollback-upgrade`, and `commit-upgrade` runs only after
+positive engine health and, in a `--migrate` hand-over, after the app's own agent
+has been retired. When a launchd job may already run out of the candidate host,
+the shell boots it out, proves with `launchctl print` that the job is really gone
+and waits for the process to exit before reverting the identity. That check fails
+closed: a job launchd still holds, a `launchctl print` that failed for any reason
+other than launchd confirming it has no such job, a process still present, or a
+`pgrep` that could not answer all keep the before-images and the journal, leave
+the run nonzero and skip the engine-definition reload rather than claiming a
+rollback of a still-running candidate. The EXIT handler also discovers the operation this shell
+owns from the journal itself (owner pid plus nonce) when the child finished the
+install before the run could record it, and keeps the journal with a spoken
+incomplete recovery when that discovery cannot be made. A commit or rollback that
+settled but could not remove its before-images keeps that settled state (nothing
+rolls a committed host back) yet still makes the installer exit nonzero, and the
+next host transaction is refused until the leftover is gone. `--no-start` never defers: it reports that the
+upgrade completes on a later normal run and leaves the previous host in place, and
+a wheel-only release or a client never touches the host at all. A journal left by a
+killed run is settled by the next run: a live owner is a refusal, and an unfinished
+or abandoned one is *not* rolled back by `install` itself — the shell quiesces the
+service and calls `rollback-upgrade` before retrying, so the identity is never
+reverted under a process that may still be running.
+
 Every release today publishes the ad-hoc revision-4 host, and its record keeps the
 unchanged schema 1. The signed revision-5 policy (#2329) is opt-in end to end: an
 explicitly signed manifest entry names the expected Developer ID team, a schema-2
 record persists it, and runtime verification checks that team, the stable
 designated requirement, the hardened runtime, the secure timestamp and the one
 Apple Events entitlement offline with the read-only `/usr/bin/codesign` probes
-(`docs/SERVER_HOST_CONTRACT.md`). The installer's call site for such an entry is a
-later child; nothing here migrates an installed host, and `publish.yml` keeps
-building the un-flagged revision-4 manifest until a separately approved activation.
+(`docs/SERVER_HOST_CONTRACT.md`). The installer accepts such an entry (#2330), and
+an owned revision-2/3/4 host is migrated to it by the transaction above; the
+migration still activates only for an explicit signed entry, so `publish.yml`
+keeps building the un-flagged revision-4 manifest and a production install stays
+ad-hoc revision 4 until a separately approved activation. Same-policy current
+hosts are no-ops even when a rebuild changed their CDHashes, a signed host is
+never downgraded to the legacy one, and a different team is never adopted
+automatically. Nothing in this path has been validated against a real Developer ID
+certificate, a real TCC grant or a real device: the tests use fake teams
+(`TESTTEAM01`, `OTHERTEAM1`) and fake `codesign` output, and the protected
+rehearsal plus an operator device walk remain the gate that turns this on.
 A wheel-only manifest (every historical release) prints nothing from the selector
 and installs the engine exactly as before, and so does an explicit `--version`
 naming a wheel cut before the host work: the shell probes for the module first,
