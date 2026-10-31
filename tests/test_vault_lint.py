@@ -1042,3 +1042,54 @@ def test_the_general_project_note_is_exempt_in_a_shared_vault(tmp_path):
 
     assert "personal/projects/active/general/general.md" not in issues["orphans"]
     assert "personal/projects/active/other/other.md" in issues["orphans"]
+
+
+# ---- .ciaoignore ------------------------------------------------------------
+
+
+def test_ciaoignore_skips_generated_sources_from_every_check(tmp_path: Path):
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "Page.md").write_text(_page("# Page\n"), encoding="utf-8")
+    (vault / "automations" / "x").mkdir(parents=True)
+    (vault / "automations" / "x" / "PROMPT.md").write_text("[x](missing.md)\n", encoding="utf-8")
+    (vault / "People").mkdir()
+    (vault / "People" / "Generated-A.md").write_text("# A\n", encoding="utf-8")
+    (vault / "People" / "Generated_A.md").write_text("# A\n", encoding="utf-8")
+
+    # Control: without a .ciaoignore all four buckets report the generated files.
+    before = vault_lint.run_validation(vault)
+    assert any(
+        "automations/x/PROMPT.md" in str(error) for error in before["frontmatter_errors"]
+    )
+    assert "missing.md" in str(before["broken_markdown_links"])
+    assert ["People/Generated-A.md", "People/Generated_A.md"] in before["duplicates"]
+    assert "People/Generated-A.md" in before["orphans"]
+
+    (vault / ".ciaoignore").write_text("automations/*/PROMPT.md\nPeople/Generated*\n", encoding="utf-8")
+    after = vault_lint.run_validation(vault)
+    assert after["frontmatter_errors"] == []
+    assert after["broken_markdown_links"] == []
+    assert after["duplicates"] == []
+    assert after["orphans"] == []
+
+
+def test_ciaoignored_files_remain_valid_link_targets(tmp_path: Path):
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "Page.md").write_text(_page("[p](automations/x/PROMPT.md)\n"), encoding="utf-8")
+    (vault / "automations" / "x").mkdir(parents=True)
+    (vault / "automations" / "x" / "PROMPT.md").write_text("# Prompt\n", encoding="utf-8")
+    (vault / ".ciaoignore").write_text("automations/\n", encoding="utf-8")
+
+    assert vault_lint.run_validation(vault)["broken_markdown_links"] == []
+
+
+def test_unreadable_ciaoignore_is_a_traversal_error(tmp_path: Path):
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "Page.md").write_text(_page("# Page\n"), encoding="utf-8")
+    (vault / ".ciaoignore").mkdir()
+
+    with pytest.raises(vault_lint.VaultTraversalError):
+        vault_lint.run_validation(vault)
