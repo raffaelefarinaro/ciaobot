@@ -7,6 +7,10 @@ SLOW_REQUEST_SECONDS, and a loop that woke late by at least
 LOOP_BLOCK_THRESHOLD_SECONDS, together with the requests in flight at that
 moment. Paths are logged without the query string, which can carry tokens.
 WebSockets are not timed; they are long-lived by design.
+
+"slow" is the total time to send, including client-bound transfers: a large
+FileResponse to a slow client can log a slow request without any loop block.
+The `event loop blocked` line is the one that marks a real stall.
 """
 
 from __future__ import annotations
@@ -31,6 +35,14 @@ SNAPSHOT_LIMIT = 10
 
 def _ms(seconds: float) -> int:
     return int(seconds * 1000)
+
+
+def _safe(text: str, limit: int) -> str:
+    """Escape control characters and cap length, so a request line cannot forge log lines."""
+    escaped = text.encode("unicode_escape").decode("ascii")
+    if len(escaped) <= limit:
+        return escaped
+    return escaped[:limit] + "..."
 
 
 @dataclass(frozen=True)
@@ -82,8 +94,10 @@ class RequestTimingMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        method = scope.get("method", "")
-        path = scope.get("path", "")
+        # The path is percent-decoded by the server and this runs before auth, so
+        # escape and cap it before it is stored or logged.
+        method = _safe(scope.get("method", ""), 16)
+        path = _safe(scope.get("path", ""), 200)
         started = time.monotonic()
         key = self.registry.add(method, path, started)
         try:

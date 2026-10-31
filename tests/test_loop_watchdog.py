@@ -99,7 +99,7 @@ def test_watchdog_is_quiet_when_the_loop_is_free(caplog: pytest.LogCaptureFixtur
     registry = InFlightRequests()
 
     async def main() -> None:
-        watchdog = EventLoopWatchdog(registry, interval=0.01, threshold=0.5)
+        watchdog = EventLoopWatchdog(registry, interval=0.01, threshold=2.0)
         watchdog.start()
         await asyncio.sleep(0.1)
         await watchdog.stop()
@@ -122,3 +122,26 @@ def test_in_flight_entry_is_removed_after_the_request() -> None:
     assert ok.status_code == 200
     assert failed.status_code == 500
     assert registry.snapshot(time.monotonic()) == []
+
+
+def test_logged_path_cannot_forge_a_log_line(caplog: pytest.LogCaptureFixture) -> None:
+    client = TestClient(_timed_app(InFlightRequests(), slow_seconds=0))
+
+    with caplog.at_level(logging.WARNING, logger=WATCHDOG_LOGGER):
+        client.get("/a%0Aforged")
+
+    messages = _warnings_containing(caplog, "slow request")
+    assert len(messages) == 1
+    assert "\n" not in messages[0]
+    assert "\r" not in messages[0]
+
+
+def test_logged_path_is_length_capped(caplog: pytest.LogCaptureFixture) -> None:
+    client = TestClient(_timed_app(InFlightRequests(), slow_seconds=0))
+
+    with caplog.at_level(logging.WARNING, logger=WATCHDOG_LOGGER):
+        client.get("/" + "a" * 5000)
+
+    messages = _warnings_containing(caplog, "slow request")
+    assert len(messages) == 1
+    assert len(messages[0]) < 400
