@@ -21,6 +21,7 @@ from ciao.vault_index import (
     canonical_type,
     is_generated_vault_file,
     is_reserved_bookkeeping,
+    load_vault_ignore,
     resolve_vault_link,
     vault_link_ref,
 )
@@ -169,6 +170,7 @@ def _markdown_source_paths(
 ) -> list[tuple[Path, Path]]:
     try:
         root = vault_root.resolve()
+        ignore = load_vault_ignore(vault_root)
     except (OSError, RuntimeError) as error:
         raise VaultTraversalError([error]) from error
     paths = discovered if discovered is not None else _discover_paths(vault_root)
@@ -177,6 +179,7 @@ def _markdown_source_paths(
         for path, relative in paths
         if relative.suffix.lower() == ".md"
         and not _is_excluded(relative)
+        and not ignore.matches(relative)
         and _canonical_relative(path, root) is not None
     ]
 
