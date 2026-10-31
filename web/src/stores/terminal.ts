@@ -1397,6 +1397,7 @@ export const useTerminalStore = defineStore('terminal', () => {
    * list loses the ended row, and nothing else moves.
    */
   async function endSession(sessionId?: string): Promise<boolean> {
+    chatSwitch.value = false
     const session = sessionId
       ? sessions.value.find((entry) => entry.session_id === sessionId)
       : activeSession.value
