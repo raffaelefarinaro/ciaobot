@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from ciao import proposal_kinds
 from ciao import skill_proposals
@@ -68,6 +70,33 @@ def walk_proposal_queue(
                 workspace, rel_path, bullet.kind, bullet.text, bullet.source, dup
             ),
         )
+
+
+def _review_digest(parts: list[str]) -> str:
+    payload = json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
+    return "prv_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def proposal_review_key(
+    workspace: str, kind: str, text: str, source: str, target: str, request: str
+) -> str:
+    """Content-derived review identity for one queue bullet.
+
+    Excludes the ordinal, the decider and the decide reason, so exact duplicates
+    name the same review question while a different target or request does not.
+    """
+    return _review_digest([workspace, kind, text, source, target, request])
+
+
+def skill_review_key(workspace: str, proposal_id: str, change: str) -> str:
+    """Content-derived review identity for one skill-proposal record."""
+    return _review_digest([workspace, "skill", proposal_id, change])
+
+
+def proposal_review_path(workspace: str, review_key: str) -> str:
+    """Canonical link to the pending review question named by *review_key*."""
+    query = urlencode({"show": "suggested", "workspace": workspace, "proposal": review_key})
+    return f"/memory/review?{query}"
 
 
 def pending_proposal_ids(config: Any) -> set[str]:
