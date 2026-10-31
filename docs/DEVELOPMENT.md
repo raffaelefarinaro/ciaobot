@@ -879,6 +879,8 @@ dialect, so there is one broken-link bucket, not one per dialect. `INDEX.md`, `M
 from the frontmatter requirement. External URLs, absolute paths, and anchors
 are not treated as vault links.
 
+A vault can list generated files in a `.ciaoignore` at its root: one glob per line, `#` comments, gitignore-style (`*` and `?` stay within one path segment, `**` spans directories, a pattern without `/` matches at any depth, a trailing `/` matches a directory, case-insensitive, no `!` negation). Matching files are skipped by `vault-lint`, `os-audit`, the orphan and duplicate checks, `INDEX.md` and the Memory Map, but stay valid link targets. Search indexing does not read it.
+
 Use `--vault-root` to choose a vault. Otherwise it uses `CIAO_VAULT_ROOT` or
 `./memory-vault`. A clean scan exits 0. Findings, a missing vault root, or an
 incomplete traversal exit 1. It never reports a clean vault when it could not

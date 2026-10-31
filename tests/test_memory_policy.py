@@ -590,3 +590,8 @@ def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb(
 
 def test_stock_memory_assets_route_repo_facts() -> None:
     assert "`repo`" in _stock("commands/remember.md")
+
+
+def test_the_capabilities_catalog_names_the_vault_ignore_file() -> None:
+    memory = " ".join(_stock("skills/ciao-capabilities/references/memory.md").split())
+    assert "`.ciaoignore`" in memory
