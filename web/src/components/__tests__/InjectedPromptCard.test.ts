@@ -170,6 +170,18 @@ describe('InjectedPromptCard', () => {
   // A retry is a turn the reader asked to run again, so it reads as a notice
   // like the other engine-written turns, and the request it repeats stays one
   // disclosure away instead of being a second copy of the same words.
+  it('draws a restart resume as a collapsed notice without a prompt toggle', async () => {
+    const wrapper = mountCard({ prompt: { kind: 'restart_resume' }, raw: 'Continue after restart: …' })
+    const card = wrapper.get('.injected-card')
+    expect(card.classes()).toContain('injected-card--restart_resume')
+    expect(card.attributes('aria-label')).toBe('Continue after restart')
+    expect(wrapper.find('.injected-card-body').exists()).toBe(false)
+
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toContain('continue where it left off')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+  })
+
   it('draws a retry as a collapsed notice with the request behind a disclosure', async () => {
     const wrapper = mountCard({ prompt: { kind: 'retry' }, raw: 'Check the video' })
     const card = wrapper.get('.injected-card')

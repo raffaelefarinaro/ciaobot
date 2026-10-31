@@ -43,6 +43,7 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   webhook: 'comment',
   update_task: 'spark',
   retry: 'activity',
+  restart_resume: 'activity',
   error: 'activity',
 }
 
@@ -182,6 +183,10 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
           <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
           <div class="injected-card-prose" tabindex="0" role="region" aria-label="Original request" v-html="md(raw)"></div>
         </details>
+      </template>
+
+      <template v-else-if="prompt.kind === 'restart_resume'">
+        <p class="injected-card-note">Ciaobot restarted while the previous turn was running, so it asked the agent to continue where it left off.</p>
       </template>
 
       <template v-else-if="prompt.kind === 'error'">

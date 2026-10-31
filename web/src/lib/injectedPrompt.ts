@@ -27,6 +27,7 @@ export type InjectedPrompt =
   | { kind: 'webhook'; instructions: string; event: string }
   | { kind: 'update_task' }
   | { kind: 'retry' }
+  | { kind: 'restart_resume' }
   | { kind: 'error'; label: string; copy: string; text: string }
 
 // Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
@@ -166,6 +167,7 @@ function parseWebhook(content: string): InjectedPrompt {
  * are recognised without an origin (history recorded before the field existed).
  * A retry is recognised by its recorded origin and by nothing else: the
  * resend carries the request it repeats, so the text never says "retry".
+ * A restart resume is recognised the same way, by its recorded origin only.
  */
 export function parseInjectedPrompt(content: string | null | undefined, origin?: string): InjectedPrompt | null {
   if (!content) return null
@@ -186,6 +188,7 @@ export function parseInjectedPrompt(content: string | null | undefined, origin?:
     case 'webhook': return parseWebhook(content)
     case 'update_task': return { kind: 'update_task' }
     case 'retry': return { kind: 'retry' }
+    case 'restart_resume': return { kind: 'restart_resume' }
     default: return null
   }
 }
@@ -270,6 +273,8 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Update task', facts: chatTitle ?? '', tone: null }
     case 'retry':
       return { label: 'Retry started', facts: 'Same request · new attempt', tone: null }
+    case 'restart_resume':
+      return { label: 'Continue after restart', facts: 'The engine restarted mid-turn', tone: null }
     case 'error':
       return { label: prompt.label, facts: '', tone: null, hint: errorHint(prompt.text) }
   }
