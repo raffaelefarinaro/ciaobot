@@ -77,6 +77,26 @@ describe('useHistoryNav', () => {
     expect(nav.backLabel.value).toBe('Back to Tasks')
   })
 
+  it('does not offer a forward entry at the same address and refreshes on a silent step', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const router = makeRouter()
+    await router.push('/')
+    let nav!: ReturnType<typeof useHistoryNav>
+    mount(defineComponent({ setup() { nav = useHistoryNav(); return () => h('div') } }), {
+      global: { plugins: [router, pinia] },
+    })
+    await router.push('/tasks')
+    // An overlay's entry: same address, no navigation, so no afterEach.
+    router.options.history.push('/tasks', {})
+    router.options.history.go(-1, false)
+    await new Promise(resolve => window.addEventListener('popstate', resolve, { once: true }))
+    await flushPromises()
+    await nextTick()
+    expect(window.history.state.forward).toBe(window.history.state.current)
+    expect(nav.canForward.value).toBe(false)
+  })
+
   it('stays inert without a router', () => {
     let nav!: ReturnType<typeof useHistoryNav>
     mount(defineComponent({ setup() { nav = useHistoryNav(); return () => h('div') } }))

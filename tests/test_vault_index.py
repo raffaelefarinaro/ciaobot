@@ -998,3 +998,15 @@ def test_scan_vault_skips_ciaoignore_matches(tmp_path: Path):
     keys = {e.path_key for e in _scan(tmp_path)}
     assert "memory-vault/automations/x/report.md" not in keys
     assert "memory-vault/People/Mo.md" in keys
+
+
+def test_scan_vault_skips_unheaded_notes_unless_asked(tmp_path: Path):
+    """Default scans drop frontmatter-less, H1-less notes; include_unheaded keeps them."""
+    _write(tmp_path / "Projects" / "Headed.md", "# Headed\n")
+    _write(tmp_path / "Projects" / "scratch.md", "plain text, no heading\n")
+
+    default_names = {e.path.name for e in vi.scan_vault(vault_root=tmp_path)}
+    asked_names = {e.path.name for e in vi.scan_vault(vault_root=tmp_path, include_unheaded=True)}
+
+    assert default_names == {"Headed.md"}
+    assert asked_names == {"Headed.md", "scratch.md"}
