@@ -7,6 +7,14 @@ set -eu
 # release archive, which has to match the sha256 embedded in this file and is
 # fetched over HTTPS; uv publishes no minisign or Apple signature for it.
 # Python and the packages uv fetches afterwards have no digest pinned here.
+#
+# The trust boundary of that bootstrap is this user, not this process: the
+# archive and the staged executable sit in a mode-0700 scratch directory, which
+# is not per-user isolation. It keeps other users out, and it does not stop a
+# process running as the same user, which can still replace the archive between
+# the `shasum` check and the tar read, or swap the staged copy before it runs.
+# The reviewed digest table plus TLS bound what the network can hand this
+# script; code already running as this user is outside that boundary.
 
 repo=raffaelefarinaro/ciaobot
 release_base=${CIAO_RELEASE_BASE_URL:-https://github.com/$repo/releases/download}
@@ -41,6 +49,10 @@ FRESH_PORT=8443
 # reviewed sha256 and passed the member allowlist: the private staged copy this
 # run extracted. A native-mode install must take this rather than a PATH uv.
 verified_uv=
+# Set immediately before the legacy publish's single exclusive create and
+# cleared once the published file is confirmed, so a failure takes back only a
+# path that write made.
+uv_created=0
 version=
 workspace=
 no_start=0
@@ -1119,37 +1131,61 @@ publish_verified_uv() {
     # Put the verified staged uv where the installer has always left it. Only
     # the legacy missing-uv path calls this; the bootstrap helper itself never
     # writes into ~/.local/bin, so it cannot replace an existing uv.
+    #
+    # The publish is one exclusive create straight at the destination: no
+    # temporary and no rename. `set -C` has the shell open the path with O_EXCL,
+    # so any pre-existing path - a regular file, a directory, a symlink, a
+    # dangling symlink, a hardlink to a file elsewhere - makes the open fail and
+    # nothing is written, followed or truncated. `mv` is not usable here: on BSD
+    # it follows a destination that is a directory or a symlink to one and moves
+    # the file inside, which both misses the intended path and overwrites
+    # whatever already carries that name there. This branch only runs when this
+    # Mac has no uv at all, so the destination does not legitimately exist.
     [ -n "$verified_uv" ] || fail "no verified uv to publish"
     uv_bin_dir="$HOME/.local/bin"
     mkdir -p "$uv_bin_dir" || fail "could not create $uv_bin_dir"
     uv_dest="$uv_bin_dir/uv"
-    # The temporary lives beside the destination so the publish is one rename.
-    # O_EXCL (set -C) refuses a path someone planted instead of following or
-    # truncating it, and the content is written through that same redirection
-    # so there is no window between creating the file and filling it.
-    uv_publish="$uv_dest.new.$$"
-    if ! (set -C; umask 077; cat "$verified_uv" > "$uv_publish"); then
-        fail "could not create $uv_publish exclusively"
-    fi
-    chmod 700 "$uv_publish" || { rm -f "$uv_publish"; fail "could not protect $uv_publish"; }
-    # Check the destination at the operation boundary, immediately before the
-    # rename: a symlink or a directory is refused, not replaced or moved into.
+    # The destination is read once before the write, and what is here is a
+    # refusal rather than something to replace: the flag below then means "this
+    # run's write is the only thing that may have created this path", and a
+    # failure may take back only what that write left behind.
     if [ -L "$uv_dest" ] || [ -d "$uv_dest" ] || { [ -e "$uv_dest" ] && [ ! -f "$uv_dest" ]; }; then
-        rm -f "$uv_publish"
         fail "refusing to replace $uv_dest: it is not a regular file"
     fi
-    if ! mv -f "$uv_publish" "$uv_dest"; then
-        rm -f "$uv_publish"
+    if [ -e "$uv_dest" ]; then
+        fail "refusing to overwrite $uv_dest: it already exists"
+    fi
+    uv_created=1
+    if ! (set -C; umask 077; cat "$verified_uv" > "$uv_dest"); then
+        discard_published_uv
         fail "could not publish the verified uv at $uv_dest"
     fi
-    # A directory substituted for the destination between the check and the
-    # rename makes mv move the file inside it, so the result is not a regular
-    # uv. Check what actually landed, and take our file back out.
+    if ! chmod 700 "$uv_dest"; then
+        discard_published_uv
+        fail "could not protect $uv_dest"
+    fi
+    # What landed has to be the regular file this write made. A symlink or a
+    # directory standing at the path is something this run did not create, so it
+    # is left exactly where it is.
     if [ -L "$uv_dest" ] || [ ! -f "$uv_dest" ]; then
-        rm -f "$uv_dest/${uv_publish##*/}"
+        discard_published_uv
         fail "the published uv at $uv_dest is not a regular file"
     fi
-    uv="$uv_dest"
+    # Publishing is for the next run: $uv is deliberately left on $verified_uv,
+    # the private staged copy. Reopening the published path here would let a
+    # replacement of ~/.local/bin/uv after these checks decide which uv the rest
+    # of this install executes.
+    uv_created=0
+}
+
+discard_published_uv() {
+    # Take back only a regular file this run's exclusive create made: the flag
+    # is set immediately before that write and cleared once the publish holds.
+    # A directory, a symlink or anything that was already at the path when this
+    # run looked is somebody else's and is never unlinked.
+    if [ "$uv_created" -eq 1 ] && [ -f "$uv_dest" ] && [ ! -L "$uv_dest" ]; then
+        rm -f "$uv_dest"
+    fi
 }
 
 find_uv() {
@@ -1163,6 +1199,8 @@ find_uv() {
         # No uv at all: bootstrap the pinned, digest-verified archive and put
         # it where this installer has always left uv. The caller's shell
         # profile is left alone until the verified engine install completes.
+        # `$uv` stays on the private staged copy the bootstrap made; publishing
+        # it is for the next run and does not hand this one a writable path.
         bootstrap_verified_uv
         publish_verified_uv
     fi

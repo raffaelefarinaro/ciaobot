@@ -6600,6 +6600,7 @@ def _uv_bootstrap_run(
         # The helper alone must be runnable without the publishing branch, so
         # its tests cannot pass by borrowing that code.
         body_parts.append(_function_source("publish_verified_uv"))
+        body_parts.append(_function_source("discard_published_uv"))
     if entry == "find_uv":
         body_parts.append(_function_source("find_uv"))
     body_parts += [
@@ -6764,24 +6765,35 @@ def test_legacy_missing_uv_publishes_the_verified_copy(tmp_path: Path) -> None:
     assert dest.read_bytes() == UV_BOOTSTRAP_BODY
     assert stat.S_IMODE(dest.stat().st_mode) == 0o700
     stage = paths["tmp"] / "uv-bootstrap"
-    assert f"uv={dest}" in result.stdout
     assert f"verified_uv={stage / 'uv'}" in result.stdout
+    # Publishing is for the next run. This one goes on executing the private
+    # staged copy, so replacing ~/.local/bin/uv after the publish cannot change
+    # the uv this install runs.
+    assert f"uv={stage / 'uv'}" in result.stdout
+    assert f"uv={dest}" not in result.stdout
     _assert_nothing_executed(paths)
+
+
+PUBLISH_SENTINEL = b"do not touch\n"
 
 
 def _run_publish(
     tmp_path: Path,
     *,
     dest_kind: str | None = None,
-    mv_race: str | None = None,
-    plant_temp: str | None = None,
+    fail_write: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
-    """Run the shipped publish step against a prepared destination directory.
+    """Run the shipped publish step against a prepared destination.
 
-    The test copy pins the temp suffix so a test can plant the exact path the
-    function will create. `mv_race` swaps the destination from inside an `mv`
-    double immediately before the real move, which is the race the boundary
-    check and the post-move check have to survive.
+    `dest_kind` says what already occupies ~/.local/bin/uv: nothing, a regular
+    file, a directory, a symlink to a file, a symlink to a directory, a dangling
+    symlink, or a hardlink to a file outside ~/.local/bin. The directory a
+    followed link would resolve to already holds a file with the destination's
+    own name, so a publish that moved or wrote *through* the destination would
+    land on it - the fixtures assert it is never written or deleted.
+
+    `fail_write` makes the copy fail after the destination has been created, so
+    the cleanup path is exercised on a file this invocation did make.
     """
     home = tmp_path / "home"
     bin_dir = home / ".local" / "bin"
@@ -6793,41 +6805,52 @@ def _run_publish(
     fakebin.mkdir()
     trace = tmp_path / "trace.log"
 
+    target_dir = home / "existing-dir"
+    target_dir.mkdir()
+    same_named = target_dir / "uv"
+    same_named.write_bytes(PUBLISH_SENTINEL)
+    target_file = home / "existing-target"
+    target_file.write_bytes(PUBLISH_SENTINEL)
+
     dest = bin_dir / "uv"
-    target = home / "existing-target"
-    target.write_bytes(b"do not touch\n")
-    if dest_kind == "symlink":
-        dest.symlink_to(target)
+    if dest_kind == "file":
+        dest.write_bytes(PUBLISH_SENTINEL)
+    elif dest_kind == "hardlink":
+        os.link(target_file, dest)
     elif dest_kind == "directory":
         dest.mkdir()
+    elif dest_kind == "symlink":
+        dest.symlink_to(target_file)
+    elif dest_kind == "symlink-to-directory":
+        dest.symlink_to(target_dir)
+    elif dest_kind == "dangling-symlink":
+        dest.symlink_to(home / "nowhere")
+    elif dest_kind is not None:
+        raise AssertionError(f"unknown destination kind: {dest_kind}")
 
-    publish_source = _function_source("publish_verified_uv").replace("$$", "4242")
-    temp = bin_dir / "uv.new.4242"
-    if plant_temp == "file":
-        temp.write_bytes(b"planted\n")
-    elif plant_temp == "symlink":
-        temp.symlink_to(target)
-
-    _write_exec(
-        fakebin / "mv",
-        "#!/bin/sh\n"
-        f"printf 'mv %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
-        "# The destination is the last argument whether or not flags precede it.\n"
-        'for mv_dest in "$@"; do :; done\n'
-        'case "${RACE:-}" in\n'
-        '    symlink) rm -f "$mv_dest"; ln -s "$HOME/existing-target" "$mv_dest" ;;\n'
-        '    directory) rm -f "$mv_dest"; mkdir "$mv_dest" ;;\n'
-        "esac\n"
-        f'exec {shlex.quote(shutil.which("mv") or "mv")} "$@"\n',
-    )
+    if fail_write:
+        # The destination's own redirection has already created and opened the
+        # file by the time this runs, so a short write followed by a failure is
+        # exactly "this run made the path and then could not fill it".
+        _write_exec(
+            fakebin / "cat",
+            "#!/bin/sh\n"
+            f"printf 'cat %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+            "printf 'partial\\n'\n"
+            "exit 1\n",
+        )
 
     body = "\n".join(
         [
             "set -eu",
             f"HOME={shlex.quote(str(home))}",
             f"verified_uv={shlex.quote(str(staged))}",
+            # find_uv's missing-uv branch: the bootstrap helper has already set
+            # both of these to the private staged copy before publishing.
+            "uv=$verified_uv",
             _function_source("fail"),
-            publish_source,
+            _function_source("publish_verified_uv"),
+            _function_source("discard_published_uv"),
             "publish_verified_uv",
             'printf "uv=%s\\n" "$uv"',
         ]
@@ -6837,8 +6860,6 @@ def _run_publish(
         "HOME": str(home),
         "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
     }
-    if mv_race is not None:
-        env["RACE"] = mv_race
     result = subprocess.run(
         ["sh", "-c", body], env=env, capture_output=True, text=True, check=False
     )
@@ -6846,69 +6867,117 @@ def _run_publish(
         "home": home,
         "bin_dir": bin_dir,
         "dest": dest,
-        "target": target,
-        "temp": temp,
+        "target_dir": target_dir,
+        "same_named": same_named,
+        "target_file": target_file,
+        "staged": staged,
     }
 
 
+def _assert_publish_touched_nothing_else(paths: dict[str, Any]) -> None:
+    """Nothing was written into or deleted from any path the fixture prepared."""
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    # The file a follow-the-link write or a BSD `mv` would have overwritten.
+    assert paths["same_named"].read_bytes() == PUBLISH_SENTINEL
+    assert [entry.name for entry in paths["target_dir"].iterdir()] == ["uv"]
+    # No temporary is left beside the destination either.
+    assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
+
+
 @runs_the_sh_installer
-@pytest.mark.parametrize("dest_kind", ["symlink", "directory"])
-def test_publish_refuses_a_non_regular_destination(
-    tmp_path: Path, dest_kind: str
+def test_publish_creates_only_the_destination(tmp_path: Path) -> None:
+    """A missing uv is published in place: one file, 0700, nothing beside it."""
+    result, paths = _run_publish(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    dest = paths["dest"]
+    assert dest.is_file()
+    assert not dest.is_symlink()
+    assert dest.read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+    assert sorted(entry.name for entry in paths["bin_dir"].iterdir()) == ["uv"]
+    # Publishing is for the next run: this one keeps executing the private
+    # staged copy, so a substitution of the published path cannot reach it.
+    assert f"uv={paths['staged']}" in result.stdout
+
+
+def test_publish_writes_the_destination_in_one_exclusive_create() -> None:
+    """No temp and no rename: `mv` on BSD follows a destination directory."""
+    source = _function_source("publish_verified_uv")
+
+    assert '(set -C; umask 077; cat "$verified_uv" > "$uv_dest")' in source
+    assert "mv " not in source
+    assert "uv_dest.new" not in source
+    # The post-check that decides whether the write landed on a regular file.
+    assert '[ -L "$uv_dest" ] || [ ! -f "$uv_dest" ]' in source
+
+
+@runs_the_sh_installer
+@pytest.mark.parametrize(
+    ("dest_kind", "message"),
+    [
+        # A destination that is not a regular file is refused before the write.
+        ("symlink", "not a regular file"),
+        ("symlink-to-directory", "not a regular file"),
+        ("dangling-symlink", "not a regular file"),
+        ("directory", "not a regular file"),
+        # A regular file - or a hardlink to one elsewhere - is refused too: the
+        # exclusive create would either truncate it or write through the link.
+        ("file", "already exists"),
+        ("hardlink", "already exists"),
+    ],
+)
+def test_publish_refuses_any_preexisting_destination(
+    tmp_path: Path, dest_kind: str, message: str
 ) -> None:
-    """A symlink or directory at the destination is refused, not followed."""
+    """A path this run did not create is neither replaced nor written through."""
     result, paths = _run_publish(tmp_path, dest_kind=dest_kind)
 
     assert result.returncode != 0
-    assert "not a regular file" in result.stderr
-    assert paths["target"].read_bytes() == b"do not touch\n"
-    assert not paths["temp"].exists()
-    if dest_kind == "symlink":
+    assert message in result.stderr
+    _assert_publish_touched_nothing_else(paths)
+    if dest_kind == "directory":
+        assert list(paths["dest"].iterdir()) == []
+    elif dest_kind == "hardlink":
+        # Still the same inode it was linked to, and still linked to it.
+        assert paths["dest"].stat().st_nlink == 2
+        assert paths["dest"].read_bytes() == PUBLISH_SENTINEL
+    elif dest_kind == "dangling-symlink":
+        assert paths["dest"].is_symlink()
+        assert not paths["dest"].exists()
+    elif dest_kind == "symlink-to-directory":
+        assert paths["dest"].is_symlink()
+    elif dest_kind == "symlink":
         assert paths["dest"].is_symlink()
     else:
-        assert paths["dest"].is_dir()
-        assert list(paths["dest"].iterdir()) == []
+        assert paths["dest"].read_bytes() == PUBLISH_SENTINEL
 
 
 @runs_the_sh_installer
-@pytest.mark.parametrize("plant", ["file", "symlink"])
-def test_publish_creates_its_temp_exclusively(tmp_path: Path, plant: str) -> None:
-    """A planted temp path is refused, never followed or truncated."""
-    result, paths = _run_publish(tmp_path, plant_temp=plant)
+def test_publish_takes_back_only_what_it_created(tmp_path: Path) -> None:
+    """A failed write removes its own half-written file and nothing else."""
+    result, paths = _run_publish(tmp_path, fail_write=True)
 
     assert result.returncode != 0
-    assert "exclusively" in result.stderr
-    assert paths["target"].read_bytes() == b"do not touch\n"
+    assert "could not publish" in result.stderr
     assert not paths["dest"].exists()
-    if plant == "file":
-        assert paths["temp"].read_bytes() == b"planted\n"
-    else:
-        assert paths["temp"].is_symlink()
+    assert list(paths["bin_dir"].iterdir()) == []
+    assert paths["target_file"].read_bytes() == PUBLISH_SENTINEL
+    assert paths["same_named"].read_bytes() == PUBLISH_SENTINEL
 
 
-@runs_the_sh_installer
-def test_publish_refuses_a_directory_substituted_at_the_move(tmp_path: Path) -> None:
-    """If the destination becomes a directory after the check, nothing lands."""
-    result, paths = _run_publish(tmp_path, mv_race="directory")
+def test_trust_boundary_is_not_per_user_isolation() -> None:
+    """The header and the docs say what 0700 staging does and does not buy."""
+    header = " ".join(SCRIPT_TEXT.split("repo=raffaelefarinaro/ciaobot", 1)[0].split())
+    assert "not per-user isolation" in header
+    assert "the same user" in header
+    doc = " ".join(
+        (REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split()
+    )
+    assert "not per-user isolation" in doc
+    assert "the same user" in doc
 
-    assert result.returncode != 0
-    assert "not a regular file" in result.stderr
-    assert paths["dest"].is_dir()
-    # The moved file is taken back out of the substituted directory.
-    assert list(paths["dest"].iterdir()) == []
 
-
-@runs_the_sh_installer
-def test_publish_survives_a_symlink_substituted_at_the_move(tmp_path: Path) -> None:
-    """A symlink planted just before the rename is replaced, never followed."""
-    result, paths = _run_publish(tmp_path, mv_race="symlink")
-
-    assert result.returncode == 0, result.stderr
-    assert paths["dest"].is_file()
-    assert not paths["dest"].is_symlink()
-    assert paths["dest"].read_bytes() == UV_BOOTSTRAP_BODY
-    assert stat.S_IMODE(paths["dest"].stat().st_mode) == 0o700
-    assert paths["target"].read_bytes() == b"do not touch\n"
 
 
 @needs_local_tools

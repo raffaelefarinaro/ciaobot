@@ -254,11 +254,26 @@ regular `uv-<triple>/uvx`, with only `uv` extracted into a fresh 0700 staging
 directory. Any other member, a link, a duplicate, an absolute
 or `..` path, or an ambiguous name is a refusal that extracts and runs nothing.
 The verified staged executable is what a native-mode install takes; the staged
-copy is published atomically to `~/.local/bin/uv` only on the legacy missing-uv
-path, so bootstrapping never replaces a uv the machine already has.
+copy is published to `~/.local/bin/uv` only on the legacy missing-uv path, so
+bootstrapping never replaces a uv the machine already has. That publish is one
+exclusive create straight at the destination (`set -C`, i.e. `O_EXCL`), with no
+temporary and no rename: any path already there — a regular file, a directory, a
+symlink, a dangling symlink, a hardlink to a file elsewhere — makes the create
+fail, and nothing is written, followed or moved into it. `mv` is not used,
+because on BSD it follows a destination that is a directory or a symlink to one
+and moves the file inside. A failed or unconfirmed publish unlinks only the path
+that write created, never one that was already there. The run that publishes
+also keeps executing the private staged copy: reopening `~/.local/bin/uv` would
+let a later substitution of that path decide which uv the install runs.
 There is no piped shell installer in this path. The trust root for the archive
 is the reviewed digest table plus TLS to GitHub: uv publishes no minisign or
 Apple signature for these assets, and the installer does not claim one.
+The 0700 scratch directory that holds the archive and the staged copy is not
+per-user isolation: it excludes other users, but a process running as the same
+user can replace the archive between the `shasum` check and the tar read, or
+swap the staged copy before it runs. The digest table and TLS bound what the
+network can hand this script; nothing here defends against code already running
+as this user.
 Bumping `UV_VERSION` means replacing all six digests in the same review, and no
 checksum is fetched at install time. The bootstrap proves only that the
 archive matches the embedded digest; it does not authenticate anything that
