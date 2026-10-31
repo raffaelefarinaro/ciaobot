@@ -17,6 +17,7 @@
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { routerKey } from 'vue-router'
 import TaskWorkspaceSurface from './TaskWorkspaceSurface.vue'
+import { useOverlayBackEntry } from '../composables/useOverlayBackEntry'
 import { useItemPeekStore } from '../stores/itemPeek'
 import { useProjectStore } from '../stores/projects'
 
@@ -85,6 +86,17 @@ function onClosed(): void {
 // A route change would take the screen away from under an overlay that opened
 // over it. Registered for the host's lifetime (not per target) so the guard is
 // in place before any navigation begins, and removed with the host.
+
+// Back closes the overlay through the same awaited close as x. Called BEFORE
+// the guard below: the history guard installs first, so its `navigating` flag
+// is set before this host's guard can close the surface, and a peek closed by
+// a route change never pops history under the push in flight.
+useOverlayBackEntry(() => peek.isOpen, async () => {
+  const closed = await requestSurfaceClose()
+  // With no surface mounted there was nothing to refuse; end the target too.
+  if (closed && peek.isOpen) onClosed()
+  return closed
+})
 
 const unregisterRoute = router?.beforeEach(async () => requestSurfaceClose()) ?? null
 
