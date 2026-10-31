@@ -288,3 +288,22 @@ def test_capability_skill_points_at_the_guidance() -> None:
     assert "references/terminal.md" in skill
     assert "references/install-and-settings.md" in skill
     assert "terminal-offer" in skill
+
+
+def test_chat_mcp_setup_runs_in_the_workspace_folder() -> None:
+    """A chat-offered MCP command starts in the workspace folder.
+
+    The chat's terminal opens in the linked repository, and a project-scoped
+    add writes into the folder the shell is in, so the guidance must prefix
+    the command with the same ``cd`` Settings' Run in terminal uses.
+    """
+    guidance = _reference("install-and-settings.md")
+    assert "cd -- '<workspace folder>' && " in guidance
+    assert "Set-Location -LiteralPath '<workspace folder>'; " in guidance
+    assert "never the linked repository" in guidance
+
+    # The prefix forms the server builds (ciao/web/mcp_inventory.py `_shell_prefix`);
+    # the source text is checked, not the helper, so both platforms see the same forms.
+    server = (REPO / "ciao" / "web" / "mcp_inventory.py").read_text(encoding="utf-8")
+    assert 'f"cd -- {shlex.quote(root)} && "' in server
+    assert "f\"Set-Location -LiteralPath '{_double_ps_quotes(root)}'; \"" in server
