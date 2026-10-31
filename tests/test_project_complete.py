@@ -853,3 +853,28 @@ def test_complete_refuses_existing_destination_without_touching_the_project(tmp_
 
     assert (folder / "foo.md").read_bytes() == before
     assert proj.project_id in pcm._projects
+
+
+def test_complete_repoints_backlinks_in_unheaded_notes(tmp_path: Path) -> None:
+    # A journal with neither frontmatter nor an H1 is a placeholder to the
+    # index, but it still links the project and must follow the move.
+    _make_work_project_folder(tmp_path, "foo")
+    journal = tmp_path / "memory-vault" / "work" / "journals" / "daily.md"
+    journal.parent.mkdir(parents=True)
+    journal.write_text("[foo](../projects/active/foo/foo.md)\n", encoding="utf-8")
+    # A moving note of the same shape must be re-spelled too: its link to a
+    # sibling project would otherwise break once it leaves active/.
+    _make_work_project_folder(tmp_path, "other")
+    scratch = tmp_path / "memory-vault" / "work" / "projects" / "active" / "foo" / "scratch.md"
+    scratch.write_text("[o](../other/other.md)\n", encoding="utf-8")
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "foo")
+
+    with patch.object(pcm, "enqueue_project_closure", return_value=None):
+        pcm.complete_project(proj.project_id)
+
+    text = journal.read_text(encoding="utf-8")
+    assert "projects/completed/foo/foo.md" in text and "projects/active/foo" not in text
+    completed_scratch = tmp_path / "memory-vault" / "work" / "projects" / "completed" / "foo" / "scratch.md"
+    assert completed_scratch.read_text(encoding="utf-8") == "[o](../../active/other/other.md)\n"
