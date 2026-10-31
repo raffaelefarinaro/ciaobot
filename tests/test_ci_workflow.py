@@ -965,3 +965,41 @@ def test_dispatch_guard_binds_the_real_event_expressions() -> None:
     script = _dispatch_guard_script()
     for name in ("CONFIRMED", "DISPATCHED_REF", "EVENT_NAME"):
         assert f'"${name}"' in script, name
+
+def test_workflow_expressions_are_valid_for_github() -> None:
+    """A `runner` context in a job-level `env` block fails to parse the workflow.
+
+    GitHub then refuses the dispatch with 422 and the run never starts, which no
+    text assertion over the file previously noticed.
+    """
+    workflow_path = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "server-host-signing-rehearsal.yml"
+    )
+    lines = workflow_path.read_text(encoding="utf-8").splitlines()
+    in_jobs = False
+    job_indent: int | None = None
+    in_job_env = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if stripped == "jobs:":
+            in_jobs = True
+            continue
+        if not in_jobs:
+            continue
+        if indent == 2:
+            job_indent = indent
+            in_job_env = False
+            continue
+        if job_indent is not None and indent == job_indent + 2 and stripped == "env:":
+            in_job_env = True
+            continue
+        if job_indent is not None and indent <= job_indent + 2:
+            if stripped != "env:":
+                in_job_env = False
+        if in_job_env:
+            assert "runner." not in stripped, (
+                "a job-level env value may not use the runner context: " + stripped
+            )
