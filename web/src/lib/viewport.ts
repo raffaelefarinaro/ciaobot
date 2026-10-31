@@ -5,8 +5,8 @@
  * instantly when the iOS keyboard opens/closes. `100dvh` alone does not update
  * on iOS Safari until the user interacts with the page. Also toggles a
  * `.keyboard-open` class so the home-indicator safe-area can collapse while
- * the keyboard is covering it, and keeps `--safe-top` aligned with the
- * browser's safe-area inset.
+ * the keyboard is covering it. Safe-area insets stay in CSS so the browser
+ * can update them as the standalone viewport settles.
  *
  * `viewportHeight()` / `viewportWidth()` are the size any `position: fixed`
  * element should measure itself against: with `interactive-widget=resizes-content`
@@ -52,30 +52,6 @@ export function onViewportChange(cb: (height: number) => void): () => void {
 let maxViewportHeight = 0
 let listenersAttached = false
 
-// `env()` cannot be read back from a custom property: `getComputedStyle` returns
-// the raw `env(...)` token, not the resolved length. Layout is the only way to
-// resolve it, so measure a throwaway box once and cache it. Rotation and resume
-// re-read it because the inset changes with orientation.
-let cachedEnvTopInset: number | null = null
-// Avoid a style write on every resize tick while the value stays the same.
-let writtenSafeTop: number | null = null
-
-/** Resolve `env(safe-area-inset-top, 0px)` through layout, then cache it. */
-function envTopInset(): number {
-  if (typeof document === 'undefined') return 0
-  if (cachedEnvTopInset !== null) return cachedEnvTopInset
-  const probe = document.createElement('div')
-  // Must not take layout space or focus, and must not intercept pointers.
-  probe.style.cssText =
-    'position: absolute; top: 0; left: 0; width: 0; visibility: hidden; pointer-events: none;' +
-    ' height: env(safe-area-inset-top, 0px);'
-  document.documentElement.appendChild(probe)
-  const measured = probe.getBoundingClientRect().height
-  probe.remove()
-  cachedEnvTopInset = Number.isFinite(measured) ? Math.max(0, Math.round(measured)) : 0
-  return cachedEnvTopInset
-}
-
 function measure(): void {
   // The settling timers below fire up to 500ms after they are scheduled, which
   // can outlive the page — or, under vitest, the jsdom environment that owns
@@ -92,13 +68,6 @@ function measure(): void {
   // heuristic always returns false. Detect keyboard open by comparing
   // against the tallest viewport height we've seen for this orientation.
   const keyboardOpen = h < maxViewportHeight * KEYBOARD_OPEN_RATIO
-  // A shorter viewport does not say which edge lost space. Trust the safe-area
-  // inset rather than treating a bottom gap as evidence of a top inset.
-  const safeTop = envTopInset()
-  if (safeTop !== writtenSafeTop) {
-    document.documentElement.style.setProperty('--safe-top', `${safeTop}px`)
-    writtenSafeTop = safeTop
-  }
   const wasOpen = document.documentElement.classList.contains('keyboard-open')
   document.documentElement.classList.toggle('keyboard-open', keyboardOpen)
   for (const cb of subscribers) cb(h)
@@ -159,10 +128,8 @@ export function installViewportPlumbing(): void {
   window.addEventListener('resize', measure)
   window.addEventListener('orientationchange', () => {
     // The tallest height for the previous orientation says nothing about this
-    // one, so drop it and re-derive from the new viewport. The safe-area inset
-    // also changes with orientation, so re-read it through layout.
+    // one, so drop it and re-derive from the new viewport.
     maxViewportHeight = 0
-    cachedEnvTopInset = null
     remeasureWhileSettling()
   })
   if (window.visualViewport) {

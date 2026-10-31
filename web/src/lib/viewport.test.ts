@@ -194,20 +194,20 @@ describe('installViewportPlumbing and --safe-top', () => {
     delete vp.offsetTop
   })
 
-  it('writes the resolved inset to --safe-top', () => {
+  it('leaves the live CSS safe-area inset authoritative after startup and rotation', () => {
     installViewportPlumbing()
 
     // Healthy full-screen webview: the env inset is kept.
     vp.height = 932
     vp.offsetTop = 0
     window.dispatchEvent(new Event('orientationchange'))
-    expect(safeTop()).toBe('59px')
+    expect(safeTop()).toBe('')
 
     // A shorter viewport does not prove the top has been inset by the OS.
     vp.height = 873
     vp.offsetTop = 0
     window.dispatchEvent(new Event('orientationchange'))
-    expect(safeTop()).toBe('59px')
+    expect(safeTop()).toBe('')
   })
 
   it('keeps the inset while the keyboard is open', () => {
@@ -219,11 +219,11 @@ describe('installViewportPlumbing and --safe-top', () => {
     vp.height = KEYBOARD_HEIGHT
     vp.offsetTop = 0
     vp.dispatchEvent(new Event('resize'))
-    expect(safeTop()).toBe('59px')
+    expect(safeTop()).toBe('')
 
     // Closing it into a shorter viewport must not remove the top inset.
     vp.height = 873
     vp.dispatchEvent(new Event('resize'))
-    expect(safeTop()).toBe('59px')
+    expect(safeTop()).toBe('')
   })
 })
