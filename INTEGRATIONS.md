@@ -367,6 +367,58 @@ Jira project tables, Airtable base/table IDs, and similar skill-specific
 reference data belong next to the workspace skill that uses them, not in this
 repository-wide document.
 
+## Server host signing rehearsal (CI only)
+
+The signed, notarized macOS server host is exercised by a separate manual
+workflow, `.github/workflows/server-host-signing-rehearsal.yml` (#2331), before
+any production activation. It uploads no release asset and distributes nothing:
+the Apple notary submission inside the release build is the only network write,
+and candidate files stay on the runner. `publish.yml` is unchanged and keeps
+publishing the ad-hoc host, so none of these names is needed for an ordinary
+release.
+
+| Name | GitHub storage | Meaning |
+|---|---|---|
+| `SERVER_HOST_CERTIFICATE_P12_BASE64` | environment secret | exported Developer ID Application identity, base64-encoded |
+| `SERVER_HOST_CERTIFICATE_PASSWORD` | environment secret | p12 import password |
+| `SERVER_HOST_NOTARY_APPLE_ID` | environment secret | Apple ID used for notarization |
+| `SERVER_HOST_NOTARY_APP_PASSWORD` | environment secret | app-specific password for that Apple ID |
+| `SERVER_HOST_SIGNING_IDENTITY` | protected environment variable | the exact certificate selector, never an auto-pick |
+| `SERVER_HOST_TEAM_ID` | protected environment variable | the expected ten-character Apple team |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | existing release secrets | sign the candidate manifest with the unchanged public verifier |
+
+Provisioning is the operator's job, done only in the GitHub environment
+`server-host-signing-rehearsal`: store the four new secrets, set the two
+variables, reuse the existing manifest-signing secrets, and configure required
+reviewers plus allowed branches (`develop`, `main`).
+Never put these values in the repository, a `.env`, a workspace, an issue or a
+chat. An agent does not export identities, create the secrets or read keychain
+material; a missing input fails the requested run.
+
+To run it: Actions → `server-host-signing-rehearsal` → Run workflow, pick
+`develop` or `main`, and check `confirm_no_release_upload`. An unchecked box is a
+refusal, not a skipped rehearsal, and the environment approval must come from a
+reviewer. The workflow refuses any other ref before it binds a credential,
+records the dispatched commit, builds the PWA and wheel, installs the wheel in a
+clean Python 3.13 environment and runs `scripts/rehearse-server-host-signing.py`
+with that interpreter.
+
+The helper creates a temporary random-password keychain and notary profile under
+a fresh runner scratch directory, restores the prior default keychain and the
+whole prior search list, and deletes its certificate and keychain on every path,
+including build, notarization, manifest and verification failures. It verifies
+the final extracted app (signature, expected team and requirement, hardened
+runtime, timestamp, entitlements, notarization ticket, staple and Gatekeeper),
+authenticates the exact archive in a signed candidate manifest, and writes a
+sanitized `verification.json` plus a summary the workflow may append to the job
+summary. The workflow's `always()` cleanup step removes the whole scratch
+directory.
+
+These are CI inputs, not runtime configuration: no `CIAO_*` variable mirrors
+them, nothing in `ciao` reads them, and setting them in a local `.env` does
+nothing. The rehearsal is prepared and tested, not operationally proven; the
+promotion gate is in [`docs/SERVER_HOST_RELEASE.md`](docs/SERVER_HOST_RELEASE.md).
+
 ## Ciaobot Server Operation
 
 Runtime config for the Ciaobot server itself (PWA, schedules, deploy).

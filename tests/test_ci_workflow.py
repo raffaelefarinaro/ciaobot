@@ -551,3 +551,181 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
         "install.ps1 end-to-end install and uninstall (advisory)",
     ):
         assert full in steps[name], f"{name!r} is not gated on WINDOWS_FULL"
+
+
+def _rehearsal_workflow() -> str:
+    return (
+        Path(__file__).parents[1]
+        / ".github"
+        / "workflows"
+        / "server-host-signing-rehearsal.yml"
+    ).read_text(encoding="utf-8")
+
+
+def test_signing_rehearsal_is_manual_protected_and_no_release_upload() -> None:
+    # #2331: a maintainer-requested rehearsal of the signed host. It is a
+    # separate manual workflow on purpose: dispatching publish.yml cannot run
+    # build-engine (it is release-only), and a green skipped job proves nothing.
+    workflow = _rehearsal_workflow()
+
+    assert "workflow_dispatch:" in workflow
+    for untriggered in ("pull_request", "pull_request_target", "release:", "push:", "schedule:"):
+        assert untriggered not in workflow, (
+            f"the signing rehearsal must stay manually dispatched: {untriggered!r}"
+        )
+
+    # An unchecked confirmation is a refusal, never a successful skip.
+    assert "confirm_no_release_upload:" in workflow
+    assert "type: boolean" in workflow
+    assert "required: true" in workflow
+    assert "default: false" in workflow
+
+    # Read-only, with no release or OIDC permission to upload anything.
+    assert "permissions:\n  contents: read\n" in workflow
+    for forbidden in ("contents: write", "id-token", "releases:", "packages:"):
+        assert forbidden not in workflow, (
+            f"the signing rehearsal grants a write permission: {forbidden!r}"
+        )
+
+    # The environment carries the required reviewers and allowed branches; the
+    # workflow states the maintenance prerequisite rather than pretending YAML
+    # proves protection.
+    assert "environment: server-host-signing-rehearsal" in workflow
+    assert "provisioned by a maintainer" in workflow
+
+    # Bounded and serialized: one engine host signing run at a time.
+    assert "timeout-minutes: 90" in workflow
+    assert "concurrency:" in workflow
+    assert "group: server-host-signing-rehearsal" in workflow
+
+    # Untrusted refs and an unconfirmed run are refused before any credential
+    # is bound to a step.
+    guard = workflow.split("    - uses: actions/checkout@v7")[0]
+    assert "refs/heads/develop|refs/heads/main" in guard
+    assert "confirm_no_release_upload" in guard
+    assert "exit 1" in guard
+    assert "secrets." not in guard, "the refusal step must not receive a secret"
+    assert "SERVER_HOST_CERTIFICATE_P12_BASE64" not in guard
+
+    # Nothing is uploaded or distributed. The one permitted network write is the
+    # Apple notary submission inside the release build.
+    commands = "\n".join(
+        line for line in workflow.splitlines() if not line.lstrip().startswith("#")
+    )
+    for forbidden in (
+        "actions/upload-artifact",
+        "gh release",
+        "--clobber",
+        "git push",
+        "npm publish",
+        "uv publish",
+        "aws s3",
+    ):
+        assert forbidden not in commands, (
+            f"the signing rehearsal would distribute a candidate: {forbidden!r}"
+        )
+    assert "continue-on-error" not in commands
+    # A cleanup step always runs and removes the runner-local candidate files.
+    assert "if: ${{ always() }}" in commands
+    assert 'rm -rf "$RUNNER_TEMP/server-host-signing-rehearsal"' in commands
+
+    # Current repo-pinned action versions, not floating ones.
+    assert "actions/checkout@v7" in workflow
+    assert "actions/setup-node@v7" in workflow
+    assert "astral-sh/setup-uv@v10.3.2" in workflow
+
+    # The named CI inputs only, and they are bound to the signing step alone.
+    signing_step = workflow.split("      - name: Rehearse the signed server host")[1]
+    signing_step = signing_step.split("      - name: Remove runner-local")[0]
+    for name in (
+        "SERVER_HOST_CERTIFICATE_P12_BASE64",
+        "SERVER_HOST_CERTIFICATE_PASSWORD",
+        "SERVER_HOST_NOTARY_APPLE_ID",
+        "SERVER_HOST_NOTARY_APP_PASSWORD",
+        "SERVER_HOST_SIGNING_IDENTITY",
+        "SERVER_HOST_TEAM_ID",
+    ):
+        assert name in signing_step, f"the signing step never receives {name}"
+    assert "SERVER_HOST_SIGNING_IDENTITY: ${{ vars." in signing_step
+    assert "SERVER_HOST_TEAM_ID: ${{ vars." in signing_step
+    assert "set -x" not in commands
+
+
+def test_signing_rehearsal_binds_source_sha_and_clean_wheel_verifier() -> None:
+    workflow = _rehearsal_workflow()
+
+    # The event's exact commit is what runs and what the report names. Checkout
+    # keeps no push credential, and the SHA is re-read from the checkout.
+    assert "persist-credentials: false" in workflow
+    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
+    assert '--source-sha "$GITHUB_SHA"' in workflow
+
+    # The wheel a real release would publish is built, then verified by an
+    # interpreter that only holds the installed wheel - never the checkout.
+    assert workflow.index("Build PWA assets") < workflow.index("Build engine wheel")
+    assert workflow.index("Build engine wheel") < workflow.index(
+        "Verify engine wheel in a clean environment"
+    )
+    assert 'uv build --wheel --out-dir dist' in workflow
+    assert 'uv venv --python 3.13 "$RUNNER_TEMP/engine-check"' in workflow
+    assert (
+        'uv pip install --python "$RUNNER_TEMP/engine-check/bin/python" '
+        "dist/ciaobot-*.whl" in workflow
+    )
+    assert 'cd "$RUNNER_TEMP"' in workflow
+    assert (
+        '"$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest check-static'
+        in workflow
+    )
+
+    # The helper runs from the checkout with that clean interpreter, a fresh
+    # scratch output and the single candidate wheel; the report stays local and
+    # only the sanitized summary reaches the step summary.
+    helper = workflow.split("      - name: Rehearse the signed server host")[1]
+    helper = helper.split("      - name: Remove runner-local")[0]
+    assert "scripts/rehearse-server-host-signing.py" in helper
+    assert '--output "$RUNNER_TEMP/server-host-signing-rehearsal"' in helper
+    assert '--python "$RUNNER_TEMP/engine-check/bin/python"' in helper
+    assert "--wheel dist/ciaobot-*.whl" in helper
+    assert (
+        'cat "$RUNNER_TEMP/server-host-signing-rehearsal/summary.txt" '
+        '>> "$GITHUB_STEP_SUMMARY"' in helper
+    )
+    assert "verification.json" not in helper, (
+        "the raw runner-local report must not be echoed into the summary"
+    )
+
+
+def test_production_publish_remains_usable_without_apple_credentials() -> None:
+    # #2331 prepares CI; it does not activate signed publishing. Today's release
+    # must keep working with no Apple secret, no signed-mode switch and no
+    # dependency on the rehearsal.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "publish.yml"
+    ).read_text(encoding="utf-8")
+
+    for forbidden in (
+        "SERVER_HOST_CERTIFICATE_P12_BASE64",
+        "SERVER_HOST_CERTIFICATE_PASSWORD",
+        "SERVER_HOST_NOTARY_APPLE_ID",
+        "SERVER_HOST_NOTARY_APP_PASSWORD",
+        "SERVER_HOST_SIGNING_IDENTITY",
+        "SERVER_HOST_TEAM_ID",
+    ):
+        assert forbidden not in workflow, (
+            f"publish.yml grew a mandatory Apple-secret dependency: {forbidden!r}"
+        )
+    for flag in ("--release", "--signing-identity", "--team-id", "--notary-profile"):
+        assert flag not in workflow, (
+            f"publish.yml switched the production host build to signed mode: {flag!r}"
+        )
+    assert "--server-host-team-id" not in workflow
+    assert "server-host-signing-rehearsal" not in workflow
+    assert "rehearsal" not in workflow.lower()
+
+    # The ordinary ad-hoc build, its scratch output and the seven assets are
+    # untouched, and the production job has no edge to the rehearsal.
+    assert '"$RUNNER_TEMP/engine-check/bin/python" scripts/build-server-host.py' in workflow
+    assert '--output "$RUNNER_TEMP/server-host-build"' in workflow
+    assert "gh release upload \"$TAG\"" in workflow
+    assert workflow.count("needs: build-engine") == 1

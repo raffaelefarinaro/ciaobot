@@ -142,7 +142,93 @@ The release now carries seven assets: `install.sh`, `install-engine.sh`,
 `install.ps1`, the wheel, the manifest, its signature, and the host archive. It
 adds no app archive, no `latest.json` feed, no verifier and no bundled runtime,
 and it introduces no new secret, codesign identity, notarization step or
-environment knob.
+environment knob. The CI-only configuration described below belongs to the
+separate rehearsal workflow, not to `publish.yml`.
+
+## The signing rehearsal workflow
+
+`.github/workflows/server-host-signing-rehearsal.yml` (#2331) is how signed5 is
+exercised before any activation. It is a separate manual workflow on purpose:
+`build-engine` in `publish.yml` is release-only, so dispatching `publish.yml`
+never runs it, and a green skipped job would prove nothing.
+
+The workflow runs only from `workflow_dispatch`, with `contents: read`, no
+release or `id-token` permission and no upload step. Its required input
+`confirm_no_release_upload` is a boolean that defaults to `false`; an unchecked
+run fails in the first step, before checkout and before any secret is bound to a
+step. The same step refuses any ref other than `refs/heads/develop` or
+`refs/heads/main`, so an untrusted branch never reaches the signing step.
+
+| Name | Storage | Purpose |
+|---|---|---|
+| `SERVER_HOST_CERTIFICATE_P12_BASE64` | environment secret | exported Developer ID Application identity, base64-encoded; supplied by the operator, never exported by an agent |
+| `SERVER_HOST_CERTIFICATE_PASSWORD` | environment secret | the p12 import password |
+| `SERVER_HOST_NOTARY_APPLE_ID` | environment secret | Apple ID used for notarization |
+| `SERVER_HOST_NOTARY_APP_PASSWORD` | environment secret | app-specific password for that Apple ID |
+| `SERVER_HOST_SIGNING_IDENTITY` | protected environment variable | the exact certificate selector; never "the first available identity" |
+| `SERVER_HOST_TEAM_ID` | protected environment variable | the expected ten-character team the candidate is signed by |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | the existing release manifest-signing secrets | sign the candidate manifest with the unchanged public verifier |
+
+`environment: server-host-signing-rehearsal` is a provisioning prerequisite a
+maintainer configures with required reviewers and allowed branches. The YAML
+states the requirement; it cannot prove the environment is protected, so a run
+without those settings is not rehearsal evidence. The workflow also records the
+exact `github.sha`, refuses a checkout whose `HEAD` is not that commit, and
+writes it into the runner-local report.
+
+The step runs `scripts/rehearse-server-host-signing.py` with the clean-wheel
+interpreter the release uses. The helper:
+
+1. validates every named input and refuses a missing one by name before it
+   creates a directory, a keychain or a build;
+2. creates a temporary random-password keychain and notary profile under a fresh
+   scratch directory, makes them the user default and the only signing-identity
+   search target, imports the certificate, and bounds the key's access to
+   `codesign`;
+3. calls the explicit release build (the `--release` path, with the named
+   identity, team and profile), which signs with hardened runtime, a secure
+   timestamp and the tracked entitlements, requires exactly `Accepted` from
+   `notarytool`, staples, validates the staple, archives and re-extracts the
+   archive;
+4. extracts the final archive again and verifies the app there — strict
+   signature, the external expected requirement, the expected team, per-arch
+   runtime/timestamp/entitlements, the canonical designated requirement, the
+   exact sealed file set including `Contents/CodeResources`, `stapler validate`
+   and a Gatekeeper assessment;
+5. writes a schema-2 ownership record in a separate scratch home and proves the
+   snapshot round-trips through `verify_owned_host`;
+6. builds and signs a candidate manifest with the pinned standalone
+   `@tauri-apps/cli` signer, verifies it with the installed
+   `ciao.release_manifest verify`, recomputes the archive digest after signing,
+   compares it with the authenticated host entry and the single candidate wheel,
+   and extracts that exact archive once more for a final inspection.
+
+Then, in `finally` on every path, the helper restores the prior default keychain
+and the entire prior search list, deletes the temporary keychain, and removes
+the exported certificate. The candidate app, archive, manifest and report stay
+in the runner's scratch directory; nothing is uploaded, published or attached
+to a release, and the Apple notary submission is the only network write. A
+failed run prints a sanitized error, writes no `verification.json`, and the
+workflow's `always()` cleanup step removes the scratch directory. No credential
+value is printed, summarized or embedded in an error, and there is no `set -x`.
+
+### Promotion gate
+
+Signed production publishing stays off until, in a separate approved follow-up:
+the maintainer provisions the environment inputs and approves a protected run; a
+real rehearsal at the candidate SHA succeeds with the expected Developer ID,
+stable designated requirement, secure timestamp/runtime/entitlements on both
+slices, `Accepted` notarization, valid staple, the expected ticket layout,
+archive extraction integrity and a Gatekeeper pass, captured as a sanitized run
+link and digest; an isolated real macOS device walk covers fresh install, the
+owned legacy4-to-signed5 migration, rollback and the permission prompts; and
+reviewers approve that evidence. Any layout, requirement or entitlement
+difference becomes a contract revision first, not a widened allowlist.
+
+Until then the rehearsal is **prepared and tested, not operationally proven or
+activated**: no provisioned run has executed, and `publish.yml` keeps publishing
+the ad-hoc revision-4 host.
+
 
 ## Platform and permission identity
 
@@ -159,9 +245,11 @@ team the signed manifest names — the designated requirement pins the bundle, t
 Developer ID extensions and the team, never a certificate fingerprint or CDHash,
 so a certificate renewal within the team keeps the same logical identity. The
 signed policy is not published by `publish.yml` yet: the release continues to
-serve the ad-hoc revision-4 host until a separately approved activation, and a
-signed archive's real ticket layout and round trip remain a promotion gate for
-the first protected rehearsal rather than a claim made here.
+serve the ad-hoc revision-4 host until a separately approved activation. The
+protected rehearsal workflow above now exercises the whole signed path with
+fakes in tests, but no provisioned run has executed, so the real ticket layout,
+staple round trip and Gatekeeper result remain promotion gates rather than
+claims made here.
 
 Revision 2 (#1249) names the executable `Ciaobot Server`, so the Login Items row reads "Ciaobot Server".
 
@@ -184,7 +272,9 @@ once. The revision-2 allowance is removed one release after revision 4 ships.
 Revision 5 is the explicitly signed revision (#2329). It is understood by the
 manifest selector and the runtime contract but is not published: `publish.yml`
 keeps building and signing the revision-4 archive until a separately approved
-activation, and no installed host is migrated to it here.
+activation, and no installed host is migrated to it here. The protected
+rehearsal (#2331) prepares and tests that path; it has not run against real
+credentials.
 
 ## What this does not do
 
@@ -192,6 +282,9 @@ activation, and no installed host is migrated to it here.
   `~/Applications`, TCC or any permission. Acquiring and installing the host is
   the installer's separate, opt-in job (child E1, `ciao/server_host_install.py`);
   the release only authenticates the archive.
+- It does not run the rehearsal. The workflow, helper and their tests are
+  prepared, but an operational run needs operator-provisioned credentials and a
+  protected environment, and no such run is claimed here.
 - It does not make the engine updater overwrite an installed host: an installed
   compatible host is never auto-replaced by an engine update, because the host
   is authenticated but opt-in and its revision is independent of the engine.
