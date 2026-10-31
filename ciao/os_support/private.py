@@ -1,10 +1,36 @@
 """Owner-only files and directories on every OS.
 
 ``make_private`` / ``make_private_dir`` restrict a path to its owner, and
-``is_private`` answers whether a path is restricted that way.
+``is_private`` answers whether a path is restricted that way. ``is_private_descriptor``
+answers the same question for an already-open descriptor, so a caller that has
+checked the open file is not re-answering it from a pathname another writer can
+swap.
 
 POSIX is the mode bits exactly as the call sites set and checked them before
 this module existed: ``0o600`` for a file, ``0o700`` for a directory.
+
+``is_private_descriptor`` and ``is_private`` answer the legacy question "are the
+bits private?" They do not ask who owns the inode, so a file owned by another
+account with ``0o600`` passes them. The strict verifiers
+``is_private_descriptor_strict`` / ``is_private_strict`` add the ownership and
+platform-ACL questions a caller needs before treating a path as its own private
+state; the legacy functions keep their existing answers for the call sites that
+already depend on them.
+
+On POSIX the strict verifiers require the inode's owner to be the process's
+effective uid, not just the mode. On macOS they also read the file's extended
+ACL through ``acl_get_fd_np`` and refuse any allow entry whose principal is not
+the effective user (deny entries are harmless and ignored). This closes the
+case where a mode ``0o600`` file still has ``everyone allow read``. Linux POSIX
+ACLs (``system.posix_acl_access``) are *not* inspected; the strict verifier
+there checks owner and mode only. On Windows strict additionally requires the
+file's owner SID to be the current account, alongside the protected DACL that
+``is_private_descriptor`` already checks.
+
+``is_owned_descriptor`` and ``descriptor_acl_grants_another_account`` expose
+those two pieces for callers that need a different mode rule (for example an
+ancestor directory that must be owned and not group/other-writable but is not
+itself ``0o700``).
 
 Windows has no mode bits (``os.chmod`` only toggles the read-only flag), so
 "private" is a protected DACL that grants full control to the current user
@@ -50,6 +76,7 @@ from ciao.os_support.files import open_fd
 if sys.platform == "win32":
     import ctypes
     import errno
+    import msvcrt
     import secrets
     from ctypes import wintypes
 
@@ -60,6 +87,7 @@ if sys.platform == "win32":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     _SE_FILE_OBJECT = 1
+    _OWNER_SECURITY_INFORMATION = 0x1
     _DACL_SECURITY_INFORMATION = 0x4
     _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
     _ACL_REVISION = 2
@@ -135,6 +163,12 @@ if sys.platform == "win32":
     _GetNamedSecurityInfoW = _declare(
         _advapi32, "GetNamedSecurityInfoW", wintypes.DWORD,
         wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD,
+        ctypes.POINTER(_PSID), ctypes.POINTER(_PSID), ctypes.POINTER(_PACL),
+        ctypes.POINTER(_PACL), ctypes.POINTER(_PSECURITY_DESCRIPTOR),
+    )
+    _GetSecurityInfo = _declare(
+        _advapi32, "GetSecurityInfo", wintypes.DWORD,
+        wintypes.HANDLE, ctypes.c_int, wintypes.DWORD,
         ctypes.POINTER(_PSID), ctypes.POINTER(_PSID), ctypes.POINTER(_PACL),
         ctypes.POINTER(_PACL), ctypes.POINTER(_PSECURITY_DESCRIPTOR),
     )
@@ -235,6 +269,32 @@ if sys.platform == "win32":
         """Restrict a directory, and what is created in it, to its owner."""
         _protect(path, _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE)
 
+    def _dacl_grants_owner_only(dacl: ctypes.c_void_p, *, is_dir: bool) -> bool:
+        """Whether this DACL grants nothing to anyone but the user and SYSTEM."""
+        if not dacl.value:
+            return False  # a NULL DACL grants everyone everything
+        info = _AclSizeInformation()
+        _check(
+            _GetAclInformation(
+                dacl, ctypes.byref(info), ctypes.sizeof(info), _ACL_SIZE_INFORMATION_CLASS
+            )
+        )
+        allowed = [ctypes.create_string_buffer(sid, len(sid)) for sid in _allowed_sids()]
+        for index in range(info.AceCount):
+            ace = ctypes.c_void_p()
+            _check(_GetAce(dacl, index, ctypes.byref(ace)))
+            entry = _AccessAllowedAce.from_address(_address(ace))
+            if entry.Header.AceType == _ACCESS_DENIED_ACE_TYPE:
+                continue  # a deny entry only takes access away
+            if entry.Header.AceType != _ACCESS_ALLOWED_ACE_TYPE:
+                return False  # a type that may grant, to a principal not read here
+            if entry.Header.AceFlags & _INHERIT_ONLY_ACE and not is_dir:
+                continue  # applies to children only, and a file has none
+            sid = _address(ace) + _AccessAllowedAce.SidStart.offset
+            if not any(_EqualSid(sid, known) for known in allowed):
+                return False
+        return True
+
     def is_private(path: str | os.PathLike[str]) -> bool:
         """Whether the DACL grants nothing to anyone but the user and SYSTEM.
 
@@ -254,29 +314,90 @@ if sys.platform == "win32":
         if error:
             raise ctypes.WinError(error)
         try:
-            if not dacl.value:
-                return False  # a NULL DACL grants everyone everything
-            info = _AclSizeInformation()
-            _check(
-                _GetAclInformation(
-                    dacl, ctypes.byref(info), ctypes.sizeof(info), _ACL_SIZE_INFORMATION_CLASS
+            return _dacl_grants_owner_only(dacl, is_dir=is_dir)
+        finally:
+            _LocalFree(descriptor)
+
+    def is_private_descriptor(fd: int) -> bool:
+        """Whether the already-open file is owner-only.
+
+        The DACL is read from the handle, not the pathname, so a path swapped
+        after the caller's checks cannot be what is judged. This is the
+        descriptor-bound sibling of :func:`is_private`.
+        """
+        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        dacl = _PACL()
+        descriptor = _PSECURITY_DESCRIPTOR()
+        error = _GetSecurityInfo(
+            msvcrt.get_osfhandle(fd), _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION,
+            None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+        )
+        if error:
+            raise ctypes.WinError(error)
+        try:
+            return _dacl_grants_owner_only(dacl, is_dir=is_dir)
+        finally:
+            _LocalFree(descriptor)
+
+    def is_owned_descriptor(fd: int) -> bool:
+        """Whether the already-open file is owned by the current account."""
+        owner = _PSID()
+        descriptor = _PSECURITY_DESCRIPTOR()
+        error = _GetSecurityInfo(
+            msvcrt.get_osfhandle(fd), _SE_FILE_OBJECT, _OWNER_SECURITY_INFORMATION,
+            ctypes.byref(owner), None, None, None, ctypes.byref(descriptor),
+        )
+        if error:
+            raise ctypes.WinError(error)
+        try:
+            expected = current_user_sid()
+            return bool(
+                _EqualSid(
+                    _address(owner),
+                    ctypes.create_string_buffer(expected, len(expected)),
                 )
             )
-            allowed = [ctypes.create_string_buffer(sid, len(sid)) for sid in _allowed_sids()]
-            for index in range(info.AceCount):
-                ace = ctypes.c_void_p()
-                _check(_GetAce(dacl, index, ctypes.byref(ace)))
-                entry = _AccessAllowedAce.from_address(_address(ace))
-                if entry.Header.AceType == _ACCESS_DENIED_ACE_TYPE:
-                    continue  # a deny entry only takes access away
-                if entry.Header.AceType != _ACCESS_ALLOWED_ACE_TYPE:
-                    return False  # a type that may grant, to a principal not read here
-                if entry.Header.AceFlags & _INHERIT_ONLY_ACE and not is_dir:
-                    continue  # applies to children only, and a file has none
-                sid = _address(ace) + _AccessAllowedAce.SidStart.offset
-                if not any(_EqualSid(sid, known) for known in allowed):
-                    return False
-            return True
+        finally:
+            _LocalFree(descriptor)
+
+    def is_owned_path(path: str | os.PathLike[str]) -> bool:
+        """Whether the named file is owned by the current account."""
+        return _named_owner_is_current_user(path)
+
+    def descriptor_acl_grants_another_account(fd: int) -> bool:
+        """Windows has no separate extended ACL beyond the DACL already checked."""
+        return False
+
+    def is_private_descriptor_strict(fd: int) -> bool:
+        """Whether the open file is this account's, with a protected owner-only DACL."""
+        return is_owned_descriptor(fd) and is_private_descriptor(fd)
+
+    def is_private_strict(path: str | os.PathLike[str]) -> bool:
+        """Path-bound strict variant of :func:`is_private_descriptor_strict`.
+
+        The pathname is inspected with a no-follow handle, but a same-UID writer
+        can still replace it after the check; prefer the descriptor form for
+        anything that is then read or written.
+        """
+        return is_private(path) and _named_owner_is_current_user(path)
+
+    def _named_owner_is_current_user(path: str | os.PathLike[str]) -> bool:
+        owner = _PSID()
+        descriptor = _PSECURITY_DESCRIPTOR()
+        error = _GetNamedSecurityInfoW(
+            os.fspath(path), _SE_FILE_OBJECT, _OWNER_SECURITY_INFORMATION,
+            ctypes.byref(owner), None, None, None, ctypes.byref(descriptor),
+        )
+        if error:
+            raise ctypes.WinError(error)
+        try:
+            expected = current_user_sid()
+            return bool(
+                _EqualSid(
+                    _address(owner),
+                    ctypes.create_string_buffer(expected, len(expected)),
+                )
+            )
         finally:
             _LocalFree(descriptor)
 
@@ -327,6 +448,154 @@ if sys.platform == "win32":
 
 else:
 
+    if sys.platform == "darwin":
+        import ctypes
+        import errno
+
+        _libc = ctypes.CDLL(None, use_errno=True)
+        _ACL_TYPE_EXTENDED = 0x100
+        _ACL_FIRST_ENTRY = 0
+        _ACL_NEXT_ENTRY = -1
+        _ACL_EXTENDED_ALLOW = 1
+        _ACL_EXTENDED_DENY = 2
+        _ACL_GUID_SIZE = 16
+
+        _acl_get_fd_np = _libc.acl_get_fd_np
+        _acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        _acl_get_fd_np.restype = ctypes.c_void_p
+        _acl_get_entry = _libc.acl_get_entry
+        _acl_get_entry.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)
+        ]
+        _acl_get_entry.restype = ctypes.c_int
+        _acl_get_tag_type = _libc.acl_get_tag_type
+        _acl_get_tag_type.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+        _acl_get_tag_type.restype = ctypes.c_int
+        _acl_get_qualifier = _libc.acl_get_qualifier
+        _acl_get_qualifier.argtypes = [ctypes.c_void_p]
+        _acl_get_qualifier.restype = ctypes.c_void_p
+        _acl_free = _libc.acl_free
+        _acl_free.argtypes = [ctypes.c_void_p]
+        _acl_free.restype = ctypes.c_int
+        _mbr_uid_to_uuid = _libc.mbr_uid_to_uuid
+        _mbr_uid_to_uuid.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_ubyte * 16)]
+        _mbr_uid_to_uuid.restype = ctypes.c_int
+
+        def _effective_user_guid() -> bytes:
+            guid = (ctypes.c_ubyte * _ACL_GUID_SIZE)()
+            if _mbr_uid_to_uuid(os.geteuid(), ctypes.byref(guid)) != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
+            return bytes(guid)
+
+        def _acl_grants_another_account(fd: int) -> bool:
+            """Whether the extended ACL allows any principal but the effective user.
+
+            A deny entry takes access away and is ignored; every allow entry
+            naming another principal is a grant. An unrecognised tag is refused
+            because it may grant. No extended ACL at all is the common case and
+            is not an error.
+            """
+            acl = _acl_get_fd_np(fd, _ACL_TYPE_EXTENDED)
+            if not acl:
+                error = ctypes.get_errno()
+                if error == errno.ENOENT:
+                    return False
+                raise OSError(error, os.strerror(error))
+            try:
+                owner = _effective_user_guid()
+                entry = ctypes.c_void_p()
+                selector = _ACL_FIRST_ENTRY
+                while True:
+                    if _acl_get_entry(acl, selector, ctypes.byref(entry)) != 0:
+                        error = ctypes.get_errno()
+                        if error == errno.EINVAL:
+                            return False  # no more entries
+                        raise OSError(error, os.strerror(error))
+                    selector = _ACL_NEXT_ENTRY
+                    tag = ctypes.c_int()
+                    if _acl_get_tag_type(entry, ctypes.byref(tag)) != 0:
+                        error = ctypes.get_errno()
+                        raise OSError(error, os.strerror(error))
+                    if tag.value == _ACL_EXTENDED_DENY:
+                        continue
+                    if tag.value != _ACL_EXTENDED_ALLOW:
+                        return True
+                    qualifier = _acl_get_qualifier(entry)
+                    if not qualifier:
+                        error = ctypes.get_errno()
+                        raise OSError(error, os.strerror(error))
+                    try:
+                        if ctypes.string_at(qualifier, _ACL_GUID_SIZE) != owner:
+                            return True
+                    finally:
+                        _acl_free(qualifier)
+            finally:
+                _acl_free(acl)
+
+    else:
+
+        def _acl_grants_another_account(fd: int) -> bool:
+            """Linux POSIX ACLs are not inspected; see the module docstring."""
+            return False
+
+    def is_owned_descriptor(fd: int) -> bool:
+        """Whether the already-open file is owned by the effective uid."""
+        return os.fstat(fd).st_uid == os.geteuid()
+
+    def is_owned_path(path: str | os.PathLike[str]) -> bool:
+        """Whether the named file is owned by the effective uid."""
+        return os.lstat(path).st_uid == os.geteuid()
+
+    def descriptor_acl_grants_another_account(fd: int) -> bool:
+        """Whether the descriptor's platform ACL allows anyone but this user.
+
+        macOS reads the extended ACL. Other POSIX systems answer ``False``;
+        their POSIX ACLs are not inspected (see the module docstring).
+        """
+        return _acl_grants_another_account(fd)
+
+    def is_private_descriptor_strict(fd: int) -> bool:
+        """Whether the open file belongs to this user and is privately accessible.
+
+        It is ``0o600`` (or ``0o700`` for a directory), owned by the effective
+        uid, and — on macOS — carries no extended ACL allow entry for another
+        principal. Read from the descriptor, so it describes the inode the
+        caller opened.
+        """
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid():
+            return False
+        if not is_private_descriptor(fd):
+            return False
+        return not _acl_grants_another_account(fd)
+
+    def is_private_strict(path: str | os.PathLike[str]) -> bool:
+        """Path-bound strict variant of :func:`is_private_descriptor_strict`.
+
+        The final component is opened with ``O_NOFOLLOW`` but a same-UID writer
+        can still replace it after the check; prefer the descriptor form for
+        anything that is then read or written.
+
+        The open is non-blocking where the platform has it. A FIFO whose mode
+        looks private is still not a file the caller can read as state, but
+        opening it read-only without ``O_NONBLOCK`` waits for a writer forever;
+        the mode/owner answer for the inode is unchanged, and a caller that
+        needs a regular file checks that itself.
+        """
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        if stat.S_ISDIR(os.lstat(path).st_mode):
+            flags |= getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(path, flags)
+        try:
+            return is_private_descriptor_strict(descriptor)
+        finally:
+            os.close(descriptor)
+
     def make_private(path: str | os.PathLike[str]) -> None:
         """Restrict a file to its owner; see the module docstring."""
         os.chmod(path, 0o600)
@@ -338,6 +607,15 @@ else:
     def is_private(path: str | os.PathLike[str]) -> bool:
         """Whether ``path`` is ``0o600`` (a file) or ``0o700`` (a directory)."""
         st = os.stat(path)
+        return stat.S_IMODE(st.st_mode) == (0o700 if stat.S_ISDIR(st.st_mode) else 0o600)
+
+    def is_private_descriptor(fd: int) -> bool:
+        """Whether the already-open file is ``0o600`` (or ``0o700`` if a directory).
+
+        Read from the descriptor, not the pathname, so a path swapped after the
+        caller's checks cannot be what is judged.
+        """
+        st = os.fstat(fd)
         return stat.S_IMODE(st.st_mode) == (0o700 if stat.S_ISDIR(st.st_mode) else 0o600)
 
     def open_private(

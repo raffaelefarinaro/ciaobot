@@ -12,6 +12,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,144 @@ def test_a_private_directory_makes_what_is_created_in_it_private(tmp_path: Path)
     fd = open_private(child, os.O_WRONLY)
     os.close(fd)
     assert is_private(child)
+
+
+def test_a_descriptor_answers_for_the_opened_file(tmp_path: Path) -> None:
+    """The descriptor-bound sibling of ``is_private`` follows the same rule."""
+    path = tmp_path / "secret.txt"
+    path.write_text("token", encoding="utf-8")
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        assert private.is_private_descriptor(fd) is False
+    finally:
+        os.close(fd)
+    make_private(path)
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        assert private.is_private_descriptor(fd) is True
+        assert private.is_private_descriptor_strict(fd) is True
+        assert private.is_owned_descriptor(fd) is True
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uid ownership is POSIX")
+def test_the_strict_descriptor_answer_requires_the_effective_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mode-0600 file owned by someone else is private to *them*, not to us."""
+    path = tmp_path / "secret.txt"
+    path.write_text("token", encoding="utf-8")
+    make_private(path)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        assert private.is_private_descriptor(descriptor) is True
+        real_geteuid = os.geteuid
+        monkeypatch.setattr(
+            private.os, "geteuid", lambda: real_geteuid() + 1
+        )
+        assert private.is_private_descriptor(descriptor) is True, (
+            "the legacy mode-only answer must not change"
+        )
+        assert private.is_private_descriptor_strict(descriptor) is False
+        assert private.is_owned_descriptor(descriptor) is False
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS extended ACLs")
+def test_the_strict_descriptor_answer_refuses_a_granting_acl(tmp_path: Path) -> None:
+    """Mode 0600 does not stop an extended ACL from allowing everyone to read."""
+    path = tmp_path / "secret.txt"
+    path.write_text("token", encoding="utf-8")
+    make_private(path)
+    subprocess.run(
+        ["chmod", "+a", "everyone allow read", str(path)],
+        capture_output=True,
+        check=True,
+    )
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        assert private.is_private_descriptor(descriptor) is True
+        assert private.is_private_descriptor_strict(descriptor) is False
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS extended ACLs")
+def test_the_strict_descriptor_answer_ignores_a_deny_only_acl(tmp_path: Path) -> None:
+    """macOS home directories carry a harmless ``everyone deny delete`` entry."""
+    path = tmp_path / "secret.txt"
+    path.write_text("token", encoding="utf-8")
+    make_private(path)
+    subprocess.run(
+        ["chmod", "+a", "everyone deny delete", str(path)],
+        capture_output=True,
+        check=True,
+    )
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            assert private.is_private_descriptor_strict(descriptor) is True
+        finally:
+            os.close(descriptor)
+    finally:
+        subprocess.run(
+            ["chmod", "-a", "everyone deny delete", str(path)],
+            capture_output=True,
+            check=False,
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX path-vs-inode semantics")
+def test_a_descriptor_is_not_fooled_by_the_path_being_replaced(tmp_path: Path) -> None:
+    """A path check after the open can describe a different inode than the fd."""
+    opened = tmp_path / "opened.txt"
+    opened.write_text("kept", encoding="utf-8")
+    make_private(opened)
+    descriptor = os.open(opened, os.O_RDONLY)
+    try:
+        replacement = tmp_path / "replacement.txt"
+        replacement.write_text("loose", encoding="utf-8")
+        replacement.chmod(0o644)
+        os.replace(replacement, opened)
+        assert not is_private(opened)
+        assert private.is_private_descriptor(descriptor)
+        assert os.read(descriptor, 4) == b"kept"
+    finally:
+        os.close(descriptor)
+
+
+def _returns_promptly(seconds: float, call):
+    """Run ``call`` in a daemon thread; fail rather than hang the suite on a FIFO."""
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["value"] = call()
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), "the strict path check did not return promptly"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX FIFOs")
+def test_the_strict_path_answer_does_not_block_on_a_fifo(tmp_path: Path) -> None:
+    """A private FIFO is answered without waiting for a writer forever.
+
+    The mode/owner/ACL question is unchanged; the open is merely non-blocking.
+    A caller that needs a regular file still checks that itself.
+    """
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo, 0o600)
+    assert stat.S_IMODE(fifo.stat().st_mode) == 0o600
+    assert _returns_promptly(5.0, lambda: private.is_private_strict(fifo)) is True
 
 
 def test_open_private_creates_private_and_leaves_an_existing_file_alone(tmp_path: Path) -> None:
