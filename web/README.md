@@ -624,6 +624,14 @@ Ground rules, so the suite stays worth blocking CI on:
   loaded runner.
 - **No retries.** `playwright.config.ts` sets `retries: 0` on CI as well. A test
   that needs a second attempt is broken; fix or delete it rather than masking it.
+- **No one-shot reads after a release.** After `mouse.up()`, `dragTo()` or a
+  synthetic `pointerup`, the app still has a re-render (and often an
+  animation) to finish. Poll DOM state with `expect.poll`, and call
+  `settled(locator)` from `e2e/support/app.ts` before reading geometry of
+  anything that slides or resizes in. `src/lib/e2eSettleReads.test.ts`
+  fails on `expect(await …)` or `boundingBox()` within a few lines of a
+  release; a line that is genuinely stable can end in
+  `// settle-ok: <why>`.
 - **No real backend.** `e2e/fixture/server.mjs` is a dependency-free Node server
   that serves the built PWA out of `ciao/web/static`, answers the API routes with
   the invented workspace in `e2e/fixture/data.mjs`, and speaks just enough

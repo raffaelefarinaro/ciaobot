@@ -222,7 +222,481 @@ def _write_superseded_record(path: Path, bundle: Path, revision: int = 3) -> Pat
     return path
 
 
-# ── the digest and size gate ─────────────────────────────────────────────────
+# ── the signed revision-5 fixtures (#2329, #2330) ───────────────────────────
+
+_SIGNED_TEAM = "TESTTEAM01"
+_OTHER_TEAM = "OTHERTEAM1"
+
+
+class _SignedRunner:
+    """Answers the native probes a real ``codesign`` would, per bundle policy.
+
+    The bundle a probe names decides the answer: a revision-5 bundle is reported
+    as Developer ID signed by this object's (fake) team, a revision-4 one as the
+    production ad-hoc host. That is what a real ``codesign`` does for two bundles
+    on one Mac, and it lets one runner drive both the policy an installed record
+    selects and the signed candidate a release selects. Only fake teams:
+    ``TESTTEAM01`` and ``OTHERTEAM1``.
+    """
+
+    def __init__(self, *, team: str = _SIGNED_TEAM, verify_rc: int = 0) -> None:
+        self.commands: list[list[str]] = []
+        self.team = team
+        self.verify_rc = verify_rc
+
+    @staticmethod
+    def _bundle_of(target: str) -> Path:
+        path = Path(target)
+        while path.name != APP_NAME and path.parent != path:
+            path = path.parent
+        return path
+
+    def _signed(self, target: str) -> bool:
+        plist = self._bundle_of(target) / _PLIST_REL
+        try:
+            with plist.open("rb") as handle:
+                info = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException):
+            return False
+        return str(info.get("CFBundleVersion")) == str(
+            server_host.SIGNED_HOST_REVISION
+        )
+
+    def __call__(
+        self, argv: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        args = list(argv)
+        self.commands.append(args)
+        if args[:2] == [_CODESIGN, "--verify"]:
+            return subprocess.CompletedProcess(args, self.verify_rc, "", "")
+        target = args[-1]
+        signed = self._signed(target)
+        if args[1:2] == ["-d"] and "--entitlements" in args:
+            payload = plistlib.dumps(
+                {"com.apple.security.automation.apple-events": True}
+            ).decode("utf-8")
+            return subprocess.CompletedProcess(args, 0, payload, "")
+        if args[1:2] == ["-d"] and "-r-" in args:
+            requirement = server_host.developer_id_requirement(self.team)
+            return subprocess.CompletedProcess(
+                args, 0, "", f"designated => {requirement}\n"
+            )
+        if args[1:2] == ["-dv"]:
+            if "--arch" not in args:
+                signature = "Developer ID Application" if signed else "adhoc"
+                stderr = (
+                    f"Identifier={BUNDLE_ID}\n"
+                    "Format=app bundle with Mach-O universal (x86_64 arm64)\n"
+                    f"Signature={signature}\n"
+                )
+                return subprocess.CompletedProcess(args, 0, "", stderr)
+            arch = args[args.index("--arch") + 1]
+            fields = f"Identifier={BUNDLE_ID}\nCDHash={_CDHASH[arch]}\n"
+            if signed:
+                fields += (
+                    f"TeamIdentifier={self.team}\n"
+                    "Runtime Version=14.0.0\n"
+                    "Timestamp=Sep 25, 2026 at 10:00:00\n"
+                    "CodeDirectory v=20500 size=400 flags=0x10000(runtime) "
+                    "hashes=7+3 location=embedded\n"
+                )
+            return subprocess.CompletedProcess(args, 0, "", fields)
+        raise AssertionError(f"unexpected native probe: {args}")
+
+
+def _make_signed_bundle(root: Path, *, name: str = APP_NAME) -> Path:
+    """A revision-5 signed host bundle: the sealed files plus its stapled ticket."""
+    bundle = _make_bundle(root, name=name)
+    info = BUILD.bundle_info()
+    info["CFBundleVersion"] = str(server_host.SIGNED_HOST_REVISION)
+    info["CFBundleShortVersionString"] = str(server_host.SIGNED_HOST_REVISION)
+    with (bundle / _PLIST_REL).open("wb") as handle:
+        plistlib.dump(info, handle)
+    (bundle / "Contents" / "CodeResources").write_bytes(b"stapled-ticket")
+    return bundle
+
+
+def _signed_fixture(
+    tmp_path: Path, *, team: str = _SIGNED_TEAM, label: str = "signed"
+) -> tuple[Path, Path, dict[str, Any]]:
+    """A signed archive, its bundle, and the authenticated entry naming its team."""
+    bundle = _make_signed_bundle(tmp_path / f"{label}-src")
+    (tmp_path / label).mkdir(parents=True, exist_ok=True)
+    archive = _archive_of(bundle, tmp_path / label / SERVER_HOST_FILENAME)
+    entry = server_host_artifact_entry(
+        archive, signing=server_host.DeveloperIDSigning(team)
+    )
+    return archive, bundle, entry
+
+
+def _deferred(
+    archive: Path,
+    entry: dict[str, Any],
+    *,
+    target: Path,
+    record: Path,
+    runner: Any,
+    owner_pid: int | None = None,
+) -> HostOwnership:
+    return server_host_install.install_server_host(
+        archive,
+        entry,
+        bundle_path=target,
+        ownership_path=record,
+        runner=runner,
+        defer_commit=True,
+        owner_pid=os.getpid() if owner_pid is None else owner_pid,
+    )
+
+
+def _install_production_host(
+    tmp_path: Path, *, target: Path, record: Path, runner: Any
+) -> tuple[Path, dict[str, Any]]:
+    archive, _bundle, entry = _fixture(tmp_path)
+    server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=runner
+    )
+    return archive, entry
+
+
+@requires_posix_uid
+def test_signed_install_uses_manifest_revision_and_expected_team(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The staged bundle is inspected under the revision and team the *entry*
+    # names, and the record it writes carries that team. A team the entry names
+    # but the bundle does not carry is a rejection, with nothing installed.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _signed_fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    runner = _SignedRunner()
+
+    snapshot = server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=runner
+    )
+
+    assert snapshot.host_revision == server_host.SIGNED_HOST_REVISION
+    assert snapshot.schema == server_host.SIGNED_SCHEMA_VERSION
+    assert snapshot.signing == server_host.DeveloperIDSigning(_SIGNED_TEAM)
+    assert read_host_ownership(record) == snapshot
+    # The expected team reached the native verification as a requirement, never
+    # as a value read back from the bundle.
+    requirement = server_host.developer_id_requirement(_SIGNED_TEAM)
+    assert any(
+        command[:2] == [_CODESIGN, "--verify"] and f"={requirement}" in command
+        for command in runner.commands
+    )
+
+    # An entry that names a team the bundle was not signed by is refused before
+    # anything reaches the target.
+    other_archive, _bundle, other_entry = _signed_fixture(
+        tmp_path, team=_OTHER_TEAM, label="other"
+    )
+    fresh_target = tmp_path / "Applications-other" / APP_NAME
+    with pytest.raises(server_host.ServerHostError) as caught:
+        server_host_install.install_server_host(
+            other_archive,
+            other_entry,
+            bundle_path=fresh_target,
+            ownership_path=tmp_path / "other-record.json",
+            runner=_SignedRunner(),
+        )
+    assert caught.value.code == server_host.SIGNATURE_REJECTED
+    assert not fresh_target.exists()
+
+
+@requires_posix_uid
+def test_signed_entry_revision_without_its_policy_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A signed revision without its signing object, and a policy under the legacy
+    # revision, are both entries this installer must not guess at. They are
+    # release defects, refused before the target is touched.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _signed_fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+
+    for broken in (
+        {k: v for k, v in entry.items() if k != "signing"},
+        {**entry, "host_revision": server_host.HOST_REVISION},
+    ):
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.install_server_host(
+                archive,
+                broken,
+                bundle_path=target,
+                ownership_path=record,
+                runner=_SignedRunner(),
+            )
+        assert caught.value.code == server_host_install.ARCHIVE_MISMATCH
+        assert not target.exists()
+        assert not record.exists()
+
+
+@requires_posix_uid
+def test_legacy_four_to_signed_requires_deferred_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The production host is owned and usable, and a release that selects the
+    # signed host replaces it — but only as a recoverable transaction. The exact
+    # old pair is what has to survive a later engine failure, so a one-step
+    # replacement is refused and the target and record are untouched.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    _install_production_host(
+        tmp_path, target=target, record=record, runner=_FakeRunner()
+    )
+    inode = target.stat().st_ino
+    record_before = record.read_bytes()
+    signed_archive, _bundle, signed_entry = _signed_fixture(tmp_path)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            signed_archive,
+            signed_entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_SignedRunner(),
+        )
+    assert caught.value.code == server_host_install.DEFERRED_UPGRADE_REQUIRED
+    assert target.stat().st_ino == inode
+    assert record.read_bytes() == record_before
+
+    # A deferred request without the outer installer's own process id is refused
+    # rather than committed by nobody.
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            signed_archive,
+            signed_entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_SignedRunner(),
+            defer_commit=True,
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert target.stat().st_ino == inode
+    assert record.read_bytes() == record_before
+
+    # And the deferred request is what turns it into a transaction.
+    snapshot = _deferred(
+        signed_archive,
+        signed_entry,
+        target=target,
+        record=record,
+        runner=_SignedRunner(),
+    )
+    assert snapshot.host_revision == server_host.SIGNED_HOST_REVISION
+    status = server_host_install.transaction_status()
+    assert status["pending"] is True
+    assert status["phase"] == "installed"
+    assert status["owner_pid"] == os.getpid()
+    assert status["owner_alive"] is True
+
+
+@requires_posix_uid
+def test_signed_current_host_is_noop_across_release_rebuilds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same revision, same team, different rebuilt bytes: the record proves the
+    # installed host is the one this policy speaks to, so nothing is replaced and
+    # no native probe runs at all - a rebuild must not churn the permission macOS
+    # granted to the host.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _signed_fixture(tmp_path, label="first")
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    first = server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=_SignedRunner()
+    )
+    inode = target.stat().st_ino
+    record_before = record.read_bytes()
+
+    rebuild_bundle = _make_signed_bundle(tmp_path / "rebuild-src")
+    (rebuild_bundle / _ICON_REL).write_bytes(b"a rebuilt icon")
+    (tmp_path / "rebuild").mkdir()
+    rebuild = _archive_of(rebuild_bundle, tmp_path / "rebuild" / SERVER_HOST_FILENAME)
+    rebuild_entry = server_host_artifact_entry(
+        rebuild, signing=server_host.DeveloperIDSigning(_SIGNED_TEAM)
+    )
+    quiet = _SignedRunner()
+
+    second = server_host_install.install_server_host(
+        rebuild,
+        rebuild_entry,
+        bundle_path=target,
+        ownership_path=record,
+        runner=quiet,
+    )
+
+    assert second == first
+    assert target.stat().st_ino == inode
+    assert record.read_bytes() == record_before
+    # The rebuild was never staged: every probe this run made was against the
+    # installed host, which is a no-op, not a replacement.
+    assert quiet.commands
+    for command in quiet.commands:
+        assert Path(command[-1]).is_relative_to(target)
+    assert not list(target.parent.glob(f"{server_host_install.STAGING_PREFIX}*"))
+    assert not server_host_install.transaction_status()["pending"]
+
+
+@requires_posix_uid
+def test_signed_host_refuses_team_rotation_and_legacy_downgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Never automatic: a different Developer ID team, and the legacy ad-hoc host
+    # over a signed one. Both leave the installed bundle and record exactly as
+    # they were.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _signed_fixture(tmp_path, label="installed")
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=_SignedRunner()
+    )
+    inode = target.stat().st_ino
+    record_before = record.read_bytes()
+
+    rotation, _bundle, rotation_entry = _signed_fixture(
+        tmp_path, team=_OTHER_TEAM, label="rotation"
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            rotation,
+            rotation_entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_SignedRunner(),
+        )
+    assert caught.value.code == server_host_install.POLICY_REFUSED
+    assert caught.value.code not in server_host_install.WARN_AND_CONTINUE
+    assert target.stat().st_ino == inode
+    assert record.read_bytes() == record_before
+
+    legacy_archive, _bundle, legacy_entry = _fixture(tmp_path)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            legacy_archive,
+            legacy_entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_SignedRunner(),
+        )
+    assert caught.value.code == server_host_install.POLICY_REFUSED
+    assert caught.value.code not in server_host_install.WARN_AND_CONTINUE
+    assert target.stat().st_ino == inode
+    assert record.read_bytes() == record_before
+
+
+def test_signature_rejection_is_never_a_warn_and_continue_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A completed probe that disproved the signed identity, and a policy the
+    # release may not select here, are both fatal. Only an *unavailable* optional
+    # probe keeps its existing warn-and-continue status, and only because the
+    # target was never changed.
+    assert server_host.SIGNATURE_REJECTED not in server_host_install.WARN_AND_CONTINUE
+    assert (
+        server_host_install.POLICY_REFUSED not in server_host_install.WARN_AND_CONTINUE
+    )
+    assert (
+        server_host_install.DEFERRED_UPGRADE_REQUIRED
+        not in server_host_install.WARN_AND_CONTINUE
+    )
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _signed_fixture(tmp_path)
+    manifest, signature = _signed_manifest(tmp_path, entry)
+    public_key = (tmp_path / "public-key.txt").read_text(encoding="utf-8")
+    argv = [
+        "install",
+        "--manifest",
+        str(manifest),
+        "--signature",
+        str(signature),
+        "--archive",
+        str(archive),
+        "--public-key",
+        public_key,
+    ]
+
+    def reject(*_args: Any, **_kwargs: Any) -> HostOwnership:
+        raise server_host.ServerHostError("not signed by us", code=server_host.SIGNATURE_REJECTED)
+
+    monkeypatch.setattr(server_host_install, "install_server_host", reject)
+    assert server_host_install.main(argv) == 1
+    assert "Error:" in capsys.readouterr().err
+
+    def unavailable(*_args: Any, **_kwargs: Any) -> HostOwnership:
+        raise server_host.ServerHostError("codesign timed out", code=server_host.INSPECTION_FAILED)
+
+    monkeypatch.setattr(server_host_install, "install_server_host", unavailable)
+    assert server_host_install.main(argv) == server_host_install.HOST_WARNING_EXIT
+    assert "warning:" in capsys.readouterr().err
+
+
+@requires_posix_uid
+def test_wrapped_record_restore_failure_keeps_backup_and_reports_both_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The record restore in the superseded-host rollback goes through
+    # `_write_ownership_record`, which translates `OSError` into a
+    # `ServerHostInstallError`. That wrapped refusal must not escape and replace
+    # the original failure: both are reported, and the host that was put back is
+    # named so the user can find it.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old_bundle = _make_superseded_bundle(target.parent)
+    record = _write_superseded_record(
+        tmp_path / "records" / "server-host.json", old_bundle
+    )
+    old_exe = (old_bundle / _EXE_REL).read_bytes()
+    real_rename = os.rename
+    real_write_record = server_host_install._write_ownership_record
+    writes: list[int] = []
+
+    def refuse_the_new_bundle(src: Any, dst: Any) -> None:
+        if os.fspath(dst) == os.fspath(target) and os.path.basename(
+            os.fspath(src)
+        ) == APP_NAME:
+            raise OSError(errno.EPERM, "Operation not permitted")
+        real_rename(src, dst)
+
+    def refuse_the_restored_record(snapshot: HostOwnership, path: Path) -> None:
+        writes.append(1)
+        if len(writes) == 2:
+            raise server_host_install.ServerHostInstallError(
+                "the ownership record could not be written: No space left on device",
+                code=server_host_install.INSTALL_FAILED,
+            )
+        real_write_record(snapshot, path)
+
+    monkeypatch.setattr(server_host_install.os, "rename", refuse_the_new_bundle)
+    monkeypatch.setattr(
+        server_host_install, "_write_ownership_record", refuse_the_restored_record
+    )
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive, entry, bundle_path=target, ownership_path=record, runner=_FakeRunner()
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    message = str(caught.value)
+    # The wrapped restore refusal is reported, not swallowed by the original one.
+    assert "No space left on device" in message
+    assert "the install failed first" in message
+    # The restored host is named and kept, whole.
+    assert "the host is kept at" in message
+    assert (target / _EXE_REL).read_bytes() == old_exe
+    # And the superseded host was not erased to make the message tidy.
+    assert (target / _EXE_REL).read_bytes() == old_exe
+
+
 
 
 def test_verify_host_archive_accepts_the_signed_bytes(tmp_path: Path) -> None:
