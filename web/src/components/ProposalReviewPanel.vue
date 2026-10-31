@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import SkeletonLoader from './SkeletonLoader.vue'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import { askPrompt } from '../lib/prompt'
 import { useProposalsStore } from '../stores/proposals'
@@ -585,9 +585,26 @@ function bindRowRef(id: string, el: unknown) {
 /** How many frames to wait for a linked row to exist before leaving the id set. */
 const REVEAL_FRAMES = 30
 
+// A newer reveal, a workspace change or unmount withdraws every older attempt:
+// the loop below is asynchronous, and the row it was waiting for may belong to
+// a scope the page has already left.
+let revealGeneration = 0
+let unmounted = false
+onBeforeUnmount(() => {
+  unmounted = true
+  revealGeneration += 1
+})
+
 async function revealRow(id: string): Promise<boolean> {
+  const gen = ++revealGeneration
+  const ws = projectStore.activeWorkspace
+  const live = () => !unmounted
+    && gen === revealGeneration
+    && projectStore.activeWorkspace === ws
+    && store.revealedRowId === id
   for (let frame = 0; frame < REVEAL_FRAMES; frame += 1) {
     await nextTick()
+    if (!live()) return false
     const el = rowEls.get(id)
     // VISIBLE, not merely mounted. The caller sets the id and navigates in the
     // same tick, so the first frames find this panel under the review filter's
@@ -606,6 +623,7 @@ async function revealRow(id: string): Promise<boolean> {
     // change is a macrotask, so a tick loop would spin through all thirty
     // before either had a chance to answer.
     await new Promise(resolve => setTimeout(resolve, 16))
+    if (!live()) return false
   }
   return false
 }
@@ -1627,7 +1645,10 @@ onMounted(() => {
 // workspace's total until the tab was opened or a queue mutation refetched.
 watch(
   () => projectStore.activeWorkspace,
-  ws => { void store.ensureHistoryLoaded(ws) },
+  ws => {
+    revealGeneration += 1
+    void store.ensureHistoryLoaded(ws)
+  },
 )
 </script>
 
