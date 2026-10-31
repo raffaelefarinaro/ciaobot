@@ -3100,3 +3100,88 @@ describe('terminal store page lifecycle', () => {
     expect(terminalListeners).toEqual([])
   })
 })
+
+describe('the terminal follows the chat on screen', () => {
+  it('does not hide on the first report', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    expect(store.visible).toBe(true)
+  })
+
+  it('hides on leaving and reopens on coming back without starting a shell', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    store.followChat('chat-b')
+    expect(store.visible).toBe(false)
+    expect(store.chatSwitch).toBe(true)
+
+    store.followChat('chat-a')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.visible).toBe(true)
+    expect(store.target).toEqual({ chatId: 'chat-a' })
+    expect(apiPost).not.toHaveBeenCalledWith('/api/terminal/sessions', expect.anything())
+
+    store.followChat('chat-b')
+    expect(store.visible).toBe(false)
+  })
+
+  it('keeps a chat closed when its terminal was closed there', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    store.hide()
+    store.followChat('chat-b')
+    store.followChat('chat-a')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.visible).toBe(false)
+  })
+
+  it('hides on a route with no chat and remembers the chat', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    store.followChat('')
+    expect(store.visible).toBe(false)
+    store.followChat('chat-a')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.visible).toBe(true)
+  })
+
+  it('hides a project terminal on a chat change and does not restore it', async () => {
+    const store = useTerminalStore()
+    store.followChat('')
+    await store.open({ projectId: 'p1' })
+    store.followChat('chat-a')
+    expect(store.visible).toBe(false)
+    store.followChat('')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.visible).toBe(false)
+  })
+
+  it('ignores a report for the chat it already follows', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    const gets = apiGet.mock.calls.length
+    store.followChat('chat-a')
+    expect(store.visible).toBe(true)
+    expect(apiGet.mock.calls.length).toBe(gets)
+  })
+
+  it('clears chatSwitch when the person opens or hides', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-a' })
+    store.followChat('chat-a')
+    store.followChat('chat-b')
+    expect(store.chatSwitch).toBe(true)
+    await store.open({ chatId: 'chat-b' })
+    expect(store.chatSwitch).toBe(false)
+    store.followChat('chat-c')
+    expect(store.chatSwitch).toBe(true)
+    await store.open({ chatId: 'chat-c' })
+    store.hide()
+    expect(store.chatSwitch).toBe(false)
+  })
+})

@@ -8539,13 +8539,23 @@ class ProjectChatManager:
         user), and returns False when the chat is idle. start_stream then
         handles the idle case, including a cold chat whose provider session
         died in a restart, since a lost task can surface hours after the turn
-        that launched it.
+        that launched it. An idle chat waiting out a provider usage limit gets
+        the prompt appended to its pending retry instead ("deferred"), because
+        a turn started now would be refused and would overwrite that retry.
 
         ``origin`` tags the turn (``cli_task_wake``) so the PWA draws a notice
         card.
         """
         if self.queue_message(parent.chat_id, prompt, origin=origin):
             delivery = "queued"
+        elif (chat := self._chats.get(parent.chat_id)) is not None and chat.retry_status == "pending":
+            # The provider is refusing turns until the retry fires. A turn now would
+            # fail and overwrite the pending retry's prompt, losing the original
+            # request and every earlier wake. Ride along on the retry instead.
+            chat.retry_prompt = f"{chat.retry_prompt}\n\n{prompt}" if chat.retry_prompt else prompt
+            self._save()
+            self._publish_retry(chat)
+            delivery = "deferred"
         else:
             # Deliberately NOT unattended: that flag forces bypass mode, and a
             # chat waking up to merge branches or act on a finished script

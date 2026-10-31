@@ -299,6 +299,13 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
 - **Hide is not End.** Hide detaches: the socket closes and the shell keeps
   running on the engine. End asks the engine to stop it. They are two
   buttons, and only one of them stops the process.
+- **The terminal belongs to the chat on screen.** It is keyed by
+  `activePinKey`, like the pinned file. Leaving a chat hides it (a detach: the
+  shell runs until the engine prunes it 15 minutes after it detached). Coming
+  back reopens it only if it was open when the person left, and starts no
+  shell. The state is per tab and in memory (`openChats` in
+  `stores/terminal.ts`), and a switch moves no focus. A project's terminal
+  hides on a chat change and is not restored.
 - **A suggested command is a card above the composer, not a second *Terminal*
   section.** When the assistant suggests a command in a chat, a transient card
   appears above the composer (`components/TerminalOfferCard.vue`): the fixed
