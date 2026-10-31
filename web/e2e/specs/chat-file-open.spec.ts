@@ -57,6 +57,49 @@ for (const mobile of [false, true]) {
   })
 }
 
+test('Back closes the file viewer and leaves the chat where it was', async ({ browser }, testInfo) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true })
+  const page = await context.newPage()
+  try {
+    await isolate(page, `chat-file-back-${testInfo.workerIndex}`)
+    const canonical = '/fixture/work/memory-vault/Workspace/draft.md'
+    await page.route('**/api/chats/alpha-chat-1/messages*', route => route.fulfill({ json: [
+      { role: 'user', content: 'Write a draft', turn_index: 0 },
+      { role: 'assistant', content: 'Open `memory-vault/Workspace/draft.md`.', turn_index: 0 },
+    ] }))
+    await page.route('**/api/chats/alpha-chat-1/file-path?*', route => route.fulfill({ json: { path: canonical } }))
+    await page.route('**/api/workspace-file?*', route => route.fulfill({ body: '# Workspace draft\n\nCorrect source workspace.', contentType: 'text/plain' }))
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await expect(page.locator('.startup-overlay')).toHaveCount(0)
+    const fileLink = page.locator('a[data-file-path="memory-vault/Workspace/draft.md"]')
+    const viewer = page.locator('.fv-modal')
+    const marker = () => page.evaluate(() => (history.state?.ciaoOverlay ?? null) as string | null)
+
+    const lengthBefore = await page.evaluate(() => history.length)
+    await fileLink.click()
+    await expect(viewer).toBeVisible()
+    await expect.poll(() => page.evaluate(() => history.length)).toBe(lengthBefore + 1)
+
+    await page.goBack()
+    await expect(viewer).toHaveCount(0)
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+    await expect(fileLink).toBeFocused()
+
+    await fileLink.click()
+    await expect(viewer).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(viewer).toHaveCount(0)
+    await expect.poll(marker).toBeNull()
+
+    await page.goForward().catch(() => null)
+    await expect(viewer).toHaveCount(0)
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+    await expect.poll(marker).toBeNull()
+  } finally {
+    await context.close()
+  }
+})
+
 test('Home loads chat and file code only when the user needs it', async ({ page }, testInfo) => {
   await isolate(page, `optional-code-${testInfo.workerIndex}`)
   const optionalRequests: string[] = []
