@@ -6504,10 +6504,15 @@ def _uv_bootstrap_run(
     archive: Path,
     digests: dict[str, str],
     download: bool = True,
+    entry: str = "bootstrap_verified_uv",
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
-    """Run the shipped bootstrap functions against `archive`, hermetically."""
+    """Run the shipped bootstrap functions against `archive`, hermetically.
+
+    `entry` is the function called by name: the helper alone, or the shipped
+    `find_uv` missing-uv branch that also publishes it.
+    """
     home = tmp_path / "home"
-    (home / ".local" / "bin").mkdir(parents=True)
+    (home / ".local" / "bin").mkdir(parents=True, exist_ok=True)
     tmp = tmp_path / "tmp"
     tmp.mkdir()
     tmp.chmod(0o700)
@@ -6551,29 +6556,40 @@ def _uv_bootstrap_run(
         f'exec {shlex.quote(shutil.which("tar") or "tar")} "$@"\n',
     )
 
-    body = "\n".join(
-        [
-            "set -eu",
-            f"tmp={shlex.quote(str(tmp))}",
-            f"CURL={shlex.quote(str(fakebin / 'curl'))}",
-            f"UV_VERSION={UV_VERSION}",
-            "verified_uv=",
-            _function_source("fail"),
-            _uv_bootstrap_digest_source(digests),
-            _function_source("uv_archive_asset"),
-            _function_source("bootstrap_verified_uv"),
-            "bootstrap_verified_uv",
-            'printf "uv=%s\\n" "$uv"',
-            'printf "verified_uv=%s\\n" "$verified_uv"',
-        ]
+    body_parts = [
+        "set -eu",
+        f"tmp={shlex.quote(str(tmp))}",
+        f"CURL={shlex.quote(str(fakebin / 'curl'))}",
+        f"UV_VERSION={UV_VERSION}",
+        "verified_uv=",
+        _function_source("fail"),
+        _uv_bootstrap_digest_source(digests),
+        _function_source("uv_archive_asset"),
+        _function_source("bootstrap_verified_uv"),
+    ]
+    if entry != "bootstrap_verified_uv":
+        # The helper alone must be runnable without the publishing branch, so
+        # its tests cannot pass by borrowing that code.
+        body_parts.append(_function_source("publish_verified_uv"))
+    if entry == "find_uv":
+        body_parts.append(_function_source("find_uv"))
+    body_parts += [
+        entry,
+        'printf "uv=%s\\n" "$uv"',
+        'printf "verified_uv=%s\\n" "$verified_uv"',
+    ]
+    body = "\n".join(body_parts)
+    # The helper alone never consults PATH. The find_uv entry must not find a
+    # real uv on the developer's machine, so its PATH is the fixture bin plus
+    # the system directories, where uv does not live.
+    path = (
+        f"{fakebin}{os.pathsep}{os.environ['PATH']}"
+        if entry == "bootstrap_verified_uv"
+        else f"{fakebin}:/usr/bin:/bin"
     )
     result = subprocess.run(
         ["sh", "-c", body],
-        env={
-            **os.environ,
-            "HOME": str(home),
-            "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
-        },
+        env={**os.environ, "HOME": str(home), "PATH": path},
         capture_output=True,
         text=True,
         check=False,
@@ -6627,17 +6643,17 @@ def test_uv_bootstrap_verifies_before_execution(
     )
 
     assert result.returncode == 0, result.stderr
-    dest = paths["home"] / ".local" / "bin" / "uv"
-    assert dest.read_bytes() == UV_BOOTSTRAP_BODY
-    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
     stage = paths["tmp"] / "uv-bootstrap"
     assert stat.S_IMODE(stage.stat().st_mode) == 0o700
     # Only uv is extracted: the archive's uvx never becomes a file.
     assert [entry.name for entry in stage.iterdir()] == ["uv"]
+    assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
     assert stat.S_IMODE((stage / "uv").stat().st_mode) == 0o700
     assert not (paths["home"] / UV_EXECUTED).exists()
-    assert f"uv={dest}" in result.stdout
+    # The helper returns the private staged executable and publishes nothing.
+    assert f"uv={stage / 'uv'}" in result.stdout
     assert f"verified_uv={stage / 'uv'}" in result.stdout
+    assert not (paths["home"] / ".local" / "bin" / "uv").exists()
 
     trace = paths["trace"].read_text(encoding="utf-8")
     assert (
@@ -6651,6 +6667,61 @@ def test_uv_bootstrap_verifies_before_execution(
         f"tar -xOf {paths['tmp']}/uv-{triple}.tar.gz uv-{triple}/uv"
     ]
     assert "uvx" not in " ".join(extractions)
+
+
+@needs_local_tools
+def test_uv_bootstrap_leaves_an_existing_uv_untouched(tmp_path: Path) -> None:
+    """A native mode can verify uv without replacing the one this Mac has."""
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(tmp_path / "uv.tar.gz", _uv_entries(triple))
+    home = tmp_path / "home"
+    existing = home / ".local" / "bin" / "uv"
+    existing.parent.mkdir(parents=True)
+    # If anything executed or replaced it, both the bytes and this marker
+    # would say so.
+    sentinel = (
+        "#!/bin/sh\n"
+        f"printf 'executed\\n' >> \"$HOME/{UV_EXECUTED}\"\n"
+        "# the uv this Mac already had\n"
+    ).encode()
+    existing.write_bytes(sentinel)
+    existing.chmod(0o750)
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert existing.read_bytes() == sentinel
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o750
+    assert not (home / UV_EXECUTED).exists()
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert (stage / "uv").read_bytes() == UV_BOOTSTRAP_BODY
+    assert f"verified_uv={stage / 'uv'}" in result.stdout
+
+
+@needs_local_tools
+def test_legacy_missing_uv_publishes_the_verified_copy(tmp_path: Path) -> None:
+    """Only the legacy branch writes ~/.local/bin/uv, from the verified copy."""
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(tmp_path / "uv.tar.gz", _uv_entries(triple))
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path,
+        arch="arm64",
+        archive=archive,
+        digests=_fixture_digests(archive),
+        entry="find_uv",
+    )
+
+    assert result.returncode == 0, result.stderr
+    dest = paths["home"] / ".local" / "bin" / "uv"
+    assert dest.read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert f"uv={dest}" in result.stdout
+    assert f"verified_uv={stage / 'uv'}" in result.stdout
+    assert not (paths["home"] / UV_EXECUTED).exists()
 
 
 @needs_local_tools
@@ -6818,6 +6889,10 @@ def _run_find_uv_selection(
             '    chmod 700 "$HOME/.local/bin/uv"',
             "    uv=$HOME/.local/bin/uv",
             "}",
+            "publish_verified_uv() {",
+            '    printf "publish-called\\n" >> "$HOME/bootstrap.log"',
+            "    uv=$HOME/.local/bin/uv",
+            "}",
             _function_source("find_uv"),
             "find_uv",
             'printf "uv=%s\\n" "$uv"',
@@ -6846,10 +6921,13 @@ def test_existing_uv_legacy_selection_is_unchanged(tmp_path: Path) -> None:
     assert f"uv={home / '.local' / 'bin' / 'uv'}" in result.stdout
     assert not (home / "bootstrap.log").exists()
 
-    # Only a missing uv reaches the verified bootstrap, never uv-installer.sh.
+    # Only a missing uv reaches the verified bootstrap, and only that branch
+    # publishes; never uv-installer.sh.
     result, home = _run_find_uv_selection(
         tmp_path / "missing", on_path=False, in_home=False
     )
     assert result.returncode == 0, result.stderr
     assert f"uv={home / '.local' / 'bin' / 'uv'}" in result.stdout
-    assert (home / "bootstrap.log").read_text(encoding="utf-8") == "bootstrap-called\n"
+    assert (home / "bootstrap.log").read_text(encoding="utf-8") == (
+        "bootstrap-called\npublish-called\n"
+    )

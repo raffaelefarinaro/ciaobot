@@ -250,9 +250,12 @@ missing `uv` is installed, from the pinned archive for its architecture:
 The installer compares that archive with a sha256 reviewed into
 `scripts/install-engine.sh` and only then reads the member list: exactly one
 `uv-<triple>/` directory, one regular `uv-<triple>/uv` and optionally one
-regular `uv-<triple>/uvx`, with only `uv` extracted into a fresh 0700 directory
-and atomically published. Any other member, a link, a duplicate, an absolute
+regular `uv-<triple>/uvx`, with only `uv` extracted into a fresh 0700 staging
+directory. Any other member, a link, a duplicate, an absolute
 or `..` path, or an ambiguous name is a refusal that extracts and runs nothing.
+The verified staged executable is what a native-mode install takes; the staged
+copy is published atomically to `~/.local/bin/uv` only on the legacy missing-uv
+path, so bootstrapping never replaces a uv the machine already has.
 There is no piped shell installer in this path. The trust root for the archive
 is the reviewed digest table plus TLS to GitHub: uv publishes no minisign or
 Apple signature for these assets, and the installer does not claim one.

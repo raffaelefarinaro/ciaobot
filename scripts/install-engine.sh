@@ -1014,9 +1014,10 @@ bootstrap_verified_uv() {
     # then inspect it and extract only its exact `uv` member. Nothing from the
     # archive runs, and tar never creates a path the archive chose: that one
     # member is written to stdout into a file this function made, in a private
-    # staging directory. The verified staged copy stays in $verified_uv for a
-    # native-mode install; the legacy missing-uv path also publishes it
-    # atomically to ~/.local/bin/uv.
+    # staging directory. It returns that private staged executable in
+    # $verified_uv (and points $uv at it), and never touches ~/.local/bin: only
+    # the legacy missing-uv path publishes it, and a native-mode install takes
+    # $verified_uv instead of replacing a uv this Mac already has.
     uv_asset=$(uv_archive_asset)
     uv_expected=$(uv_archive_sha256 "$uv_asset")
     uv_archive="$tmp/$uv_asset"
@@ -1106,7 +1107,15 @@ bootstrap_verified_uv() {
         || fail "the extracted uv is not a regular file"
     [ -s "$uv_staged" ] || fail "the extracted uv is empty"
     chmod 700 "$uv_staged" || fail "could not protect the extracted uv"
+    uv="$uv_staged"
+    verified_uv="$uv_staged"
+}
 
+publish_verified_uv() {
+    # Put the verified staged uv where the installer has always left it. Only
+    # the legacy missing-uv path calls this; the bootstrap helper itself never
+    # writes into ~/.local/bin, so it cannot replace an existing uv.
+    [ -n "$verified_uv" ] || fail "no verified uv to publish"
     uv_bin_dir="$HOME/.local/bin"
     mkdir -p "$uv_bin_dir" || fail "could not create $uv_bin_dir"
     uv_dest="$uv_bin_dir/uv"
@@ -1115,14 +1124,13 @@ bootstrap_verified_uv() {
     fi
     uv_publish="$uv_dest.new.$$"
     rm -f "$uv_publish"
-    if ! (umask 077 && cp "$uv_staged" "$uv_publish"); then
+    if ! (umask 077 && cp "$verified_uv" "$uv_publish"); then
         rm -f "$uv_publish"
         fail "could not stage the verified uv next to $uv_dest"
     fi
     chmod 700 "$uv_publish" || { rm -f "$uv_publish"; fail "could not protect $uv_publish"; }
     mv -f "$uv_publish" "$uv_dest" || { rm -f "$uv_publish"; fail "could not publish the verified uv at $uv_dest"; }
     uv="$uv_dest"
-    verified_uv="$uv_staged"
 }
 
 find_uv() {
@@ -1133,10 +1141,11 @@ find_uv() {
     elif [ -x "$HOME/.local/bin/uv" ]; then
         uv="$HOME/.local/bin/uv"
     else
-        # No uv at all: bootstrap the pinned, digest-verified archive. The
-        # caller's shell profile is left alone until the verified engine
-        # install completes.
+        # No uv at all: bootstrap the pinned, digest-verified archive and put
+        # it where this installer has always left uv. The caller's shell
+        # profile is left alone until the verified engine install completes.
         bootstrap_verified_uv
+        publish_verified_uv
     fi
     [ -x "$uv" ] || fail "uv is not available at $uv"
 }
