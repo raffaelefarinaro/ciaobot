@@ -172,6 +172,9 @@ this file; the gates are the ones under Verification.
   The Windows suites and the macOS job run only there. If it goes red, open a
   `bug` issue naming the failing tests and the merge that broke them, and fix
   it before merging more on top. `/ciao-release` will not cut over a red run.
+  Before queuing a PR whose diff touches path handling, the filesystem,
+  subprocesses or Windows code, add the `windows-full` label and push once, so
+  the full Windows suites run on the PR instead of after merge.
 - Hands-on device testing (a real Windows or macOS install) is for diffs that
   touch the installers (`scripts/install*.sh`, `scripts/install.ps1`), the
   service or scheduled-task code, engine update/migration, or `desktop/`.

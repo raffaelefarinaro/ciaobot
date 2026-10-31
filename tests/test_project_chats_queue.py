@@ -1323,6 +1323,59 @@ async def test_queue_edit_updates_flushed_text(tmp_path: Path) -> None:
     assert turn_calls == ["initial", "edited"]
 
 
+async def test_stream_finishes_when_turn_end_save_fails(tmp_path: Path) -> None:
+    """A registry write that fails at turn end must not leave the stream open.
+
+    On Windows `_save()` can raise PermissionError while another process holds
+    the state file. That raise used to escape `drive()`'s finally before
+    `stream.finish()`, so subscribers never got their sentinel.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-save-fail", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="save-fail-test")
+
+    first_turn_ready = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="ok",
+            session_id="sess-sf",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    def failing_save() -> None:
+        raise PermissionError(13, "Access is denied")
+
+    pcm._save = failing_save  # type: ignore[method-assign]
+
+    first_turn_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    assert pcm.get_active_stream(chat.chat_id) is None
+
+
 # ── the close-the-queue race ────────────────────────────────────────────────
 
 

@@ -37,6 +37,14 @@ def _fast_watch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(claude_mod, "_CLAUDEAI_CATALOG_POLL_S", 0.01)
 
 
+@pytest.fixture
+def patient_watch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # For tests whose rows appear on a later poll: a 50 ms deadline let a loaded
+    # xdist worker give up before the second poll ran (#2367). The watch returns
+    # as soon as rows show, so the longer deadline costs nothing when it works.
+    monkeypatch.setattr(claude_mod, "_CLAUDEAI_CATALOG_DEADLINE_S", 5.0)
+
+
 class _StatusClient:
     def __init__(self, *responses: Any) -> None:
         self.get_mcp_status = AsyncMock(side_effect=list(responses) or None, return_value=_NO_ROWS)
@@ -65,7 +73,7 @@ def _watch(provider: ClaudeProvider, client: object) -> None:
     asyncio.run(provider._watch_claudeai_catalog(client))  # type: ignore[arg-type]
 
 
-def test_watch_marks_seen_and_resets_retries_when_rows_appear(tmp_path: Path) -> None:
+def test_watch_marks_seen_and_resets_retries_when_rows_appear(tmp_path: Path, patient_watch: None) -> None:
     client = _StatusClient(_NO_ROWS, _SLACK_ROW)
     provider = _provider(tmp_path, client)
     provider._claudeai_catalog_retries = 1
@@ -77,7 +85,7 @@ def test_watch_marks_seen_and_resets_retries_when_rows_appear(tmp_path: Path) ->
     assert provider._claudeai_catalog_retries == 0
 
 
-def test_watch_drops_stale_gave_up_notice_when_rows_appear(tmp_path: Path) -> None:
+def test_watch_drops_stale_gave_up_notice_when_rows_appear(tmp_path: Path, patient_watch: None) -> None:
     client = _StatusClient(_SLACK_ROW)
     provider = _provider(tmp_path, client)
     provider._claudeai_gave_up_notice_pending = True
@@ -141,7 +149,7 @@ def test_watch_silent_when_account_never_had_connectors(tmp_path: Path) -> None:
     assert sink == []
 
 
-def test_watch_survives_status_errors(tmp_path: Path) -> None:
+def test_watch_survives_status_errors(tmp_path: Path, patient_watch: None) -> None:
     client = _StatusClient(asyncio.TimeoutError(), _SLACK_ROW)
     provider = _provider(tmp_path, client)
 

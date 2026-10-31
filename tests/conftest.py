@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 import os
+
+# A Ciaobot chat (or the bundled app's launcher) exports its own CIAO_*
+# settings - vault root, workspace, agent token, CIAO_BUNDLED_APP - and
+# PWA_AUTH_TOKEN to every command it runs, this suite included. Drop them
+# before any `ciao` module is imported, so code reading them at import time
+# sees a clean environment too; pytest-xdist workers inherit the cleaned one.
+# Tests that need one set it with monkeypatch.
+INHERITED_ENV_PREFIXES = ("CIAO_", "PWA_")
+for _name in [name for name in os.environ if name.startswith(INHERITED_ENV_PREFIXES)]:
+    del os.environ[_name]
+
 import sys
 import pytest
 from pathlib import Path
@@ -10,6 +21,15 @@ from ciao import config as ciao_config
 from ciao import job_runs as jr
 from ciao import transcripts
 from types import SimpleNamespace
+
+# A Ciaobot chat exports the live install's settings and credentials into every
+# command it runs, this suite included. Tests that build a config or call the
+# CLI would read those values instead of their own fixtures, so drop them once,
+# before any test module is collected. Tests that need a value set it with
+# monkeypatch.setenv (#2356).
+_INHERITED_ENV_PREFIXES = ("CIAO_", "PWA_", "GWS_")
+for _key in [key for key in os.environ if key.startswith(_INHERITED_ENV_PREFIXES)]:
+    del os.environ[_key]
 
 # Captured before any fixture runs, so the guard test can prove no test sees it.
 REAL_HOME = Path.home()
@@ -143,18 +163,6 @@ def _reset_exported_dotenv() -> None:
     ciao_config.reset_exported_dotenv()
     yield
     ciao_config.reset_exported_dotenv()
-
-
-@pytest.fixture(autouse=True)
-def _drop_inherited_bundled_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ignore ``CIAO_BUNDLED_APP`` inherited from a Ciaobot.app agent shell.
-
-    The bundled launcher exports it, so every command a Ciaobot chat runs -
-    including this suite - inherits it, and ``detect_install_mode`` would call
-    the test process a packaged app (``admin_deploy`` then refuses up front).
-    Tests that need it set it explicitly.
-    """
-    monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
 
 
 @pytest.fixture(autouse=True)
