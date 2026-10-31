@@ -1081,7 +1081,7 @@ Provisioning completion (`.runtime/setup-completed-at`) is only a setup/catch-up
 
 ## Project naming convention
 
-Every configured workspace uses the same shape: a project is a folder under `<workspace.vault_root>/projects/active/<name>/` with a same-named main doc `<name>/<name>.md` (or `README.md`). On completion it moves to `<workspace.vault_root>/projects/completed/<name>/` via the PWA's "Complete" button (or `complete_project()`).
+Every configured workspace uses the same shape: a project is a folder under `<workspace.vault_root>/projects/active/<name>/` with a same-named main doc `<name>/<name>.md` (or `README.md`). On completion it moves to `<workspace.vault_root>/projects/completed/<name>/` via the PWA's "Complete" button (or `complete_project()`). Completion and restore both move the folder through `vault_review.move_project_folder`, which repoints references to and from the moved notes before the move and puts them back if the move fails.
 
 Completed projects can be restored. The sidebar footer has an archive icon next to "+ New Project" that opens a modal listing the current workspace's completed projects (`ProjectChatManager.list_completed_projects()` scans the `projects/completed/` tree read-only). Each entry has a Restore button: `restore_project(workspace, stem)` moves the folder back to `projects/active/`, flips frontmatter `status: completed` back to `active`, and re-runs auto-discovery to recreate the PWA project. Auto-discovery derives a stable id from the workspace and folder slug; the original chats stay archived. Routes: `GET /api/projects/completed` (optional `?workspace=`) and `POST /api/projects/completed/restore` (see `PWA_API.md`).
 

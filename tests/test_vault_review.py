@@ -2692,3 +2692,24 @@ def test_the_general_project_note_still_carries_other_signals(tmp_path: Path) ->
     candidate = candidates["memory-vault/projects/active/general/general.md"]
     assert "weak_provenance" in candidate.signals
     assert "unlinked" not in candidate.signals
+
+
+def test_plan_rewrites_processes_moving_note_without_moved_stem(tmp_path: Path) -> None:
+    # The moving note's own link names no moved stem, but it is measured from a
+    # new directory once the note moves, so it must still be planned.
+    root = tmp_path.resolve()
+    _note(root, "projects/active/foo/notes.md", "See [bar](../bar/bar.md).\n")
+    _note(root, "projects/active/bar/bar.md", "Bar.\n")
+    entries = scan_vault(root, workspace="personal")
+    moves = [
+        (
+            "memory-vault/projects/active/foo/notes.md",
+            "memory-vault/projects/completed/foo/notes.md",
+        )
+    ]
+
+    edited, rewrites = review._plan_reference_rewrites(root, entries, moves)
+
+    assert edited == ["memory-vault/projects/completed/foo/notes.md"]
+    assert [r.path_before for r in rewrites] == [root / "projects/active/foo/notes.md"]
+    assert "../../active/bar/bar.md" in rewrites[0].after
