@@ -108,7 +108,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking
+from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking, vault_review
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -3164,6 +3164,8 @@ class ProjectChatManager:
                     raise ValueError(
                         f"vault_folder {vault_folder!r} resolves outside the projects tree."
                     )
+                if dst.exists():
+                    raise ValueError(f"A completed project folder named {vault_folder!r} already exists.")
                 _append_project_closure(
                     src,
                     vault_folder,
@@ -3171,8 +3173,12 @@ class ProjectChatManager:
                     note=note,
                     recorded_at=recorded_at,
                 )
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dst))
+                vault_review.move_project_folder(
+                    self._workspace_vault_root(project.workspace).resolve(),
+                    src,
+                    dst,
+                    workspace=project.workspace,
+                )
 
                 # Update status frontmatter in the main project markdown
                 # (<dst>/<stem>.md). README.md is the other place the
@@ -3284,8 +3290,12 @@ class ProjectChatManager:
                 f"An active project folder named {stem!r} already exists."
             )
 
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
+        vault_review.move_project_folder(
+            self._workspace_vault_root(workspace).resolve(),
+            src,
+            dst,
+            workspace=workspace,
+        )
 
         # Flip status frontmatter back to active in the main markdown.
         for candidate in (dst / f"{stem}.md", dst / "README.md"):

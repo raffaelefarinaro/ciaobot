@@ -34,6 +34,7 @@ from ciao.vault_lint import is_template_stem, run_validation
 if TYPE_CHECKING:  # the runtime import lives in the functions, to avoid the cycle
     from ciao.entry_verification import EntryCheck
     from ciao.note_verification import NoteCheck
+    from ciao.vault_index import Entry
 
 # No retention window. A `RETENTION_DAYS = 30` constant sat here unread while
 # three strings in the panel promised a note would be restorable "for 30 days"
@@ -1959,6 +1960,24 @@ def _moved_back_map(
     return moved_back
 
 
+def _folder_moves(
+    entries: list[Entry], folder: str, destination_folder: str, *, skip: str = ""
+) -> list[tuple[str, str]]:
+    """Every note under *folder* except *skip*, paired with its place under *destination_folder*.
+
+    A folder project moves as a folder, so each note inside it moves with it. The
+    suffix carries the note's place inside the folder, which the move does not
+    change: only the leading segment above it does.
+    """
+    moves: list[tuple[str, str]] = []
+    for entry in entries:
+        rel = entry.path_key
+        if rel == skip or not rel.startswith(f"{folder}/"):
+            continue
+        moves.append((rel, destination_folder + rel[len(folder):]))
+    return moves
+
+
 def _repoint_project_references(
     root: Path, previous_path: str, completed_path: str, *, workspace: str, folder: str = ""
 ) -> tuple[list[str], list[_Rewrite]]:
@@ -2000,11 +2019,30 @@ def _repoint_project_references(
     else, on the one note the sweep excluded. Excluding it bought nothing: the
     caller folds its ``status:`` line into whatever comes back, so one write and
     one undo image still cover both edits.
+    """
+    root = Path(root).resolve()
+    entries = scan_vault(root, workspace=workspace)
+    moves: list[tuple[str, str]] = []
+    if folder:
+        moves = _folder_moves(entries, folder, _completed_counterpart(folder), skip=previous_path)
+    moves.append((previous_path, completed_path))
+    return _plan_reference_rewrites(root, entries, moves)
+
+
+def _plan_reference_rewrites(
+    root: Path, entries: list[Entry], moves: list[tuple[str, str]]
+) -> tuple[list[str], list[_Rewrite]]:
+    """The rewrites that *moves* requires across the vault, with nothing written.
+
+    *moves* is ``(old, new)`` per note, both ``memory-vault/…`` paths, and *root*
+    is the resolved vault root. Nothing here depends on the direction of the move,
+    so any folder move can plan through it, not only a completion.
 
     Only notes that can name a moved note are read. A reference in any dialect is
     a path without its extension, so it always contains that note's stem, and a
     file without any of them cannot mention one: parsing every note in the vault
-    to discover that is the cost this skips.
+    to discover that is the cost this skips. A note that is itself moving is read
+    regardless, because its own relative links are measured from its new place.
     """
     # Imported here, not at module scope: `vault_rehome` pulls in the migration
     # receipt and the git rail, and a read-only listing of this module's queue
@@ -2012,20 +2050,7 @@ def _repoint_project_references(
     # `strip_references` at the point of use.
     from ciao.vault_rehome import rewrite_references
 
-    root = Path(root).resolve()
-    entries = scan_vault(root, workspace=workspace)
     filename_index = build_filename_index(entries)
-    moves: list[tuple[str, str]] = []
-    if folder:
-        completed_folder = _completed_counterpart(folder)
-        for entry in entries:
-            rel = entry.path_key
-            if rel == previous_path or not rel.startswith(f"{folder}/"):
-                continue
-            # The suffix carries the note's place inside the folder, which is
-            # unchanged by the move: only the `active` segment above it is.
-            moves.append((rel, completed_folder + rel[len(folder):]))
-    moves.append((previous_path, completed_path))
     moved_to = dict(moves)
     # `rewrite_references` works in two value spaces, so the one move is spelled
     # twice: a markdown destination is a path resolved against the note holding
@@ -2056,7 +2081,7 @@ def _repoint_project_references(
             # record for `restore_completed` either.
             continue
         folded = text.casefold()
-        if not any(needle in folded for needle in needles):
+        if rel not in moved_to and not any(needle in folded for needle in needles):
             continue
         after_rel = moved_to.get(rel, rel)
         new_text, _changes = rewrite_references(
@@ -2069,6 +2094,49 @@ def _repoint_project_references(
         edited.append(_vault_path(root, after))
         rewrites.append(_Rewrite(note, after, text, new_text))
     return edited, rewrites
+
+
+def move_project_folder(
+    root: Path, source: Path, destination: Path, *, workspace: str
+) -> list[str]:
+    """Repoint every reference into *source*, then move the folder to *destination*.
+
+    *root* is the workspace vault root, the same root ControlPlane passes to
+    :func:`complete_project_note`; *source* and *destination* are absolute folders
+    inside it. The references are written before the move because resolving them
+    needs the notes still at their old paths, and a failure at either step puts
+    the vault back as it was: written notes are restored and any directories the
+    move created are pruned. Returns the edited notes as ``memory-vault/…`` ids,
+    at their paths after the move.
+    """
+    root = Path(root).resolve()
+    source = Path(source).resolve()
+    destination = Path(destination).resolve()
+    if not source.is_relative_to(root) or not destination.is_relative_to(root):
+        raise ValueError("project folder is outside the vault")
+    if not source.is_dir():
+        raise ValueError(f"project folder {source.name} does not exist")
+    if destination.exists():
+        raise ValueError(f"a folder already exists at {destination.name}; refusing to move into it")
+    entries = scan_vault(root, workspace=workspace)
+    edited, rewrites = _plan_reference_rewrites(
+        root,
+        entries,
+        _folder_moves(entries, _vault_path(root, source), _vault_path(root, destination)),
+    )
+    try:
+        _write_texts([(r.path_before, r.before, r.after) for r in rewrites])
+    except OSError as exc:
+        raise ValueError(f"could not rewrite the references to the project: {exc}") from exc
+    created = _missing_ancestors(destination.parent, root)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(destination))
+    except OSError as exc:
+        _unwrite_texts([(r.path_before, r.before) for r in rewrites])
+        _prune_created(created)
+        raise ValueError(f"could not move the project; it was put back: {exc}") from exc
+    return edited
 
 
 def complete_project_note(root: Path, candidate: ReviewCandidate, *, actor: str = "user") -> dict[str, Any]:

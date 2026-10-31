@@ -35,6 +35,7 @@ const stubs = vi.hoisted(() => {
     disposed = false
     focused = 0
     size = { cols: 80, rows: 24 }
+    modes = { applicationCursorKeysMode: false }
     dataListeners: Array<(data: string) => void> = []
     addons: unknown[] = []
 
@@ -363,6 +364,25 @@ describe('disposal', () => {
     expect(stubs.FakeResizeObserver.instances[0].observed).toEqual([element])
     renderer.dispose()
     expect(stubs.FakeResizeObserver.instances[0].disconnected).toBe(true)
+  })
+})
+
+describe('application cursor mode', () => {
+  it('reports the screen\'s cursor-key mode, and false once disposed', async () => {
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element: host() })
+    const terminal = await waitForTerminal()
+
+    expect(renderer.applicationCursorKeys).toBe(false)
+    terminal.modes.applicationCursorKeysMode = true
+    expect(renderer.applicationCursorKeys).toBe(true)
+    renderer.dispose()
+    expect(renderer.applicationCursorKeys).toBe(false)
+  })
+
+  it('is false before the screen exists', () => {
+    const renderer = new TerminalRenderer({ sessionId: 'session-a', element: host() })
+
+    expect(renderer.applicationCursorKeys).toBe(false)
   })
 })
 

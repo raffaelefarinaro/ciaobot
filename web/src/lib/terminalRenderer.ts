@@ -346,6 +346,17 @@ export class TerminalRenderer {
   }
 
   /**
+   * True while the program on screen has put the cursor keys in application
+   * mode (DECCKM, `CSI ? 1 h`): a hardware arrow then sends SS3 (`ESC O A`)
+   * rather than CSI (`ESC [ A`), and an on-screen arrow must do the same.
+   * False before the screen exists and after it is disposed.
+   */
+  get applicationCursorKeys(): boolean {
+    if (this.#disposed) return false
+    return this.#terminal?.modes.applicationCursorKeysMode ?? false
+  }
+
+  /**
    * Tear the screen down.
    *
    * The observer is disconnected, the terminal is disposed, and every write

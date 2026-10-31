@@ -286,6 +286,16 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   listener has already run. `Shift`+`Tab` is the one key intercepted in the
   capture phase: it moves the keyboard to the panel's controls, because the
   shell keeps Tab and a pane that cannot be left is a keyboard trap.
+- **A soft keyboard gets a key row.** Under `(pointer: coarse)` the pane shows
+  `components/TerminalKeyRow.vue` under the screen while a session has one:
+  Esc, Tab, Ctrl+C, Ctrl+D, the four arrows and Enter, 44px native buttons
+  disabled until the session is live. The bytes come from
+  `lib/terminalKeys.ts` and go through `store.sendInput`, like a keystroke;
+  the arrows follow the screen's cursor-key mode (DECCKM, read from
+  `TerminalRenderer.applicationCursorKeys`), CSI normally and SS3 in
+  application mode. A tap prevents the pointerdown and mousedown defaults so
+  the focus (and the soft keyboard) stays on the shell, and a key that took
+  the focus anyway hands it back to the screen.
 - **Hide is not End.** Hide detaches: the socket closes and the shell keeps
   running on the engine. End asks the engine to stop it. They are two
   buttons, and only one of them stops the process.
