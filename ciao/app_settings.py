@@ -94,6 +94,7 @@ _BOOLEAN_FIELDS = {
     "backup_paused",
     "dev_mode",
     "legacy_env_imported",
+    "resume_after_restart",
 }
 # Bookkeeping the store owns; a PATCH never sets it.
 _INTERNAL_FIELDS = {"legacy_env_imported"}
@@ -228,6 +229,9 @@ class AppSettings:
     # What a message sent while a turn runs does by default: "" = queue (a
     # follow-up turn), "steer" = injected into the running turn.
     mid_turn_delivery: str = ""
+    # Whether a chat whose turn a restart or crash cut off gets one "Continue
+    # after restart" turn at the next start (#2128). Settings → General.
+    resume_after_restart: bool = True
 
     # Appearance preferences are engine-wide so every device agrees. "" and
     # 0.0 mean "never stored": the first browser to load seeds theme and

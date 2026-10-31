@@ -93,6 +93,43 @@ test.describe('a task link in a chat reply', () => {
     await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
   })
 
+  test('Back closes the editor over the chat and writes what it held', async ({ page }) => {
+    const link = await openTaskLink(page)
+    await link.click()
+    const editor = page.locator(EDITOR)
+    await expect(editor).toBeVisible()
+    await editor.locator('#task-detail-name').fill('Reply to Ivo after Back')
+
+    await page.goBack()
+    await expect(editor).toBeHidden()
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+    await expect(link).toBeFocused()
+    const writes = await fixtureWrites(page)
+    expect(writes.some(write => write.method === 'PATCH' && write.path === `/api/tasks/${TASK_ID}`)).toBe(true)
+  })
+
+  test('a refused save keeps the editor on Back', async ({ page }) => {
+    const link = await openTaskLink(page)
+    await page.route('**/api/tasks/*', async route => {
+      if (route.request().method() !== 'PATCH') return route.fallback()
+      await route.fulfill({
+        status: 409,
+        json: { error: { code: 'task_revision_conflict', message: 'that task changed on disk', retryable: true } },
+      })
+    })
+
+    await link.click()
+    const editor = page.locator(EDITOR)
+    await expect(editor).toBeVisible()
+    await editor.locator('#task-detail-name').fill('A title that cannot be saved')
+
+    await page.goBack()
+    await expect(editor).toBeVisible()
+    await expect(editor.locator('#task-detail-name')).toHaveValue('A title that cannot be saved')
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+    await expect.poll(() => page.evaluate(() => window.history.state?.ciaoOverlay)).toBeTruthy()
+  })
+
   test('a modified click still opens the task page in another tab', async ({ page, context }) => {
     const link = await openTaskLink(page)
 

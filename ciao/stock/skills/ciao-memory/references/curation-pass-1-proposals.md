@@ -59,3 +59,4 @@ For each `[memory]` / `[profile]` row in the worklist:
 - If an acting command exits 1, leave the row queued and escalate it with `ciao memory-proposal-escalate`, using the refusal it printed as the reason.
 - Never use `ciao memory update` or hand-edit `AGENTS.md` for this. Both acting commands re-check the setting themselves, and `memory-proposal-accept` takes at most five facts per run and only while you hold the curation lease.
 - Under **What needs you** report the region rows left queued. Count the rows you acted on under **What I did**.
+- When `ciao memory-proposals` returns a `review_path` for a row you leave queued, report it verbatim next to that row under **What needs you**. Keys and links are derived from the question's content, so an edited or resolved question may stop being available; never invent an id, and never accept a proposal because a link exists.

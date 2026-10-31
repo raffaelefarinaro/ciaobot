@@ -17,6 +17,7 @@ import { nextTick } from 'vue'
 import MemoryMapView from '../MemoryMapView.vue'
 import { useMemoryMapStore } from '../../stores/memoryMap'
 import { useProjectStore } from '../../stores/projects'
+import { useProposalsStore } from '../../stores/proposals'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -884,5 +885,409 @@ describe('MemoryMapView verification state', () => {
     expect(mm.staleNotes.map(n => n.title)).toEqual(['Conflicted', 'Untouched'])
     expect(wrapper.get('.mm-toolbar-stale').text()).toContain('2')
     wrapper.unmount()
+  })
+})
+
+/**
+ * A reloadable proposal link: `/memory/review?show=suggested&workspace=NAME&proposal=prv_<64 hex>`.
+ *
+ * The real panel is mounted; only layout (jsdom has none), the frame timer and
+ * the network are replaced. Fetches are held on deferred promises and the
+ * panel's 16 ms frames on fake timers, so each test decides when the queue
+ * arrives and when the row becomes visible.
+ */
+describe('MemoryMapView proposal links', () => {
+  type Deferred<T> = { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void }
+  function deferred<T>(): Deferred<T> {
+    let resolve!: (v: T) => void
+    let reject!: (e: unknown) => void
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+  const keyOf = (c: string) => `prv_${c.repeat(64)}`
+  const linkTo = (c: string, ws = 'personal') =>
+    `/memory/review?show=suggested&workspace=${ws}&proposal=${keyOf(c)}`
+  const row = (id: string, text: string, c: string, ws = 'personal') => ({
+    id, kind: 'memory', text, source: '', path: '', workspace: ws, region: 'memory',
+    target: '', ts: '2026-09-01', review_key: keyOf(c), review_path: linkTo(c, ws),
+  })
+  const QUEUE = () => ({
+    rows: [
+      row('p1', 'Alpha fact', 'a'),
+      row('p2', 'Beta fact', 'b'),
+      row('p3', 'Gamma fact', 'c', 'work'),
+    ],
+  })
+
+  let listing: () => Promise<unknown>
+  let visible: boolean
+  let focused: string[]
+  let current: ReturnType<typeof mount> | null
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    apiGet.mockReset()
+    apiPost.mockReset()
+    visible = true
+    focused = []
+    current = null
+    listing = () => Promise.resolve(QUEUE())
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/proposals') return listing()
+      if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false, limit: 200 })
+      if (url.startsWith('/api/vault/review')) return Promise.resolve({ candidates: [], trashed: [], cleared: [] })
+      if (url.includes('/api/vault/graph')) return Promise.resolve(graphPayload())
+      return Promise.resolve({})
+    })
+    const store = useProjectStore()
+    store.workspaces = [
+      { name: 'personal', vault_root: '/tmp/vault', default_provider: 'claude', gws_profile: '' },
+      { name: 'work', vault_root: '/tmp/work', default_provider: 'claude', gws_profile: '' },
+    ]
+    store.activeWorkspace = 'personal'
+    store.bootstrapped = true
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => null) as never
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    // jsdom lays nothing out: `visible` is what the panel's frame loop waits for.
+    vi.spyOn(Element.prototype, 'getClientRects').mockImplementation(
+      () => (visible ? [{}] : []) as unknown as DOMRectList,
+    )
+    Element.prototype.scrollIntoView = vi.fn()
+    const realFocus = HTMLElement.prototype.focus
+    vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, ...args) {
+      if (this.classList.contains('pr-row')) focused.push(/Alpha|Beta|Gamma/.exec(this.textContent ?? '')?.[0] ?? '?')
+      else realFocus.apply(this, args)
+    })
+  })
+
+  afterEach(() => {
+    current?.unmount()
+    document.body.innerHTML = ''
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+  })
+
+  /** Let promises and the panel's 16 ms frames run a few rounds. */
+  async function settle() {
+    for (let i = 0; i < 4; i += 1) {
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(16)
+    }
+    await flushPromises()
+  }
+  async function open(path: string) {
+    const wrapper = await mountView(path)
+    current = wrapper
+    await settle()
+    return wrapper
+  }
+  const noticeText = (wrapper: ReturnType<typeof mount>) => wrapper.find('.mm-link-notice').text()
+
+  it('a fresh mount waits for bootstrap and the deferred fetch, then reveals the exact row and clears saved filters', async () => {
+    const proposals = useProposalsStore()
+    proposals.kindFilter = 'skill'
+    proposals.decideFilter = 'needs-you'
+    proposals.search = 'zzz'
+    useProjectStore().bootstrapped = false
+    const gate = deferred<unknown>()
+    listing = () => gate.promise
+
+    const wrapper = await open(linkTo('b'))
+    expect(noticeText(wrapper)).toContain('Opening the proposal')
+    useProjectStore().bootstrapped = true
+    await settle()
+    expect(focused).toEqual([])
+
+    gate.resolve(QUEUE())
+    await settle()
+
+    expect(focused).toEqual(['Beta'])
+    expect([proposals.kindFilter, proposals.decideFilter, proposals.search]).toEqual(['all', 'all', ''])
+    expect(proposals.revealedRowId).toBe('')
+    expect(wrapper.find('.mm-link-notice').exists()).toBe(false)
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('a same-component route update reveals the exact row after a deferred fetch', async () => {
+    const proposals = useProposalsStore()
+    const wrapper = await open('/memory/review')
+    expect(focused).toEqual([])
+    proposals.kindFilter = 'skill'
+    proposals.search = 'zzz'
+    const gate = deferred<unknown>()
+    listing = () => gate.promise
+
+    await wrapper.router.push(linkTo('a'))
+    await settle()
+    expect(focused).toEqual([])
+
+    gate.resolve(QUEUE())
+    await settle()
+
+    expect(focused).toEqual(['Alpha'])
+    expect([proposals.kindFilter, proposals.search]).toEqual(['all', ''])
+  })
+
+  it('a registered other workspace is entered through the switch guards', async () => {
+    const store = useProjectStore()
+    const guard = vi.fn(async () => true)
+    store.registerWorkspaceSwitchGuard(guard)
+
+    await open(linkTo('c', 'work'))
+
+    expect(guard).toHaveBeenCalledWith('personal')
+    expect(store.activeWorkspace).toBe('work')
+    expect(focused).toEqual(['Gamma'])
+  })
+
+  it('a declined guard leaves the scope and the focus alone', async () => {
+    const store = useProjectStore()
+    store.registerWorkspaceSwitchGuard(async () => false)
+
+    const wrapper = await open(linkTo('c', 'work'))
+
+    expect(store.activeWorkspace).toBe('personal')
+    expect(focused).toEqual([])
+    expect(useProposalsStore().revealedRowId).toBe('')
+    expect(noticeText(wrapper)).toContain('The workspace was not changed')
+  })
+
+  it('an unknown workspace is said so and changes nothing', async () => {
+    const store = useProjectStore()
+    const wrapper = await open(linkTo('a', 'ghost'))
+
+    expect(store.activeWorkspace).toBe('personal')
+    expect(focused).toEqual([])
+    expect(noticeText(wrapper)).toContain('"ghost" is not available')
+  })
+
+  it('a malformed or repeated key is refused and never picks another row', async () => {
+    const short = await open('/memory/review?show=suggested&workspace=personal&proposal=prv_abc')
+    expect(noticeText(short)).toContain('not valid')
+    short.unmount()
+    current = null
+
+    const repeated = await open(`/memory/review?show=suggested&workspace=personal&proposal=${keyOf('a')}&proposal=${keyOf('b')}`)
+    expect(noticeText(repeated)).toContain('not valid')
+    expect(focused).toEqual([])
+    expect(useProjectStore().activeWorkspace).toBe('personal')
+  })
+
+  it('a key that belongs to another workspace is not found here', async () => {
+    const wrapper = await open(linkTo('c', 'personal'))
+
+    expect(noticeText(wrapper)).toContain('This proposal is no longer pending.')
+    expect(focused).toEqual([])
+  })
+
+  it('a missing or resolved key says it is no longer pending and links to history', async () => {
+    const wrapper = await open(linkTo('f'))
+
+    expect(noticeText(wrapper)).toContain('This proposal is no longer pending.')
+    expect(wrapper.get('.mm-link-notice a').attributes('href')).toBe('/memory/history')
+    expect(focused).toEqual([])
+  })
+
+  it('a transport failure is not a missing-state claim, and Retry succeeds', async () => {
+    listing = () => Promise.reject(new Error('offline'))
+    const wrapper = await open(linkTo('b'))
+
+    const alert = wrapper.get('.mm-link-notice[role="alert"]')
+    expect(alert.text()).toContain('Could not load the proposal')
+    expect(wrapper.text()).not.toContain('no longer pending')
+    expect(focused).toEqual([])
+
+    listing = () => Promise.resolve(QUEUE())
+    await alert.get('button').trigger('click')
+    await settle()
+
+    expect(focused).toEqual(['Beta'])
+    expect(wrapper.find('.mm-link-notice').exists()).toBe(false)
+  })
+
+  it('route A to B while A is still loading: A cannot overwrite B', async () => {
+    const proposals = useProposalsStore()
+    const reveal = vi.spyOn(proposals, 'revealRow')
+    const gate = deferred<unknown>()
+    listing = () => gate.promise
+    const wrapper = await open(linkTo('a'))
+
+    await wrapper.router.push(linkTo('b'))
+    await settle()
+    gate.resolve(QUEUE())
+    await settle()
+
+    expect(reveal.mock.calls.map(c => c[0])).toEqual(['p2'])
+    expect(focused).toEqual(['Beta'])
+  })
+
+  it('after handoff, navigating to B never lets A focus or clear B', async () => {
+    const proposals = useProposalsStore()
+    visible = false
+    const wrapper = await open(linkTo('a'))
+    expect(proposals.revealedRowId).toBe('p1')
+
+    await wrapper.router.push(linkTo('b'))
+    await settle()
+    expect(proposals.revealedRowId).toBe('p2')
+    expect(focused).toEqual([])
+
+    visible = true
+    await settle()
+    expect(focused).toEqual(['Beta'])
+    expect(proposals.revealedRowId).toBe('')
+  })
+
+  it('after handoff, a workspace switch the resolver did not make withdraws the reveal', async () => {
+    const proposals = useProposalsStore()
+    visible = false
+    await open(linkTo('a'))
+    expect(proposals.revealedRowId).toBe('p1')
+
+    useProjectStore().activeWorkspace = 'work'
+    await settle()
+    expect(proposals.revealedRowId).toBe('')
+
+    visible = true
+    await settle()
+    expect(focused).toEqual([])
+  })
+
+  it('after handoff, unmounting stops the old loop and withdraws the reveal', async () => {
+    const proposals = useProposalsStore()
+    visible = false
+    const wrapper = await open(linkTo('a'))
+    expect(proposals.revealedRowId).toBe('p1')
+
+    wrapper.unmount()
+    current = null
+    expect(proposals.revealedRowId).toBe('')
+
+    visible = true
+    await settle()
+    expect(focused).toEqual([])
+  })
+
+  it('exactly equivalent duplicates reveal the first, and no decision is ever sent', async () => {
+    listing = () => Promise.resolve({
+      rows: [row('p1', 'Alpha fact', 'a'), row('p9', 'Beta fact', 'a'), row('p2', 'Gamma fact', 'b')],
+    })
+
+    await open(linkTo('a'))
+
+    expect(focused).toEqual(['Alpha'])
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
+  it('without a proposal query, or outside To decide, nothing is resolved or changed', async () => {
+    const proposals = useProposalsStore()
+    const reveal = vi.spyOn(proposals, 'revealRow')
+    proposals.kindFilter = 'skill'
+
+    const plain = await open('/memory/review')
+    expect(plain.find('.mm-link-notice').exists()).toBe(false)
+    expect(proposals.kindFilter).toBe('skill')
+    plain.unmount()
+    current = null
+
+    const map = await open(`/memory/map?workspace=personal&proposal=${keyOf('a')}`)
+    expect(map.find('.mm-link-notice').exists()).toBe(false)
+    expect(reveal).not.toHaveBeenCalled()
+    expect(proposals.kindFilter).toBe('skill')
+  })
+
+  it('a Vault review reveal of the same row survives the route change that follows a finished link', async () => {
+    const proposals = useProposalsStore()
+    const wrapper = await open(linkTo('a'))
+    expect(focused).toEqual(['Alpha'])
+
+    // What VaultReviewPanel does: reveal the row, then go to the queue.
+    visible = false
+    proposals.revealRow('p1')
+    await wrapper.router.push('/memory/review?show=suggested')
+    await settle()
+
+    expect(proposals.revealedRowId).toBe('p1')
+  })
+
+  it('a manual workspace switch after a finished link is not resolver work', async () => {
+    const proposals = useProposalsStore()
+    await open(linkTo('a'))
+    expect(focused).toEqual(['Alpha'])
+
+    visible = false
+    proposals.revealRow('p1')
+    await settle()
+    useProjectStore().activeWorkspace = 'work'
+    await settle()
+
+    // Not the resolver's reveal, so the resolver must not take it back.
+    expect(proposals.revealedRowId).toBe('p1')
+  })
+
+  it('Retry leaves keyboard focus inside the notice', async () => {
+    listing = () => Promise.reject(new Error('offline'))
+    const wrapper = await open(linkTo('b'))
+    const gate = deferred<unknown>()
+    listing = () => gate.promise
+
+    const button = wrapper.get('.mm-link-notice button').element as HTMLButtonElement
+    button.focus()
+    expect(document.activeElement).toBe(button)
+    await wrapper.get('.mm-link-notice button').trigger('click')
+    await settle()
+
+    const notice = wrapper.get('.mm-link-notice').element
+    expect(notice.contains(document.activeElement)).toBe(true)
+    expect(document.activeElement).not.toBe(document.body)
+    gate.resolve(QUEUE())
+    await settle()
+  })
+
+  it('a forced fetch superseded by a newer request neither reveals nor claims the row is gone', async () => {
+    const proposals = useProposalsStore()
+    listing = () => Promise.reject(new Error('offline'))
+    const wrapper = await open(linkTo('b'))
+    const stale = deferred<unknown>()
+    const newer = deferred<unknown>()
+    const gates = [stale, newer]
+    listing = () => gates.shift()!.promise
+
+    await wrapper.get('.mm-link-notice button').trigger('click')
+    await settle()
+    void proposals.fetch({ force: true })
+    await settle()
+
+    // The superseded request answers first, with a queue that lacks the row.
+    stale.resolve({ rows: [] })
+    await settle()
+    expect(focused).toEqual([])
+    expect(wrapper.text()).not.toContain('no longer pending')
+
+    newer.resolve(QUEUE())
+    await settle()
+    expect(focused).toEqual(['Beta'])
+  })
+
+  it('a manual workspace switch while the resolver is switching stops it and keeps the reader\'s scope', async () => {
+    const store = useProjectStore()
+    store.workspaces = [...store.workspaces, { name: 'third', vault_root: '/tmp/third', default_provider: 'claude', gws_profile: '' }]
+    const release = deferred<boolean>()
+    store.registerWorkspaceSwitchGuard(() => release.promise)
+    await open(linkTo('c', 'work'))
+
+    store.activeWorkspace = 'third'
+    await settle()
+    release.resolve(true)
+    await settle()
+
+    expect(store.activeWorkspace).toBe('third')
+    expect(focused).toEqual([])
+    expect(useProposalsStore().revealedRowId).toBe('')
   })
 })

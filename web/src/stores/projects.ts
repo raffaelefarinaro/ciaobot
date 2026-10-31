@@ -4290,10 +4290,20 @@ export const useProjectStore = defineStore('projects', () => {
 
   // Resolves true once the workspace is active (or already was), false when a
   // guard declined: a caller that goes on to act in `ws` must stop.
-  async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }): Promise<boolean> {
+  //
+  // `isCurrent` lets an asynchronous caller (a deep-link resolver) withdraw: it
+  // is asked before anything else and again once the guards have answered, and
+  // a false answer returns false without touching the scope, so a switch that
+  // was superseded while a guard was open can never apply late.
+  async function switchWorkspace(
+    ws: WorkspaceName,
+    options?: { transition?: boolean; isCurrent?: () => boolean },
+  ): Promise<boolean> {
     const transition = options?.transition !== false
+    if (options?.isCurrent && !options.isCurrent()) return false
     if (activeWorkspace.value === ws) return true
     if (!(await workspaceSwitchAllowed(activeWorkspace.value))) return false
+    if (options?.isCurrent && !options.isCurrent()) return false
     if (activeWorkspace.value === ws) return true
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws

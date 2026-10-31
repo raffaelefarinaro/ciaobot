@@ -87,10 +87,11 @@ QUEUE_DELIVERIES = frozenset({"queue", "steer"})
 #: An engine-injected turn's source, or ``retry`` for a user-requested retry.
 #: Recorded per turn in ``ChatInfo.user_turn_origin`` and sent on
 #: ``user_echo`` / ``/messages`` so the PWA draws a notice card instead of a
-#: user bubble. Empty string = typed by the person.
+#: user bubble. Empty string = typed by the person. ``restart_resume`` is the
+#: one turn the engine sends into a chat whose turn a restart cut off (#2128).
 TURN_ORIGINS = frozenset({
-    "background_run", "cli_task_wake", "retry", "schedule", "task_delegation",
-    "task_resume", "webhook", "update_task",
+    "background_run", "cli_task_wake", "retry", "restart_resume", "schedule",
+    "task_delegation", "task_resume", "webhook", "update_task",
 })
 # ``steer_id`` of an entry handed to ``steer_turn`` whose delivery id is not
 # known yet. It locks the entry (no edit, remove or re-dispatch) meanwhile.
