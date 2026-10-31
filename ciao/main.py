@@ -1265,6 +1265,16 @@ async def _run_server_locked(
                 interrupted,
             )
 
+        # Resume chats whose turn the previous process never finished (#2128).
+        try:
+            resumed = pcm.resume_interrupted_turns(
+                enabled=app_settings.settings.resume_after_restart
+            )
+            if resumed:
+                logger.warning("Resuming %d chat(s) whose turn the restart interrupted", resumed)
+        except Exception:
+            logger.exception("Restart resume sweep failed")
+
         # The memory-pass queue is durable on the memory chats' helpers, so a
         # restart picks it back up: a pass that was running died with the old
         # process and is surfaced for attention, and anything still queued is
@@ -1519,6 +1529,8 @@ async def _run_server_locked(
 
     # ── App bundle refresh on upgrade ────────────────────────
     async def _shutdown_providers() -> None:
+        # Before any provider goes away: turns torn down from here on stay stamped as interrupted (#2128).
+        pcm.begin_shutdown()
         # Disconnect every active provider before uvicorn finishes its
         # lifespan shutdown. Otherwise the Claude SDK subprocess transports
         # outlive the loop and asyncio.run wedges in its cleanup phase

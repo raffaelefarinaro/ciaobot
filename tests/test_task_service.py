@@ -1076,7 +1076,7 @@ def test_agent_complete_on_a_done_task_says_it_is_already_done(tmp_path: Path) -
     assert read_decisions(plane.config.workspace_vault_root("personal")) == []
 
 
-@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task"])
+@pytest.mark.parametrize("origin", ["webhook", "task_delegation", "cli_task_wake", "update_task", "restart_resume"])
 def test_agent_delete_and_complete_refuse_a_turn_the_person_did_not_type(
     tmp_path: Path, origin: str
 ) -> None:

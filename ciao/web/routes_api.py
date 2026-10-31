@@ -5946,6 +5946,7 @@ _ROUTINES_SETTINGS_KEYS = frozenset({
     "log_level",
     "dev_mode",
     "app_repo",
+    "resume_after_restart",
 })
 
 
@@ -5976,6 +5977,8 @@ def _routines_payload(config, app_settings) -> dict:
         "log_level": s.log_level,
         "dev_mode": s.dev_mode,
         "app_repo": s.app_repo,
+        # Settings → General: resume a chat whose turn a restart cut off (#2128).
+        "resume_after_restart": s.resume_after_restart,
         "server_defaults": {
             "pwa_host": DEFAULT_PWA_HOST,
             "log_level": DEFAULT_LOG_LEVEL,
