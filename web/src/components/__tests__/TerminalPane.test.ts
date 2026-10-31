@@ -67,6 +67,9 @@ const screen = vi.hoisted(() => {
     disposed = false
     focused = 0
     resets = 0
+    // A plain public field, not a private one: the test flips it the way the
+    // program on screen flips DECCKM, and the pane must read it from the screen.
+    applicationCursorKeys = false
     writes: Uint8Array[] = []
     onInput: ((bytes: Uint8Array) => void) | null
     onResize: ((cols: number, rows: number) => void) | null
@@ -494,6 +497,91 @@ describe('TerminalPane', () => {
     const down = new Event('pointerdown', { bubbles: true, cancelable: true })
     key.dispatchEvent(down)
     expect(down.defaultPrevented).toBe(true)
+    const mouseDown = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    key.dispatchEvent(mouseDown)
+    expect(mouseDown.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('gives the focus back to the screen when a tap left it on a key', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+    expect(store.phase).toBe('live')
+
+    const key = wrapper.get('[aria-label="Enter"]').element as HTMLButtonElement
+    key.focus()
+    const before = screen.FakeScreen.instances.at(-1)!.focused
+    key.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+    await flushPromises()
+
+    expect(screen.FakeScreen.instances.at(-1)!.focused).toBe(before + 1)
+    expect(sockets[0].ofType('input').at(-1)?.data).toBe(btoa('\r'))
+    wrapper.unmount()
+  })
+
+  it('leaves the focus alone for a keyboard press and for a tap that did not move it', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+
+    const key = wrapper.get('[aria-label="Enter"]').element as HTMLButtonElement
+    const fake = () => screen.FakeScreen.instances.at(-1)!
+
+    // (a) Enter or Space on the focused key: detail 0, the focus stays on the key.
+    key.focus()
+    const beforeKeyboard = fake().focused
+    key.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 0 }))
+    await flushPromises()
+    expect(fake().focused).toBe(beforeKeyboard)
+    expect(document.activeElement).toBe(key)
+
+    // (b) A tap that did not move the focus: the screen keeps it.
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    const beforeTap = fake().focused
+    key.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
+    await flushPromises()
+    expect(fake().focused).toBe(beforeTap)
+
+    const frames = sockets[0].ofType('input').map((f) => f.data)
+    expect(frames.slice(-2)).toEqual([btoa('\r'), btoa('\r')])
+    wrapper.unmount()
+  })
+
+  it('sends application-mode arrows when the screen is in application cursor mode', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+    expect(store.phase).toBe('live')
+
+    screen.FakeScreen.instances.at(-1)!.applicationCursorKeys = true
+    await wrapper.get('[aria-label="Up arrow"]').trigger('click')
+    expect(sockets[0].ofType('input').at(-1)?.data).toBe(btoa('\x1bOA'))
+    await wrapper.get('[aria-label="Left arrow"]').trigger('click')
+    expect(sockets[0].ofType('input').at(-1)?.data).toBe(btoa('\x1bOD'))
+    await wrapper.get('[aria-label="Escape"]').trigger('click')
+    expect(sockets[0].ofType('input').at(-1)?.data).toBe(btoa('\x1b'))
     wrapper.unmount()
   })
 
@@ -501,10 +589,32 @@ describe('TerminalPane', () => {
     // jsdom has no layout engine, so the rules are asserted from the sheet
     // the pane ships: hidden by default, shown for a coarse pointer, and each
     // key at the shared touch size.
-    const source = readFileSync(join(__dirname, '..', 'TerminalPane.vue'), 'utf8')
-    expect(source).toMatch(/\.tp-keys \{[^}]*display:\s*none/)
-    expect(source).toMatch(/@media \(pointer: coarse\) \{\s*\.tp-keys \{ display: flex; \}/)
-    expect(source).toMatch(/\.tp-key \{[^}]*min-width:\s*var\(--touch\)[^}]*min-height:\s*var\(--touch\)/)
+    const row = readFileSync(join(__dirname, '..', 'TerminalKeyRow.vue'), 'utf8')
+    expect(row).toMatch(/\.tp-keys \{[^}]*display:\s*none/)
+    expect(row).toMatch(/@media \(pointer: coarse\) \{\s*\.tp-keys \{ display: flex; \}/)
+    expect(row).toMatch(/\.tp-key \{[^}]*min-width:\s*var\(--touch\)[^}]*min-height:\s*var\(--touch\)/)
+
+    // The pane shows its touch sentence only under the same coarse pointer.
+    const pane = readFileSync(join(__dirname, '..', 'TerminalPane.vue'), 'utf8')
+    expect(pane).toMatch(/\.tp-hint-touch \{ display: none; \}/)
+    expect(pane).toMatch(/@media \(pointer: coarse\) \{[^}]*\.tp-hint-touch \{ display: inline; \}/s)
+  })
+
+  it('tells a touch user where the shell\'s keys are', async () => {
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+    sockets[0].receive({
+      type: 'ready', session_id: 's1', folder: '/tmp/work', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.tp-hint .tp-hint-touch').text())
+      .toBe('On a touch screen, the keys under the terminal send them.')
+    wrapper.unmount()
   })
 
   it('closes the pane without ending its sessions', async () => {

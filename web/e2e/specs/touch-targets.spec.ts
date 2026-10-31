@@ -514,6 +514,30 @@ test.describe('touch targets', () => {
     }
   })
 
+  test('the terminal pane and its key row are at least 44×44 on touch', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.getByRole('button', { name: 'Show chat details' }).click()
+    await page.locator('#chat-work-rail .chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+
+    const pane = page.locator('.terminal-pane')
+    await expect(pane).toBeVisible()
+    // The row appears once the shell's screen exists; Enter is enabled once
+    // the session is live.
+    const keys = pane.getByRole('toolbar', { name: 'Terminal keys' })
+    await expect(keys).toBeVisible()
+    await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()
+
+    // The row is measured on its own: all nine keys are there, so the check
+    // cannot pass on a zero-sized row.
+    const row = await measure(page, '.terminal-pane .tp-keys')
+    expect(row.total, 'the key row has nine buttons').toBe(9)
+    expect(row.bad, `keys under ${TOUCH_MIN}px:\n${row.bad.join('\n')}`).toEqual([])
+
+    const pair = await measure(page, '.terminal-pane')
+    expect(pair.total, 'the pane has more controls than the row').toBeGreaterThan(9)
+    expect(pair.bad, `pane controls under ${TOUCH_MIN}px:\n${pair.bad.join('\n')}`).toEqual([])
+  })
+
   test('the workspace reorder handle and Move up / Move down are at least 44×44 on touch', async ({ page }) => {
     await boot(page, '/settings/workspace', WORKSPACE_READY)
     const handle = page.locator('[data-workspace-handle="beta"]')

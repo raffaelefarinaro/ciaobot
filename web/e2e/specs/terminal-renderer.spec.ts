@@ -96,3 +96,23 @@ test('a TUI start-up probe is answered and the screen keeps drawing', async ({ p
   await expect(page.locator('#terminal')).toContainText(TEXT)
   expect(pageErrors).toEqual([])
 })
+
+test('the screen reports application cursor mode', async ({ page }) => {
+  // The on-screen arrows follow this mode: a program that sends `CSI ? 1 h`
+  // expects SS3 arrows, and `CSI ? 1 l` takes them back to CSI.
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => {
+    pageErrors.push(error.message)
+  })
+
+  await page.goto(HARNESS)
+  await page.waitForFunction(() => Boolean(window.__terminal))
+  expect(await page.evaluate(() => window.__terminal.applicationCursorKeys())).toBe(false)
+
+  await page.evaluate((text) => window.__terminal.write(text), '\x1b[?1h')
+  expect(await page.evaluate(() => window.__terminal.applicationCursorKeys())).toBe(true)
+
+  await page.evaluate((text) => window.__terminal.write(text), '\x1b[?1l')
+  expect(await page.evaluate(() => window.__terminal.applicationCursorKeys())).toBe(false)
+  expect(pageErrors).toEqual([])
+})
