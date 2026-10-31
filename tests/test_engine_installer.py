@@ -10,6 +10,7 @@ refused before that same call.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import plistlib
@@ -20,9 +21,10 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -918,7 +920,18 @@ def _harness(
 
     fakebin = tmp_path / "fakebin"
     fakebin.mkdir()
-    _write_exec(fakebin / "uname", "#!/bin/sh\necho Darwin\n")
+    # `uname` answers per flag: the installer asks `-s` for its macOS guard and
+    # `-m` for the uv archive it may bootstrap. Answering "Darwin" to both, as
+    # this stub used to, would make the architecture unknowable.
+    _write_exec(
+        fakebin / "uname",
+        "#!/bin/sh\n"
+        'case "${1:-}" in\n'
+        "    -m) echo arm64 ;;\n"
+        "    -s) echo Darwin ;;\n"
+        "    *) echo Darwin ;;\n"
+        "esac\n",
+    )
     _write_exec(fakebin / "sw_vers", '#!/bin/sh\n[ "$1" = "-productVersion" ] && echo 14.5\n')
     _write_exec(fakebin / "uv", _fake_uv())
     _write_exec(
@@ -6370,3 +6383,473 @@ def test_installer_still_prints_the_link_when_the_engine_came_up(
 
     assert result.returncode == 0, result.stderr
     assert "Open Ciaobot: http://localhost:8443/?setup=tok" in result.stdout
+
+
+# --- uv bootstrap (#2338) ---------------------------------------------------
+#
+# A missing uv is bootstrapped from the pinned upstream release archive, and
+# the reviewed sha256 literals are its trust root. These tests run the shipped
+# shell functions against local tar fixtures through a curl double: nothing is
+# downloaded, nothing is installed on the machine running them, and the
+# fixture's `uv` is a script that would record its own execution.
+
+UV_VERSION = "0.12.17"
+
+# The six published sha256 values for that release, reviewed into the installer.
+# This copy exists so a fixture substitution in a test copy of the table cannot
+# hide a production-table typo.
+UV_SHA256 = {
+    "uv-aarch64-apple-darwin.tar.gz": (
+        "85f00cbdc6dd3e97eba4c31b4d014375a9fdfe8f570023b84e5102fc3456896b"
+    ),
+    "uv-x86_64-apple-darwin.tar.gz": (
+        "8dcf05a8c809bb3c471d2b614788ba27a6e41298fc8c31ac84b5f4339fd468e5"
+    ),
+    "uv-x86_64-unknown-linux-gnu.tar.gz": (
+        "fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63"
+    ),
+    "uv-aarch64-unknown-linux-gnu.tar.gz": (
+        "d636d1b678e9e7f367ecb22b46bd1cabbed234d6bc3b4d96365d2b507f72f86c"
+    ),
+    "uv-x86_64-unknown-linux-musl.tar.gz": (
+        "6401c4665d8fa2a9893e087c91f585430738e3170f5398a1141483efb4a93310"
+    ),
+    "uv-aarch64-unknown-linux-musl.tar.gz": (
+        "a6096da273d548cb9f277d237a01ac7344a39ef0f455c0e148e4dc9737c1596b"
+    ),
+}
+
+UV_EXECUTED = "uv-executed.log"
+UV_BOOTSTRAP_BODY = (
+    "#!/bin/sh\n" f"printf 'executed\\n' >> \"$HOME/{UV_EXECUTED}\"\n"
+).encode()
+
+
+def _uv_archive(path: Path, entries: list[tuple[str, str, bytes]]) -> Path:
+    """Write a gzip tar of `(name, kind, payload)` entries.
+
+    `kind` is "file", "dir", "symlink", "hardlink" or "fifo"; for the two link
+    kinds `payload` is the link target. The format is USTAR so the listing has
+    no pax extension members that would read as unexpected archive members.
+    """
+    with tarfile.open(path, "w:gz", format=tarfile.USTAR_FORMAT) as archive:
+        for name, kind, payload in entries:
+            info = tarfile.TarInfo(name)
+            if kind == "file":
+                info.size = len(payload)
+                info.mode = 0o755
+                archive.addfile(info, io.BytesIO(payload))
+                continue
+            if kind == "dir":
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+            elif kind == "symlink":
+                info.type = tarfile.SYMTYPE
+                info.linkname = payload.decode()
+            elif kind == "hardlink":
+                info.type = tarfile.LNKTYPE
+                info.linkname = payload.decode()
+            elif kind == "fifo":
+                info.type = tarfile.FIFOTYPE
+            else:
+                raise AssertionError(f"unknown tar entry kind: {kind}")
+            archive.addfile(info)
+    return path
+
+
+def _uv_entries(triple: str) -> list[tuple[str, str, bytes]]:
+    """The three members a real uv release archive carries."""
+    return [
+        (f"uv-{triple}/", "dir", b""),
+        (f"uv-{triple}/uv", "file", UV_BOOTSTRAP_BODY),
+        (f"uv-{triple}/uvx", "file", b"#!/bin/sh\nexit 0\n"),
+    ]
+
+
+def _fixture_digests(archive: Path) -> dict[str, str]:
+    """The fixture archive's digest under every table key.
+
+    Only the Darwin entries are ever selected; using one fixture digest for all
+    six keeps the test copy a complete, syntactically valid table without
+    inventing five archives.
+    """
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    return {asset: digest for asset in UV_SHA256}
+
+
+def _uv_bootstrap_digest_source(digests: dict[str, str]) -> str:
+    """The shipped table with the fixture's digests substituted in the test copy.
+
+    The shipping literals are asserted separately (they are the trust root), so
+    this rewrite exists only to point the same code at local fixtures.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        asset = match.group(1)
+        return f"{asset}) printf '%s\\n' {digests[asset]} ;;"
+
+    rewritten, count = re.subn(
+        r"(uv-[a-z0-9_-]+\.tar\.gz)\) printf '%s\\n' [0-9a-f]{64} ;;",
+        replace,
+        _function_source("uv_archive_sha256"),
+    )
+    assert count == 6, "the sha256 table no longer has one line per archive"
+    return rewritten
+
+
+def _uv_bootstrap_run(
+    tmp_path: Path,
+    *,
+    arch: str,
+    archive: Path,
+    digests: dict[str, str],
+    download: bool = True,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    """Run the shipped bootstrap functions against `archive`, hermetically."""
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    tmp.chmod(0o700)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    trace = tmp_path / "trace.log"
+
+    _write_exec(
+        fakebin / "uname",
+        "#!/bin/sh\n"
+        'case "${1:-}" in\n'
+        f"    -m) echo {arch} ;;\n"
+        "    -s) echo Darwin ;;\n"
+        "    *) echo Darwin ;;\n"
+        "esac\n",
+    )
+    # A curl double: it records the request, then serves the fixture (or
+    # refuses), so no test reaches GitHub.
+    download_body = (
+        f"cp {shlex.quote(str(archive))} \"$out\"\n" if download
+        else "printf 'download-refused\\n' >&2\nexit 22\n"
+    )
+    _write_exec(
+        fakebin / "curl",
+        "#!/bin/sh\n"
+        f"printf 'curl %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+        "out=\n"
+        "previous=\n"
+        'for arg in "$@"; do\n'
+        '    if [ "$previous" = -o ]; then out=$arg; fi\n'
+        "    previous=$arg\n"
+        "done\n"
+        '[ -n "$out" ] || exit 2\n' + download_body,
+    )
+    # A tar double: every inspection and extraction is recorded, then the real
+    # system tar does the work, so the tests exercise the shipped invocation.
+    _write_exec(
+        fakebin / "tar",
+        "#!/bin/sh\n"
+        f"printf 'tar %s\\n' \"$*\" >> {shlex.quote(str(trace))}\n"
+        f'exec {shlex.quote(shutil.which("tar") or "tar")} "$@"\n',
+    )
+
+    body = "\n".join(
+        [
+            "set -eu",
+            f"tmp={shlex.quote(str(tmp))}",
+            f"CURL={shlex.quote(str(fakebin / 'curl'))}",
+            f"UV_VERSION={UV_VERSION}",
+            "verified_uv=",
+            _function_source("fail"),
+            _uv_bootstrap_digest_source(digests),
+            _function_source("uv_archive_asset"),
+            _function_source("bootstrap_verified_uv"),
+            "bootstrap_verified_uv",
+            'printf "uv=%s\\n" "$uv"',
+            'printf "verified_uv=%s\\n" "$verified_uv"',
+        ]
+    )
+    result = subprocess.run(
+        ["sh", "-c", body],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, {"home": home, "tmp": tmp, "trace": trace}
+
+
+def _tar_trace(trace: Path) -> list[str]:
+    if not trace.exists():
+        return []
+    return [
+        line for line in trace.read_text(encoding="utf-8").splitlines()
+        if line.startswith("tar ")
+    ]
+
+
+def test_uv_bootstrap_digest_table_matches_reviewed_01217_assets() -> None:
+    """The six literals are the trust root: a typo here authenticates nothing."""
+    assert re.search(r"^UV_VERSION=0\.12\.17$", SCRIPT_TEXT, re.MULTILINE)
+    body = "\n".join(
+        [
+            _function_source("fail"),
+            _function_source("uv_archive_sha256"),
+            *[f"uv_archive_sha256 {asset}" for asset in UV_SHA256],
+        ]
+    )
+
+    result = subprocess.run(
+        ["sh", "-c", body], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [UV_SHA256[asset] for asset in UV_SHA256]
+    # No runtime installer download and no piped shell remains.
+    assert "uv-installer" not in SCRIPT_TEXT
+
+
+@needs_local_tools
+@pytest.mark.parametrize(
+    ("arch", "triple"),
+    [("arm64", "aarch64-apple-darwin"), ("x86_64", "x86_64-apple-darwin")],
+)
+def test_uv_bootstrap_verifies_before_execution(
+    tmp_path: Path, arch: str, triple: str
+) -> None:
+    """A valid archive installs only its `uv`, privately, and runs nothing."""
+    archive = _uv_archive(tmp_path / "uv.tar.gz", _uv_entries(triple))
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch=arch, archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode == 0, result.stderr
+    dest = paths["home"] / ".local" / "bin" / "uv"
+    assert dest.read_bytes() == UV_BOOTSTRAP_BODY
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+    stage = paths["tmp"] / "uv-bootstrap"
+    assert stat.S_IMODE(stage.stat().st_mode) == 0o700
+    # Only uv is extracted: the archive's uvx never becomes a file.
+    assert [entry.name for entry in stage.iterdir()] == ["uv"]
+    assert stat.S_IMODE((stage / "uv").stat().st_mode) == 0o700
+    assert not (paths["home"] / UV_EXECUTED).exists()
+    assert f"uv={dest}" in result.stdout
+    assert f"verified_uv={stage / 'uv'}" in result.stdout
+
+    trace = paths["trace"].read_text(encoding="utf-8")
+    assert (
+        f"https://github.com/astral-sh/uv/releases/download/"
+        f"{UV_VERSION}/uv-{triple}.tar.gz"
+    ) in trace
+    assert "--proto =https" in trace
+    assert "--proto-redir =https" in trace
+    extractions = [line for line in _tar_trace(paths["trace"]) if " -x" in line]
+    assert extractions == [
+        f"tar -xOf {paths['tmp']}/uv-{triple}.tar.gz uv-{triple}/uv"
+    ]
+    assert "uvx" not in " ".join(extractions)
+
+
+@needs_local_tools
+def test_uv_bootstrap_mismatch_executes_nothing(tmp_path: Path) -> None:
+    """A digest mismatch stops before inspection, extraction or installation."""
+    archive = _uv_archive(
+        tmp_path / "uv.tar.gz", _uv_entries("aarch64-apple-darwin")
+    )
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path,
+        arch="arm64",
+        archive=archive,
+        digests={asset: "0" * 64 for asset in UV_SHA256},
+    )
+
+    assert result.returncode != 0
+    assert "reviewed sha256" in result.stderr
+    assert not (paths["home"] / ".local" / "bin" / "uv").exists()
+    assert not (paths["tmp"] / "uv-bootstrap").exists()
+    assert _tar_trace(paths["trace"]) == []
+    assert not (paths["home"] / UV_EXECUTED).exists()
+
+
+UNSAFE_UV_ARCHIVES: list[
+    tuple[Callable[[str], list[tuple[str, str, bytes]]], str]
+] = [
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"../uv-{triple}/uv", "file", b"#!/bin/sh\nexit 0\n")],
+        "traversing",
+    ),
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"/tmp/uv-{triple}/uv", "file", b"#!/bin/sh\nexit 0\n")],
+        "absolute",
+    ),
+    (
+        lambda triple: [
+            (name, "symlink", b"uv")
+            if name == f"uv-{triple}/uv"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "non-regular",
+    ),
+    (
+        lambda triple: [
+            (name, "hardlink", f"uv-{triple}/uvx".encode())
+            if name == f"uv-{triple}/uv"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "non-regular",
+    ),
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"uv-{triple}/uv", "file", b"#!/bin/sh\nexit 0\n")],
+        "exactly one",
+    ),
+    (
+        lambda triple: _uv_entries(triple)
+        + [(f"uv-{triple}/README", "file", b"unexpected")],
+        "unexpected member",
+    ),
+    (
+        lambda triple: [
+            (name, "dir" if name == f"uv-{triple}/uv" else kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "unexpected member",
+    ),
+    (
+        lambda triple: [
+            (f"{name} ", kind, payload)
+            if name == f"uv-{triple}/uv"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "unsafe member name",
+    ),
+    (
+        lambda triple: [
+            (name, "fifo", payload)
+            if name == f"uv-{triple}/uv"
+            else (name, kind, payload)
+            for name, kind, payload in _uv_entries(triple)
+        ],
+        "non-regular",
+    ),
+]
+
+
+@needs_local_tools
+@pytest.mark.parametrize(("entries", "reason"), UNSAFE_UV_ARCHIVES)
+def test_uv_bootstrap_rejects_unsafe_archive_members(
+    tmp_path: Path,
+    entries: Callable[[str], list[tuple[str, str, bytes]]],
+    reason: str,
+) -> None:
+    """The allowlist is exact: no other path, type or name reaches extraction."""
+    triple = "aarch64-apple-darwin"
+    archive = _uv_archive(tmp_path / "uv.tar.gz", entries(triple))
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path, arch="arm64", archive=archive, digests=_fixture_digests(archive)
+    )
+
+    assert result.returncode != 0
+    assert reason in result.stderr
+    assert not (paths["home"] / ".local" / "bin" / "uv").exists()
+    assert not (paths["tmp"] / "uv-bootstrap").exists()
+    assert not [line for line in _tar_trace(paths["trace"]) if " -x" in line]
+    assert not (paths["home"] / UV_EXECUTED).exists()
+
+
+@needs_local_tools
+def test_uv_bootstrap_rejects_unknown_architecture(tmp_path: Path) -> None:
+    """An unknown machine refuses before any download or archive inspection."""
+    archive = _uv_archive(
+        tmp_path / "uv.tar.gz", _uv_entries("aarch64-apple-darwin")
+    )
+
+    result, paths = _uv_bootstrap_run(
+        tmp_path,
+        arch="riscv64",
+        archive=archive,
+        digests=_fixture_digests(archive),
+    )
+
+    assert result.returncode != 0
+    assert "architecture" in result.stderr
+    assert _tar_trace(paths["trace"]) == []
+    # Neither the curl double nor the tar double ran: nothing was downloaded.
+    assert not paths["trace"].exists()
+
+
+def _run_find_uv_selection(
+    tmp_path: Path, *, on_path: bool, in_home: bool
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run the shipped find_uv with a stubbed verified bootstrap.
+
+    PATH is narrowed to the fixture bin plus /usr/bin:/bin so a real uv on the
+    developer's machine cannot decide the branch being tested.
+    """
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    if on_path:
+        _write_exec(fakebin / "uv", "#!/bin/sh\necho path-uv\n")
+    if in_home:
+        _write_exec(home / ".local" / "bin" / "uv", "#!/bin/sh\necho home-uv\n")
+
+    body = "\n".join(
+        [
+            "set -eu",
+            f"HOME={shlex.quote(str(home))}",
+            f"PATH={shlex.quote(str(fakebin))}:/usr/bin:/bin",
+            "export HOME PATH",
+            _function_source("fail"),
+            "bootstrap_verified_uv() {",
+            '    printf "bootstrap-called\\n" >> "$HOME/bootstrap.log"',
+            '    : > "$HOME/.local/bin/uv"',
+            '    chmod 700 "$HOME/.local/bin/uv"',
+            "    uv=$HOME/.local/bin/uv",
+            "}",
+            _function_source("find_uv"),
+            "find_uv",
+            'printf "uv=%s\\n" "$uv"',
+        ]
+    )
+    result = subprocess.run(
+        ["sh", "-c", body], capture_output=True, text=True, check=False
+    )
+    return result, home
+
+
+def test_existing_uv_legacy_selection_is_unchanged(tmp_path: Path) -> None:
+    """An ordinary CLI install still reuses the uv it already has."""
+    # `command -v uv` wins even when ~/.local/bin/uv is also there: the order
+    # of find_uv's selection is unchanged by the verified bootstrap.
+    result, home = _run_find_uv_selection(tmp_path, on_path=True, in_home=True)
+    assert result.returncode == 0, result.stderr
+    assert f"uv={tmp_path / 'fakebin' / 'uv'}" in result.stdout
+    assert not (home / "bootstrap.log").exists()
+
+    # Without one on PATH, the installer-managed ~/.local/bin/uv is reused.
+    result, home = _run_find_uv_selection(
+        tmp_path / "home-only", on_path=False, in_home=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"uv={home / '.local' / 'bin' / 'uv'}" in result.stdout
+    assert not (home / "bootstrap.log").exists()
+
+    # Only a missing uv reaches the verified bootstrap, never uv-installer.sh.
+    result, home = _run_find_uv_selection(
+        tmp_path / "missing", on_path=False, in_home=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"uv={home / '.local' / 'bin' / 'uv'}" in result.stdout
+    assert (home / "bootstrap.log").read_text(encoding="utf-8") == "bootstrap-called\n"

@@ -2,8 +2,11 @@
 set -eu
 
 # One-line installer for the Ciaobot engine alone (no Ciaobot.app), #562.
-# Everything it installs is verified against the release minisign key
-# embedded below before anything runs.
+# The engine manifest and wheel are verified against the release minisign key
+# embedded below before anything runs. A missing uv is bootstrapped from the
+# pinned uv release archive whose sha256 is reviewed into this file and fetched
+# over TLS: that archive carries no minisign or Apple signature, and the Python
+# interpreter uv fetches afterwards is not signature-authenticated either.
 
 repo=raffaelefarinaro/ciaobot
 release_base=${CIAO_RELEASE_BASE_URL:-https://github.com/$repo/releases/download}
@@ -31,6 +34,10 @@ SLEEP=sleep
 # The port `ciao run --installer-bootstrap` and a fresh install's first engine
 # serve on: ciao.config's `pwa_port` default.
 FRESH_PORT=8443
+# Set only by bootstrap_verified_uv, once the pinned uv archive has matched its
+# reviewed sha256 and passed the member allowlist: the private staged copy this
+# run extracted. A native-mode install must take this rather than a PATH uv.
+verified_uv=
 version=
 workspace=
 no_start=0
@@ -925,7 +932,7 @@ if [ "$migrate" -eq 0 ] && { [ "$as_host" -ne 0 ] || [ -n "$as_client" ]; }; the
     fail "--as-host and --as-client require --migrate"
 fi
 
-for command in curl shasum mktemp uname awk sw_vers; do
+for command in curl shasum mktemp uname awk sw_vers tar; do
     command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
 
@@ -974,6 +981,150 @@ download() {
     "$CURL" -fsSL --retry 3 --connect-timeout 15 "$1" -o "$2"
 }
 
+# The pinned uv release a missing uv is bootstrapped from. These are the six
+# published sha256 values for that release's assets, reviewed by a maintainer
+# and committed here: together with TLS to GitHub they are the whole trust root
+# for the uv archive, which carries no minisign or Apple signature. Change
+# UV_VERSION and this whole table as one review unit, and never fetch a
+# checksum at install time - the reviewed literals are what authenticate it.
+uv_archive_sha256() {
+    case "$1" in
+        uv-aarch64-apple-darwin.tar.gz) printf '%s\n' 85f00cbdc6dd3e97eba4c31b4d014375a9fdfe8f570023b84e5102fc3456896b ;;
+        uv-x86_64-apple-darwin.tar.gz) printf '%s\n' 8dcf05a8c809bb3c471d2b614788ba27a6e41298fc8c31ac84b5f4339fd468e5 ;;
+        uv-x86_64-unknown-linux-gnu.tar.gz) printf '%s\n' fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63 ;;
+        uv-aarch64-unknown-linux-gnu.tar.gz) printf '%s\n' d636d1b678e9e7f367ecb22b46bd1cabbed234d6bc3b4d96365d2b507f72f86c ;;
+        uv-x86_64-unknown-linux-musl.tar.gz) printf '%s\n' 6401c4665d8fa2a9893e087c91f585430738e3170f5398a1141483efb4a93310 ;;
+        uv-aarch64-unknown-linux-musl.tar.gz) printf '%s\n' a6096da273d548cb9f277d237a01ac7344a39ef0f455c0e148e4dc9737c1596b ;;
+        *) fail "no reviewed sha256 for uv archive: $1" ;;
+    esac
+}
+
+uv_archive_asset() {
+    # The macOS guard above has already run, so only the two Darwin archives
+    # are selectable here; an unknown machine refuses rather than guessing.
+    case "$(uname -m)" in
+        arm64|aarch64) printf '%s\n' uv-aarch64-apple-darwin.tar.gz ;;
+        x86_64) printf '%s\n' uv-x86_64-apple-darwin.tar.gz ;;
+        *) fail "no reviewed uv archive for this architecture: $(uname -m)" ;;
+    esac
+}
+
+bootstrap_verified_uv() {
+    # Download the pinned archive, authenticate it against the reviewed table,
+    # then inspect it and extract only its exact `uv` member. Nothing from the
+    # archive runs, and tar never creates a path the archive chose: that one
+    # member is written to stdout into a file this function made, in a private
+    # staging directory. The verified staged copy stays in $verified_uv for a
+    # native-mode install; the legacy missing-uv path also publishes it
+    # atomically to ~/.local/bin/uv.
+    uv_asset=$(uv_archive_asset)
+    uv_expected=$(uv_archive_sha256 "$uv_asset")
+    uv_archive="$tmp/$uv_asset"
+    "$CURL" --proto '=https' --proto-redir '=https' -fsSL --retry 3 --connect-timeout 15 \
+        "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$uv_asset" \
+        -o "$uv_archive" || fail "could not download the uv archive"
+    [ -f "$uv_archive" ] || fail "the downloaded uv archive is not a regular file"
+    uv_actual=$(shasum -a 256 "$uv_archive" | awk '{print $1}')
+    [ "$uv_actual" = "$uv_expected" ] \
+        || fail "the uv archive does not match its reviewed sha256"
+
+    # The archive's one expected directory, its `uv`, and optionally `uvx`.
+    # Names are a finite ASCII allowlist, so an unusual name, a duplicate, an
+    # absolute path or a `..` component is a refusal, not a parsing problem.
+    uv_dir=${uv_asset%.tar.gz}
+    uv_member="$uv_dir/uv"
+    uv_listing="$tmp/uv-archive.members"
+    LC_ALL=C tar -P -tf "$uv_archive" > "$uv_listing" 2>/dev/null \
+        || fail "could not list the uv archive"
+    [ -s "$uv_listing" ] || fail "the uv archive has no members"
+    uv_dirs=0
+    uv_files=0
+    uv_uvx=0
+    while IFS= read -r uv_name; do
+        case "$uv_name" in
+            *[!A-Za-z0-9_./-]*) fail "the uv archive has an unsafe member name" ;;
+        esac
+        case "$uv_name" in
+            /*) fail "the uv archive has an absolute member" ;;
+        esac
+        case "/$uv_name/" in
+            */../*) fail "the uv archive has a traversing member" ;;
+        esac
+        case "$uv_name" in
+            "$uv_dir/") uv_dirs=$((uv_dirs + 1)) ;;
+            "$uv_member") uv_files=$((uv_files + 1)) ;;
+            "$uv_dir/uvx") uv_uvx=$((uv_uvx + 1)) ;;
+            *) fail "the uv archive has an unexpected member: $uv_name" ;;
+        esac
+    done < "$uv_listing"
+    [ "$uv_dirs" -eq 1 ] || fail "the uv archive must contain exactly one $uv_dir/ directory"
+    [ "$uv_files" -eq 1 ] || fail "the uv archive must contain exactly one $uv_member"
+    [ "$uv_uvx" -le 1 ] || fail "the uv archive has more than one uvx member"
+
+    # A name listing does not say what an entry is - a symlink and a regular
+    # file print the same name - so the type comes from the verbose listing and
+    # is checked against the name it belongs to. Both listings must agree on
+    # the member count, or the listing is ambiguous and nothing is extracted.
+    uv_types="$tmp/uv-archive.types"
+    LC_ALL=C tar -P -tvf "$uv_archive" > "$uv_types" 2>/dev/null \
+        || fail "could not inspect the uv archive"
+    [ "$(wc -l < "$uv_types")" -eq "$(wc -l < "$uv_listing")" ] \
+        || fail "the uv archive listing is ambiguous"
+    while IFS= read -r uv_line; do
+        uv_rest=${uv_line#?}
+        uv_type=${uv_line%"$uv_rest"}
+        case "$uv_type" in
+            -|d) ;;
+            *) fail "the uv archive has a non-regular member" ;;
+        esac
+        case "$uv_line" in
+            *" -> "*|*" link to "*) fail "the uv archive has a non-regular member" ;;
+        esac
+        uv_line_name=${uv_line##* }
+        case "$uv_line_name" in
+            "$uv_dir/")
+                [ "$uv_type" = d ] || fail "the uv archive has an unexpected member type for $uv_dir/"
+                ;;
+            "$uv_member")
+                [ "$uv_type" = - ] || fail "the uv archive has an unexpected member type for $uv_member"
+                ;;
+            "$uv_dir/uvx")
+                [ "$uv_type" = - ] || fail "the uv archive has an unexpected member type for $uv_dir/uvx"
+                ;;
+            *) fail "the uv archive has an unexpected member: $uv_line_name" ;;
+        esac
+    done < "$uv_types"
+
+    uv_stage="$tmp/uv-bootstrap"
+    (umask 077 && mkdir "$uv_stage") || fail "could not create a private uv staging directory"
+    chmod 700 "$uv_stage" || fail "could not protect the uv staging directory"
+    uv_staged="$uv_stage/uv"
+    if ! (set -C; LC_ALL=C tar -xOf "$uv_archive" "$uv_member" > "$uv_staged" 2>/dev/null); then
+        fail "could not extract $uv_member from the uv archive"
+    fi
+    [ -f "$uv_staged" ] && [ ! -L "$uv_staged" ] \
+        || fail "the extracted uv is not a regular file"
+    [ -s "$uv_staged" ] || fail "the extracted uv is empty"
+    chmod 700 "$uv_staged" || fail "could not protect the extracted uv"
+
+    uv_bin_dir="$HOME/.local/bin"
+    mkdir -p "$uv_bin_dir" || fail "could not create $uv_bin_dir"
+    uv_dest="$uv_bin_dir/uv"
+    if [ -L "$uv_dest" ] || { [ -e "$uv_dest" ] && [ ! -f "$uv_dest" ]; }; then
+        fail "refusing to replace $uv_dest: it is not a regular file"
+    fi
+    uv_publish="$uv_dest.new.$$"
+    rm -f "$uv_publish"
+    if ! (umask 077 && cp "$uv_staged" "$uv_publish"); then
+        rm -f "$uv_publish"
+        fail "could not stage the verified uv next to $uv_dest"
+    fi
+    chmod 700 "$uv_publish" || { rm -f "$uv_publish"; fail "could not protect $uv_publish"; }
+    mv -f "$uv_publish" "$uv_dest" || { rm -f "$uv_publish"; fail "could not publish the verified uv at $uv_dest"; }
+    uv="$uv_dest"
+    verified_uv="$uv_staged"
+}
+
 find_uv() {
     # No `local` anywhere in this script: every function writes globals on
     # purpose, so the value found here is what the steps below use.
@@ -982,13 +1133,10 @@ find_uv() {
     elif [ -x "$HOME/.local/bin/uv" ]; then
         uv="$HOME/.local/bin/uv"
     else
-        # Pinned version and official installer, and the caller's shell
-        # profile is left alone until the verified engine install completes.
-        download "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-installer.sh" \
-            "$tmp/uv-installer.sh" || fail "could not download the uv installer"
-        UV_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin" sh "$tmp/uv-installer.sh" >/dev/null \
-            || fail "could not install uv"
-        uv="$HOME/.local/bin/uv"
+        # No uv at all: bootstrap the pinned, digest-verified archive. The
+        # caller's shell profile is left alone until the verified engine
+        # install completes.
+        bootstrap_verified_uv
     fi
     [ -x "$uv" ] || fail "uv is not available at $uv"
 }

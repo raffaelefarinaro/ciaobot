@@ -243,6 +243,26 @@ and `--no-start` provisions nothing. Migration and existing-workspace installs
 keep the `ciao setup` + `ciao service start` path; this installer runs on
 macOS only.
 
+The bootstrap has its own, narrower trust root. A machine that already has a
+`uv` (on `PATH`, else `~/.local/bin/uv`) reuses it exactly as before, and only a
+missing `uv` is installed, from the pinned archive for its architecture:
+`https://github.com/astral-sh/uv/releases/download/0.12.17/uv-<triple>.tar.gz`.
+The installer compares that archive with a sha256 reviewed into
+`scripts/install-engine.sh` and only then reads the member list: exactly one
+`uv-<triple>/` directory, one regular `uv-<triple>/uv` and optionally one
+regular `uv-<triple>/uvx`, with only `uv` extracted into a fresh 0700 directory
+and atomically published. Any other member, a link, a duplicate, an absolute
+or `..` path, or an ambiguous name is a refusal that extracts and runs nothing.
+There is no piped shell installer in this path. The trust root for the archive
+is the reviewed digest table plus TLS to GitHub: uv publishes no minisign or
+Apple signature for these assets, and the installer does not claim one.
+Bumping `UV_VERSION` means replacing all six digests in the same review, and no
+checksum is fetched at install time. The engine manifest and wheel keep their
+separate minisign verification; the Python interpreter and packages `uv run`
+fetches afterwards (cryptography included) are authenticated by uv's own hashes
+over TLS, not by the engine key, so this is not supply-chain-wide signature
+coverage.
+
 `--migrate` is the app→terminal hand-over (#576): after the same manifest and digest
 verification, it classifies the Mac from the verified wheel, takes before-images
 of the two plists, the shim, the install receipt and any existing uv tool
