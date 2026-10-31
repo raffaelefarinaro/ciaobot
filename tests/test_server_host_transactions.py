@@ -711,8 +711,11 @@ def test_unsafe_terminal_cleanup_targets_are_refused_before_anything_is_deleted(
     outside.mkdir()
     (outside / "keep").write_text("not ours", encoding="utf-8")
 
-    # (a) the before-images replaced by a symlink to another directory
-    server_host_install.shutil.rmtree(backup)
+    # (a) the before-images replaced by a symlink to another directory. Moved
+    # aside, not deleted: it holds the recorded inode, so no replacement below can
+    # be handed that inode back (ext4 reuses freed inodes) and pass as the original.
+    original = tmp_path / "original-backup"
+    backup.rename(original)
     backup.symlink_to(outside)
     with pytest.raises(server_host_install.ServerHostInstallError) as caught:
         server_host_install.rollback_host_upgrade(
@@ -727,6 +730,7 @@ def test_unsafe_terminal_cleanup_targets_are_refused_before_anything_is_deleted(
     backup.mkdir(mode=0o700)
     os.chmod(backup, 0o700)
     (backup / "keep").write_text("not ours either", encoding="utf-8")
+    assert backup.stat().st_ino != original.stat().st_ino
     with pytest.raises(server_host_install.ServerHostInstallError) as caught:
         server_host_install.rollback_host_upgrade(
             operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
@@ -744,6 +748,7 @@ def test_unsafe_terminal_cleanup_targets_are_refused_before_anything_is_deleted(
         (outside / "keep").read_bytes() * 0 + b'{"schema": 1}\n'
     )
     os.chmod(backup / "record", 0o600)
+    assert backup.stat().st_ino != original.stat().st_ino
     with pytest.raises(server_host_install.ServerHostInstallError) as caught:
         server_host_install.commit_host_upgrade(
             operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
