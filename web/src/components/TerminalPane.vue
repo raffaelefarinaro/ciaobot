@@ -21,6 +21,11 @@
  * **Close is not End.** Closing the pane leaves every shell running on the
  * engine; closing an individual session tab ends only that shell.
  *
+ * **The terminal belongs to the chat on screen.** The layout names the chat
+ * (`chatId`, `''` off a chat route) and the store's `followChat` hides the
+ * terminal when it changes and shows it again on return, if it was open when
+ * the person left. A switch moves no focus.
+ *
  * **The keyboard belongs to the shell while the terminal has focus.**
  * Escape, Tab, the arrows, Ctrl+C and Ctrl+D are the shell's, so the pane
  * does not claim them — and it does not use the app's modal Escape capture
@@ -64,8 +69,11 @@ const store = useTerminalStore()
  * it when no file has and the pane has room for both columns. The pane only
  * draws the shape it is told — the tile when it is in the slot, the drawer
  * over the pane when it is not.
+ *
+ * `chatId` is the chat on screen, as the layout names it (`''` off a chat
+ * route); the terminal follows it.
  */
-const props = withDefaults(defineProps<{ inTile?: boolean }>(), { inTile: false })
+const props = withDefaults(defineProps<{ inTile?: boolean; chatId?: string }>(), { inTile: false, chatId: '' })
 const emit = defineEmits<{ open: [boolean] }>()
 
 /** The element the screen is mounted into. It exists for the pane's whole life. */
@@ -159,7 +167,7 @@ async function openScreen(sessionId: string): Promise<void> {
   rendererSession = sessionId
   store.attachRenderer(created)
   applyInputState()
-  if (store.visible) created.focus()
+  if (store.visible && !store.chatSwitch) created.focus()
 }
 
 /**
@@ -362,6 +370,9 @@ watch(() => store.visible, (open) => {
   // The layout owns the slot and needs to know whether the terminal is on
   // screen: a hidden terminal gives the slot back.
   emit('open', open)
+  // A chat switch showed or hid the terminal: the keyboard stays where the
+  // navigation left it, and the old opener is forgotten.
+  if (store.chatSwitch) { opener = null; return }
   if (open) {
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     void nextTick(() => { if (store.visible) focusScreen() })
@@ -372,6 +383,8 @@ watch(() => store.visible, (open) => {
   opener = null
   void nextTick(() => { if (target?.isConnected) target.focus() })
 }, { flush: 'sync', immediate: true })
+
+watch(() => props.chatId, (chatId) => { store.followChat(chatId) }, { immediate: true })
 
 function onViewport(): void {
   isMobile.value = window.innerWidth < 768
