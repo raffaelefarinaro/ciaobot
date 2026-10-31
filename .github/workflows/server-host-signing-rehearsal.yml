@@ -127,6 +127,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          # Nothing at this run's receipt path can predate this step: the helper
+          # records the directory it created, and cleanup trusts only that.
+          rm -f "${REHEARSAL_DIR}.owned"
           "$RUNNER_TEMP/engine-check/bin/python" scripts/rehearse-server-host-signing.py \
             --output "$REHEARSAL_DIR" \
             --python "$RUNNER_TEMP/engine-check/bin/python" \
@@ -143,8 +146,12 @@ jobs:
         if: ${{ always() }}
         run: |
           set -euo pipefail
-          if [ -f "$REHEARSAL_DIR/.rehearsal-owned" ]; then
+          # The helper writes this sibling receipt only after its own exclusive
+          # mkdir succeeded, so only a directory this run created is deleted.
+          receipt="${REHEARSAL_DIR}.owned"
+          if [ -f "$receipt" ] && [ "$(cat "$receipt")" = "$REHEARSAL_DIR" ]; then
             rm -rf "$REHEARSAL_DIR"
           else
             echo "no rehearsal-owned scratch directory to remove"
           fi
+          rm -f "$receipt"

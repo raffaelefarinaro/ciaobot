@@ -1,7 +1,13 @@
 from __future__ import annotations
 
-import re
+import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+import pytest
 
 
 def test_public_ci_matches_release_contract() -> None:
@@ -643,8 +649,13 @@ def test_signing_rehearsal_is_manual_protected_and_no_release_upload() -> None:
         in commands
     )
     assert "if: ${{ always() }}" in commands
-    assert '[ -f "$REHEARSAL_DIR/.rehearsal-owned" ]' in commands
+    # Deleting is gated on the receipt the helper wrote after its own exclusive
+    # mkdir, not on a marker string a pre-existing directory could carry.
+    assert 'receipt="${REHEARSAL_DIR}.owned"' in commands
+    assert '[ "$(cat "$receipt")" = "$REHEARSAL_DIR" ]' in commands
     assert 'rm -rf "$REHEARSAL_DIR"' in commands
+    assert 'rm -f "$receipt"' in commands
+    assert '[ -f "$REHEARSAL_DIR/.rehearsal-owned" ]' not in commands
 
     # Current repo-pinned action versions, not floating ones.
     assert "actions/checkout@v7" in workflow
@@ -705,6 +716,10 @@ def test_signing_rehearsal_binds_source_sha_and_clean_wheel_verifier() -> None:
     helper = workflow.split("      - name: Rehearse the signed server host")[1]
     helper = helper.split("      - name: Remove runner-local")[0]
     assert "scripts/rehearse-server-host-signing.py" in helper
+    assert 'rm -f "${REHEARSAL_DIR}.owned"' in helper
+    assert helper.index('rm -f "${REHEARSAL_DIR}.owned"') < helper.index(
+        "scripts/rehearse-server-host-signing.py"
+    )
     assert '--output "$REHEARSAL_DIR"' in helper
     assert '--python "$RUNNER_TEMP/engine-check/bin/python"' in helper
     assert "--wheel dist/ciaobot-*.whl" in helper
@@ -748,3 +763,59 @@ def test_production_publish_remains_usable_without_apple_credentials() -> None:
     assert '--output "$RUNNER_TEMP/server-host-build"' in workflow
     assert "gh release upload \"$TAG\"" in workflow
     assert workflow.count("needs: build-engine") == 1
+
+
+def _dispatch_guard_script() -> str:
+    """The guard step's shell, extracted so a test can actually execute it."""
+    workflow = _rehearsal_workflow()
+    step = workflow.split(
+        "      - name: Refuse an unconfirmed or untrusted run", 1
+    )[1]
+    run = step.split("        run: |\n", 1)[1]
+    lines: list[str] = []
+    for line in run.splitlines():
+        if line.startswith("          "):
+            lines.append(line[10:])
+        elif not line.strip():
+            lines.append("")
+        else:
+            break
+    return "\n".join(lines)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="the guard runs on the macOS runner under bash",
+)
+@pytest.mark.parametrize(
+    ("event", "confirmed", "ref", "allowed"),
+    [
+        ("workflow_dispatch", "true", "refs/heads/develop", True),
+        ("workflow_dispatch", "true", "refs/heads/main", True),
+        ("workflow_dispatch", "false", "refs/heads/develop", False),
+        ("workflow_dispatch", "", "refs/heads/develop", False),
+        ("workflow_dispatch", "TRUE", "refs/heads/develop", False),
+        ("workflow_dispatch", "true", "refs/heads/feature/x", False),
+        ("workflow_dispatch", "true", "refs/pull/1/merge", False),
+        ("push", "true", "refs/heads/develop", False),
+    ],
+)
+def test_dispatch_guard_refuses_untrusted_refs_and_unconfirmed_runs(
+    event: str, confirmed: str, ref: str, allowed: bool
+) -> None:
+    script = _dispatch_guard_script()
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", script],
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "EVENT_NAME": event,
+            "CONFIRMED": confirmed,
+            "DISPATCHED_REF": ref,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == (0 if allowed else 1), (
+        result.stdout,
+        result.stderr,
+    )

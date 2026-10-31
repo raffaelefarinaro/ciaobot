@@ -68,6 +68,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import threading
 from types import ModuleType
 from typing import Any, Callable, Iterator, Mapping
 
@@ -82,9 +83,15 @@ BUILDER_SCRIPT = REPO / "scripts" / "build-server-host.py"
 MANIFEST_SIGNER = "@tauri-apps/cli@2.11.4"
 SIGNER_BIN = Path("node_modules") / ".bin" / "tauri"
 
-#: Marks the scratch directory this run created. The workflow deletes only a
-#: directory carrying it, so a pre-existing path is never adopted or removed.
+#: Marks the scratch directory this run created, and the sibling receipt that
+#: records the exact path this run created. The workflow deletes only a path the
+#: helper recorded, so a pre-existing directory (even one that already contains
+#: a marker) is never adopted or removed.
 OWNERSHIP_MARKER = ".rehearsal-owned"
+OWNERSHIP_RECEIPT_SUFFIX = ".owned"
+
+#: How long a terminated child gets to exit before it is killed and reaped.
+CHILD_REAP_SECONDS = 10
 
 #: Runs the ownership round trip in the prepared interpreter, so the verifier
 #: that reads the record is the installed wheel and never an editable checkout.
@@ -427,6 +434,13 @@ def _check_environment(
     # lexists() also refuses a dangling symlink, which resolve() would follow.
     if os.path.lexists(output):
         raise RehearsalError(f"refusing to reuse an existing output path: {output}")
+    # An ownership receipt is written only by a run that created its directory;
+    # a pre-existing one is never adopted or overwritten.
+    receipt = output.with_name(output.name + OWNERSHIP_RECEIPT_SUFFIX)
+    if os.path.lexists(receipt):
+        raise RehearsalError(
+            f"refusing to reuse an existing ownership receipt: {receipt}"
+        )
     if output.resolve().is_relative_to(REPO):
         raise RehearsalError(
             "refusing to rehearse inside the repository; use a scratch directory"
@@ -488,6 +502,98 @@ def _identity_is_available(text: str, identity: str) -> bool:
         for line in text.splitlines()
         for quoted in re.findall(r'"([^"]*)"', line)
     )
+
+
+class _ActiveChildren:
+    """The one tool process that is currently running, and how to stop it.
+
+    A signal handler must not restore keychain state while a ``security`` or
+    ``notarytool`` child is still applying its own change. The handler asks this
+    registry to terminate and reap the child first; production registers the
+    real ``Popen`` and tests register a handle with the same protocol.
+    """
+
+    def __init__(self) -> None:
+        self._child: Any = None
+        self._lock = threading.Lock()
+
+    def register(self, child: Any) -> None:
+        with self._lock:
+            self._child = child
+
+    def clear(self) -> None:
+        with self._lock:
+            self._child = None
+
+    def stop(self) -> None:
+        """Terminate and reap the active child, killing it if it will not exit."""
+        with self._lock:
+            child, self._child = self._child, None
+        if child is None:
+            return
+        try:
+            child.terminate()
+        except OSError:
+            pass
+        try:
+            child.wait(timeout=CHILD_REAP_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            child.kill()
+        except OSError:
+            pass
+        try:
+            child.wait(timeout=CHILD_REAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            # Nothing more we can do; the runner discards the machine.
+            pass
+
+
+class _ProcessRunner:
+    """``subprocess.run`` with the active child registered for the handler."""
+
+    def __init__(self, children: _ActiveChildren) -> None:
+        self._children = children
+
+    def __call__(
+        self,
+        cmd: list[str],
+        *,
+        check: bool = False,
+        capture_output: bool = True,
+        text: bool = True,
+        timeout: float | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+        input: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=None if env is None else dict(env),
+            cwd=None if cwd is None else str(cwd),
+        )
+        self._children.register(process)
+        try:
+            stdout, stderr = process.communicate(input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise subprocess.TimeoutExpired(cmd, timeout) from None
+        finally:
+            self._children.clear()
+        if check and process.returncode:
+            raise subprocess.CalledProcessError(
+                process.returncode, cmd, output=stdout, stderr=stderr
+            )
+        return subprocess.CompletedProcess(
+            cmd, process.returncode, stdout=stdout, stderr=stderr
+        )
 
 
 class _SigningKeychain:
@@ -654,8 +760,11 @@ class _SigningKeychain:
     def restore(self) -> list[str]:
         """Put back the prior keychain state and delete every credential.
 
-        Returns fixed-text cleanup problems instead of raising: the caller
-        decides how to combine them with a failure that is already in flight.
+        Each step is attempted independently and every failure is collected as
+        fixed text: a p12 that cannot be unlinked never stops the API key from
+        being deleted, and a restore command that fails keeps its flag set so a
+        retry still attempts it. Returns the problems instead of raising, so the
+        caller can combine them with whatever failure is already in flight.
         """
         if self._restoring:
             return []
@@ -663,7 +772,6 @@ class _SigningKeychain:
         try:
             problems: list[str] = []
             if self.search_changed:
-                self.search_changed = False
                 try:
                     _run(
                         self.runner,
@@ -680,8 +788,11 @@ class _SigningKeychain:
                     )
                 except RehearsalError as exc:
                     problems.append(str(exc))
+                else:
+                    # Only a successful restore clears the flag; a retry still
+                    # attempts a setting that failed.
+                    self.search_changed = False
             if self.default_changed:
-                self.default_changed = False
                 try:
                     _run(
                         self.runner,
@@ -698,8 +809,9 @@ class _SigningKeychain:
                     )
                 except RehearsalError as exc:
                     problems.append(str(exc))
+                else:
+                    self.default_changed = False
             if self.created:
-                self.created = False
                 try:
                     _run(
                         self.runner,
@@ -712,12 +824,25 @@ class _SigningKeychain:
                     # there is gone, even if the delete command reported an error.
                     if os.path.lexists(self.keychain):
                         problems.append(str(exc))
-            # The p12 and the decoded App Store Connect key go in the same
-            # unconditional cleanup as the keychain and the profile, whether or
-            # not the directory removal below succeeds.
-            self.certificate.unlink(missing_ok=True)
-            self.notary_key.unlink(missing_ok=True)
-            shutil.rmtree(self.credentials_dir, ignore_errors=True)
+                    else:
+                        self.created = False
+                else:
+                    self.created = False
+            # Independent credential deletion: one failure never stops the next.
+            for path, failure in (
+                (self.certificate, "the exported certificate could not be deleted"),
+                (self.notary_key, "the decoded notary key could not be deleted"),
+            ):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    problems.append(failure)
+            try:
+                shutil.rmtree(self.credentials_dir)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                problems.append("the credential directory could not be removed")
             return problems
         finally:
             self._restoring = False
@@ -727,6 +852,7 @@ def _temporary_signing_keychain(
     output: Path,
     credentials: _Credentials,
     runner: Callable[..., Any],
+    children: _ActiveChildren,
     progress: "_Progress | None" = None,
 ) -> contextlib.AbstractContextManager[tuple[Path, str]]:
     """Create the ephemeral keychain and notary profile, and always undo them.
@@ -741,13 +867,25 @@ def _temporary_signing_keychain(
     def manage() -> Iterator[tuple[Path, str]]:
         session = _SigningKeychain(output, credentials, runner)
         previous_handlers: dict[int, Any] = {}
+        state = {"interrupting": False, "deferred": False}
 
         def interrupted(signum: int, _frame: Any) -> None:
             name = signal.Signals(signum).name
+            if state["interrupting"]:
+                # A second signal while cleanup is running: defer it so the
+                # restore finishes, then exit through the first interruption.
+                state["deferred"] = True
+                return
+            state["interrupting"] = True
+            # Never restore while the interrupted tool may still be applying a
+            # change: terminate it and reap it first.
+            children.stop()
             problems = session.restore()
             suffix = (
                 "; cleanup also failed: " + "; ".join(problems) if problems else ""
             )
+            if state["deferred"]:
+                suffix += "; a later signal was deferred until cleanup finished"
             raise RehearsalError(
                 f"the rehearsal was interrupted by {name}{suffix}"
             ) from None
@@ -1068,6 +1206,7 @@ def _rehearse(
     source_sha: str,
     environ: Mapping[str, str],
     runner: Callable[..., Any],
+    children: _ActiveChildren,
     platform_name: str,
 ) -> RehearsalResult:
     credentials = _credentials(environ)
@@ -1077,15 +1216,20 @@ def _rehearse(
     )
 
     output = output.expanduser()
+    receipt = output.with_name(output.name + OWNERSHIP_RECEIPT_SUFFIX)
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
     os.chmod(output, 0o700)
     progress = _Progress()
     try:
-        # The ownership marker is the first thing written after creation, so
-        # only a directory this run made can ever be adopted by cleanup.
+        # The marker is written immediately after creation, and then the exact
+        # created path is recorded in a sibling receipt. The workflow deletes
+        # only the recorded path, so a pre-existing directory (even with a
+        # marker) is never adopted. An interruption between these two writes
+        # leaves no receipt, so the directory is not deleted either.
         _write_private(
             output / OWNERSHIP_MARKER, b"ciaobot server host signing rehearsal\n"
         )
+        _write_private(receipt, str(output).encode("utf-8"))
         home = output / "home"
         home.mkdir(mode=0o700)
         return _run_rehearsal_stages(
@@ -1096,6 +1240,7 @@ def _rehearse(
             source_sha=source_sha,
             environ=environ,
             runner=runner,
+            children=children,
             platform_name=platform_name,
             credentials=credentials,
             home=home,
@@ -1115,6 +1260,7 @@ def _run_rehearsal_stages(
     source_sha: str,
     environ: Mapping[str, str],
     runner: Callable[..., Any],
+    children: _ActiveChildren,
     platform_name: str,
     credentials: _Credentials,
     home: Path,
@@ -1125,7 +1271,9 @@ def _run_rehearsal_stages(
     manifest_env = _clean_env(environ, home)
 
     progress.enter("keychain")
-    with _temporary_signing_keychain(output, credentials, runner, progress) as (
+    with _temporary_signing_keychain(
+        output, credentials, runner, children, progress
+    ) as (
         _keychain,
         profile,
     ):
@@ -1339,17 +1487,25 @@ def rehearse(
     source_sha: str,
     environ: Mapping[str, str],
     runner: Callable[..., Any] | None = None,
+    children: _ActiveChildren | None = None,
     platform_name: str | None = None,
 ) -> RehearsalResult:
     """Run the whole rehearsal with injected tools; fail closed on any stage.
 
-    ``platform_name``, ``runner`` and ``environ`` are injection points for
-    tests. They are not shipped bypass flags: the platform is checked against
-    the same value the build uses, and there is no code path that builds
-    without ``release_signing``.
+    ``platform_name``, ``runner``, ``children`` and ``environ`` are injection
+    points for tests. They are not shipped bypass flags: the platform is checked
+    against the same value the build uses, and there is no code path that builds
+    without ``release_signing``. In production the runner is the tracked
+    ``_ProcessRunner``, so a signal can terminate and reap the active child
+    before any keychain state is restored.
     """
     effective_platform = sys.platform if platform_name is None else platform_name
-    effective_runner = subprocess.run if runner is None else runner
+    if runner is None:
+        tracker = _ActiveChildren()
+        effective_runner: Callable[..., Any] = _ProcessRunner(tracker)
+    else:
+        effective_runner = runner
+        tracker = children if children is not None else _ActiveChildren()
     try:
         return _rehearse(
             output=output,
@@ -1358,6 +1514,7 @@ def rehearse(
             source_sha=source_sha,
             environ=environ,
             runner=effective_runner,
+            children=tracker,
             platform_name=effective_platform,
         )
     except RehearsalError:
@@ -1372,6 +1529,7 @@ def main(
     argv: list[str] | None = None,
     *,
     runner: Callable[..., Any] | None = None,
+    children: _ActiveChildren | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1409,6 +1567,7 @@ def main(
             source_sha=args.source_sha,
             environ=os.environ if environ is None else environ,
             runner=runner,
+            children=children,
         )
     except RehearsalError as exc:
         print(f"Error: {exc}", file=sys.stderr)

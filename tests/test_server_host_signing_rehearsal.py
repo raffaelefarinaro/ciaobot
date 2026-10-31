@@ -99,6 +99,15 @@ ENTITLEMENTS_XML = (
     "</dict>\n</plist>\n"
 )
 PARTITION_LIST = "apple-tool:,apple:,codesign:"
+ENTITLEMENTS_PATH = ROOT / "native" / "server-host" / "ServerHost.entitlements.plist"
+
+
+def _app_of(path: Path) -> Path:
+    """The app bundle a path lives in; fails if it is not inside one."""
+    for candidate in (path, *path.parents):
+        if candidate.name.endswith(".app"):
+            return candidate
+    raise AssertionError(f"not inside an app bundle: {path}")
 
 
 def _load(name: str, path: Path) -> ModuleType:
@@ -161,6 +170,33 @@ def _digest(path: Path) -> tuple[str, int]:
     return hashlib.sha256(data).hexdigest(), len(data)
 
 
+class FakeChild:
+    """One in-flight tool process, as the rehearsal's tracker sees it."""
+
+    def __init__(self, events: list[tuple[str, str]], family: str, *, ignore_terminate: bool = False) -> None:
+        self.events = events
+        self.family = family
+        self.ignore_terminate = ignore_terminate
+        self.terminated = False
+        self.killed = False
+        self.waits = 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.events.append(("terminate", self.family))
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits += 1
+        if self.ignore_terminate and self.waits == 1:
+            raise subprocess.TimeoutExpired(self.family, timeout or 0)
+        self.events.append(("reaped", self.family))
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.events.append(("kill", self.family))
+
+
 class FakeToolchain:
     """A strict native toolchain: complete argv, realistic output, no fallbacks.
 
@@ -210,6 +246,8 @@ class FakeToolchain:
         drop_host_entry: bool = False,
         mutate_archive_after_sign: bool = False,
         on_command: Any = None,
+        children: Any = None,
+        child_ignore_terminate: bool = False,
     ) -> None:
         self.team_id = team_id
         self.identity = identity
@@ -247,6 +285,15 @@ class FakeToolchain:
         self.drop_host_entry = drop_host_entry
         self.mutate_archive_after_sign = mutate_archive_after_sign
         self.on_command = on_command
+        self.children = (
+            children if children is not None else REHEARSAL._ActiveChildren()
+        )
+        self.child_ignore_terminate = child_ignore_terminate
+        self.events: list[tuple[str, str]] = []
+        self.built_app: Path | None = None
+        self.zip_path: Path | None = None
+        self.scratch: Path | None = None
+        self.manifest_path: Path | None = None
         self.commands: list[list[str]] = []
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
         self.profile: str | None = None
@@ -262,8 +309,38 @@ class FakeToolchain:
     def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.commands.append(list(cmd))
         self.calls.append((list(cmd), dict(kwargs)))
-        if self.on_command is not None:
-            self.on_command(list(cmd), dict(kwargs))
+        family = self._family(cmd)
+        child = FakeChild(
+            self.events, family, ignore_terminate=self.child_ignore_terminate
+        )
+        self.children.register(child)
+        self.events.append(("start", family))
+        try:
+            if self.on_command is not None:
+                self.on_command(list(cmd), dict(kwargs))
+            return self._dispatch(cmd, kwargs)
+        finally:
+            self.children.clear()
+
+    def _family(self, cmd: list[str]) -> str:
+        tool = Path(cmd[0]).name
+        if tool == "security":
+            return f"security:{cmd[1]}" + (":set" if "-s" in cmd else "")
+        if tool == "xcrun":
+            return f"xcrun:{cmd[1]}:{cmd[2]}"
+        if tool == "codesign":
+            return "codesign:" + (cmd[1] if cmd[1] != "--verify" else "verify")
+        if tool == "lipo":
+            return f"lipo:{cmd[1]}"
+        if tool in ("ditto", "spctl", "npm", "tauri"):
+            return tool
+        if cmd[1] == "-c":
+            return "ownership"
+        return "manifest:" + cmd[3]
+
+    def _dispatch(
+        self, cmd: list[str], kwargs: dict[str, Any]
+    ) -> subprocess.CompletedProcess[str]:
         tool = Path(cmd[0]).name
         if tool == "security":
             return self._security(cmd, kwargs)
@@ -274,7 +351,10 @@ class FakeToolchain:
         if tool == "lipo":
             return self._lipo(cmd, kwargs)
         if tool == "ditto":
-            assert cmd == ["ditto", "-c", "-k", "--keepParent", cmd[4], cmd[5]], cmd
+            assert len(cmd) == 6, cmd
+            assert Path(cmd[4]) == self.built_app, cmd
+            assert Path(cmd[5]) == self.built_app.parent / ".host-notarize.zip", cmd
+            self.zip_path = Path(cmd[5])
             Path(cmd[5]).write_bytes(b"temporary-zip")
             return self._done(cmd, kwargs)
         if tool == "spctl":
@@ -283,6 +363,7 @@ class FakeToolchain:
                 ["spctl", "--assess", "--type", "execute", "--verbose=2"],
                 length=6,
             )
+            assert Path(cmd[-1]).name == APP_NAME, cmd
             return self._done(
                 cmd, kwargs, returncode=self._stage_rc("gatekeeper", cmd[-1])
             )
@@ -358,6 +439,7 @@ class FakeToolchain:
             assert len(cmd) == 5 + len(targets), cmd
             assert targets in ([self.keychain], PRIOR_SEARCH), cmd
             if targets == PRIOR_SEARCH:
+                self.events.append(("restore", "security:list-keychains"))
                 return self._done(cmd, kwargs, returncode=self.restore_search_rc)
             return self._done(cmd, kwargs, returncode=self.search_set_rc)
         if action == "default-keychain":
@@ -365,11 +447,10 @@ class FakeToolchain:
                 cmd, ["security", "default-keychain", "-d", "user", "-s"], length=6
             )
             assert cmd[-1] in (self.keychain, PRIOR_DEFAULT), cmd
-            rc = (
-                self.restore_default_rc
-                if cmd[-1] == PRIOR_DEFAULT
-                else self.default_set_rc
-            )
+            restoring = cmd[-1] == PRIOR_DEFAULT
+            if restoring:
+                self.events.append(("restore", "security:default-keychain"))
+            rc = self.restore_default_rc if restoring else self.default_set_rc
             return self._done(cmd, kwargs, returncode=rc)
         if action == "create-keychain":
             # The keychain password is never on argv: create-keychain reads it
@@ -377,6 +458,9 @@ class FakeToolchain:
             self._expect(cmd, ["security", "create-keychain"], length=3)
             assert "-p" not in cmd, f"the keychain password reached argv: {cmd}"
             self.keychain = cmd[-1]
+            assert Path(cmd[-1]).name == "rehearsal.keychain-db"
+            assert Path(cmd[-1]).parent.name == "credentials"
+            self.scratch = Path(cmd[-1]).parent.parent
             password = (kwargs.get("input") or "").split("\n")
             assert len(password) == 3 and password[0] == password[1] and password[0]
             self.keychain_password = password[0]
@@ -396,9 +480,9 @@ class FakeToolchain:
             assert (kwargs.get("input") or "").split("\n")[0] == self.keychain_password
             return self._done(cmd, kwargs, returncode=self.unlock_rc)
         if action == "import":
-            self._expect(
-                cmd, ["security", "import", cmd[2], "-k", str(self.keychain)], length=9
-            )
+            assert len(cmd) == 9, cmd
+            assert Path(cmd[2]) == Path(self.keychain).parent / "certificate.p12", cmd
+            assert cmd[3:5] == ["-k", str(self.keychain)], cmd
             assert cmd[5] == "-P" and cmd[6], cmd
             assert cmd[7:] == ["-T", "/usr/bin/codesign"], cmd
             return self._done(cmd, kwargs, returncode=self.import_rc)
@@ -420,11 +504,14 @@ class FakeToolchain:
             assert (kwargs.get("input") or "").split("\n")[0] == self.keychain_password
             return self._done(cmd, kwargs, returncode=self.partition_rc)
         if action == "find-identity":
-            self._expect(
-                cmd,
-                ["security", "find-identity", "-v", "-p", "codesigning"],
-                length=6,
-            )
+            assert cmd[:5] == [
+                "security",
+                "find-identity",
+                "-v",
+                "-p",
+                "codesigning",
+            ], cmd
+            assert cmd[5] == self.keychain, cmd
             if not self.identity_listed:
                 return self._done(cmd, kwargs, stdout="     0 valid identities found\n")
             return self._done(
@@ -437,6 +524,7 @@ class FakeToolchain:
             )
         if action == "delete-keychain":
             self._expect(cmd, ["security", "delete-keychain"], length=3)
+            self.events.append(("restore", "security:delete-keychain"))
             if self.delete_rc:
                 return self._done(cmd, kwargs, returncode=self.delete_rc)
             Path(cmd[-1]).unlink(missing_ok=True)
@@ -473,6 +561,7 @@ class FakeToolchain:
                 assert cmd[8] == "--issuer" and cmd[9] == self.issuer_id, cmd
                 assert cmd[10] == "--keychain" and cmd[11] == self.keychain, cmd
                 assert cmd[12] == "--no-validate", cmd
+                assert key_path == Path(self.keychain).parent / "notary-key.p8", cmd
                 # The decoded key is a private file with the exact bytes.
                 assert key_path.read_bytes() == self.notary_key
                 assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
@@ -490,6 +579,7 @@ class FakeToolchain:
                 "json",
             ], cmd
             assert len(cmd) == 11, cmd
+            assert Path(cmd[3]) == self.zip_path, cmd
             assert self.notary_key not in [token.encode() for token in cmd]
             stdout = (
                 self.notary_stdout
@@ -501,6 +591,8 @@ class FakeToolchain:
             assert cmd[2] in ("staple", "validate"), cmd
             assert len(cmd) == 4, cmd
             target = Path(cmd[3])
+            assert target.name == APP_NAME, cmd
+            assert target.parent.name != "credentials", cmd
             if cmd[2] == "staple":
                 if self.ticket is not None:
                     ticket = target / "Contents" / "CodeResources"
@@ -517,15 +609,21 @@ class FakeToolchain:
     def _codesign(
         self, cmd: list[str], kwargs: dict[str, Any]
     ) -> subprocess.CompletedProcess[str]:
+        requirement = SERVER_HOST.developer_id_requirement(self.team_id)
         if cmd[1] == "--force":
-            # The one release signature: identity, runtime, timestamp,
-            # entitlements and the canonical requirement, in that order.
+            # The one release signature: identity, runtime, timestamp, the
+            # tracked entitlements and the exact canonical requirement.
+            assert len(cmd) == 12, cmd
             assert cmd[2:6] == ["--sign", self.identity, "--options", "runtime"], cmd
             assert cmd[6] == "--timestamp" and cmd[7] == "--entitlements", cmd
-            assert str(cmd[8]).endswith("ServerHost.entitlements.plist"), cmd
-            assert cmd[9] == "--requirements" and cmd[10].startswith("=designated =>")
-            assert len(cmd) == 12, cmd
+            assert Path(cmd[8]) == ENTITLEMENTS_PATH, cmd
+            assert cmd[9] == "--requirements", cmd
+            assert cmd[10] == f"=designated => {requirement}", cmd
             app = Path(cmd[-1])
+            assert app.name == APP_NAME, cmd
+            assert app.parent.name == "build", cmd
+            assert app.parent.parent == self.scratch, cmd
+            self.built_app = app
             seal = app / "Contents" / "_CodeSignature" / "CodeResources"
             seal.parent.mkdir(parents=True, exist_ok=True)
             seal.write_bytes(b"sealed-resources")
@@ -538,7 +636,7 @@ class FakeToolchain:
                 # slice, then the external expected requirement.
                 if "--test-requirement" in cmd:
                     assert len(cmd) == 7 and cmd[4] == "--test-requirement", cmd
-                    assert cmd[5].startswith("="), cmd
+                    assert cmd[5] == f"={requirement}", cmd
                 else:
                     assert len(cmd) == 5, cmd
                 return self._done(
@@ -547,7 +645,7 @@ class FakeToolchain:
             if cmd[3] == "--test-requirement":
                 # The builder's external expected requirement check.
                 assert len(cmd) == 7, cmd
-                assert cmd[4].startswith("="), cmd
+                assert cmd[4] == f"={requirement}", cmd
                 assert cmd[5] == "--all-architectures", cmd
                 return self._done(
                     cmd, kwargs, returncode=self._stage_rc("verify", cmd[-1])
@@ -559,6 +657,7 @@ class FakeToolchain:
         if cmd[1] == "-dv":
             if "--arch" in cmd:
                 assert len(cmd) == 6 and cmd[2] == "--verbose=4", cmd
+                assert _app_of(Path(cmd[-1])).name == APP_NAME, cmd
                 arch = cmd[4]
                 return self._done(cmd, kwargs, stderr=self._slice_display(arch, cmd[-1]))
             # The runtime's bundle display.
@@ -568,12 +667,14 @@ class FakeToolchain:
         if cmd[1] == "-d" and cmd[2] == "--entitlements":
             assert cmd[3:6] == [":-", "--xml", "--arch"], cmd
             assert len(cmd) == 8, cmd
+            assert _app_of(Path(cmd[-1])).name == APP_NAME, cmd
             fault = self._fault(cmd[-1])
             if "entitlements" in fault:
                 return self._done(cmd, kwargs, stdout=fault["entitlements"])
             return self._done(cmd, kwargs, stdout=ENTITLEMENTS_XML)
         if cmd[1] == "-d" and cmd[2] == "-r-":
             assert cmd[3] == "--arch" and len(cmd) == 6, cmd
+            assert _app_of(Path(cmd[-1])).name == APP_NAME, cmd
             return self._done(
                 cmd,
                 kwargs,
@@ -623,6 +724,7 @@ class FakeToolchain:
     ) -> subprocess.CompletedProcess[str]:
         assert cmd[1] == "install", cmd
         assert cmd[2] == "--prefix" and len(cmd) == 11, cmd
+        assert Path(cmd[3]) == self.scratch / "signer", cmd
         assert cmd[4:] == [
             "--no-save",
             "--no-audit",
@@ -696,9 +798,14 @@ class FakeToolchain:
         assert cmd[0] not in ("python", "python3", sys.executable), (
             "ownership must be verified by the prepared interpreter"
         )
+        assert Path(cmd[3]) == self.scratch / "verify-extracted" / APP_NAME, cmd
+        assert (
+            Path(cmd[4])
+            == self.scratch / "home" / ".local" / "state" / "ciaobot" / "server-host.json"
+        ), cmd
         env = kwargs.get("env") or {}
         assert "PYTHONPATH" not in env
-        assert env.get("HOME", "").endswith("/home"), env
+        assert env.get("HOME", "") == str(self.scratch / "home"), env
         if self.ownership_rc:
             return self._done(cmd, kwargs, returncode=self.ownership_rc)
         # The fake plays the installed wheel: it runs the real verifier against
@@ -720,6 +827,10 @@ class FakeToolchain:
         team_id = cmd[cmd.index("--server-host-team-id") + 1]
         wheel = Path(cmd[-1])
         assert len(cmd) == 13, cmd
+        assert out == self.scratch / "ciaobot-engine-manifest.json", cmd
+        assert archive == self.scratch / "build" / REHEARSAL.ARCHIVE_NAME, cmd
+        assert team_id == self.team_id, cmd
+        assert wheel.name == WHEEL_NAME, cmd
         assert cmd[0] not in ("python", "python3", sys.executable), (
             "the manifest must be built by the prepared interpreter"
         )
@@ -787,6 +898,7 @@ def _run_rehearsal(
         source_sha=SOURCE_SHA,
         environ=_environment() if environ is None else environ,
         runner=fake,
+        children=fake.children,
         platform_name=platform_name,
     )
 
@@ -950,37 +1062,101 @@ def test_rehearsal_refuses_existing_output_and_non_macos_before_writes(
 
 
 def _workflow_cleanup(scratch: Path) -> bool:
-    """The workflow's rule: delete only a directory that carries the marker."""
-    if (scratch / REHEARSAL.OWNERSHIP_MARKER).is_file():
-        import shutil
+    """The workflow's rule: delete only the path this run recorded."""
+    import shutil
 
+    receipt = scratch.with_name(scratch.name + REHEARSAL.OWNERSHIP_RECEIPT_SUFFIX)
+    if receipt.is_file() and receipt.read_text(encoding="utf-8").strip() == str(scratch):
         shutil.rmtree(scratch)
+        receipt.unlink()
         return True
+    if receipt.is_file():
+        receipt.unlink()
     return False
 
 
 def test_scratch_cleanup_is_ownership_scoped(tmp_path: Path, macos: None) -> None:
-    # A directory this run did not create carries no marker: refusal leaves it,
-    # and the workflow's always() cleanup must not touch it either.
+    # A pre-existing directory that already contains the marker is still not
+    # ours: exclusive mkdir refuses it, no receipt is written, and the
+    # workflow's cleanup leaves it alone.
     foreign = tmp_path / "rehearsal"
     foreign.mkdir()
     sentinel = foreign / "someone-elses-file"
     sentinel.write_text("keep", encoding="utf-8")
+    (foreign / REHEARSAL.OWNERSHIP_MARKER).write_text("planted", encoding="utf-8")
     fake = FakeToolchain()
     with pytest.raises(REHEARSAL.RehearsalError):
         _run_rehearsal(tmp_path, fake)
     assert sentinel.read_text(encoding="utf-8") == "keep"
-    assert not (foreign / REHEARSAL.OWNERSHIP_MARKER).exists()
     assert _workflow_cleanup(foreign) is False
-    assert sentinel.exists()
+    assert foreign.is_dir()
 
-    # A directory the helper created carries the marker, so cleanup removes it.
+    # A pre-existing receipt is never adopted, even without a directory there.
+    planted = tmp_path / "planted"
+    planted_receipt = planted.with_name(
+        planted.name + REHEARSAL.OWNERSHIP_RECEIPT_SUFFIX
+    )
+    planted_receipt.write_text(str(planted), encoding="utf-8")
+    fake = FakeToolchain()
+    with pytest.raises(REHEARSAL.RehearsalError) as caught:
+        _run_rehearsal(tmp_path, fake, name="planted")
+    assert "ownership receipt" in str(caught.value)
+    assert not planted.exists()
+    assert planted_receipt.exists()
+
+    # A planted directory with a matching receipt is still not ours: the
+    # workflow clears the receipt before the helper starts, so the refusal
+    # leaves no receipt and cleanup leaves the directory alone.
+    combined = tmp_path / "combined"
+    combined.mkdir()
+    combined_marker = combined / REHEARSAL.OWNERSHIP_MARKER
+    combined_marker.write_text("planted", encoding="utf-8")
+    combined_receipt = combined.with_name(
+        combined.name + REHEARSAL.OWNERSHIP_RECEIPT_SUFFIX
+    )
+    combined_receipt.write_text(str(combined), encoding="utf-8")
+    combined_receipt.unlink()  # the helper step's pre-clean
+    fake = FakeToolchain()
+    with pytest.raises(REHEARSAL.RehearsalError):
+        _run_rehearsal(tmp_path, fake, name="combined")
+    assert _workflow_cleanup(combined) is False
+    assert combined_marker.read_text(encoding="utf-8") == "planted"
+
+    # A directory this run created is recorded by path, and cleanup removes
+    # exactly that directory and the receipt.
     owned = tmp_path / "owned"
     fake = FakeToolchain()
     _run_rehearsal(tmp_path, fake, name="owned")
+    receipt = owned.with_name(owned.name + REHEARSAL.OWNERSHIP_RECEIPT_SUFFIX)
     assert (owned / REHEARSAL.OWNERSHIP_MARKER).is_file()
+    assert receipt.read_text(encoding="utf-8") == str(owned)
     assert _workflow_cleanup(owned) is True
     assert not owned.exists()
+    assert not receipt.exists()
+
+
+def test_no_ownership_receipt_when_the_marker_write_fails(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An interruption (or failure) between mkdir and the marker leaves our empty
+    # directory behind, but writes no receipt, so cleanup never adopts it.
+    real_write = REHEARSAL._write_private
+
+    def fail_marker(path: Path, data: bytes) -> None:
+        if Path(path).name == REHEARSAL.OWNERSHIP_MARKER:
+            raise OSError("simulated interruption")
+        real_write(path, data)
+
+    monkeypatch.setattr(REHEARSAL, "_write_private", fail_marker)
+    fake = FakeToolchain()
+    with pytest.raises(REHEARSAL.RehearsalError):
+        _run_rehearsal(tmp_path, fake)
+    output = tmp_path / "rehearsal"
+    receipt = output.with_name(output.name + REHEARSAL.OWNERSHIP_RECEIPT_SUFFIX)
+    assert output.is_dir()
+    assert not receipt.exists()
+    assert _workflow_cleanup(output) is False
+    assert output.is_dir()
 
 
 def test_rehearsal_requires_exactly_one_candidate_wheel(
@@ -1119,35 +1295,49 @@ def test_malformed_notary_api_key_fails_before_any_tool(
     assert not (tmp_path / "rehearsal").exists()
 
 
+@pytest.mark.parametrize(
+    ("fake_kwargs", "stage"),
+    [
+        ({}, None),
+        ({"create_rc": 1}, "keychain"),
+        ({"store_rc": 1}, "keychain"),
+        ({"sign_rc": 1}, "build"),
+        ({"notary_status": "Invalid"}, "build"),
+        ({"manifest_verify_rc": 1}, "manifest_verification"),
+        ({"restore_search_rc": 1}, "cleanup"),
+    ],
+)
 def test_p8_key_is_private_and_deleted_on_every_path(
-    tmp_path: Path, macos: None
+    tmp_path: Path, macos: None, fake_kwargs: dict[str, Any], stage: str | None
 ) -> None:
-    for index, fake_kwargs in enumerate(
-        (
-            {},
-            {"create_rc": 1},
-            {"store_rc": 1},
-            {"sign_rc": 1},
-            {"notary_status": "Invalid"},
-            {"manifest_verify_rc": 1},
-            {"restore_search_rc": 1},
+    fake = FakeToolchain(**fake_kwargs)
+    if stage is None:
+        _run_rehearsal(tmp_path, fake)
+    else:
+        with pytest.raises(REHEARSAL.RehearsalError):
+            _run_rehearsal(tmp_path, fake)
+        report = json.loads(
+            (tmp_path / "rehearsal" / REHEARSAL.VERIFICATION_NAME).read_text(
+                encoding="utf-8"
+            )
         )
-    ):
-        name = f"run-{index}"
-        fake = FakeToolchain(**fake_kwargs)
-        try:
-            _run_rehearsal(tmp_path, fake, name=name)
-        except REHEARSAL.RehearsalError:
-            pass
-        credentials = tmp_path / name / "credentials"
-        assert not credentials.exists(), fake_kwargs
-        # The decoded key is deleted wherever it was written, not only where
-        # the rehearsal was supposed to put it.
-        assert not list((tmp_path / name).rglob("*.p8")), fake_kwargs
-        if fake.notary_key_path is not None:
-            # While it existed it was owner-only and held the decoded key; the
-            # fake asserted the mode and bytes at store time.
-            assert fake.notary_key_path.name == "notary-key.p8"
+        assert report["failure"]["stage"] == stage
+
+    output = tmp_path / "rehearsal"
+    credentials = output / "credentials"
+    assert not credentials.exists(), fake_kwargs
+    # The decoded key is deleted wherever it was written, not only where the
+    # rehearsal was supposed to put it, and its bytes never survive anywhere in
+    # the scratch tree.
+    assert not list(output.rglob("*.p8")), fake_kwargs
+    for path in output.rglob("*"):
+        if path.is_file():
+            data = path.read_bytes()
+            assert NOTARY_KEY_PEM not in data, path
+            assert SENTINEL_KEY_MATERIAL.encode() not in data, path
+    if fake.notary_key_path is not None:
+        assert fake.notary_key_path.name == "notary-key.p8"
+
 
 def test_build_and_manifest_commands_never_carry_a_secret(
     tmp_path: Path, macos: None
@@ -1468,6 +1658,81 @@ def _restore_commands(commands: list[list[str]]) -> tuple[list[str], list[str]]:
     return restored_search, restored_default
 
 
+def _prepared_session(
+    tmp_path: Path, fake: FakeToolchain
+) -> REHEARSAL._SigningKeychain:
+    output = tmp_path / "rehearsal"
+    output.mkdir()
+    session = REHEARSAL._SigningKeychain(
+        output, REHEARSAL._credentials(_environment()), fake
+    )
+    session.prepare()
+    return session
+
+
+def test_credential_deletion_survives_unlink_and_directory_failures(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeToolchain()
+    session = _prepared_session(tmp_path, fake)
+    assert session.notary_key.is_file()
+    # A path that still holds the p12 (an import that failed before its early
+    # unlink, for example) must not stop the API key from being deleted.
+    session.certificate.write_bytes(P12_BYTES)
+
+    real_unlink = Path.unlink
+
+    def fail_certificate(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path == session.certificate:
+            raise OSError("simulated unlink failure")
+        real_unlink(path, *args, **kwargs)
+
+    def fail_rmtree(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("simulated directory removal failure")
+
+    monkeypatch.setattr(Path, "unlink", fail_certificate)
+    monkeypatch.setattr(REHEARSAL.shutil, "rmtree", fail_rmtree)
+
+    problems = session.restore()
+    assert any("certificate could not be deleted" in problem for problem in problems)
+    assert any(
+        "credential directory could not be removed" in problem for problem in problems
+    )
+    # Each deletion was attempted independently: the API key is gone even
+    # though the p12 unlink and the directory removal both failed.
+    assert not session.notary_key.exists()
+    assert session.certificate.exists()
+    # The keychain was still deleted and both prior settings restored.
+    assert any(cmd[:2] == ["security", "delete-keychain"] for cmd in fake.commands)
+    restored_search, restored_default = _restore_commands(fake.commands)
+    assert restored_search == PRIOR_SEARCH
+    assert restored_default == [PRIOR_DEFAULT]
+
+
+def test_failed_restore_keeps_its_flag_and_retries(
+    tmp_path: Path, macos: None
+) -> None:
+    fake = FakeToolchain(restore_search_rc=1)
+    session = _prepared_session(tmp_path, fake)
+    problems = session.restore()
+    assert any("search list could not be restored" in problem for problem in problems)
+    # The flag survives the failure so a retry still attempts the setting...
+    assert session.search_changed is True
+    # ...and the API key is deleted even though the restore command failed.
+    assert not session.notary_key.exists()
+
+    fake.restore_search_rc = 0
+    assert session.restore() == []
+    assert session.search_changed is False
+    restores = [
+        cmd
+        for cmd in fake.commands
+        if cmd[:5] == ["security", "list-keychains", "-d", "user", "-s"]
+        and cmd[5:] == PRIOR_SEARCH
+    ]
+    assert len(restores) == 2
+
+
 @pytest.mark.parametrize(
     ("fake_kwargs", "restored"),
     [
@@ -1610,6 +1875,17 @@ def test_sigint_during_signing_restores_the_keychain(
     assert "interrupted" in str(caught.value)
     assert interrupted["sent"]
 
+    # The interrupted signing child was terminated and reaped before any
+    # keychain state was restored.
+    terminations = [event for event in fake.events if event[0] == "terminate"]
+    assert terminations and terminations[0][1] == "codesign:--force"
+    assert ("reaped", "codesign:--force") in fake.events
+    first_restore = next(
+        index for index, event in enumerate(fake.events) if event[0] == "restore"
+    )
+    assert fake.events.index(terminations[0]) < first_restore
+    assert fake.events.index(("reaped", "codesign:--force")) < first_restore
+
     restored_search, restored_default = _restore_commands(fake.commands)
     assert restored_search == PRIOR_SEARCH
     assert restored_default == [PRIOR_DEFAULT]
@@ -1633,6 +1909,84 @@ def test_sigterm_and_sigint_handlers_are_installed_during_the_rehearsal(
     _run_rehearsal(tmp_path, fake)
     assert observed[signal.SIGTERM] not in (signal.SIG_DFL, signal.SIG_IGN, None)
     assert observed[signal.SIGINT] not in (signal.SIG_DFL, signal.SIG_IGN, None)
+
+
+def test_sigint_during_keychain_settings_terminates_the_child_first(
+    tmp_path: Path, macos: None
+) -> None:
+    sent = {"once": False}
+
+    def interrupt(cmd: list[str], _kwargs: dict[str, Any]) -> None:
+        if cmd[1:2] == ["set-keychain-settings"] and not sent["once"]:
+            sent["once"] = True
+            # Interrupt while a keychain-setting command is applying its change.
+            signal.raise_signal(signal.SIGINT)
+
+    fake = FakeToolchain(on_command=interrupt)
+    with pytest.raises(REHEARSAL.RehearsalError) as caught:
+        _run_rehearsal(tmp_path, fake)
+    assert "interrupted" in str(caught.value)
+    terminations = [event for event in fake.events if event[0] == "terminate"]
+    assert terminations and terminations[0][1] == "security:set-keychain-settings"
+    assert ("reaped", "security:set-keychain-settings") in fake.events
+    first_restore = next(
+        index for index, event in enumerate(fake.events) if event[0] == "restore"
+    )
+    assert fake.events.index(terminations[0]) < first_restore
+    assert fake.events.index(("reaped", "security:set-keychain-settings")) < first_restore
+    credentials = tmp_path / "rehearsal" / "credentials"
+    assert not credentials.exists()
+    assert not (credentials / "notary-key.p8").exists()
+
+
+def test_child_that_ignores_terminate_is_killed_and_reaped(
+    tmp_path: Path, macos: None
+) -> None:
+    sent = {"once": False}
+
+    def interrupt(cmd: list[str], _kwargs: dict[str, Any]) -> None:
+        if cmd[:3] == ["codesign", "--force", "--sign"] and not sent["once"]:
+            sent["once"] = True
+            signal.raise_signal(signal.SIGINT)
+
+    fake = FakeToolchain(on_command=interrupt, child_ignore_terminate=True)
+    with pytest.raises(REHEARSAL.RehearsalError):
+        _run_rehearsal(tmp_path, fake)
+    kills = [event for event in fake.events if event[0] == "kill"]
+    assert kills and kills[0][1] == "codesign:--force"
+    assert ("reaped", "codesign:--force") in fake.events
+
+
+def test_second_signal_during_cleanup_is_deferred(
+    tmp_path: Path, macos: None
+) -> None:
+    state = {"first": False, "second": False}
+
+    def interrupt(cmd: list[str], _kwargs: dict[str, Any]) -> None:
+        if cmd[:3] == ["codesign", "--force", "--sign"] and not state["first"]:
+            state["first"] = True
+            signal.raise_signal(signal.SIGINT)
+        elif (
+            state["first"]
+            and not state["second"]
+            and cmd[:5] == ["security", "list-keychains", "-d", "user", "-s"]
+        ):
+            state["second"] = True
+            # A second signal while cleanup is running must not abandon it.
+            signal.raise_signal(signal.SIGINT)
+
+    fake = FakeToolchain(on_command=interrupt)
+    with pytest.raises(REHEARSAL.RehearsalError) as caught:
+        _run_rehearsal(tmp_path, fake)
+    assert "interrupted" in str(caught.value)
+    # The deferred signal did not abort cleanup: no cleanup failure is reported.
+    assert "cleanup also failed" not in str(caught.value)
+    assert state["first"] and state["second"]
+    restored_search, restored_default = _restore_commands(fake.commands)
+    assert restored_search == PRIOR_SEARCH
+    assert restored_default == [PRIOR_DEFAULT]
+    assert any(cmd[:2] == ["security", "delete-keychain"] for cmd in fake.commands)
+    assert not (tmp_path / "rehearsal" / "credentials").exists()
 
 
 # --- sanitized failure report ----------------------------------------------
@@ -1671,6 +2025,7 @@ def test_failure_writes_an_incomplete_sanitized_report(
             str(wheel),
         ],
         runner=fake,
+        children=fake.children,
         environ=_sentinel_environment(),
     )
     assert exit_code == 1
@@ -1750,14 +2105,14 @@ def _sentinel_environment(**overrides: str | None) -> dict[str, str]:
 
 
 @pytest.mark.parametrize(
-    "fake_kwargs",
+    ("fake_kwargs", "stage"),
     [
-        {"import_rc": 1},
-        {"notary_status": "Invalid"},
-        {"fault": {"stage": "extracted", "gatekeeper": 1}},
-        {"manifest_team": "ZZZZZZZZZZ"},
-        {"signer_rc": 1},
-        {"restore_search_rc": 1},
+        ({"import_rc": 1}, "keychain"),
+        ({"notary_status": "Invalid"}, "build"),
+        ({"fault": {"stage": "extracted", "gatekeeper": 1}}, "extracted_verification"),
+        ({"manifest_team": "ZZZZZZZZZZ"}, "manifest_authentication"),
+        ({"signer_rc": 1}, "manifest_signature"),
+        ({"restore_search_rc": 1}, "cleanup"),
     ],
 )
 def test_authentication_values_do_not_leak_through_logs_or_exceptions(
@@ -1765,10 +2120,9 @@ def test_authentication_values_do_not_leak_through_logs_or_exceptions(
     macos: None,
     capsys: pytest.CaptureFixture[str],
     fake_kwargs: dict[str, Any],
+    stage: str,
 ) -> None:
-    fake = FakeToolchain(
-        identity=SENTINELS["SERVER_HOST_SIGNING_IDENTITY"], **fake_kwargs
-    )
+    fake = FakeToolchain(**_sentinel_fake_kwargs(), **fake_kwargs)
     wheel, interpreter = _paths(tmp_path)
     exit_code = REHEARSAL.main(
         [
@@ -1782,22 +2136,34 @@ def test_authentication_values_do_not_leak_through_logs_or_exceptions(
             str(wheel),
         ],
         runner=fake,
+        children=fake.children,
         environ=_sentinel_environment(),
     )
     captured = capsys.readouterr()
     assert exit_code == 1
     assert "Error:" in captured.err
+    # Each case reached the stage it is meant to exercise, rather than failing
+    # early for an unrelated reason.
+    report = json.loads(
+        (tmp_path / "rehearsal" / REHEARSAL.VERIFICATION_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert report["failure"]["stage"] == stage
+
     text = captured.out + captured.err
     for value in SENTINELS.values():
         assert value not in text
     assert "SENTINEL-CERTIFICATE-8A44" not in text
+    assert SENTINEL_KEY_MATERIAL not in text
+    assert SENTINEL_KEY_PEM.decode() not in text
 
-    if (tmp_path / "rehearsal").exists():
-        for path in (tmp_path / "rehearsal").rglob("*"):
-            if path.is_file():
-                haystack = path.read_bytes()
-                for value in SENTINELS.values():
-                    assert value.encode() not in haystack, path
+    for path in (tmp_path / "rehearsal").rglob("*"):
+        if path.is_file():
+            haystack = path.read_bytes()
+            for value in list(SENTINELS.values()) + [SENTINEL_KEY_MATERIAL]:
+                assert value.encode() not in haystack, path
+            assert SENTINEL_KEY_PEM not in haystack, path
 
 
 def test_fake_failure_argv_and_stderr_values_never_reach_output(
@@ -1860,6 +2226,7 @@ def test_candidate_files_stay_runner_local_and_only_sanitized_summary_is_emitted
             str(wheel),
         ],
         runner=fake,
+        children=fake.children,
         environ=_sentinel_environment(),
     )
     captured = capsys.readouterr()
