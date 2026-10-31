@@ -939,6 +939,51 @@ describe('TerminalPane', () => {
       wrapper.unmount()
     })
 
+    /** Chat A open, chat B opened by hand, then back to A: a restore that changes scope. */
+    async function restoreAcrossScopes() {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const wrapper = await mountFor('chat-a')
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await store.open({ chatId: 'chat-b' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-a' })
+      await flushPromises()
+      return { store, wrapper }
+    }
+    const focusTotal = () => screen.FakeScreen.instances.reduce((sum, instance) => sum + instance.focused, 0)
+
+    it('does not focus a new screen when a restore changes scope', async () => {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const wrapper = await mountFor('chat-a')
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await store.open({ chatId: 'chat-b' })
+      await flushPromises()
+      const before = focusTotal()
+      await wrapper.setProps({ chatId: 'chat-a' })
+      await flushPromises()
+      expect(store.visible).toBe(true)
+      expect(store.chatSwitch).toBe(true)
+      expect(focusTotal()).toBe(before)
+      wrapper.unmount()
+    })
+
+    it('focuses the new screen of a session the person starts after a restore', async () => {
+      const { store, wrapper } = await restoreAcrossScopes()
+      const before = focusTotal()
+      serve([sessionInfo('s1'), sessionInfo('s-new')])
+      await store.createSession()
+      await flushPromises()
+      expect(store.chatSwitch).toBe(false)
+      expect(focusTotal()).toBeGreaterThan(before)
+      wrapper.unmount()
+    })
+
     it('does not move focus to the opener when a chat switch hides the terminal', async () => {
       serve([sessionInfo('s1')])
       const store = useTerminalStore()

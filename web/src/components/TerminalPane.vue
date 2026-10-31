@@ -69,8 +69,10 @@ const store = useTerminalStore()
  * it when no file has and the pane has room for both columns. The pane only
  * draws the shape it is told — the tile when it is in the slot, the drawer
  * over the pane when it is not.
+ *
+ * `chatId` is the chat on screen, as the layout names it (`''` off a chat
+ * route); the terminal follows it.
  */
-/** `chatId`: the chat on screen, as the layout names it (`''` off a chat route); the terminal follows it. */
 const props = withDefaults(defineProps<{ inTile?: boolean; chatId?: string }>(), { inTile: false, chatId: '' })
 const emit = defineEmits<{ open: [boolean] }>()
 
@@ -165,7 +167,7 @@ async function openScreen(sessionId: string): Promise<void> {
   rendererSession = sessionId
   store.attachRenderer(created)
   applyInputState()
-  if (store.visible) created.focus()
+  if (store.visible && !store.chatSwitch) created.focus()
 }
 
 /**

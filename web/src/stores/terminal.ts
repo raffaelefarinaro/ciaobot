@@ -1308,6 +1308,7 @@ export const useTerminalStore = defineStore('terminal', () => {
    * engine's default folder is used.
    */
   async function createSession(location?: TerminalLocation): Promise<boolean> {
+    chatSwitch.value = false
     const scope = target.value
     if (!scope) return false
     if (creating.value) return false
@@ -1377,6 +1378,7 @@ export const useTerminalStore = defineStore('terminal', () => {
    * first one showed.
    */
   function selectSession(sessionId: string): boolean {
+    chatSwitch.value = false
     const session = sessions.value.find((entry) => entry.session_id === sessionId)
     if (!session) return false
     if (activeSession.value?.session_id === sessionId) return true
