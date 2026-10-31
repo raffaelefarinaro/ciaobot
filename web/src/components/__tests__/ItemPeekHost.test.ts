@@ -29,6 +29,9 @@ const apiDel = vi.hoisted(() => vi.fn())
 const askConfirm = vi.hoisted(() => vi.fn(async () => true))
 const askConfirmReason = vi.hoisted(() => vi.fn(async () => ({ confirmed: true, reason: '' })))
 const pendingConfirm = vi.hoisted(() => ({ value: null as unknown }))
+const overlayBackEntry = vi.hoisted(() => vi.fn())
+
+vi.mock('../../composables/useOverlayBackEntry', () => ({ useOverlayBackEntry: overlayBackEntry }))
 
 vi.mock('../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: apiPatch, del: apiDel },
@@ -136,6 +139,7 @@ beforeEach(() => {
   askConfirm.mockResolvedValue(true)
   askConfirmReason.mockResolvedValue({ confirmed: true, reason: '' })
   pendingConfirm.value = null
+  overlayBackEntry.mockReset()
 
   const store = useProjectStore()
   store.workspaces = [
@@ -334,6 +338,41 @@ describe('ItemPeekHost', () => {
 
     expect(peek.isOpen).toBe(false)
     expect(document.activeElement).toBe(opener)
+    wrapper.unmount()
+  })
+
+  it('hands Back the host\'s own close', async () => {
+    answerWith(BOARD)
+    const peek = useItemPeekStore()
+    const wrapper = render(fakeRouter())
+    expect(overlayBackEntry).toHaveBeenCalledTimes(1)
+    const [isOpen, close] = overlayBackEntry.mock.calls[0] as [() => boolean, () => Promise<boolean>]
+    expect(isOpen()).toBe(false)
+    peek.openTask(TASK_ID)
+    expect(isOpen()).toBe(true)
+    await flushPromises()
+    await nextTick()
+
+    // A title that cannot be saved refuses the close, as it does for x.
+    await wrapper.get('#task-detail-name').setValue('   ')
+    await nextTick()
+    expect(await close()).toBe(false)
+    expect(peek.isOpen).toBe(true)
+    expect(apiPatch).not.toHaveBeenCalled()
+
+    // A savable title writes, and the surface goes.
+    apiPatch.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...task({ title: 'Renamed' }), revision: NEXT_REVISION, body: '' },
+    })
+    await wrapper.get('#task-detail-name').setValue('Renamed')
+    await nextTick()
+    expect(await close()).toBe(true)
+    await flushPromises()
+    await nextTick()
+    expect(apiPatch.mock.calls[0]![1]).toMatchObject({ title: 'Renamed' })
+    expect(peek.isOpen).toBe(false)
+    expect(surface(wrapper).exists()).toBe(false)
     wrapper.unmount()
   })
 })

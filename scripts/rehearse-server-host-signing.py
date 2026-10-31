@@ -410,7 +410,11 @@ def _single_wheel(wheels: list[Path]) -> tuple[Path, str]:
         raise RehearsalError(
             "the candidate wheel is not named ciaobot-<version>-<tags>.whl"
         )
-    return wheel, match.group(1)
+    # Resolve at this boundary. The workflow names the candidate relative to the
+    # checkout (``--wheel dist/ciaobot-*.whl``) while the manifest subprocess runs
+    # with the scratch output as its cwd, where that path names nothing; every
+    # later use must name the exact file this run verified (#41221404339).
+    return wheel.resolve(), match.group(1)
 
 
 def _check_environment(

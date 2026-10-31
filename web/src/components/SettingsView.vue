@@ -2596,7 +2596,7 @@ async function applyWorkspaceFileAccessLink(fullPath: string): Promise<void> {
 // owns it: it switches to NAME and then drops the query, which re-runs this
 // watcher on the right workspace (scrolling now would hit the previous one).
 watch(
-  () => [route.hash, currentTab.value, workspacesLoaded.value, route.query.workspace] as const,
+  [() => route.hash, currentTab, workspacesLoaded, () => route.query.workspace],
   async ([hash, tab, loaded, linked]) => {
     if (tab !== 'workspace' || !loaded || linked) return
     await nextTick()

@@ -17,9 +17,11 @@ let installedOn: Router | null = null
 
 function readEdges(): HistoryEdges {
   const state = (typeof window !== 'undefined' ? window.history.state : null) as Partial<HistoryEdges> | null
+  // A forward edge at the current address is a closed overlay's entry, not a page.
+  const current = (state as { current?: unknown } | null)?.current
   return {
     back: typeof state?.back === 'string' ? state.back : null,
-    forward: typeof state?.forward === 'string' ? state.forward : null,
+    forward: typeof state?.forward === 'string' && state.forward !== current ? state.forward : null,
   }
 }
 
@@ -29,6 +31,8 @@ function install(router: Router): void {
   edges.value = readEdges()
   // afterEach runs once the history entry is written, so state is current.
   router.afterEach(() => { edges.value = readEdges() })
+  // A silent step-back over an overlay's entry fires no afterEach.
+  window.addEventListener('popstate', () => { edges.value = readEdges() })
 }
 
 const SECTION_LABELS: Record<string, string> = {

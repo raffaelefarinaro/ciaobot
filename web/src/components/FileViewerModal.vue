@@ -357,11 +357,13 @@ import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
 import { handleAppLinkClick } from '../lib/appLinks'
 import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
+import { useOverlayBackEntry } from '../composables/useOverlayBackEntry'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const store = useFileViewerStore()
+useOverlayBackEntry(() => store.isOpen, () => store.close())
 const props = withDefaults(defineProps<{ opener?: HTMLElement | null }>(), { opener: null })
 const opener = ref<HTMLElement | null>(props.opener)
 watch(() => store.isOpen, (open, wasOpen) => {

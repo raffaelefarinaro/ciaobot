@@ -987,6 +987,16 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                 line_index, raw, bullet, pid = (
                     entry.line, entry.raw, entry.bullet, entry.proposal_id,
                 )
+                # Hashed from the bullet as parsed, before the note_edit branch
+                # below replaces `target` with the note path.
+                review_key = proposal_tracking.proposal_review_key(
+                    workspace,
+                    bullet.kind,
+                    bullet.text,
+                    bullet.source,
+                    bullet.target,
+                    bullet.request,
+                )
                 row: dict[str, Any] = {
                     "id": pid,
                     "kind": bullet.kind,
@@ -999,6 +1009,10 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # by: an accept can await a model call, and a concurrent
                     # accept/dismiss rewrites the file underneath it.
                     "raw": raw,
+                    "review_key": review_key,
+                    "review_path": proposal_tracking.proposal_review_path(
+                        workspace, review_key
+                    ),
                 }
                 if bullet.target:
                     # The payload a destination kind acts on: the person name
@@ -1079,6 +1093,9 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
         # on is a notification wearing a button.
         for proposal in skill_proposals.read_queue(config, workspace):
             path = skill_proposals.proposal_path(config, workspace, proposal.skill)
+            review_key = proposal_tracking.skill_review_key(
+                workspace, proposal.id, proposal.change
+            )
             row = {
                 "id": proposal.id,
                 "kind": "skill",
@@ -1128,6 +1145,8 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                 "workspace": workspace,
                 "path": skill_proposals.proposal_rel_path(workspace, proposal.skill),
                 "line": -1,
+                "review_key": review_key,
+                "review_path": proposal_tracking.proposal_review_path(workspace, review_key),
             }
             rows.append(row)
             by_id[proposal.id] = {

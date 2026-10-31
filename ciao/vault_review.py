@@ -2021,7 +2021,7 @@ def _repoint_project_references(
     one undo image still cover both edits.
     """
     root = Path(root).resolve()
-    entries = scan_vault(root, workspace=workspace)
+    entries = scan_vault(root, workspace=workspace, include_unheaded=True)
     moves: list[tuple[str, str]] = []
     if folder:
         moves = _folder_moves(entries, folder, _completed_counterpart(folder), skip=previous_path)
@@ -2118,7 +2118,7 @@ def move_project_folder(
         raise ValueError(f"project folder {source.name} does not exist")
     if destination.exists():
         raise ValueError(f"a folder already exists at {destination.name}; refusing to move into it")
-    entries = scan_vault(root, workspace=workspace)
+    entries = scan_vault(root, workspace=workspace, include_unheaded=True)
     edited, rewrites = _plan_reference_rewrites(
         root,
         entries,

@@ -8,8 +8,8 @@
  * the surface stays mounted across its internal closes (the delegation preview)
  * so the host only unmounts on the surface's final `close`.
  *
- * The host owns the three exits — the surface's own close, a route change and a
- * workspace switch — and every one of them awaits `requestClose()`. A refusal
+ * The host owns the four exits — the surface's own close, Back, a route change
+ * and a workspace switch — and every one of them awaits `requestClose()`. A refusal
  * (a blank title, a refused or incomplete save, a busy nested sheet) cancels
  * the action and leaves the route, the workspace and the draft as they were.
  * A kind added to `PeekTarget` gets its own branch here.
@@ -17,6 +17,7 @@
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { routerKey } from 'vue-router'
 import TaskWorkspaceSurface from './TaskWorkspaceSurface.vue'
+import { useOverlayBackEntry } from '../composables/useOverlayBackEntry'
 import { useItemPeekStore } from '../stores/itemPeek'
 import { useProjectStore } from '../stores/projects'
 
@@ -79,6 +80,17 @@ function onClosed(): void {
   peek.close()
   void nextTick(restoreOpener)
 }
+
+// Back closes the overlay through the same awaited close as x. Called BEFORE
+// the guard below: the history guard installs first, so its `navigating` flag
+// is set before this host's guard can close the surface, and a peek closed by
+// a route change never pops history under the push in flight.
+useOverlayBackEntry(() => peek.isOpen, async () => {
+  const closed = await requestSurfaceClose()
+  // With no surface mounted there was nothing to refuse; end the target too.
+  if (closed && peek.isOpen) onClosed()
+  return closed
+})
 
 // ── Route guard ───────────────────────────────────────────────────────────
 //

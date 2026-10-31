@@ -363,6 +363,53 @@ test('a chat with no repository opens the terminal too', async ({ page }) => {
   await expect(pane.getByRole('tab')).toHaveCount(1)
 })
 
+test('the terminal belongs to the chat: it hides on a switch and comes back with its shell', async ({ page }) => {
+  await boot(page, NO_REPO_CHAT_PATH, COMPOSER)
+  // The fixture's shells outlive a spec within one worker, so count against
+  // what was already there.
+  const countSessions = () => page.evaluate(async () => {
+    const res = await fetch('/__fixture__/terminal')
+    return (await res.json()).sessions.length as number
+  })
+  const before = await countSessions()
+
+  await page.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
+  const surface = pane.locator('.tp-surface')
+  await expect(pane.locator('.tp-surface textarea')).toBeEditable()
+  await surface.click()
+  await page.keyboard.type(`echo ${OUTPUT}`)
+  await page.keyboard.press('Enter')
+  await expect(surface).toContainText(OUTPUT)
+
+  // Another chat: the terminal is hidden and the slot is the chat's again.
+  await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
+  await expect(page).toHaveURL(new RegExp(CHAT_PATH))
+  await expect(pane).toBeHidden()
+  await expect(page.locator('.chat-split-resizer')).toHaveCount(0)
+
+  // Back: the same shell, no new one, and the keyboard was not taken.
+  await page.locator('.chat-item', { hasText: 'alpha second conversation' }).click()
+  await expect(page).toHaveURL(new RegExp(NO_REPO_CHAT_PATH))
+  await expect(pane).toBeVisible()
+  await expect(pane.getByRole('tab')).toHaveCount(1)
+  await expect(surface).toContainText(OUTPUT)
+  expect(await countSessions()).toBe(before + 1)
+  const focusInPane = await page.evaluate(() => !!document.activeElement?.closest('.terminal-pane'))
+  expect(focusInPane).toBe(false)
+
+  // Closed there, it stays closed after a round trip.
+  await pane.getByRole('button', { name: 'Close' }).click()
+  await expect(pane).toBeHidden()
+  await page.locator('.chat-item', { hasText: 'alpha first conversation' }).click()
+  await expect(page).toHaveURL(new RegExp(CHAT_PATH))
+  await page.locator('.chat-item', { hasText: 'alpha second conversation' }).click()
+  await expect(page).toHaveURL(new RegExp(NO_REPO_CHAT_PATH))
+  await expect(pane).toBeHidden()
+})
+
 test('a chat with a linked repository asks where to open the shell', async ({ page }, testInfo) => {
   // A fixture session of its own: the earlier journeys left shells running
   // for this chat, and a running shell is adopted rather than asked about.

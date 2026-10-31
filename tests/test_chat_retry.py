@@ -1672,3 +1672,84 @@ async def test_control_plane_set_retry_from_unattended_turn_stays_unattended(tmp
     assert pcm.get_chat(chat.chat_id).retry_unattended is False
     pcm.stop_chat_retry(chat.chat_id)
     pcm.stop_chat_retry(other.chat_id)
+
+
+async def test_wake_during_pending_quota_retry_joins_the_retry(tmp_path: Path) -> None:
+    """A background-run wake into a chat waiting out a usage limit must not start a
+    turn the provider will refuse, and must not overwrite the pending retry: the
+    retried turn has to carry the original prompt and every wake notice."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append(prompt)
+        yield ResultEvent(
+            type="result",
+            result="The usage limit has been reached",
+            session_id="sess-retry",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    await asyncio.wait_for(_consume(pcm.start_stream(chat.chat_id, "do the thing")), timeout=10.0)
+    armed = pcm.get_chat(chat.chat_id)
+    assert armed is not None and armed.retry_status == "pending"
+    next_at = armed.retry_next_at
+
+    for notice in ("[Ciaobot] 1 background run finished.\n\n— smoke (FAILED)",
+                   "[Ciaobot] 1 background run finished.\n\n— gates (FAILED)"):
+        delivery = pcm._deliver_wake(armed, notice, count=1, origin="cli_task_wake")
+        stream = pcm._broker.get(chat.chat_id)
+        if stream is not None:
+            await asyncio.wait_for(_consume(stream), timeout=10.0)
+        assert delivery == "deferred"
+
+    assert calls == ["do the thing"]
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_next_at == next_at
+    assert updated.retry_prompt.startswith("do the thing")
+    assert "smoke (FAILED)" in updated.retry_prompt
+    assert "gates (FAILED)" in updated.retry_prompt
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_wake_without_pending_retry_still_starts_a_turn(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append(prompt)
+        yield ResultEvent(
+            type="result",
+            result="ok",
+            session_id="sess-wake",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    delivery = pcm._deliver_wake(chat, "WAKE", count=1, origin="cli_task_wake")
+    stream = pcm._broker.get(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(_consume(stream), timeout=10.0)
+
+    assert delivery == "started"
+    assert calls == ["WAKE"]
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+    pcm.stop_chat_retry(chat.chat_id)

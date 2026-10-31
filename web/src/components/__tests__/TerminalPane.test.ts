@@ -891,4 +891,118 @@ describe('TerminalPane', () => {
     expect(sockets[1].closed).toBe(false)
     second.unmount()
   })
+
+  describe('following the chat on screen', () => {
+    async function mountFor(chatId: string) {
+      const wrapper = mount(TerminalPane, { props: { chatId }, attachTo: document.body })
+      await flushPromises()
+      return wrapper
+    }
+
+    it('reports the chat on screen to the store, and again when it changes', async () => {
+      serve([])
+      const store = useTerminalStore()
+      const follow = vi.spyOn(store, 'followChat')
+      const wrapper = await mountFor('chat-a')
+      expect(follow).toHaveBeenCalledWith('chat-a')
+
+      await wrapper.setProps({ chatId: 'chat-b' })
+      expect(follow).toHaveBeenCalledWith('chat-b')
+      wrapper.unmount()
+    })
+
+    it('does not focus the screen when a chat switch shows the terminal', async () => {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const wrapper = await mountFor('chat-a')
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      const focusedAfterOpen = screen.FakeScreen.instances[0].focused
+      expect(focusedAfterOpen).toBeGreaterThan(0)
+
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await flushPromises()
+      expect(store.visible).toBe(false)
+      await wrapper.setProps({ chatId: 'chat-a' })
+      await flushPromises()
+
+      expect(store.visible).toBe(true)
+      const focused = screen.FakeScreen.instances.reduce((sum, instance) => sum + instance.focused, 0)
+      expect(focused).toBe(focusedAfterOpen)
+
+      store.hide()
+      await flushPromises()
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      const afterPlainOpen = screen.FakeScreen.instances.reduce((sum, instance) => sum + instance.focused, 0)
+      expect(afterPlainOpen).toBeGreaterThan(focused)
+      wrapper.unmount()
+    })
+
+    /** Chat A open, chat B opened by hand, then back to A: a restore that changes scope. */
+    async function restoreAcrossScopes() {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const wrapper = await mountFor('chat-a')
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await store.open({ chatId: 'chat-b' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-a' })
+      await flushPromises()
+      return { store, wrapper }
+    }
+    const focusTotal = () => screen.FakeScreen.instances.reduce((sum, instance) => sum + instance.focused, 0)
+
+    it('does not focus a new screen when a restore changes scope', async () => {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const wrapper = await mountFor('chat-a')
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await store.open({ chatId: 'chat-b' })
+      await flushPromises()
+      const before = focusTotal()
+      await wrapper.setProps({ chatId: 'chat-a' })
+      await flushPromises()
+      expect(store.visible).toBe(true)
+      expect(store.chatSwitch).toBe(true)
+      expect(focusTotal()).toBe(before)
+      wrapper.unmount()
+    })
+
+    it('focuses the new screen of a session the person starts after a restore', async () => {
+      const { store, wrapper } = await restoreAcrossScopes()
+      const before = focusTotal()
+      serve([sessionInfo('s1'), sessionInfo('s-new')])
+      await store.createSession()
+      await flushPromises()
+      expect(store.chatSwitch).toBe(false)
+      expect(focusTotal()).toBeGreaterThan(before)
+      wrapper.unmount()
+    })
+
+    it('does not move focus to the opener when a chat switch hides the terminal', async () => {
+      serve([sessionInfo('s1')])
+      const store = useTerminalStore()
+      const opener = document.createElement('button')
+      document.body.appendChild(opener)
+      const wrapper = await mountFor('chat-a')
+      opener.focus()
+      await store.open({ chatId: 'chat-a' })
+      await flushPromises()
+      const elsewhere = document.createElement('input')
+      document.body.appendChild(elsewhere)
+      elsewhere.focus()
+
+      await wrapper.setProps({ chatId: 'chat-b' })
+      await flushPromises()
+
+      expect(store.visible).toBe(false)
+      expect(document.activeElement).toBe(elsewhere)
+      wrapper.unmount()
+    })
+  })
 })
