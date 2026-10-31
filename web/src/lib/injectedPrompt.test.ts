@@ -425,6 +425,17 @@ describe('summarizeInjectedPrompt', () => {
     })
   })
 
+  it('recognises a restart resume by its recorded origin only', () => {
+    expect(parseInjectedPrompt('Continue after restart: …', 'restart_resume')).toEqual({ kind: 'restart_resume' })
+    expect(parseInjectedPrompt('Continue after restart: …')).toBeNull()
+  })
+
+  it('summarises a restart resume', () => {
+    expect(summarizeInjectedPrompt({ kind: 'restart_resume' })).toEqual({
+      label: 'Continue after restart', facts: 'The engine restarted mid-turn', tone: null,
+    })
+  })
+
   it('summarizes an error notice', () => {
     const quota = errorNoticePrompt('you have reached your weekly usage limit, upgrade for higher limits')
     expect(quota).toMatchObject({ kind: 'error', label: 'Usage limit reached' })
