@@ -753,6 +753,32 @@ def test_signing_rehearsal_binds_source_sha_and_clean_wheel_verifier() -> None:
     )
 
 
+def test_signing_rehearsal_still_reports_its_sanitized_summary_when_the_helper_fails() -> None:
+    # #41221404339: the helper writes a sanitized summary.txt on a failed stage
+    # too, but the step ran under `set -e`, which aborted at the failed command
+    # before the append, so the run showed no reason at all. The step must
+    # append the summary and still fail with the helper's status.
+    workflow = _rehearsal_workflow()
+    helper = workflow.split("      - name: Rehearse the signed server host")[1]
+    helper = helper.split("      - name: Remove runner-local")[0]
+
+    capture = '|| status=$?'
+    report = 'cat "$REHEARSAL_DIR/summary.txt" >> "$GITHUB_STEP_SUMMARY"'
+    propagate = 'exit "$status"'
+    assert capture in helper
+    assert helper.index(capture) < helper.index(report) < helper.index(propagate)
+    # A failure before the scratch directory exists has no summary; the guard
+    # keeps the append from becoming a second, masking error.
+    assert '[ -f "$REHEARSAL_DIR/summary.txt" ]' in helper
+    # The only file the step reads is that summary: nothing else is cat'd, so
+    # the raw runner-local report can never reach the job summary.
+    reads = [
+        line.strip() for line in helper.splitlines() if line.split()[:1] == ["cat"]
+    ]
+    assert reads == [report], reads
+    assert "verification.json" not in helper
+
+
 def test_production_publish_remains_usable_without_apple_credentials() -> None:
     # #2331 prepares CI; it does not activate signed publishing. Today's release
     # must keep working with no Apple secret, no signed-mode switch and no

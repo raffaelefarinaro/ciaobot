@@ -861,14 +861,38 @@ class FakeToolchain:
             return self._done(cmd, kwargs, returncode=1)
         return self._done(cmd, kwargs)
 
+    def _child_path(self, cmd: list[str], kwargs: dict[str, Any], value: str) -> Path:
+        """Resolve an argv path the way the real child process would.
+
+        The rehearsal runs its subprocesses with ``cwd`` set to the scratch
+        output, so a relative argument is relative to that directory, not to
+        the test process's working directory. Resolving it here is what lets a
+        checkout-relative path fail exactly as it did in CI (#41221404339)
+        instead of silently finding a file the child could never see.
+        """
+        path = Path(value)
+        cwd = kwargs.get("cwd")
+        if path.is_absolute() or cwd is None:
+            return path
+        return Path(cwd) / path
+
     def _manifest_build(
         self, cmd: list[str], kwargs: dict[str, Any]
     ) -> subprocess.CompletedProcess[str]:
         assert cmd[4:6] == ["--version", VERSION], cmd
-        out = Path(cmd[cmd.index("--out") + 1])
-        archive = Path(cmd[cmd.index("--server-host") + 1])
+        # The child runs in the scratch output, so every relative path in its
+        # argv is resolved there - never against the caller's directory.
+        cwd = kwargs.get("cwd")
+        assert cwd is None or Path(cwd) == self.scratch, cwd
+        out = self._child_path(cmd, kwargs, cmd[cmd.index("--out") + 1])
+        archive = self._child_path(cmd, kwargs, cmd[cmd.index("--server-host") + 1])
         team_id = cmd[cmd.index("--server-host-team-id") + 1]
-        wheel = Path(cmd[-1])
+        # The manifest subprocess's cwd is the scratch output, which never
+        # contains the candidate wheel: the helper must name it absolutely.
+        assert Path(cmd[-1]).is_absolute(), (
+            f"the manifest subprocess cannot read a relative wheel: {cmd[-1]}"
+        )
+        wheel = self._child_path(cmd, kwargs, cmd[-1])
         assert len(cmd) == 13, cmd
         assert out == self.scratch / "ciaobot-engine-manifest.json", cmd
         assert archive == self.scratch / "build" / REHEARSAL.ARCHIVE_NAME, cmd
@@ -1630,6 +1654,51 @@ def test_manifest_authenticates_exact_final_archive_and_expected_team(
     # The installed verifier ran, and the post-manifest re-verification did not.
     assert any(cmd[1:4] == ["-m", "ciao.release_manifest", "verify"] for cmd in fake.commands)
     assert not any("verify-final" in " ".join(cmd) for cmd in fake.commands)
+
+
+def test_a_relative_candidate_wheel_reaches_the_manifest_as_an_absolute_path(
+    tmp_path: Path, macos: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The workflow passes ``--wheel dist/ciaobot-*.whl`` from the checkout while
+    # the manifest subprocess runs with the scratch output as its cwd. The
+    # helper must resolve the candidate at its own boundary: a checkout-relative
+    # path names nothing there, which is how the rehearsal failed in CI
+    # (#41221404339).
+    wheel, interpreter = _paths(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    relative = Path("dist") / WHEEL_NAME
+    assert not relative.is_absolute() and relative.is_file()
+
+    fake = FakeToolchain()
+    result = REHEARSAL.rehearse(
+        output=tmp_path / "rehearsal",
+        python=interpreter,
+        wheels=[relative],
+        source_sha=SOURCE_SHA,
+        environ=_environment(),
+        runner=fake,
+        children=fake.children,
+        platform_name="darwin",
+    )
+
+    assert result.archive_name == REHEARSAL.ARCHIVE_NAME
+    builds = _manifest_builds(fake.commands)
+    assert len(builds) == 1, fake.commands
+    passed = Path(builds[0][-1])
+    assert passed.is_absolute(), builds[0]
+    assert passed == wheel.resolve(), builds[0]
+    assert passed.is_file()
+    # The manifest describes the candidate's real bytes, which the fake could
+    # only compute by opening the file the rehearsal intended.
+    manifest = json.loads(
+        (tmp_path / "rehearsal" / REHEARSAL.release_manifest.MANIFEST_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    wheel_entry = next(
+        entry for entry in manifest["artifacts"] if entry["kind"] == "wheel"
+    )
+    assert (wheel_entry["sha256"], wheel_entry["size"]) == _digest(wheel)
 
 
 def test_manifest_signer_is_prepared_without_signing_credentials(
