@@ -48,6 +48,9 @@ const harness: TerminalHarness = {
   focus(): void {
     renderer.focus()
   },
+  applicationCursorKeys(): boolean {
+    return renderer.applicationCursorKeys
+  },
   size(): { cols: number; rows: number } {
     return size
   },

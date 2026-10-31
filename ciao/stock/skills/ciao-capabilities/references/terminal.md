@@ -9,6 +9,7 @@
 - **A session belongs to one chat or one project.** The shell opens in a folder the engine resolves for that target: the repository (the chat's code-mode worktree, else the project's linked repository) or the workspace's agent root. When both exist the user picks one — the panel shows **Repository** and **Workspace** buttons — and otherwise the one that exists is used. The caller names a target and at most which of those two locations, never a folder, a path or a command.
 - **Every chat and every project has a way in, and a repository is not required.** Chat details carries a **Terminal** section of its own and a project page carries one too; neither sits inside the repository's, so a chat or a project with no linked folder still has one. The button is **Open in Terminal**: it opens the panel and adopts a running shell, or starts one when there is none. A chat or project with a linked repository asks first whether to open it in the workspace or the repository; **+** asks the same question for each further shell.
 - **On macOS and Linux** the shell is the account's login shell in a real pty; on Windows it is PowerShell in a pseudoconsole.
+- **On a phone or tablet** a row of keys under the screen sends Esc, Tab, Ctrl+C, Ctrl+D, the arrows and Enter, which a soft keyboard does not have. They go to the shell like typed keys; a tap does not close the soft keyboard.
 
 ## When to use it, and when not to
 

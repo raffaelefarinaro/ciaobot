@@ -981,3 +981,19 @@ async def test_network_retry_kind_and_interval_survive_reload(tmp_path: Path) ->
     assert reloaded.retry_status == "pending"
     manager.stop_chat_retry(chat.chat_id)
     second.stop_chat_retry(chat.chat_id)
+
+
+def test_unchanged_registry_is_not_rewritten_by_a_read(tmp_path: Path) -> None:
+    # `GET /api/projects` runs list_projects on every sidebar refresh and chat
+    # open. Rewriting the whole registry there (read, merge, re-serialise and
+    # write a multi-megabyte file on the event loop) stalled every concurrent
+    # request, including the opened chat's /messages, by about a second.
+    manager = _make_manager(tmp_path)
+    manager.create_project("Steady", workspace="work")
+    registry = tmp_path / ".runtime" / "web_projects.json"
+    revision = json.loads(registry.read_text(encoding="utf-8"))["revision"]
+
+    manager.list_projects()
+    manager.list_projects("work")
+
+    assert json.loads(registry.read_text(encoding="utf-8"))["revision"] == revision

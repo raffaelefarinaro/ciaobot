@@ -367,6 +367,81 @@ Jira project tables, Airtable base/table IDs, and similar skill-specific
 reference data belong next to the workspace skill that uses them, not in this
 repository-wide document.
 
+## Server host signing rehearsal (CI only)
+
+The signed, notarized macOS server host is exercised by a separate manual
+workflow, `.github/workflows/server-host-signing-rehearsal.yml` (#2331), before
+any production activation. It uploads no release asset and distributes nothing:
+the Apple notary submission inside the release build is the only network write,
+and candidate files stay on the runner. `publish.yml` is unchanged and keeps
+publishing the ad-hoc host, so none of these names is needed for an ordinary
+release.
+
+| Name | GitHub storage | Meaning |
+|---|---|---|
+| `SERVER_HOST_CERTIFICATE_P12_BASE64` | environment secret | exported Developer ID Application identity, base64-encoded |
+| `SERVER_HOST_CERTIFICATE_PASSWORD` | environment secret | p12 import password |
+| `SERVER_HOST_NOTARY_KEY_P8_BASE64` | environment secret | base64 of the App Store Connect API key (`.p8`) used for notarization |
+| `SERVER_HOST_NOTARY_KEY_ID` | protected environment variable | the API key identifier (an identifier, not a secret) |
+| `SERVER_HOST_NOTARY_ISSUER_ID` | protected environment variable | the App Store Connect issuer UUID (an identifier, not a secret) |
+| `SERVER_HOST_SIGNING_IDENTITY` | protected environment variable | the exact certificate selector, never an auto-pick |
+| `SERVER_HOST_TEAM_ID` | protected environment variable | the expected ten-character Apple team |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | existing release secrets | sign the candidate manifest with the unchanged public verifier |
+
+Provisioning is the operator's job, done only in the GitHub environment
+`server-host-signing-rehearsal`: store the three new secrets (certificate data,
+its password and the API key), set the four variables (signing identity, team,
+key id, issuer), reuse the existing manifest-signing secrets, and configure
+required reviewers plus allowed branches (`develop`, `main`). The API key must
+be a notarization-capable App Store Connect API key; its key id and issuer UUID
+are identifiers, not secrets.
+Never put these values in the repository, a `.env`, a workspace, an issue or a
+chat. An agent does not export identities, create the secrets or read keychain
+material; a missing input fails the requested run.
+
+To run it: Actions → `server-host-signing-rehearsal` → Run workflow, pick
+`develop` or `main`, and check `confirm_no_release_upload`. An unchecked box is a
+refusal, not a skipped rehearsal, and the environment approval must come from a
+reviewer. The workflow refuses any other ref before it binds a credential,
+records the dispatched commit, builds the PWA and wheel, installs the wheel in a
+clean Python 3.13 environment and runs `scripts/rehearse-server-host-signing.py`
+with that interpreter. It uses no dependency cache and every npm command runs
+with audits and funding traffic disabled, so the Apple notary submission remains
+the only network write.
+
+The helper creates a temporary random-password keychain and notary profile in a
+per-run scratch directory it created itself, records that exact path in a
+sibling receipt (cleared by the workflow's first `claim-scratch` step, before
+the guard and gated so cleanup runs only when that claim succeeded, so it can
+only describe this job), and restores the prior default keychain and the
+whole prior search list. An interruption first terminates and reaps the
+in-flight tool where the process is still schedulable, and a signal during a
+running restore — first or later — is deferred until cleanup finishes. It deletes its certificate, decoded
+API key, keychain and profile by independent attempts on every recoverable path,
+including an interrupted build and build, notarization, manifest or verification
+failures; an unrecoverable failure (SIGKILL, a filesystem error, a child that
+never exits) is reported and may leave material in the run-scoped directory,
+which the runner discards. Credentials stay out of
+argv: the keychain password is fed to `security` on stdin and the App Store
+Connect API key is passed to `notarytool` as the path to an owner-only file, with
+one accepted residual — `security import -P` takes the p12 passphrase in one
+short-lived process, because Apple's CLI has no stdin option for it. It verifies
+the final extracted app (signature, expected team and requirement, hardened
+runtime, timestamp, entitlements, notarization ticket, staple and Gatekeeper),
+authenticates the exact archive in a signed candidate manifest whose signer is
+installed before any signing credential is present, and writes a sanitized
+`verification.json` plus a summary the workflow may append to the job summary.
+Submissions use only the keychain profile, so no account address, password or
+key material appears in any spawned argv. A failed run writes an explicitly
+incomplete report naming only its stage and code. The workflow's `always()`
+cleanup deletes only the path named by the helper's `.owned` receipt, so a
+pre-existing directory is never adopted.
+
+These are CI inputs, not runtime configuration: no `CIAO_*` variable mirrors
+them, nothing in `ciao` reads them, and setting them in a local `.env` does
+nothing. The rehearsal is prepared and tested, not operationally proven; the
+promotion gate is in [`docs/SERVER_HOST_RELEASE.md`](docs/SERVER_HOST_RELEASE.md).
+
 ## Ciaobot Server Operation
 
 Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
