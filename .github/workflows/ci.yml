@@ -80,8 +80,8 @@ jobs:
     # the runner for GitHub's six-hour default.
     timeout-minutes: 45
     env:
-      # 'true' on pushes and release PRs into main, 'false' on develop PRs.
-      WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
+      # 'true' on pushes, release PRs into main, and develop PRs labelled windows-full; 'false' on other develop PRs.
+      WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'windows-full') }}
     defaults:
       run:
         shell: bash

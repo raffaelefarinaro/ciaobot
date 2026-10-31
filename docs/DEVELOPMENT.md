@@ -478,7 +478,7 @@ while the server is running, because the live schedule store may be writing it.
   (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate:
   on pushes and PRs into `main` it also runs `pytest -n auto --durations=30
   tests/` and `npm test`, which take about 15 minutes on a hosted runner, so a
-  PR into `develop` skips them and waits about 2 minutes. A Windows test
+  PR into `develop` skips them and waits about 2 minutes. A `develop` PR labelled `windows-full` runs them too; use it for path, filesystem, process or installer changes. The label is read from the event, so add it and then push (an empty commit is enough) — re-running a job replays the old event and does not see a new label. A Windows test
   failure therefore surfaces on the post-merge push run, and `/ciao-release`
   will not cut while that run is red. The job fails on any gate that ran. Every
   gate runs even after an earlier one failed, the job summary lists the counts
