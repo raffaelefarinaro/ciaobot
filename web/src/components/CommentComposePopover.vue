@@ -335,8 +335,8 @@ defineExpose({ focus })
   }
 }
 @media (pointer: coarse) {
-  .compose-attach,
-  .compose-btn {
+  /* Only the attachment is icon-only. Text actions must size to their label. */
+  .compose-attach {
     min-width: var(--touch);
     min-height: var(--touch);
     width: var(--touch);

@@ -185,6 +185,27 @@ describe('parseInjectedPrompt', () => {
     expect(parseInjectedPrompt(cliWake, undefined)).toEqual(expected)
   })
 
+  it('parses OpenCode background work interrupted by a restart', () => {
+    const restartWake = [
+      '[Ciaobot] Lost CLI tasks: 2 CLI tasks you started (OpenCode subagents / background shells) were interrupted: the Ciaobot engine restarted and stopped this chat\'s OpenCode server, so they will never finish or report back.',
+      '',
+      '— subagent: interrupted subagent session (task ses_child_a)',
+      '',
+      '— shell: background shell (task sh_1)',
+      'command: bash gates.sh',
+      '',
+      'Check the real state yourself now: inspect the files, worktrees or output they were writing rather than assuming they finished. To continue an interrupted subagent with its context, call the task tool again with its sessionID (the task id above). Re-run any interrupted shell that still needs to run.',
+    ].join('\n')
+    expect(parseInjectedPrompt(restartWake, 'cli_task_wake')).toEqual({
+      kind: 'cli_task_wake',
+      count: 2,
+      tasks: [
+        { type: 'subagent', description: 'interrupted subagent session', taskId: 'ses_child_a', command: '' },
+        { type: 'shell', description: 'background shell', taskId: 'sh_1', command: 'bash gates.sh' },
+      ],
+    })
+  })
+
   const scheduleText = [
     'The scheduled command `./digest.sh` ran before this run and exited with code 2.',
     '',

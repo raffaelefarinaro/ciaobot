@@ -1978,6 +1978,10 @@ class OpencodeProvider(BaseSDKProvider):
             for shell_id in sorted(self._background_shells)
         ]
 
+    def background_child_ids(self) -> list[str]:
+        """Session ids of the background subagents tracked for this chat, sorted."""
+        return sorted(self._background_children)
+
     async def stop_background_shell(self, shell_id: str) -> bool:
         """Terminate one tracked background shell (``DELETE /api/shell/:id``).
 
