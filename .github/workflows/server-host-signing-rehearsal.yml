@@ -1,0 +1,166 @@
+name: server-host-signing-rehearsal
+
+# A manual, protected, explicitly confirmed rehearsal of the signed (Developer
+# ID, notarized) server host (#2331). It builds and inspects a candidate, signs
+# a candidate engine manifest, and writes a sanitized runner-local report. It
+# uploads no release asset, calls no artifact upload and distributes nothing:
+# the Apple notary submission the release builder performs is the only network
+# write.
+#
+# This does not activate signed production publishing. `publish.yml` is
+# unchanged and keeps publishing the ad-hoc revision-4 host until a separately
+# approved activation. The `server-host-signing-rehearsal` environment must be
+# provisioned by a maintainer with required reviewers and allowed branches;
+# YAML alone cannot prove that protection exists.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_no_release_upload:
+        description: >-
+          Confirm this run uploads no release asset and distributes nothing.
+          Unchecked is a refusal, not a skipped rehearsal.
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-host-signing-rehearsal
+  cancel-in-progress: false
+
+jobs:
+  rehearse:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    environment: server-host-signing-rehearsal
+    env:
+      # Unique per run, so a leftover directory from another run can never be
+      # reused, adopted or deleted by this one.
+      REHEARSAL_DIR: ${{ runner.temp }}/server-host-signing-rehearsal-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Claim the run-scoped scratch receipt
+        id: claim-scratch
+        # Runs before the confirmation/ref guard, because cleanup runs always()
+        # and must never trust a receipt a refused run did not clear. The path is
+        # unique per run id and attempt, so only this job can have written one.
+        run: |
+          set -euo pipefail
+          rm -f "${REHEARSAL_DIR}.owned"
+
+      - name: Refuse an unconfirmed or untrusted run
+        # Runs before checkout and before any credential is bound: an unchecked
+        # confirmation, another event or an untrusted ref fails this run rather
+        # than reporting a green skip.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CONFIRMED: ${{ github.event.inputs.confirm_no_release_upload }}
+          DISPATCHED_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "::error::the signing rehearsal only runs from workflow_dispatch"
+            exit 1
+          fi
+          if [ "$CONFIRMED" != "true" ]; then
+            echo "::error::confirm_no_release_upload must be checked: this rehearsal uploads no release asset"
+            exit 1
+          fi
+          case "$DISPATCHED_REF" in
+            refs/heads/develop|refs/heads/main) ;;
+            *)
+              echo "::error::the signing rehearsal only runs on refs/heads/develop or refs/heads/main"
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@v7
+        with:
+          # The rehearsal reads the checkout; it never pushes with the token.
+          persist-credentials: false
+
+      - name: Verify the checked-out commit is the dispatched commit
+        # The report names this exact commit, so the build must be that commit
+        # rather than whatever a branch points at after approval.
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "rehearsing $GITHUB_SHA"
+
+      - uses: actions/setup-node@v7
+        with:
+          # No dependency cache: this rehearsal must not perform any implicit
+          # network fetch beyond the pinned packages it names itself.
+          node-version: "22"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.3.2
+
+      - name: Build PWA assets
+        working-directory: web
+        env:
+          # No audit or funding traffic: the Apple notary submission is the
+          # only network write this workflow may make.
+          npm_config_audit: "false"
+          npm_config_fund: "false"
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Build engine wheel
+        run: uv build --wheel --out-dir dist
+
+      - name: Verify engine wheel in a clean environment
+        run: |
+          set -euo pipefail
+          uv venv --python 3.13 "$RUNNER_TEMP/engine-check"
+          uv pip install --python "$RUNNER_TEMP/engine-check/bin/python" dist/ciaobot-*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/engine-check/bin/python" -m ciao.release_manifest check-static
+
+      - name: Rehearse the signed server host
+        # Credentials are bound to this step only, by name. Nothing is printed,
+        # no step echoes a value, and the helper deletes its keychain, profile,
+        # certificate and decoded notary key in its own unconditional cleanup.
+        env:
+          SERVER_HOST_SIGNING_IDENTITY: ${{ vars.SERVER_HOST_SIGNING_IDENTITY }}
+          SERVER_HOST_TEAM_ID: ${{ vars.SERVER_HOST_TEAM_ID }}
+          SERVER_HOST_CERTIFICATE_P12_BASE64: ${{ secrets.SERVER_HOST_CERTIFICATE_P12_BASE64 }}
+          SERVER_HOST_CERTIFICATE_PASSWORD: ${{ secrets.SERVER_HOST_CERTIFICATE_PASSWORD }}
+          SERVER_HOST_NOTARY_KEY_P8_BASE64: ${{ secrets.SERVER_HOST_NOTARY_KEY_P8_BASE64 }}
+          SERVER_HOST_NOTARY_KEY_ID: ${{ vars.SERVER_HOST_NOTARY_KEY_ID }}
+          SERVER_HOST_NOTARY_ISSUER_ID: ${{ vars.SERVER_HOST_NOTARY_ISSUER_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/engine-check/bin/python" scripts/rehearse-server-host-signing.py \
+            --output "$REHEARSAL_DIR" \
+            --python "$RUNNER_TEMP/engine-check/bin/python" \
+            --source-sha "$GITHUB_SHA" \
+            --wheel dist/ciaobot-*.whl
+          # Only the helper's sanitized summary reaches the job summary.
+          cat "$REHEARSAL_DIR/summary.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove runner-local candidate and credential files
+        # Always runs, including after a cancelled or failed step. The helper
+        # also cleans up in its own finally block, so a failed step never
+        # depends on this step alone. Only a directory this run created carries
+        # the marker, so a pre-existing path is never adopted or deleted.
+        # Delete only when the claim step actually cleared the stale receipt: a
+        # failed or cancelled claim must never let cleanup trust a pre-existing
+        # receipt left at this run's unique path.
+        if: ${{ always() && steps.claim-scratch.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          # The helper writes this sibling receipt only after its own exclusive
+          # mkdir succeeded, so only a directory this run created is deleted.
+          receipt="${REHEARSAL_DIR}.owned"
+          if [ -f "$receipt" ] && [ "$(cat "$receipt")" = "$REHEARSAL_DIR" ]; then
+            rm -rf "$REHEARSAL_DIR"
+          else
+            echo "no rehearsal-owned scratch directory to remove"
+          fi
+          rm -f "$receipt"
