@@ -116,6 +116,7 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   // A pointer with a keyboard behind it has no use for on-screen keys: the
   // row is rendered for the layout but hidden until a coarse pointer.
   await expect(pane.locator('.tp-keys')).toBeHidden()
+  await expect(pane.locator('.tp-hint-touch')).toBeHidden()
 
   // The documented way out: Shift+Tab hands the keyboard to the panel's own
   // controls, and the shell never sees the key.
@@ -392,6 +393,46 @@ test('a chat with a linked repository asks where to open the shell', async ({ pa
   await expect(pane.getByRole('tab').nth(1)).toHaveAttribute('title', /\/synthetic\/workspace/)
 })
 
+test.describe('on a touch screen wide enough for the tile', () => {
+  test.use({ viewport: { width: 1280, height: 900 }, hasTouch: true })
+
+  test('the key row sits under the screen in the tile', async ({ page }) => {
+    await isolate(page, 'terminal-pane-touch-tile')
+    await boot(page, CHAT_PATH, COMPOSER)
+    // A coarse pointer is what shows the row; a fine one would hide it.
+    expect(await page.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+
+    await page.locator('.work-inspector-trigger').click()
+    const details = page.locator('#chat-work-rail')
+    await expect(details).toBeVisible()
+    await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open terminal' }).click()
+
+    const pane = page.locator('.terminal-pane')
+    await expect(pane).toBeVisible()
+    await expect(pane).toHaveClass(/terminal-pane--tile/)
+
+    // A shell starts with the pane, and the row follows the screen.
+    const keys = pane.getByRole('toolbar', { name: 'Terminal keys' })
+    await expect(keys).toBeVisible()
+    await expect(keys.getByRole('button')).toHaveCount(9)
+    await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()
+
+    // The row is under the screen, not beside it or above it.
+    const surface = pane.locator('.tp-surface')
+    await settled(pane)
+    const surfaceBox = (await surface.boundingBox())!
+    const rowBox = (await keys.boundingBox())!
+    expect(rowBox.y).toBeGreaterThanOrEqual(surfaceBox.y + surfaceBox.height - 0.5)
+
+    // Every key is a 44px target.
+    for (let i = 0; i < 9; i += 1) {
+      const box = (await keys.getByRole('button').nth(i).boundingBox())!
+      expect(box.height, `key ${i} is ${box.height}px tall`).toBeGreaterThanOrEqual(44 - 0.5)
+      expect(box.width, `key ${i} is ${box.width}px wide`).toBeGreaterThanOrEqual(44 - 0.5)
+    }
+  })
+})
+
 test.describe('on a phone', () => {
   test.use({ viewport: { width: 375, height: 667 }, hasTouch: true, isMobile: true })
 
@@ -427,6 +468,8 @@ test.describe('on a phone', () => {
     await pane.getByRole('button', { name: 'New terminal session' }).click()
     const keys = pane.getByRole('toolbar', { name: 'Terminal keys' })
     await expect(keys).toBeVisible()
+    await expect(pane.locator('.tp-hint-touch')).toBeVisible()
+    await expect(keys.getByRole('button')).toHaveCount(9)
     const field = pane.locator('.tp-surface textarea')
     await expect(field).toBeEditable()
     await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()

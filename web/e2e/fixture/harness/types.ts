@@ -13,6 +13,8 @@ export interface TerminalHarness {
   setInputEnabled(enabled: boolean): void
   /** Put the keyboard on the screen. */
   focus(): void
+  /** True while the screen is in application cursor mode (DECCKM). */
+  applicationCursorKeys(): boolean
   /** The screen's size in character cells, as the renderer last measured it. */
   size(): { cols: number; rows: number }
   /** Every keystroke that reached the screen, as byte lists. */
