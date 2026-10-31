@@ -83,6 +83,14 @@ requires_posix_uid = pytest.mark.skipif(
     sys.platform == "win32", reason="mocking darwin needs a POSIX uid"
 )
 
+# An ownership record names a macOS bundle by an absolute POSIX path, and the
+# reader refuses a backslash. A bundle built under a Windows ``tmp_path`` can
+# never be recorded, so tests that round-trip one through a record are macOS/
+# Linux only. The inspection itself still runs on Windows.
+requires_posix_bundle_path = pytest.mark.skipif(
+    sys.platform == "win32", reason="a recorded bundle path is POSIX-only"
+)
+
 # The builder needs the Command Line Tools (xcrun swiftc, lipo); the inspector
 # itself needs only /usr/bin/codesign.
 HAS_TOOLS = (
@@ -928,6 +936,7 @@ class _FakeRunner:
         return "=" + BUILD.designated_requirement(self.expected_team)
 
     def _note_bundle(self, target: str) -> None:
+        target = target.replace(os.sep, "/")
         if not os.path.isabs(target) or os.path.basename(target) != APP_NAME:
             raise AssertionError(f"probe does not name the host bundle: {target!r}")
         # Pinned to one bundle: the first target binds, and a later probe aimed
@@ -939,6 +948,7 @@ class _FakeRunner:
         self.bundle = target
 
     def _note_executable(self, target: str) -> None:
+        target = target.replace(os.sep, "/")
         suffix = "/" + _EXE_REL
         if not os.path.isabs(target) or not target.endswith(suffix):
             raise AssertionError(f"probe does not name the host executable: {target!r}")
@@ -2023,6 +2033,7 @@ def test_the_developer_id_requirement_is_stable_across_certificate_renewal() -> 
     assert "H\"" not in requirement
 
 
+@requires_posix_bundle_path
 def test_signed_record_round_trips_with_expected_team(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2105,6 +2116,7 @@ def test_signed_policy_binds_the_team_from_the_private_record(
         assert caught.value.code == SIGNATURE_REJECTED, (signing, bundle_team)
 
 
+@requires_posix_bundle_path
 def test_record_rejects_schema_revision_signing_confusion(tmp_path: Path) -> None:
     # One field of a valid signed record is broken at a time. Every case must be
     # a refusal: the schema, the revision and the signing identity are one
