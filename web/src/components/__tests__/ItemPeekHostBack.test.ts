@@ -184,11 +184,10 @@ describe('ItemPeekHost and the Back button', () => {
     await nextTick()
 
     await back()
-    if (marker() === null) {
-      await nextPopstate()
-      await settle()
-      await flushPromises()
-    }
+    await vi.waitFor(() => {
+      expect(marker()).not.toBeNull()
+      expect(peek.isOpen).toBe(true)
+    })
 
     expect(peek.isOpen).toBe(true)
     expect(wrapper!.get<HTMLTextAreaElement>('#task-detail-name').element.value).toBe('   ')
@@ -206,5 +205,26 @@ describe('ItemPeekHost and the Back button', () => {
 
     expect(peek.isOpen).toBe(false)
     expect(document.activeElement).toBe(opener)
+  })
+
+  it('a route push closes the overlay after its save without popping history under the push', async () => {
+    const peek = await openOverlay()
+    apiPatch.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...task({ title: 'Renamed' }), revision: NEXT_REVISION, body: '' },
+    })
+    await wrapper!.get('#task-detail-name').setValue('Renamed')
+    await nextTick()
+    const go = vi.spyOn(router.options.history, 'go')
+
+    await router.push('/')
+    await settle()
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(apiPatch.mock.calls[0]![1]).toMatchObject({ title: 'Renamed' })
+    expect(peek.isOpen).toBe(false)
+    expect(go).not.toHaveBeenCalled()
+    expect(marker()).toBeNull()
   })
 })
