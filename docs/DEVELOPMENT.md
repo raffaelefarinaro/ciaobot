@@ -475,28 +475,31 @@ while the server is running, because the live schedule store may be writing it.
   on the post-merge push run instead.
   The `windows` job (`windows-latest`, every PR and push) is blocking since
   #696's C9. On every run it imports every `ciao` module and runs `mypy ciao`
-  (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate:
-  on pushes and PRs into `main` it also runs `pytest -n auto --durations=30
-  tests/` and `npm test`, which take about 15 minutes on a hosted runner, so a
-  PR into `develop` skips them and waits about 2 minutes. A Windows test
-  failure therefore surfaces on the post-merge push run, and `/ciao-release`
-  will not cut while that run is red. The job fails on any gate that ran. Every
-  gate runs even after an earlier one failed, the job summary lists the counts
-  and the failing tests by name, and the full logs are in its
-  `windows-results` artifact. Its install.ps1 steps (full runs only) (dry runs under both
-  PowerShell hosts, the analyzer, and a real end-to-end install and
-  `-Uninstall`) stay advisory: a hosted runner has no interactive logon, so a
-  task that does not start there is a datum, not a verdict. Known flaky
-  Windows tests are listed in #696's C9 tracking comment.
+  (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate: on
+  pushes and PRs into `main` it also runs `pytest -n auto --durations=30 tests/`
+  and `npm test`, which take about 15 minutes on a hosted runner, so a PR into
+  `develop` skips them and waits about 2 minutes. A `develop` PR labelled
+  `windows-full` runs them too; use it for path, filesystem, process or
+  installer changes. The label is read from the event, so add it and then push
+  (an empty commit is enough) — re-running a job replays the old event and does
+  not see a new label. A Windows test failure therefore surfaces on the
+  post-merge push run, and `/ciao-release` will not cut while that run is red.
+  The job fails on any gate that ran. Every gate runs even after an earlier one
+  failed, the job summary lists the counts and the failing tests by name, and
+  the full logs are in its `windows-results` artifact. Its install.ps1 steps
+  (full runs only) (dry runs under both PowerShell hosts, the analyzer, and a
+  real end-to-end install and `-Uninstall`) stay advisory: a hosted runner has
+  no interactive logon, so a task that does not start there is a datum, not a
+  verdict. Known flaky Windows tests are listed in #696's C9 tracking comment.
   The runner is elevated and has uv and Git's `usr\bin` on `PATH`; a
   contributor's Windows account usually has neither the symlink privilege nor
   the coreutils. Without Developer Mode, a test that creates a symlink of its
   own is skipped ("cannot create a symlink here", `tests/conftest.py`) rather
-  than failing with WinError 1314, so a local run reports more skips than CI;
-  a symlink the engine itself makes still fails, since the engine must not
-  need one on Windows. The suite also points `LOCALAPPDATA` at each test's
-  home, so a machine with Ciaobot installed does not hand its real logon-task
-  workspace to config-discovery tests.
+  than failing with WinError 1314, so a local run reports more skips than CI; a
+  symlink the engine itself makes still fails, since the engine must not need
+  one on Windows. The suite also points `LOCALAPPDATA` at each test's home, so a
+  machine with Ciaobot installed does not hand its real logon-task workspace to
+  config-discovery tests.
   One step runs on **every** PR rather than only on the `WINDOWS_FULL` ones:
   `Windows ConPTY terminal tests`, which is `pytest -q -rfE
   tests/test_os_terminal_windows.py` with a 15-minute bound, so a test that
