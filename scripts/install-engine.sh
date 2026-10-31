@@ -470,47 +470,98 @@ native_host_listener_pid() {
 native_host_read_lock() {
     # The engine's own identity for this install's runtime root: pid and the
     # startup_id it writes fresh for every run. Read with the authenticated tool
-    # interpreter so the lock's shape is the contract's, never shell JSON parsing.
-    # Prints `startup_id=...` and `pid=...`, or nothing when the lock is missing,
-    # unreadable, not `running`, or not for this workspace.
-    [ -x "${tool_python:-}" ] || return 1
-    [ -n "${workspace:-}" ] || return 1
+    # interpreter, through a descriptor rather than the name: the lock must be a
+    # regular file this user owns with mode 0600, opened without following a link,
+    # and the opened inode must be the one the directory listed - an unsafe or
+    # swapped lock is rejected, because readable metadata is not proof of anything.
+    # Prints `startup_id=...` and `pid=...`. Exit codes say *why* on failure:
+    # 3 = present but unsafe (link, owner, mode, swapped inode), 2 = absent,
+    # unreadable or naming another workspace/port. The caller turns that into the
+    # step it reports.
+    [ -x "${tool_python:-}" ] || return 2
+    [ -n "${workspace:-}" ] || return 2
     native_host_lock_out="$tmp/native-host-lock"
-    if ! "$tool_python" -I -c '
+    native_host_lock_rc=0
+    "$tool_python" -I -c '
+import json
+import os
+import stat
 import sys
 
-from ciao.macos_service import DesktopRuntime, read_lock_owner
-
-workspace, runtime_root, port = sys.argv[1:4]
+lock_path, workspace, runtime_root, port = sys.argv[1:5]
 try:
-    runtime = DesktopRuntime(
-        workspace=workspace,
-        runtime_root=runtime_root,
-        port=int(port),
-        server_plist="",
-        python_path="",
-    )
-except (TypeError, ValueError):
-    raise SystemExit(1)
-owner = read_lock_owner(runtime)
+    checked = os.lstat(lock_path)
+except OSError:
+    raise SystemExit(2)
+if stat.S_ISLNK(checked.st_mode) or not stat.S_ISREG(checked.st_mode):
+    raise SystemExit(3)
+if hasattr(os, "getuid") and checked.st_uid != os.getuid():
+    raise SystemExit(3)
+if stat.S_IMODE(checked.st_mode) != 0o600:
+    raise SystemExit(3)
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+try:
+    descriptor = os.open(lock_path, flags)
+except OSError:
+    raise SystemExit(2)
+try:
+    opened = os.fstat(descriptor)
+    if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+        raise SystemExit(3)
+    with os.fdopen(descriptor, "rb") as handle:
+        descriptor = -1
+        raw = handle.read()
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+try:
+    owner = json.loads(raw.decode("utf-8"))
+except (ValueError, UnicodeDecodeError):
+    raise SystemExit(2)
 if not isinstance(owner, dict):
-    raise SystemExit(1)
+    raise SystemExit(2)
 if owner.get("status") != "running":
-    raise SystemExit(1)
+    raise SystemExit(2)
 startup_id = owner.get("startup_id")
 pid = owner.get("pid")
 if not isinstance(startup_id, str) or not startup_id:
-    raise SystemExit(1)
+    raise SystemExit(2)
 if type(pid) is not int or pid <= 0:
-    raise SystemExit(1)
+    raise SystemExit(2)
 if owner.get("port") is not None and owner.get("port") != int(port):
-    raise SystemExit(1)
+    raise SystemExit(2)
+if owner.get("workspace") is not None and owner.get("workspace") != workspace:
+    raise SystemExit(2)
+if owner.get("runtime") is not None and owner.get("runtime") != runtime_root:
+    raise SystemExit(2)
 print("startup_id=" + startup_id)
 print("pid=%d" % pid)
-' "$workspace" "$workspace/.runtime" "$port" > "$native_host_lock_out" 2>/dev/null; then
-        return 1
-    fi
+' "$workspace/.runtime/server.lock" "$workspace" "$workspace/.runtime" "$port" \
+        > "$native_host_lock_out" 2>/dev/null || native_host_lock_rc=$?
+    case "$native_host_lock_rc" in
+        0) ;;
+        3) return 3 ;;
+        *) return 2 ;;
+    esac
     cat "$native_host_lock_out"
+}
+
+native_host_listener_pid_wait() {
+    # <port>: the one pid holding the listening socket, waiting briefly for it to
+    # appear. Exactly one listener on every attempt; none, several, or a lookup that
+    # cannot answer is not a listener this install can name.
+    native_host_wait_attempt=0
+    while [ "$native_host_wait_attempt" -lt 3 ]; do
+        native_host_wait_rc=0
+        native_host_wait_pid=$(native_host_listener_pid "$1") || native_host_wait_rc=$?
+        if [ "$native_host_wait_rc" -eq 0 ] && [ -n "$native_host_wait_pid" ]; then
+            printf '%s\n' "$native_host_wait_pid"
+            return 0
+        fi
+        native_host_wait_attempt=$((native_host_wait_attempt + 1))
+        [ "$native_host_wait_attempt" -ge 3 ] || "$SLEEP" 1
+    done
+    return 1
 }
 
 native_host_capture_pre_responder() {
@@ -563,23 +614,72 @@ native_host_ancestor_pids() {
     return 0
 }
 
-native_host_verify_candidate() {
-    # <port> <startup_id the responder reported>: 0 only when the responder is the
-    # engine run this install started. All four has to hold:
-    #   1. the caller already matched the exact expected version;
-    #   2. the reported startup_id is the one in this runtime root's lock;
-    #   3. the one listener on the port is the pid in that lock;
-    #   4. the listener's bounded ancestor chain (four hops at most) reaches the pid
-    #      launchd reports for the job, and that ancestor is the installed host
-    #      executable - launchd runs `Ciaobot Server`, which posix_spawns Python, so
-    #      the job pid is never the socket holder.
-    # A missing, ambiguous, over-deep or unreadable answer is a failure.
-    native_host_verify_port=$1
-    native_host_verify_startup_id=$2
-    if [ -z "$native_host_verify_startup_id" ]; then
+native_host_probe_candidate() {
+    # <port> <expected version>: 0 only when the engine that answered is the process
+    # instance this install started. Every step is bound to an object, never to a
+    # readable string:
+    #   1. exactly one listener on the port before the request, captured by pid;
+    #   2. the request itself, carrying the exact expected version;
+    #   3. exactly one listener after the request, and it is the same pid - so an
+    #      unrelated listener cannot answer and exit between the two;
+    #   4. that pid is the pid in this runtime root's lock, and the reported
+    #      startup_id is the lock's - and the lock itself is a private regular file,
+    #      opened no-follow, whose opened inode is the one listed;
+    #   5. the listener's bounded ancestor chain (four hops) reaches the pid launchd
+    #      reports for the job, and that job process' executable text is the
+    #      installed `Ciaobot Server` - launchd runs the host, which posix_spawns
+    #      Python, so the job pid is never the socket holder.
+    # `native_host_unproven` names the step that failed, so a timeout gives the
+    # operator a direction instead of "it did not come up".
+    native_host_probe_port=$1
+    native_host_probe_version=$2
+    native_host_unproven=""
+    native_host_listener_before=$(native_host_listener_pid_wait "$native_host_probe_port") || {
+        native_host_unproven="exactly one listener on port $native_host_probe_port before the request"
+        return 1
+    }
+    native_host_probe_body=$(
+        "$CURL" -fsS "http://localhost:$native_host_probe_port/api/startup-status" \
+            2>/dev/null || true
+    )
+    if [ -z "$native_host_probe_body" ]; then
+        native_host_unproven="a health response from port $native_host_probe_port"
         return 1
     fi
-    native_host_lock=$(native_host_read_lock) || return 1
+    native_host_probe_reported=$(
+        printf '%s\n' "$native_host_probe_body" \
+            | sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+    )
+    if [ "$native_host_probe_reported" != "$native_host_probe_version" ]; then
+        native_host_unproven="version $native_host_probe_version from the responder (saw ${native_host_probe_reported:-nothing})"
+        return 1
+    fi
+    native_host_probe_startup_id=$(
+        printf '%s\n' "$native_host_probe_body" \
+            | sed -n 's/.*"startup_id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+    )
+    if [ -z "$native_host_probe_startup_id" ]; then
+        native_host_unproven="a startup identity in the health response"
+        return 1
+    fi
+    native_host_listener_after=$(native_host_listener_pid_wait "$native_host_probe_port") || {
+        native_host_unproven="exactly one listener on port $native_host_probe_port after the request"
+        return 1
+    }
+    if [ "$native_host_listener_after" != "$native_host_listener_before" ]; then
+        native_host_unproven="one listener across the request (it was replaced: $native_host_listener_before then $native_host_listener_after)"
+        return 1
+    fi
+    native_host_lock_rc=0
+    native_host_lock=$(native_host_read_lock) || native_host_lock_rc=$?
+    if [ "$native_host_lock_rc" -ne 0 ]; then
+        if [ "$native_host_lock_rc" -eq 3 ]; then
+            native_host_unproven="a private 0600 runtime lock owned by this user"
+        else
+            native_host_unproven="a readable runtime lock for this runtime root"
+        fi
+        return 1
+    fi
     native_host_lock_startup_id=$(
         printf '%s\n' "$native_host_lock" | sed -n 's/^startup_id=//p' | head -1
     )
@@ -587,47 +687,67 @@ native_host_verify_candidate() {
         printf '%s\n' "$native_host_lock" | sed -n 's/^pid=//p' | head -1
     )
     if [ -z "$native_host_lock_startup_id" ] || [ -z "$native_host_lock_pid" ]; then
+        native_host_unproven="a runtime lock naming the engine's pid and startup id"
         return 1
     fi
-    if [ "$native_host_lock_startup_id" != "$native_host_verify_startup_id" ]; then
+    if [ "$native_host_lock_pid" != "$native_host_listener_after" ]; then
+        native_host_unproven="the lock's pid ($native_host_lock_pid) owning the listener ($native_host_listener_after)"
+        return 1
+    fi
+    if [ "$native_host_lock_startup_id" != "$native_host_probe_startup_id" ]; then
+        native_host_unproven="the lock's startup id matching the responder"
         return 1
     fi
     native_host_pre=$(cat "$tmp/pre-identity" 2>/dev/null || true)
     if [ -n "$native_host_pre" ] &&
         [ "$native_host_pre" = "$native_host_lock_startup_id" ]; then
-        return 1
-    fi
-    native_host_verify_listener=$(native_host_listener_pid "$native_host_verify_port") \
-        || return 1
-    if [ "$native_host_verify_listener" != "$native_host_lock_pid" ]; then
+        native_host_unproven="an engine run newer than the one that answered before this run started it"
         return 1
     fi
     native_host_job_rc=0
     native_host_job_state || native_host_job_rc=$?
     if [ "$native_host_job_rc" -ne 0 ]; then
+        native_host_unproven="launchd reporting the $SERVER_LABEL job"
         return 1
     fi
     native_host_launchd_pid=$(native_host_job_pid)
     if [ -z "$native_host_launchd_pid" ]; then
+        native_host_unproven="a running pid in launchd's report for $SERVER_LABEL"
         return 1
     fi
-    native_host_chain=$(native_host_ancestor_pids "$native_host_verify_listener") \
-        || return 1
+    if [ "$native_host_launchd_pid" = "$native_host_listener_after" ]; then
+        native_host_unproven="a listener that is the launched host's child, not the job itself"
+        return 1
+    fi
+    native_host_chain=$(native_host_ancestor_pids "$native_host_listener_after") || {
+        native_host_unproven="a readable process ancestry from the listener"
+        return 1
+    }
     if ! printf '%s\n' "$native_host_chain" | grep -qx "$native_host_launchd_pid"; then
+        native_host_unproven="an ancestry from the listener reaching launchd's pid $native_host_launchd_pid within four hops"
         return 1
     fi
-    if [ "$native_host_launchd_pid" = "$native_host_verify_listener" ]; then
+    native_host_txt_rc=0
+    native_host_txt=$(
+        "$LSOF" -a -p "$native_host_launchd_pid" -d txt -Fn 2>/dev/null
+    ) || native_host_txt_rc=$?
+    if [ "$native_host_txt_rc" -ne 0 ]; then
+        native_host_unproven="the executable text of launchd's pid $native_host_launchd_pid"
         return 1
     fi
-    native_host_comm_rc=0
-    native_host_launchd_comm=$(
-        "$PS" -o comm= -p "$native_host_launchd_pid" 2>/dev/null
-    ) || native_host_comm_rc=$?
-    if [ "$native_host_comm_rc" -ne 0 ]; then
+    native_host_txt_records=$(
+        printf '%s\n' "$native_host_txt" | grep -c '^n' || true
+    )
+    if [ "$native_host_txt_records" != 1 ]; then
+        native_host_unproven="exactly one executable text record for launchd's pid $native_host_launchd_pid"
         return 1
     fi
+    native_host_txt_path=$(
+        printf '%s\n' "$native_host_txt" | sed -n 's/^n//p' | head -1
+    )
     native_host_executable="$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
-    if [ "$native_host_launchd_comm" != "$native_host_executable" ]; then
+    if [ "$native_host_txt_path" != "$native_host_executable" ]; then
+        native_host_unproven="the installed host executable at launchd's pid $native_host_launchd_pid (it runs ${native_host_txt_path:-nothing})"
         return 1
     fi
     return 0
@@ -2593,10 +2713,8 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
                             break
                         fi
                         # A bare `ready` is not proof of the candidate either: the
-                        # same four-part identity gate applies here.
-                        fresh_startup_id=$(sed -n 's/.*"startup_id":[[:space:]]*"\([^"]*\)".*/\1/p' \
-                            "$tmp/startup-status.json" | head -1)
-                        if native_host_verify_candidate "$port" "$fresh_startup_id"; then
+                        # same process-instance probe applies here.
+                        if native_host_probe_candidate "$port" "$version"; then
                             healthy=1
                             break
                         fi
@@ -2628,16 +2746,13 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
                         healthy=1
                         break
                     fi
-                    # Positive evidence that the responder is the engine run this
-                    # install started: its startup_id is the one in this runtime
-                    # root's lock, that lock's pid holds the listening socket, and
-                    # the listener's bounded ancestor chain reaches the pid launchd
-                    # reports for the job - which is the installed `Ciaobot Server`
-                    # executable. A version string says nothing about any of that.
-                    reported_startup_id=$(printf '%s\n' "$status" \
-                        | sed -n 's/.*"startup_id":[[:space:]]*"\([^"]*\)".*/\1/p' \
-                        | head -1)
-                    if native_host_verify_candidate "$port" "$reported_startup_id"; then
+                    # Positive evidence that the responder is the process instance
+                    # this install started: one listener before and the same one
+                    # after the request, that pid in the runtime lock, the reported
+                    # startup id in the same lock, and that listener's ancestry
+                    # reaching launchd's job - whose executable text is the installed
+                    # host. A version string says nothing about any of that.
+                    if native_host_probe_candidate "$port" "$version"; then
                         healthy=1
                         break
                     fi
@@ -2677,6 +2792,9 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
         if [ "$migrate_path" = host ] || [ "$native_host_pending" -ne 0 ]; then
             if [ -n "$access_denied" ]; then
                 abort_install "$access_denied"
+            fi
+            if [ "$native_host_pending" -ne 0 ] && [ -n "${native_host_unproven:-}" ]; then
+                abort_install "the new engine this run started was not proven within ${health_attempts}s: no ${native_host_unproven}. Check: $(quote_shell_path "$ciao") service status"
             fi
             abort_install "the new engine this run started did not answer on http://localhost:$port with version $version within ${health_attempts}s; check: $(quote_shell_path "$ciao") service status"
         fi

@@ -187,7 +187,7 @@ The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quir
 - `visualViewport` `scroll` events are intentionally NOT listened to. iOS fires them while the page shifts to keep the caret visible during multi-line typing, and re-reading `vv.height` there can latch a stale/smaller value, collapsing the messages area.
 - The viewport is re-measured on `visibilitychange` (visible) and `pageshow`, each time as a short burst (0/50/200/500ms) rather than a single read. iOS suspends JS while the PWA is backgrounded, and if the keyboard was open it gets dismissed during the suspension with no `resize` ever reaching the page, so `--app-h` stays latched at the keyboard-open height and the layout keeps a dead zone under the input bar. The burst exists because `vv.height` still reports the stale value at the instant of resume. The resume path deliberately does NOT reset the tallest-seen height: if the keyboard is genuinely still up at resume, that would record the shrunken height as the maximum and keyboard-open would never be detected again.
 - When the keyboard closes while a text field still holds focus (the user swiped it away), the field is blurred and the viewport re-measured. iOS otherwise keeps the page shifted for the focused field, leaving a status-bar-high gap above the pane header until focus moves.
-- An installed PWA can also be laid out *below* the status bar — iOS paints that band itself — while `env(safe-area-inset-top)` still reports the inset; adding it again puts the same status-bar-high gap above every pane header on a cold open. `resolveTopInset()` in `lib/viewport.ts` decides it at runtime: the gap between `screen.height` and `visualViewport.height + offsetTop` says whether the OS already applied the inset, and `--safe-top` is then written back as the resolved px value (the `env()` in `App.vue` is only the pre-JS fallback). Do not read `env()` back from a custom property — the computed value is the unresolved token; the module resolves it through a throwaway laid-out box.
+- `--safe-top` stays as `env(safe-area-inset-top, 0px)` in CSS. Never replace it with a JavaScript pixel measurement: a cached startup value can stay at zero while the standalone viewport settles, hiding the header beneath the status bar. A screen/viewport height difference cannot distinguish a top inset from space lost at the bottom. `lib/viewport.ts` owns viewport height and keyboard state, not safe-area measurement.
 - `window.scrollY` is force-clamped to 0. iOS can still shift the document when the keyboard opens, leaving the input bar floating with a gap below it.
 - `html.keyboard-open` collapses `--safe-bottom` to 0 in `App.vue`. Without that, the home-indicator safe-area inset adds dead space below the input bar while the keyboard covers the home indicator.
 
@@ -624,6 +624,14 @@ Ground rules, so the suite stays worth blocking CI on:
   loaded runner.
 - **No retries.** `playwright.config.ts` sets `retries: 0` on CI as well. A test
   that needs a second attempt is broken; fix or delete it rather than masking it.
+- **No one-shot reads after a release.** After `mouse.up()`, `dragTo()` or a
+  synthetic `pointerup`, the app still has a re-render (and often an
+  animation) to finish. Poll DOM state with `expect.poll`, and call
+  `settled(locator)` from `e2e/support/app.ts` before reading geometry of
+  anything that slides or resizes in. `src/lib/e2eSettleReads.test.ts`
+  fails on `expect(await …)` or `boundingBox()` within a few lines of a
+  release; a line that is genuinely stable can end in
+  `// settle-ok: <why>`.
 - **No real backend.** `e2e/fixture/server.mjs` is a dependency-free Node server
   that serves the built PWA out of `ciao/web/static`, answers the API routes with
   the invented workspace in `e2e/fixture/data.mjs`, and speaks just enough

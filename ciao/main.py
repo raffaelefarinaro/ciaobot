@@ -1258,6 +1258,12 @@ async def _run_server_locked(
         swept = pcm.sweep_orphaned_cli_tasks()
         if swept:
             logger.warning("Woke %d chat(s) with CLI tasks orphaned by the restart", swept)
+        interrupted = pcm.sweep_interrupted_background_work()
+        if interrupted:
+            logger.warning(
+                "Woke %d chat(s) with OpenCode background work interrupted by the restart",
+                interrupted,
+            )
 
         # The memory-pass queue is durable on the memory chats' helpers, so a
         # restart picks it back up: a pass that was running died with the old
@@ -1522,6 +1528,8 @@ async def _run_server_locked(
         # own, and a sweep racing this teardown would disconnect a service
         # already being torn down here.
         await pcm.stop_provider_reaper()
+        # The providers still hold their background sets here, and disconnect clears them.
+        pcm.record_interrupted_background_work()
         services = list(pcm._providers.values())
         pcm._providers.clear()
         pcm._provider_last_used.clear()

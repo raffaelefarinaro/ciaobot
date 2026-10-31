@@ -114,7 +114,7 @@ test.describe('sidebar project reordering', () => {
     await expect.poll(() => requests.length).toBe(1)
     const expected = ['filler-02', NOTES, 'filler-01', ...FILLERS.slice(2)]
     expect(requests[0]!.order).toEqual(expected)
-    expect(await rowOrder(page)).toEqual(['alpha-general', ...expected])
+    await expect.poll(() => rowOrder(page)).toEqual(['alpha-general', ...expected])
   })
 
   test('a project reorders from its header name, with no handle on the row', async ({ page }) => {
@@ -152,7 +152,7 @@ test.describe('sidebar project reordering', () => {
     await expect.poll(() => requests.length).toBe(1)
     const expected = ['filler-02', NOTES, 'filler-01', ...FILLERS.slice(2)]
     expect(requests[0]!.order).toEqual(expected)
-    expect(await rowOrder(page)).toEqual(['alpha-general', ...expected])
+    await expect.poll(() => rowOrder(page)).toEqual(['alpha-general', ...expected])
     // The press was a drag, not the name's click.
     expect(new URL(page.url()).pathname).toBe('/')
   })
@@ -193,7 +193,7 @@ test.describe('sidebar project reordering', () => {
     await expect(overlay).toHaveCount(0)
     await page.mouse.up()
     expect(posted).toBe(0)
-    expect((await rowOrder(page)).slice(0, 2)).toEqual(['alpha-general', NOTES])
+    await expect.poll(() => rowOrder(page).then((rows) => rows.slice(0, 2))).toEqual(['alpha-general', NOTES])
   })
 
   test('a cover over the list blocks a drop through it', async ({ page }) => {
@@ -227,7 +227,7 @@ test.describe('sidebar project reordering', () => {
 
     await expect(page.locator('.drag-overlay')).toHaveCount(0)
     expect(posted).toBe(0)
-    expect((await rowOrder(page)).slice(0, 2)).toEqual(['alpha-general', NOTES])
+    await expect.poll(() => rowOrder(page).then((rows) => rows.slice(0, 2))).toEqual(['alpha-general', NOTES])
     await page.evaluate(() => document.querySelector('.e2e-cover')?.remove())
   })
 

@@ -957,6 +957,304 @@ def test_a_byte_identical_substitute_of_the_backup_is_refused_in_terminal_cleanu
 
 
 @requires_posix_uid
+def test_a_regular_file_at_the_deletion_seam_is_refused_not_unlinked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The deletion helper is given the device/inode the transaction created. A
+    # regular file sitting at that name must be refused, not unlinked: only the
+    # exact private directory may be drained.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    parent = tmp_path / "Applications"
+    parent.mkdir()
+    substitute = parent / (".ciaobot-host-upgrade." + "a" * 32)
+    substitute.write_text("not a directory", encoding="utf-8")
+    info = os.lstat(substitute)
+    parent_fd = server_host_install._open_dir_no_follow(
+        parent, what="the host bundle's directory"
+    )
+    try:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install._remove_tree_at(
+                parent_fd,
+                substitute.name,
+                what="the before-images",
+                expected=(info.st_dev, info.st_ino),
+            )
+    finally:
+        os.close(parent_fd)
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert substitute.is_file()
+    assert substitute.read_text(encoding="utf-8") == "not a directory"
+
+
+@requires_posix_uid
+def test_a_directory_swapped_at_the_deletion_seam_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `_finish_journal` verified the directory, and the swap lands before the
+    # deletion helper opens it. The helper's own identity check refuses, and the
+    # substitute is left intact.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    status = _start_upgrade(tmp_path)
+    backup = Path(
+        json.loads(_journal_path().read_text(encoding="utf-8"))["backup_dir"]
+    )
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _TERMINAL_KILL_CHILD,
+            "commit",
+            status["operation"],
+            str(os.getpid()),
+        ],
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+    committed = _tree(_bundle_path())
+    original = tmp_path / "before-images-kept"
+    real_remove = server_host_install._remove_tree_at
+    swapped: list[int] = []
+
+    def swap_then_remove(dir_fd: int, name: str, **kwargs: Any) -> None:
+        nonlocal backup
+        if not swapped:
+            swapped.append(1)
+            os.rename(backup, original)
+            backup.mkdir(mode=0o700)
+            os.chmod(backup, 0o700)
+            (backup / "keep").write_text("substitute", encoding="utf-8")
+        real_remove(dir_fd, name, **kwargs)
+
+    monkeypatch.setattr(server_host_install, "_remove_tree_at", swap_then_remove)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.commit_host_upgrade(
+            operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
+        )
+    assert swapped, "the test never swapped the before-images"
+    assert caught.value.code in (
+        server_host_install.TRANSACTION_CLEANUP,
+        server_host_install.TRANSACTION_FAILED,
+    )
+    # The substitute is intact, the original is intact and the journal is kept.
+    assert (backup / "keep").read_text(encoding="utf-8") == "substitute"
+    assert (original / "record").exists()
+    assert _journal_path().exists()
+    assert _tree(_bundle_path()) == committed
+
+
+@requires_posix_uid
+def test_the_journal_identity_comes_from_the_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The journal is replaced in the window between the write's atomic move and the
+    # moment its identity is taken. The identity must come from the descriptor that
+    # wrote the bytes: a pathname re-stat there would adopt the substitute, and the
+    # cleanup would then delete a journal this command never wrote.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    status = _start_upgrade(tmp_path)
+    journal = server_host_install._read_upgrade_journal()
+    assert journal is not None
+    terminal = server_host_install._journal_with_phase(journal, "committed")
+    real_replace = server_host_install.replace_file
+    substituted: list[int] = []
+
+    def replace_then_substitute(src: Any, dst: Any) -> None:
+        real_replace(src, dst)
+        if not substituted:
+            substituted.append(1)
+            substitute = tmp_path / "substituted-journal"
+            substitute.write_text(
+                json.dumps({**journal.document(), "owner_pid": 1}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(substitute, 0o600)
+            os.replace(substitute, _journal_path())
+
+    monkeypatch.setattr(server_host_install, "replace_file", replace_then_substitute)
+    written = server_host_install._write_upgrade_journal(terminal)
+    monkeypatch.setattr(server_host_install, "replace_file", real_replace)
+    assert substituted, "the test never substituted the journal"
+
+    problem = server_host_install._finish_journal(terminal, journal_inode=written)
+    assert problem is not None
+    assert "not the one this command settled" in problem
+    assert _journal_path().exists()
+    assert json.loads(_journal_path().read_text(encoding="utf-8"))["owner_pid"] == 1
+
+
+@requires_posix_uid
+def test_rollback_restores_a_non_canonical_record_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A record an older installer formatted differently is restored as *those*
+    # bytes. A `to_record()` reconstruction would be valid JSON with a different
+    # layout, so byte equality is the only assertion that rules it out.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    document = json.loads(_record_path().read_text(encoding="utf-8"))
+    exact = json.dumps(document, indent=1, sort_keys=False).encode("utf-8") + b"\n\n"
+    _record_path().write_bytes(exact)
+    os.chmod(_record_path(), 0o600)
+    assert exact != server_host_install._record_bytes(
+        server_host.read_host_ownership(_record_path())
+    )
+
+    status = _start_upgrade(tmp_path)
+    server_host_install.rollback_host_upgrade(
+        operation=status["operation"], owner_pid=os.getpid(), runner=_SignedRunner()
+    )
+
+    assert _record_path().read_bytes() == exact
+    assert server_host.read_host_ownership(_record_path()).host_revision == 4
+    assert not server_host_install.transaction_status()["pending"]
+
+
+@requires_posix_uid
+@pytest.mark.parametrize("command", ["commit", "rollback"])
+def test_a_kill_after_a_terminal_phase_is_settled_by_the_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    # A real process killed after its terminal phase was written and before the
+    # cleanup: the next run finishes the cleanup and never treats the settled
+    # operation as something to roll back (or commit) again.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    tree, record_before = _install_legacy(tmp_path, server_host.HOST_REVISION)
+    status = _start_upgrade(tmp_path)
+    backup = Path(
+        json.loads(_journal_path().read_text(encoding="utf-8"))["backup_dir"]
+    )
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _TERMINAL_KILL_CHILD,
+            command,
+            status["operation"],
+            str(os.getpid()),
+        ],
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+
+    journal = json.loads(_journal_path().read_text(encoding="utf-8"))
+    assert journal["phase"] == ("committed" if command == "commit" else "rolled_back")
+    assert backup.exists()
+    assert server_host_install.transaction_status() == {"pending": False}
+    if command == "rollback":
+        assert _tree(_bundle_path()) == tree
+        assert _record_path().read_bytes() == record_before
+
+    # A committed operation stays committed through the cleanup; a rolled-back one
+    # stays the previous host. Neither is redone.
+    if command == "commit":
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.rollback_host_upgrade(
+                operation=status["operation"],
+                owner_pid=os.getpid(),
+                runner=_SignedRunner(),
+            )
+        assert caught.value.code == server_host_install.TRANSACTION_CONFLICT
+        archive, _bundle, entry = _signed_fixture(tmp_path, label="after-terminal")
+        before = _tree(_bundle_path())
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            runner=_SignedRunner(),
+            defer_commit=True,
+            owner_pid=os.getpid(),
+        )
+        assert _tree(_bundle_path()) == before
+    else:
+        archive, _bundle, entry = _signed_fixture(tmp_path, label="after-terminal")
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            runner=_SignedRunner(),
+            defer_commit=True,
+            owner_pid=os.getpid(),
+        )
+        journal = server_host_install._read_upgrade_journal()
+        assert journal is not None
+        assert journal.phase == "installed"
+        assert journal.operation != status["operation"]
+        assert _tree(journal.backup_dir / server_host_install._RETAINED_BUNDLE) == tree
+    # The settled operation's own before-images are gone in both cases.
+    assert not backup.exists()
+
+
+@requires_posix_uid
+def test_a_settled_journal_that_cannot_be_cleaned_blocks_the_next_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A terminal journal whose before-images cannot be removed keeps the next
+    # transaction refused: overwriting it would orphan the only copy of the previous
+    # host. The failure is propagated, not printed and forgotten.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    status = _start_upgrade(tmp_path)
+    backup = Path(
+        json.loads(_journal_path().read_text(encoding="utf-8"))["backup_dir"]
+    )
+    # Make the before-image directory unremovable by its own contents: a read-only
+    # directory rmtree cannot empty.
+    (backup / "sealed").mkdir()
+    (backup / "sealed" / "payload").write_text("x", encoding="utf-8")
+    os.chmod(backup / "sealed", 0o500)
+    try:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.commit_host_upgrade(
+                operation=status["operation"],
+                owner_pid=os.getpid(),
+                runner=_SignedRunner(),
+            )
+        assert caught.value.code == server_host_install.TRANSACTION_CLEANUP
+        # The operation itself is committed and the material is kept.
+        assert json.loads(_journal_path().read_text(encoding="utf-8"))["phase"] == (
+            "committed"
+        )
+        assert backup.exists()
+        assert server_host_install.transaction_status() == {"pending": False}
+
+        archive, _bundle, entry = _signed_fixture(tmp_path, label="blocked-signed")
+        before = _tree(_bundle_path())
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.install_server_host(
+                archive,
+                entry,
+                runner=_SignedRunner(),
+                defer_commit=True,
+                owner_pid=os.getpid(),
+            )
+        assert caught.value.code == server_host_install.TRANSACTION_CLEANUP
+        assert _tree(_bundle_path()) == before
+        assert backup.exists()
+    finally:
+        os.chmod(backup / "sealed", 0o700)
+
+    # Once the obstruction is gone the settled journal is finished; the committed
+    # signed host is then the current one, so a new install is a no-op.
+    archive, _bundle, entry = _signed_fixture(tmp_path, label="unblocked-signed")
+    before = _tree(_bundle_path())
+    server_host_install.install_server_host(
+        archive, entry, runner=_SignedRunner(), defer_commit=True, owner_pid=os.getpid()
+    )
+    assert _tree(_bundle_path()) == before
+    assert not _journal_path().exists()
+    assert not backup.exists()
+    assert server_host_install.transaction_status() == {"pending": False}
+
+
+@requires_posix_uid
 def test_the_upgrade_lock_is_held_by_a_real_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
