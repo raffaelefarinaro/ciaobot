@@ -390,7 +390,7 @@ export interface ChatRetryInfo {
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
 export type TurnOrigin =
   | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
-  | 'task_resume' | 'webhook' | 'update_task' | 'compaction'
+  | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume'
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -941,6 +941,9 @@ export interface RoutineSettings {
   log_level?: string
   dev_mode?: boolean
   app_repo?: string
+  // Settings → General: a chat whose turn a restart or crash cut off gets one
+  // "Continue after restart" turn at the next start. Missing = on.
+  resume_after_restart?: boolean
   server_defaults?: {
     pwa_host: string
     log_level: string

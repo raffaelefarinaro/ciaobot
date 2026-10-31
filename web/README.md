@@ -540,7 +540,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   and an "Up to date" status when nothing is in progress), then the
   capability-help section linking to the public feature guide, then Use Ciaobot
   as an app, Notifications, Keyboard shortcuts (the binding list is collapsed
-  by default), Start at sign-in and Open
+  by default), Resume after restart (`settings/SettingsRestartResume.vue`, the `resume_after_restart` routine setting), Start at sign-in and Open
   source. Appearance is
   the Appearance card alone: Theme and Font size rows in `SettingsView.vue`, and
   `settings/SettingsAppearance.vue` (Text contrast, Body font, Custom colours with `settings/CustomColorsDialog.vue`; `lib/contrast.ts` holds the WCAG maths and refuses unreadable pairs). Appearance is engine-wide:

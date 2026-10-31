@@ -105,9 +105,23 @@ def test_update_persists_and_roundtrips(tmp_path):
         "dev_mode": True,
         "backup_enabled": True,
         "backup_paused": False,
+        "resume_after_restart": True,
     }
     # Fresh instance sees the persisted value.
     assert AppSettingsStore(path).settings.dev_mode is True
+
+
+def test_resume_after_restart_defaults_on_and_round_trips(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.settings.resume_after_restart is True
+
+    store.update({"resume_after_restart": False})
+    assert json.loads(path.read_text())["resume_after_restart"] is False
+    assert AppSettingsStore(path).settings.resume_after_restart is False
+
+    with pytest.raises(ValueError, match="must be a boolean"):
+        store.update({"resume_after_restart": "no"})
 
 
 def test_update_rejects_a_non_string_value(tmp_path):
@@ -194,6 +208,7 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
     assert json.loads(path.read_text()) == {
         "backup_enabled": True,
         "backup_paused": False,
+        "resume_after_restart": True,
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},
         "provider_default_thinking": {"claude": "high"},
     }

@@ -174,6 +174,7 @@ from ciao.transcripts import (
     parse_archive_turns,
 )
 from ciao.web import chat_service
+from ciao.web import restart_resume
 from ciao.web.chat_broker import (
     QUEUE_DELIVERIES,
     STEER_DISPATCHING,
@@ -668,6 +669,10 @@ class ChatInfo:
     # One-line snippet of the error that ended the last turn. Empty when the
     # last turn did not fail; cleared when a new turn starts.
     last_error: str = ""
+    # restart_resume.PROCESS_TOKEN of the process running this chat's turn, set
+    # when a turn starts and cleared when it ends; a foreign token at boot is a
+    # turn a restart or crash cut off (#2128). Never sent to clients.
+    turn_owner: str = ""
     # Monotonic counter of user turns initiated for this chat. Used as the
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
@@ -1181,6 +1186,8 @@ class ProjectChatManager:
         # already-queued follow-ups) may finish, but idle chats must not start
         # new turns or the server could race a fresh provider request.
         self._restart_draining = False
+        # Set by begin_shutdown: the drive loop then keeps turn_owner stamps (#2128).
+        self._shutting_down = False
         # Per-chat deferred quota retry loops. Each loop sleeps until the
         # chat's retry_next_at, tries the saved prompt if idle, then repeats
         # hourly until success/stop/archive/delete.
@@ -1275,6 +1282,7 @@ class ProjectChatManager:
                 last_response=cd.get("last_response", ""),
                 last_response_status=cd.get("last_response_status", ""),
                 last_error=cd.get("last_error", ""),
+                turn_owner=str(cd.get("turn_owner", "") or ""),
                 user_turn_count=cd.get("user_turn_count", 0),
                 turn_index_base=int(cd.get("turn_index_base", 0) or 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
@@ -1399,6 +1407,7 @@ class ProjectChatManager:
                     "last_response": c.last_response,
                     "last_response_status": c.last_response_status,
                     "last_error": c.last_error,
+                    "turn_owner": c.turn_owner,
                     "user_turn_count": c.user_turn_count,
                     "turn_index_base": c.turn_index_base,
                     "user_turn_images": c.user_turn_images,
@@ -8031,6 +8040,7 @@ class ProjectChatManager:
             # and stay visible on this stream.
             turn_index = chat_meta.user_turn_count
             chat_meta.user_turn_count = turn_index + 1
+            chat_meta.turn_owner = restart_resume.PROCESS_TOKEN
             if image_refs:
                 chat_meta.user_turn_images[str(turn_index)] = list(image_refs)
             sent_at_iso = chat_service._now_iso()
@@ -8504,6 +8514,65 @@ class ProjectChatManager:
     def sweep_interrupted_background_work(self) -> int:
         """At boot, wake OpenCode chats whose background work a restart interrupted."""
         return self._subagents.sweep_interrupted_background_work()
+
+    def begin_shutdown(self) -> None:
+        """Keep in-flight turn stamps through teardown (#2128).
+
+        Shutdown disconnects providers under running turns, and the drive
+        loop's ``finally`` then runs as if each turn had ended. Those turns did
+        not end, so from here on the stamp stays for the next boot to resume.
+        """
+        self._shutting_down = True
+
+    def resume_interrupted_turns(self, *, enabled: bool) -> int:
+        """At boot, consume every interrupted-turn stamp and arm one resume each.
+
+        Every foreign stamp is cleared and saved first, whether or not the chat
+        is resumed, so a turn is resumed at most once and a switched-off
+        setting never leaves stale stamps for later. Returns the number armed.
+        """
+        interrupted = [c for c in self._chats.values() if restart_resume.interrupted(c)]
+        if not interrupted:
+            return 0
+        for chat in interrupted:
+            chat.turn_owner = ""
+        self._save()
+        if not enabled:
+            return 0
+        armed = 0
+        for chat in interrupted:
+            reason = restart_resume.skip_reason(chat)
+            if reason:
+                logger.info("Not resuming chat %s after restart: %s", chat.chat_id, reason)
+                continue
+            self._spawn_detached(
+                self._deferred_restart_resume(chat.chat_id, chat.user_turn_count),
+                f"restart-resume-{chat.chat_id}",
+            )
+            armed += 1
+        return armed
+
+    async def _deferred_restart_resume(self, chat_id: str, turn_count: int) -> None:
+        """Send the one "Continue after restart" turn, unless the chat moved on."""
+        await asyncio.sleep(restart_resume.RESUME_DELAY_SECONDS)
+        chat = self._chats.get(chat_id)
+        if (
+            chat is None
+            or chat.user_turn_count != turn_count
+            or self._broker.get(chat_id) is not None
+            or self._restart_draining
+            or restart_resume.skip_reason(chat)
+        ):
+            return
+        try:
+            # Not unattended: the chat keeps its own mode and permission mode.
+            self.start_stream(
+                chat_id,
+                restart_resume.RESTART_RESUME_PROMPT,
+                origin=restart_resume.RESTART_RESUME_ORIGIN,
+            )
+        except Exception:  # noqa: BLE001 — one chat must not break the others
+            logger.exception("Restart resume failed for chat %s", chat_id)
 
     @staticmethod
     def _build_cli_task_wake_prompt(tasks: list[SubagentInfo]) -> str:
