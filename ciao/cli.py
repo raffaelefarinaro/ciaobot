@@ -4287,6 +4287,110 @@ def _resolve_workspace_and_vaults(
     return workspace, resolved, resolved, name
 
 
+def _proposal_review_owner(args: argparse.Namespace, workspace: Path, vault: Path) -> str | None:
+    """The registered workspace whose vault is ``vault``, named for review links only.
+
+    The vault a command reads or writes is decided by ``_resolve_workspace_and_vaults``
+    and never by this. A registry or config that cannot be read leaves the link
+    metadata null, and the command proceeds exactly as it did before links existed.
+    """
+    from ciao.config import CiaoConfig, installed_workspace_env
+
+    if getattr(args, "workspace", None) or os.environ.get("CIAO_WORKSPACE", "").strip():
+        env_source = dict(os.environ)
+        env_source["CIAO_WORKSPACE"] = str(workspace)
+    else:
+        env_source = installed_workspace_env(os.environ)
+        if not env_source.get("CIAO_WORKSPACE", "").strip():
+            env_source["CIAO_WORKSPACE"] = str(workspace)
+    if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+        # A placeholder, so reading the registry never mints a session secret.
+        env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
+    try:
+        config = CiaoConfig.from_env(env_source)
+        return _registered_owner(config, vault.resolve())
+    except (ValueError, OSError):
+        return None
+
+
+def _review_link_for(owner: str, bullet: Any) -> tuple[str, str]:
+    """``(review_key, review_path)`` for one parsed queue bullet of ``owner``."""
+    from ciao import proposal_tracking
+
+    review_key = proposal_tracking.proposal_review_key(
+        owner, bullet.kind, bullet.text, bullet.source, bullet.target, bullet.request
+    )
+    return review_key, proposal_tracking.proposal_review_path(owner, review_key)
+
+
+def _listed_proposal_rows(queue: Path, owner: str | None) -> list[dict[str, Any]]:
+    """The pending rows ``memory-proposals`` lists, each with its review identity.
+
+    One walk of the queue, the same one the PWA scan uses, so the id here is the
+    action id the review tab hands out. Every identity field is ``None`` when no
+    registered workspace owns the vault.
+    """
+    from ciao import proposal_tracking
+
+    if not queue.exists():
+        return []
+    rel_path = Path(owner or "").joinpath("Workspace", "Memory-Proposals.md").as_posix()
+    rows: list[dict[str, Any]] = []
+    for entry in proposal_tracking.walk_proposal_queue(
+        owner or "", rel_path, queue.read_text(encoding="utf-8")
+    ):
+        bullet = entry.bullet
+        row: dict[str, Any] = {
+            "kind": bullet.kind,
+            "text": bullet.text,
+            "source": bullet.source,
+            "target": bullet.target,
+            "request": bullet.request,
+            "decider": bullet.decider or "",
+            "decide_reason": bullet.decide_reason,
+            "id": None,
+            "review_key": None,
+            "review_path": None,
+        }
+        if owner is not None:
+            row["id"] = entry.proposal_id
+            row["review_key"], row["review_path"] = _review_link_for(owner, bullet)
+        rows.append(row)
+    return rows
+
+
+def _queued_review_identity(
+    vault: Path,
+    owner: str | None,
+    proposal: Any,
+    *,
+    dismissed: bool,
+    promoted: bool,
+) -> tuple[str | None, str | None, str | None]:
+    """``(id, review_key, review_path)`` for the pending bullet a fact was queued as.
+
+    Only a pending row has a review question. The bullet is matched on its parsed
+    fields, so a fact the queue did not store as written (text dedupe suppressed
+    it) gets no link rather than another row's.
+    """
+    from ciao import proposal_tracking
+
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    expected = proposal_kinds.parse_bullet(proposal.as_bullet())
+    if owner is None or dismissed or promoted or expected is None or not queue.is_file():
+        return None, None, None
+    rel_path = Path(owner).joinpath("Workspace", "Memory-Proposals.md").as_posix()
+    wanted = (expected.kind, expected.text, expected.source, expected.target, expected.request)
+    for entry in proposal_tracking.walk_proposal_queue(
+        owner, rel_path, queue.read_text(encoding="utf-8")
+    ):
+        bullet = entry.bullet
+        if (bullet.kind, bullet.text, bullet.source, bullet.target, bullet.request) == wanted:
+            review_key, review_path = _review_link_for(owner, bullet)
+            return entry.proposal_id, review_key, review_path
+    return None, None, None
+
+
 #: Proposals `ciao memory-proposals` prints per page unless `--limit` says otherwise.
 MEMORY_PROPOSALS_DEFAULT_LIMIT = 20
 
@@ -4361,7 +4465,6 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     and thereby keeps memory improving across sessions.
     """
     from ciao.control_plane import PAGE_MAX_LIMIT, page_of, validate_page
-    from ciao.memory_proposals import list_proposals
 
     try:
         validate_page(args.limit, args.offset, maximum=PAGE_MAX_LIMIT)
@@ -4370,7 +4473,7 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
         return 2
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
-    rows = list_proposals(path)
+    rows = _listed_proposal_rows(path, _proposal_review_owner(args, workspace, vault))
     from ciao.proposal_predictions import REGION_KINDS, latest_predictions, prediction_key
 
     predictions = latest_predictions(path)
@@ -4403,6 +4506,8 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
                 else ""
             )
             print(f"- [{row['kind']}] {row['text']}{tag}{decide}{predicted}")
+            if row["review_path"]:
+                print(f"  review: {row['review_path']}")
         if "next_offset" in page:
             print(
                 f"Showing {args.offset + 1}-{page['next_offset']} of {len(rows)}; "
@@ -4585,6 +4690,13 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     # earlier decision that their request had landed when no row exists.
     dismissed = path is None and was_dismissed(vault, text)
     promoted = path is None and not dismissed and was_promoted(vault, text)
+    proposal_id, review_key, review_path = _queued_review_identity(
+        vault,
+        _proposal_review_owner(args, workspace, vault),
+        proposal,
+        dismissed=dismissed,
+        promoted=promoted,
+    )
     if args.json:
         json.dump(
             {
@@ -4593,6 +4705,9 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
                 "dismissed_before": dismissed,
                 "promoted_before": promoted,
                 "path": str(path) if path else None,
+                "id": proposal_id,
+                "review_key": review_key,
+                "review_path": review_path,
                 "text": text,
                 "request": request,
                 "decide": decide,
@@ -4618,6 +4733,8 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         print(f"Already in the queue; nothing added for {text!r}.")
     else:
         print(f"Queued [{kind}] proposal in {path}.")
+    if review_path and not args.json:
+        print(f"  review: {review_path}")
     return 0
 
 

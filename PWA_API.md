@@ -1397,6 +1397,19 @@ reason.
 Each `GET /api/proposals` row may carry `decider` (`nightly` or `you`, absent
 when the bullet carries none) and `decide_reason` (one line).
 
+Every `GET /api/proposals` row also carries `review_key` and `review_path`.
+`review_key` (`prv_` plus a SHA-256 hex digest) is derived from the row's content:
+workspace, kind, text, source, target and request for a queue bullet, or the
+skill, id and change text for a skill row. Exact duplicates share one key, while
+a different target or request, or an edited change, gets a different one; the
+decider and the duplicate ordinal are not part of it. `review_path` is the
+canonical link to that pending question,
+`/memory/review?show=suggested&workspace=<name>&proposal=<review_key>`. Once the
+content changes or the question is resolved, the link no longer names a pending
+row. Neither field is an action id: preview, accept and dismiss still take
+`id`. Neither is an access token or a permanent link; opening one uses the
+normal signed session.
+
 Memory mutations also expose `GET /api/memory/receipts`,
 `GET /api/memory/receipts/{id}` and `POST /api/memory/receipts/{id}/undo`
 (see below).
