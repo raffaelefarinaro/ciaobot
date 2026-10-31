@@ -1784,6 +1784,9 @@ export interface ProposalRow {
   workspace: string
   path: string
   line: number
+  /** Read-only review identity and canonical link from the listing; distinct from the action `id`. Locally hydrated rows may lack both and never match a deep link. */
+  readonly review_key?: string
+  readonly review_path?: string
   region?: string
   leak_warning?: boolean
   rehome?: RehomeSignal

@@ -50,6 +50,19 @@
           @click="setReviewFilter(chip.filter)"
         >{{ chip.label }} <span v-if="chip.count !== null" class="mr-chip-count">{{ chip.count }}</span></button>
       </div>
+      <!-- A proposal link being opened: one quiet line saying what it is doing
+           or why it cannot reveal a question. Never a claim about the outcome. -->
+      <div
+        v-if="mm.section === 'review' && proposalNotice"
+        ref="proposalNoticeEl"
+        class="mm-link-notice"
+        :role="proposalNotice.kind === 'error' ? 'alert' : 'status'"
+        tabindex="-1"
+      >
+        <span>{{ proposalNotice.message }}</span>
+        <router-link v-if="proposalNotice.kind === 'gone'" class="mr-link mm-link-notice-action" to="/memory/history">Open history</router-link>
+        <button v-if="proposalNotice.kind === 'error'" type="button" class="mr-btn mm-link-notice-action" @click="retryProposalLink">Retry</button>
+      </div>
       <!-- Suggested and History are the proposal panel's two sections; it is
            bound without `key`, so moving between them swaps its section
            rather than remounting it (which would refetch the queue). The
@@ -1372,6 +1385,148 @@ watch(() => [route.params.section, route.query.show] as const, ([section, show])
   if (section !== 'review') return
   mm.reviewFilter = isReviewFilter(show) ? show : 'all'
 }, { immediate: true })
+
+// ---------- proposal review link ----------
+// A canonical proposal link (show=suggested, workspace=NAME, proposal=prv_ plus
+// 64 hex) names one review question. The resolver waits for the workspace list,
+// switches scope through the store's guards, loads the queue fresh, and hands
+// the matching row to the panel. Every await re-checks that this run is still
+// the live one: a route change, an unmount or a workspace change the resolver
+// did not make withdraws it, and a withdrawn run never reveals, focuses or
+// clears anything that belongs to a newer request.
+const PROPOSAL_KEY = /^prv_[a-f0-9]{64}$/
+type ProposalLinkNotice = {
+  kind: 'loading' | 'gone' | 'unavailable' | 'refused' | 'error'
+  message: string
+}
+const proposalNotice = ref<ProposalLinkNotice | null>(null)
+let resolveGeneration = 0
+let resolverUnmounted = false
+let resolveLive = false
+let selfSwitchTarget: string | null = null
+let handedOffId = ''
+let cancelBootstrapWait: (() => void) | null = null
+
+/** Take back a reveal this resolver handed to the panel, and only that one:
+ * the Vault review panel reveals rows through the same store field. */
+function releaseHandoff() {
+  if (handedOffId && proposals.revealedRowId === handedOffId) proposals.revealedRowId = ''
+  handedOffId = ''
+}
+function invalidateProposalLink() {
+  resolveGeneration += 1
+  resolveLive = false
+  cancelBootstrapWait?.()
+  releaseHandoff()
+}
+function waitForBootstrap(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const stop = watch(() => store.bootstrapped, (ready) => { if (ready) done() })
+    const done = () => {
+      stop()
+      if (cancelBootstrapWait === done) cancelBootstrapWait = null
+      resolve()
+    }
+    cancelBootstrapWait = done
+  })
+}
+
+async function resolveProposalLink(force = false) {
+  invalidateProposalLink()
+  const gen = resolveGeneration
+  proposalNotice.value = null
+  if (route.params.section !== 'review') return
+  const rawKey = route.query.proposal
+  if (rawKey === undefined) return
+  const rawWorkspace = route.query.workspace
+  const key = typeof rawKey === 'string' ? rawKey : ''
+  const name = typeof rawWorkspace === 'string' ? rawWorkspace : ''
+  const capturedPath = route.fullPath
+  const current = () => gen === resolveGeneration && !resolverUnmounted && route.fullPath === capturedPath
+  if (!name || !PROPOSAL_KEY.test(key)) {
+    proposalNotice.value = { kind: 'refused', message: 'This proposal link is not valid, so nothing was opened.' }
+    return
+  }
+  resolveLive = true
+  proposalNotice.value = { kind: 'loading', message: 'Opening the proposal\u2026' }
+  try {
+    if (!store.bootstrapped) {
+      await waitForBootstrap()
+      if (!current()) return
+    }
+    if (!store.workspaces.some(w => w.name === name)) {
+      proposalNotice.value = { kind: 'unavailable', message: `The workspace "${name}" is not available here, so the proposal was not opened.` }
+      return
+    }
+    if (store.activeWorkspace !== name) {
+      selfSwitchTarget = name
+      let ok = false
+      try {
+        ok = await store.switchWorkspace(name, { transition: false, isCurrent: current })
+        // The store's own watchers see the new scope on the next flush; keep the
+        // target until they have, so the switch is not read as someone else's.
+        await nextTick()
+      } finally {
+        selfSwitchTarget = null
+      }
+      if (!current()) return
+      if (!ok) {
+        proposalNotice.value = { kind: 'refused', message: 'The workspace was not changed, so the proposal was not opened.' }
+        return
+      }
+    }
+    // `fetch`, not `ensureLoaded`: rows hydrated earlier are not a fresh queue.
+    await proposals.fetch(force ? { force: true } : undefined)
+    if (!current()) return
+    if (proposals.loading) {
+      await proposals.fetch()
+      if (!current()) return
+    }
+    if (proposals.loadError) {
+      proposalNotice.value = { kind: 'error', message: 'Could not load the proposal' }
+      return
+    }
+    const row = proposals.rows.find(r => r.review_key === key && r.workspace === name)
+    if (!row) {
+      proposalNotice.value = { kind: 'gone', message: 'This proposal is no longer pending.' }
+      return
+    }
+    if (proposals.revealedRowId === row.id) {
+      // The panel only reacts to a change, so a kept id has to be reset first.
+      proposals.revealedRowId = ''
+      await nextTick()
+      if (!current()) return
+    }
+    proposalNotice.value = null
+    // Owned only while the panel has not consumed it.
+    handedOffId = row.id
+    proposals.revealRow(row.id)
+  } finally {
+    if (gen === resolveGeneration) resolveLive = false
+  }
+}
+// Ownership ends when the panel consumes the reveal or anything else replaces it.
+watch(() => proposals.revealedRowId, (id) => {
+  if (handedOffId && id !== handedOffId) handedOffId = ''
+})
+const proposalNoticeEl = ref<HTMLElement | null>(null)
+function retryProposalLink() {
+  // The button is replaced by the loading line; keep focus on the notice itself.
+  proposalNoticeEl.value?.focus({ preventScroll: true })
+  void resolveProposalLink(true)
+}
+watch(() => [route.params.section, route.query.workspace, route.query.proposal] as const, () => {
+  void resolveProposalLink()
+}, { immediate: true })
+// A workspace change the resolver did not make is the reader moving on.
+watch(() => store.activeWorkspace, (workspace) => {
+  if (workspace === selfSwitchTarget) return
+  if (!resolveLive && !handedOffId) return
+  const waiting = resolveLive
+  invalidateProposalLink()
+  if (waiting) proposalNotice.value = null
+})
+
 function setReviewFilter(filter: ReviewFilter) {
   if (filter === mm.reviewFilter) return
   void viewRouter.replace(reviewPath(filter))
@@ -1651,6 +1806,8 @@ watch(isLightTheme, () => {
   requestRedraw()
 })
 onBeforeUnmount(() => {
+  resolverUnmounted = true
+  invalidateProposalLink()
   if (rafId) cancelAnimationFrame(rafId)
   if (redrawRafId) cancelAnimationFrame(redrawRafId)
   if (animRafId) cancelAnimationFrame(animRafId)
@@ -1689,6 +1846,21 @@ onBeforeUnmount(() => {
    than as one queue's chips. */
 .mm-decide-chips {
   padding-bottom: var(--space-2);
+}
+
+/* The proposal-link status line: quiet, with 44px targets for its one action. */
+.mm-link-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+.mm-link-notice-action {
+  min-height: 44px;
+  min-width: 44px;
 }
 
 .mm-body {

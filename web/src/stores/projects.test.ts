@@ -6684,6 +6684,39 @@ describe('workspace and chat transitions', () => {
     expect(store.activeWorkspace).toBe('personal')
   })
 
+  test('a predicate that turns false while a guard is pending stops the switch from applying', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    store.activeChatId = 'c-open'
+    window.localStorage.setItem('ciao-active-workspace', 'work')
+    let release: (allowed: boolean) => void = () => {}
+    store.registerWorkspaceSwitchGuard(() => new Promise<boolean>(resolve => { release = resolve }))
+    let current = true
+
+    const switching = store.switchWorkspace('personal', { transition: false, isCurrent: () => current })
+    // The route moved on (A then B) while A's guard was still asking.
+    current = false
+    release(true)
+
+    expect(await switching).toBe(false)
+    expect(store.activeWorkspace).toBe('work')
+    expect(store.activeChatId).toBe('c-open')
+    expect(window.localStorage.getItem('ciao-active-workspace')).toBe('work')
+  })
+
+  test('a predicate that is already false returns before any guard or fast path', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn(async () => true)
+    store.registerWorkspaceSwitchGuard(guard)
+
+    expect(await store.switchWorkspace('personal', { transition: false, isCurrent: () => false })).toBe(false)
+    // Even a switch to the workspace already active reports the stale caller.
+    expect(await store.switchWorkspace('work', { transition: false, isCurrent: () => false })).toBe(false)
+    expect(guard).not.toHaveBeenCalled()
+    expect(store.activeWorkspace).toBe('work')
+  })
+
   test('a declining settings guard stops the registered guards', async () => {
     const store = useProjectStore()
     store.activeWorkspace = 'work'

@@ -12,6 +12,7 @@ import {
   handleAppLinkClick,
   isAppRouteHref,
   parseChatHref,
+  parseProposalReviewHref,
   parseTaskHref,
   parseWorkspaceFileAccessHref,
 } from './appLinks'
@@ -174,6 +175,28 @@ describe('a workspace File access link', () => {
       expect(parseWorkspaceFileAccessHref(href), href).toBeNull()
       expect(isAppRouteHref(href), href).toBe(false)
     }
+  })
+})
+
+describe('a proposal review link', () => {
+  const KEY = `prv_${'0123456789abcdef'.repeat(4)}`
+  const href = (ws = 'work', key = KEY) => `/memory/review?show=suggested&workspace=${ws}&proposal=${key}`
+
+  it('is an app route and parses to its workspace and proposal', () => {
+    expect(isAppRouteHref(href())).toBe(true)
+    expect(parseProposalReviewHref(href())).toEqual({ workspace: 'work', proposal: KEY })
+  })
+
+  it.each([
+    ['uppercase hex', href('work', `prv_${'0123456789ABCDEF'.repeat(4)}`)],
+    ['a short key', href('work', KEY.slice(0, -1))],
+    ['an extra parameter', `${href()}&x=1`],
+    ['reordered parameters', `/memory/review?workspace=work&show=suggested&proposal=${KEY}`],
+    ['a fragment', `${href()}#top`],
+    ['a workspace containing a space', href('my work')],
+  ])('refuses %s', (_label, bad) => {
+    expect(isAppRouteHref(bad)).toBe(false)
+    expect(parseProposalReviewHref(bad)).toBeNull()
   })
 })
 
