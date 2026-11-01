@@ -57,8 +57,10 @@ at once; each is a full engine, so keep it low.
 1. A temporary directory `T` is made. `setup_workspace(T/ws, ...)` runs with
    every `CIAO_*`, `PWA_*` and `GWS_*` variable removed from the environment
    and the working directory set to `T`. The engine's storage roots
-   (`CIAO_MEMORY_DIR`, `CIAO_LAUNCH_AGENTS_DIR`, `CIAO_QUEUE_LOCK_DIR`) point
-   into `T`, so nothing reaches the live install's index or LaunchAgent.
+   (`CIAO_MEMORY_DIR`, `CIAO_LAUNCH_AGENTS_DIR`) point into `T`, so nothing
+   reaches the live install's index or LaunchAgent. The queue-lock directory
+   keeps its per-user temp default: lock names hash the throwaway vault path,
+   and the agent's sandbox can write there (it cannot write into `T`).
 2. The fixture vault `ciao/stock/evals/tasks/_fixture/` is copied over
    `T/ws/personal/memory-vault/`. The task's optional `overlay/` tree is copied
    over `T/ws/personal/`. The workspace defaults to the requested provider, and
@@ -224,7 +226,6 @@ match the fixture exactly.
 
 ## Known limits
 
-- The hard tier and gws fakes for `requires` come later. The catalog has easy
-  and medium tasks.
+- `--jobs` above 1 has a small port race: each engine's port is probed free when its harness object is created and bound only when the engine starts, so two concurrent boots can collide. Use `--jobs 1` for a run whose numbers you will compare.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.
