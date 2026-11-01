@@ -603,7 +603,13 @@ returned; a changed host is refused and left in place, never rolled back. The
 checks are refusal points, not proof: a same-UID writer can still interleave
 between a check and the write it guards, and a lost rename may leave the record the
 fresh attempt wrote (the existing `keep_record` path) while the run reports
-`HOST_EXISTS` and never claims that host as its own.
+`HOST_EXISTS` and never claims that host as its own. When a fresh install fails
+after its rename, it renames the bundle it placed into a unique name inside its
+own staging directory, re-checks that entry's inode, and only then removes it. A
+substitute swapped in before that rename is kept in the staging directory and
+named in the error, never deleted. The race is moved onto a name no other writer
+knows in advance and narrowed, not closed: a same-UID writer can still swap the
+stage directory or the scratch entry between the checks and the removal.
 
 The coordinator lifecycle is in `ciao.native_installer`, but it has **no
 production caller and no public run path**: `run_native_install` still refuses
