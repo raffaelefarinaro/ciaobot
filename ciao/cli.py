@@ -5678,11 +5678,13 @@ def _eval_tasks_command(args: argparse.Namespace) -> int:
             repeats=args.repeats,
             jobs=args.jobs,
             out=out,
+            mode=args.mode,
             session_factory=partial(
                 task_eval.IsolatedEngine.boot,
                 provider=args.provider,
                 model=args.model,
                 keep_workdir=args.keep_workdir,
+                mode=args.mode,
             ),
             capabilities=task_eval.available_capabilities(),
         )
@@ -9869,6 +9871,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tasks_run.add_argument(
         "--tier", default="", help="Comma-separated tiers: easy, medium, hard (default: all)."
+    )
+    from ciao.config import PERMISSION_MODES  # noqa: PLC0415
+
+    tasks_run.add_argument(
+        "--mode", choices=PERMISSION_MODES, default=None,
+        help=(
+            "Permission mode the run's chats start in (default per provider: "
+            "claude auto, opencode bypass). Recorded on every row."
+        ),
     )
     tasks_run.add_argument(
         "--out", type=Path, default=None,

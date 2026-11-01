@@ -731,7 +731,9 @@ def test_cli_package_mismatch_names_both_packages(monkeypatch: pytest.MonkeyPatc
     message = te.cli_package_mismatch()
 
     assert message is not None
-    assert "/Users/someone/repos/ciaobot/ciao" in message
+    # The message names the resolved package directory, which is drive-qualified
+    # with backslashes on Windows; compare the platform's own spelling.
+    assert str(Path("/Users/someone/repos/ciaobot/ciao/__init__.py").resolve().parent) in message
     assert str(Path(te.__file__).resolve().parent) in message
     assert "uv venv .venv-eval" in message
     assert ".venv-eval/bin/ciao eval tasks run" in message
@@ -1101,3 +1103,189 @@ def test_close_kills_a_sigterm_ignoring_straggler_without_waitid(
             return
         time.sleep(0.1)
     pytest.fail("SIGTERM-ignoring grandchild survived engine close")
+
+
+# --- Issue #2439: per-provider permission mode, camelCase OpenCode usage ------------
+
+
+def _app_settings(ws: Path) -> dict[str, Any]:
+    raw = (ws / ".runtime" / "app_settings.json").read_text(encoding="utf-8")
+    settings: dict[str, Any] = json.loads(raw)
+    return settings
+
+
+def test_prepare_workspace_defaults_mode_per_provider(tmp_path: Path) -> None:
+    opencode_ws = te.prepare_workspace(tmp_path / "oc", "opencode", "some-model", _insurance_task())
+    claude_ws = te.prepare_workspace(tmp_path / "cl", "claude", "haiku", _insurance_task())
+
+    assert _app_settings(opencode_ws)["provider_default_modes"] == {"opencode": "bypass"}
+    assert _app_settings(claude_ws)["provider_default_modes"] == {"claude": "auto"}
+
+
+def test_prepare_workspace_explicit_mode_overrides_default(tmp_path: Path) -> None:
+    ws = te.prepare_workspace(
+        tmp_path / "T", "opencode", "some-model", _insurance_task(), mode="auto"
+    )
+
+    assert _app_settings(ws)["provider_default_modes"] == {"opencode": "auto"}
+
+
+def test_prepare_workspace_rejects_unknown_mode_before_building(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="plan"):
+        te.prepare_workspace(tmp_path / "T", "claude", "haiku", _insurance_task(), mode="plan")
+
+    assert not (tmp_path / "T" / "ws").exists()
+
+
+def test_pin_default_mode_merges_into_existing_settings(tmp_path: Path) -> None:
+    settings = tmp_path / "app_settings.json"
+    settings.write_text(
+        json.dumps({"keyboard_send_mode": "steer", "provider_default_modes": {"claude": "manual"}}),
+        encoding="utf-8",
+    )
+
+    te._pin_default_mode(settings, "opencode", "bypass")
+
+    merged = json.loads(settings.read_text(encoding="utf-8"))
+    assert merged == {
+        "keyboard_send_mode": "steer",
+        "provider_default_modes": {"claude": "manual", "opencode": "bypass"},
+    }
+
+
+def test_run_task_records_resolved_mode_per_provider(tmp_path: Path, stable_provenance: None) -> None:
+    session = FakeSession(tmp_path)
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="opencode",
+        model="some-model",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["mode"] == "bypass"
+    assert record["status"] == "passed"
+
+
+def test_run_task_records_mode_on_skipped_record(tmp_path: Path, stable_provenance: None) -> None:
+    record = te.run_task(
+        _insurance_task(requires=["gws_fake"]),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: FakeSession(tmp_path),
+        capabilities=frozenset(),
+    )
+
+    assert record["status"] == "skipped"
+    assert record["mode"] == "auto"
+
+
+def test_run_task_unknown_mode_is_error_record_without_booting(
+    tmp_path: Path, stable_provenance: None
+) -> None:
+    calls: list[te.EvalTask] = []
+
+    def factory(task: te.EvalTask) -> FakeSession:
+        calls.append(task)
+        return FakeSession(tmp_path)
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=factory,
+        mode="plan",
+    )
+
+    assert record["status"] == "error"
+    assert record["mode"] == "plan"
+    assert "plan" in record["error"]
+    assert calls == []
+
+
+def test_summarize_separates_two_modes() -> None:
+    rows = [
+        {**_row(context_total=100), "mode": "auto"},
+        {**_row(context_total=300), "mode": "bypass"},
+    ]
+
+    summary = te.summarize(rows)
+
+    assert [item["mode"] for item in summary] == ["auto", "bypass"]
+    assert all(item["n"] == 1 for item in summary)
+    table = te.render_summary(summary)
+    assert "| Mode |" in table.splitlines()[0]
+    assert "| bypass |" in table
+
+
+def test_comparison_shows_each_side_mode() -> None:
+    baseline = [{**_row(), "mode": "auto"}]
+    candidate = [{**_row(label="candidate"), "mode": "bypass"}]
+
+    table = te.render_comparison(te.compare(baseline, candidate))
+
+    assert "Baseline mode" in table.splitlines()[0]
+    assert "| E2-recall-guest-count | auto | bypass |" in table
+
+
+def test_usage_reads_opencode_camel_case_and_prefers_snake(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    folder = runtime / "transcripts" / "chat-oc"
+    folder.mkdir(parents=True)
+    turns = [
+        {
+            "response": "first",
+            "usage": {
+                "inputTokens": "45564",
+                "outputTokens": "120",
+                "cacheReadTokens": "9000",
+                "cacheWriteTokens": "0",
+            },
+            "tool_calls": [],
+        },
+        {
+            "response": "second",
+            "usage": {"input_tokens": 7, "inputTokens": "999", "outputTokens": "3"},
+            "tool_calls": [],
+        },
+    ]
+    (folder / "opencode.json").write_text(json.dumps({"turns": turns}), encoding="utf-8")
+
+    usage = te.collect_usage(runtime)
+
+    assert usage["tokens"] == {"input": 45571, "output": 123, "cache_read": 9000, "cache_write": 0}
+
+
+def test_cli_eval_tasks_run_passes_mode_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_run_suite(tasks: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(te, "cli_package_mismatch", lambda: None)
+    monkeypatch.setattr(te, "run_suite", fake_run_suite)
+    out = str(tmp_path / "r.jsonl")
+
+    assert cli.main(
+        ["eval", "tasks", "run", "--provider", "opencode", "--model", "m", "--mode", "auto", "--out", out]
+    ) == 0
+    assert seen["mode"] == "auto"
+    assert seen["session_factory"].keywords["mode"] == "auto"
+
+    assert cli.main(["eval", "tasks", "run", "--provider", "opencode", "--model", "m", "--out", out]) == 0
+    assert seen["mode"] is None
+
+
+def test_cli_eval_tasks_run_rejects_unknown_mode(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["eval", "tasks", "run", "--model", "m", "--mode", "plan"])
+    assert "invalid choice" in capsys.readouterr().err

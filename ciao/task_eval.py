@@ -47,6 +47,7 @@ import yaml
 
 import ciao
 from ciao import behavioral_eval, gws_auth
+from ciao.config import PERMISSION_MODES
 from ciao.os_support.tool_path import dedupe_path
 from ciao.tool_path import common_tool_dirs
 
@@ -59,6 +60,11 @@ SETUP_KINDS: frozenset[str] = frozenset({"task", "project"})
 SCHEMA = "ciao-task-eval/1"
 DEFAULT_TIMEOUT_S = 600.0
 ANSWER_TAIL_CHARS = 2000
+# The permission mode a run's chats start in, per provider, unless the caller
+# asks for another (`--mode`). Mirrors a typical operator install. OpenCode's
+# `auto` puts every shell call behind an approval card that nobody answers in an
+# eval, so the run hangs to its timeout with zero usage (#2439).
+DEFAULT_MODES: dict[str, str] = {"claude": "auto", "opencode": "bypass"}
 
 # Phrases that count as a clean refusal to answer from the vault. Curly
 # apostrophes are accepted too, since models often emit them.
@@ -792,6 +798,43 @@ def _pin_workspace_model(registry: Path, provider: str, model: str) -> None:
     raise RuntimeError(f"workspace registry has no {WORKSPACE!r} entry: {registry}")
 
 
+def _requested_mode(provider: str, mode: str | None) -> str:
+    return mode or DEFAULT_MODES.get(provider, "auto")
+
+
+def resolve_mode(provider: str, mode: str | None = None) -> str:
+    """The permission mode a run uses: ``mode`` when given, else the provider's default.
+
+    An unknown mode raises ``ValueError``; the engine's closed vocabulary is
+    ``PERMISSION_MODES`` (the same set ``app_settings`` validates against).
+    """
+    resolved = _requested_mode(provider, mode)
+    if resolved not in PERMISSION_MODES:
+        raise ValueError(
+            f"unknown permission mode {resolved!r}; expected one of {', '.join(PERMISSION_MODES)}"
+        )
+    return resolved
+
+
+def _pin_default_mode(settings: Path, provider: str, mode: str) -> None:
+    """Write ``provider_default_modes[provider]`` into the workspace's app settings.
+
+    ``AppSettingsStore`` reads this nested map at engine boot and applies it to
+    new chats, delegated chats included. Other keys in the file are kept.
+    """
+    raw: Any = {}
+    if settings.is_file():
+        raw = json.loads(settings.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"app settings is not a JSON object: {settings}")
+    modes = raw.get("provider_default_modes")
+    pinned: dict[str, str] = dict(modes) if isinstance(modes, dict) else {}
+    pinned[provider] = mode
+    raw["provider_default_modes"] = pinned
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8", newline="")
+
+
 def prepare_workspace(
     workdir: Path,
     provider: str,
@@ -800,16 +843,19 @@ def prepare_workspace(
     *,
     auth_token: str | None = None,
     port: int | None = None,
+    mode: str | None = None,
 ) -> Path:
     """Build the throwaway workspace under ``workdir/ws`` without booting anything.
 
     ``setup_workspace`` runs with the live environment scrubbed and the working
     directory set to ``workdir``. The fixture vault is copied into
     ``ws/personal/memory-vault`` and the task overlay over ``ws/personal``. The
-    workspace defaults to ``provider`` and pins ``model`` for it.
+    workspace defaults to ``provider``, pins ``model`` for it, and starts its
+    chats in ``mode`` (see :func:`resolve_mode`).
     """
     from ciao import cli
 
+    resolved = resolve_mode(provider, mode)
     workdir.mkdir(parents=True, exist_ok=True)
     ws = workdir / "ws"
     with _PROCESS_STATE_LOCK, _engine_environ(workdir, ws), _in_directory(workdir):
@@ -822,6 +868,7 @@ def prepare_workspace(
             default_provider=provider,
         )
     _pin_workspace_model(ws / ".runtime" / "workspaces.json", provider, model)
+    _pin_default_mode(ws / ".runtime" / "app_settings.json", provider, resolved)
     personal = ws / WORKSPACE
     shutil.copytree(TASKS_ROOT / FIXTURE_DIRNAME, personal / "memory-vault", dirs_exist_ok=True)
     if task.overlay is not None:
@@ -916,20 +963,32 @@ class IsolatedEngine(EngineSession):
 
     @classmethod
     def boot(
-        cls, task: EvalTask, *, provider: str, model: str, keep_workdir: bool = False
+        cls,
+        task: EvalTask,
+        *,
+        provider: str,
+        model: str,
+        keep_workdir: bool = False,
+        mode: str | None = None,
     ) -> "IsolatedEngine":
         workdir = Path(tempfile.mkdtemp(prefix="ciao-task-eval-"))
         engine = cls(workdir, keep_workdir=keep_workdir)
         try:
-            engine._start(task, provider, model)
+            engine._start(task, provider, model, mode)
         except BaseException:
             engine.close()
             raise
         return engine
 
-    def _start(self, task: EvalTask, provider: str, model: str) -> None:
+    def _start(self, task: EvalTask, provider: str, model: str, mode: str | None) -> None:
         prepare_workspace(
-            self.workdir, provider, model, task, auth_token=self.token, port=self.port
+            self.workdir,
+            provider,
+            model,
+            task,
+            auth_token=self.token,
+            port=self.port,
+            mode=mode,
         )
         self._log = self._log_path.open("wb")
         script = Path(sys.executable).with_name("ciao")
@@ -1623,6 +1682,15 @@ _TOKEN_FIELDS: dict[str, str] = {
     "cache_read": "cache_read_input_tokens",
     "cache_write": "cache_creation_input_tokens",
 }
+# OpenCode transcripts spell the same counts in camelCase (the USAGE_ALIASES
+# table in scripts/session_audit.py). A field present in both spellings counts
+# the snake_case one only, so a turn is never counted twice.
+_TOKEN_CAMEL_FIELDS: dict[str, str] = {
+    "input": "inputTokens",
+    "output": "outputTokens",
+    "cache_read": "cacheReadTokens",
+    "cache_write": "cacheWriteTokens",
+}
 
 
 def _as_int(value: Any) -> int:
@@ -1669,7 +1737,10 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
             usage = turn.get("usage") or {}
             if isinstance(usage, dict):
                 for name, key in _TOKEN_FIELDS.items():
-                    tokens[name] += _as_int(usage.get(key))
+                    value = usage.get(key)
+                    if value is None:
+                        value = usage.get(_TOKEN_CAMEL_FIELDS[name])
+                    tokens[name] += _as_int(value)
             for call in turn.get("tool_calls") or []:
                 tool_calls += 1
                 if isinstance(call, dict) and call.get("error"):
@@ -1844,7 +1915,9 @@ def code_revision() -> str | None:
     return f"{head.stdout.strip()}-dirty" if dirty else head.stdout.strip()
 
 
-def _base_record(task: EvalTask, *, provider: str, model: str, label: str, repeat: int) -> dict[str, Any]:
+def _base_record(
+    task: EvalTask, *, provider: str, model: str, mode: str, label: str, repeat: int
+) -> dict[str, Any]:
     return {
         "schema": SCHEMA,
         "label": label,
@@ -1853,6 +1926,7 @@ def _base_record(task: EvalTask, *, provider: str, model: str, label: str, repea
         "category": task.category,
         "provider": provider,
         "model": model,
+        "mode": mode,
         "repeat": repeat,
         "code_revision": code_revision(),
         "provider_version": provider_version(provider),
@@ -1882,24 +1956,38 @@ def run_task(
     model: str,
     label: str,
     repeat: int,
+    mode: str | None = None,
     session_factory: Callable[[EvalTask], EngineSession] | None = None,
     capabilities: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """One graded run of one task. Never raises: a failure becomes ``status="error"``.
 
-    Without ``session_factory`` the run boots a real engine on ``provider``/``model``.
+    ``mode`` is the permission mode the chats start in (default: the provider's
+    entry in ``DEFAULT_MODES``). Without ``session_factory`` the run boots a real
+    engine on ``provider``/``model``/``mode``.
     """
-    record = _base_record(task, provider=provider, model=model, label=label, repeat=repeat)
+    record = _base_record(
+        task,
+        provider=provider,
+        model=model,
+        mode=_requested_mode(provider, mode),
+        label=label,
+        repeat=repeat,
+    )
     missing = [name for name in task.requires if name not in capabilities]
     if missing:
         record["status"] = "skipped"
         record["skip_reason"] = f"missing capability: {', '.join(missing)}"
         return record
 
-    factory = session_factory or partial(IsolatedEngine.boot, provider=provider, model=model)
+    factory = session_factory or partial(
+        IsolatedEngine.boot, provider=provider, model=model, mode=mode
+    )
     started = time.monotonic()
     session: EngineSession | None = None
     try:
+        # Validated before any engine boots: an unknown mode is an error record.
+        resolve_mode(provider, mode)
         session = factory(task)
         _apply_setup(session.api, task)
         snapshot = take_snapshot(session.agent_root, session.api, _unchanged_paths(task))
@@ -1957,6 +2045,7 @@ def run_suite(
     repeats: int = 3,
     jobs: int = 1,
     out: Path,
+    mode: str | None = None,
     session_factory: Callable[[EvalTask], EngineSession] | None = None,
     capabilities: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
@@ -1972,6 +2061,7 @@ def run_suite(
             model=model,
             label=label,
             repeat=repeat,
+            mode=mode,
             session_factory=session_factory,
             capabilities=capabilities,
         )
@@ -2014,13 +2104,18 @@ def _median(values: Sequence[float | None]) -> float | None:
 
 
 def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Per (label, provider, model, code revision, task): counts, pass rate and medians."""
-    groups: dict[tuple[str, str, str, str, str], list[Mapping[str, Any]]] = {}
+    """Per (label, provider, model, mode, code revision, task): counts, pass rate and medians.
+
+    A report from before the ``mode`` field has no mode to group by, so those rows
+    fall into the ``-`` group.
+    """
+    groups: dict[tuple[str, str, str, str, str, str], list[Mapping[str, Any]]] = {}
     for row in rows:
         key = (
             str(row.get("label")),
             str(row.get("provider")),
             str(row.get("model")),
+            str(row.get("mode") or "-"),
             str(row.get("code_revision")),
             str(row.get("task_id")),
         )
@@ -2028,7 +2123,7 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
     summary: list[dict[str, Any]] = []
     for key in sorted(groups):
-        label, provider, model, revision, task_id = key
+        label, provider, model, mode, revision, task_id = key
         items = groups[key]
         ran = [r for r in items if r.get("status") != "skipped"]
         passed = sum(1 for r in ran if r.get("status") == "passed")
@@ -2037,6 +2132,7 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "label": label,
                 "provider": provider,
                 "model": model,
+                "mode": mode,
                 "code_revision": revision,
                 "task_id": task_id,
                 "n": len(items),
@@ -2114,18 +2210,19 @@ def _fmt(value: Any, digits: int = 2) -> str:
 
 def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
     lines = [
-        "| Task | Label | Provider | Model | Revision | n | Ran | Pass rate | Median context | Median output | Median wall s | Median cost USD | Tool errors | Timeouts |",
-        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Task | Label | Provider | Model | Mode | Revision | n | Ran | Pass rate | Median context | Median output | Median wall s | Median cost USD | Tool errors | Timeouts |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in summary:
         pass_rate = item["pass_rate"]
         lines.append(
-            "| {task} | {label} | {provider} | {model} | {rev} | {n} | {ran} | {pass_rate} | "
+            "| {task} | {label} | {provider} | {model} | {mode} | {rev} | {n} | {ran} | {pass_rate} | "
             "{ctx} | {out} | {wall} | {cost} | {terr} | {timeouts} |".format(
                 task=item["task_id"],
                 label=item["label"],
                 provider=item["provider"],
                 model=item["model"],
+                mode=item["mode"],
                 rev=item["code_revision"],
                 n=item["n"],
                 ran=item["ran"],
@@ -2143,16 +2240,18 @@ def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
 
 def render_comparison(comparison: Sequence[Mapping[str, Any]]) -> str:
     lines = [
-        "| Task | Baseline pass | Candidate pass | Delta pass | Delta context % | Delta wall % | Delta cost % |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Task | Baseline mode | Candidate mode | Baseline pass | Candidate pass | Delta pass | Delta context % | Delta wall % | Delta cost % |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in comparison:
         base = item["baseline"] or {}
         cand = item["candidate"] or {}
         delta = item["delta"]
         lines.append(
-            "| {task} | {bp} | {cp} | {dp} | {dc} | {dw} | {dco} |".format(
+            "| {task} | {bm} | {cm} | {bp} | {cp} | {dp} | {dc} | {dw} | {dco} |".format(
                 task=item["task_id"],
+                bm=base.get("mode", "-"),
+                cm=cand.get("mode", "-"),
                 bp=_fmt(base.get("pass_rate")),
                 cp=_fmt(cand.get("pass_rate")),
                 dp=_fmt(delta["pass_rate"]),
