@@ -25,7 +25,10 @@ derived from. The bullet carries an id; this module owns everything behind it.
 itself — so a nightly run that reaches the same conclusion from a different
 transcript folds into the record that is already queued rather than opening a
 second row a person then has to reject twice. Evidence accumulates on the record;
-the change text is what is compared.
+the change text is what is compared. A reworded change to a skill that already
+has drafts is not a new row by default: the filer names the record it is the
+same as (``same_as``) or lists every sibling it is distinct from
+(``distinct_from``).
 
 **A draft is not a filing.** :func:`file_draft` writes a record and a queue
 bullet, both local. :func:`approve_draft` is the only thing that reaches GitHub,
@@ -229,6 +232,18 @@ class UnattendedRefused(DraftRefused):
     enforcement, so the deferral is a raised error rather than a prompt nobody
     reads.
     """
+
+
+class SiblingDraftExists(DraftRefused):
+    """A new draft would sit beside existing drafts of the same skill.
+
+    ``sibling_ids`` names the ones the caller did not account for, so the caller
+    can re-file with ``same_as`` or ``distinct_from`` rather than guess.
+    """
+
+    def __init__(self, message: str, sibling_ids: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.sibling_ids = sibling_ids
 
 
 class SanitizeRefused(DraftError):
@@ -451,6 +466,8 @@ def file_draft(
     version: str = "",
     private_evidence: str = "",
     origins: Sequence[dict[str, str]] = (),
+    same_as: str = "",
+    distinct_from: Sequence[str] = (),
 ) -> UpstreamDraft:
     """File one deduplicated ``[review]`` draft, and return what is stored.
 
@@ -462,6 +479,14 @@ def file_draft(
     record keeps accumulating evidence without re-entering the queue, and a
     re-filing of a rejected change is refused by name rather than silently
     reopening.
+
+    A new record for a skill that already has drafts in the workspace, in any
+    lifecycle, is refused with :class:`SiblingDraftExists` before anything is
+    written. The filer must say which it is: ``same_as`` folds this sighting
+    into the named record (its title, change and body are kept), and
+    ``distinct_from`` names every existing sibling when this is a different
+    defect. Re-filing an identical change and restoring from a decision row are
+    not new records, so they are not gated.
 
     ``body`` is validated with :func:`sanitize_lesson` when there is one, and so
     are ``title``, ``skill`` and ``version`` — every one of them is an argument
@@ -499,7 +524,10 @@ def file_draft(
         body = sanitize_lesson(body)
     repository = _checked_repository(repository)
     links = _validated_origins(origins)
-    identity = draft_id(workspace, target, skill, change)
+    same_as = same_as.strip()
+    if same_as and distinct_from:
+        raise DraftRefused("pass same_as or distinct_from, not both")
+    identity = same_as or draft_id(workspace, target, skill, change)
 
     path = sidecar_path(config, workspace, identity)
     with queue_lock(path):
@@ -517,9 +545,47 @@ def file_draft(
             private_evidence=private_evidence.strip(),
             origins=links,
         )
+        if same_as:
+            if (
+                existing is None
+                or existing.target != target
+                or normalized_statement(existing.skill) != normalized_statement(skill)
+            ):
+                raise DraftRefused(
+                    f"same_as names {same_as!r}, which is not a {target} draft for {skill}"
+                )
+            folded = _fold_sighting(existing, incoming)
+            write_queue_atomically(path, render_sidecar(folded))
+            if not folded.settled and not _bullet_present(config, workspace, identity):
+                _append_bullet(config, workspace, folded)
+            logger.info("Folded a sighting into %s draft %s in %s", target, identity, workspace)
+            return folded
         decision = (
             None if existing is not None else decision_row(config, workspace, identity)
         )
+        if existing is None and decision is None:
+            siblings = _siblings(config, workspace, target, skill, identity)
+            known = {sibling.id for sibling in siblings}
+            stray = [item for item in distinct_from if item not in known]
+            if stray:
+                raise DraftRefused(
+                    f"distinct_from names {', '.join(stray)}, which is not a draft of "
+                    f"{skill} in {workspace}"
+                )
+            named = set(distinct_from)
+            missing = [sibling for sibling in siblings if sibling.id not in named]
+            if missing:
+                listed = "; ".join(
+                    f"{sibling.id} ({sibling.lifecycle}): {sibling.title}"
+                    for sibling in siblings
+                )
+                raise SiblingDraftExists(
+                    f"{skill} already has draft(s) in {workspace}: {listed}. If this "
+                    'is the same defect, re-file with "same_as": "<id>" so the sighting '
+                    "joins that record; if it is a different defect, add "
+                    '"distinct_from": [<every id listed>].',
+                    tuple(sibling.id for sibling in missing),
+                )
         if decision is not None:
             # The record is gone but the decision is not: a settled draft whose
             # sidecar somebody deleted would otherwise be re-queued by the next
@@ -600,6 +666,37 @@ def _bullet_present(config: CiaoConfig, workspace: str, identity: str) -> bool:
         (bullet := parse_bullet(line)) is not None and bullet.target == identity
         for line in lines
     )
+
+
+def _fold_sighting(existing: UpstreamDraft, incoming: UpstreamDraft) -> UpstreamDraft:
+    """``existing`` with ``incoming``'s sighting added, and nothing it says about the change.
+
+    Used by ``same_as``: the filer has decided this is the same defect, so the
+    record keeps its title, change and body and takes only the new evidence and
+    learning links.
+    """
+    return replace(
+        existing,
+        private_evidence=_join_notes(existing.private_evidence, incoming.private_evidence),
+        origins=_merge_origins(existing.origins, incoming.origins),
+        repository=existing.repository or incoming.repository,
+        version=existing.version or incoming.version,
+        updated_at=_now(),
+    )
+
+
+def _siblings(
+    config: CiaoConfig, workspace: str, target: str, skill: str, identity: str
+) -> list[UpstreamDraft]:
+    """Every other draft in ``workspace`` for the same target and skill, in any lifecycle."""
+    wanted = normalized_statement(skill)
+    return [
+        record
+        for record in read_records(config, workspace)
+        if record.id != identity
+        and record.target == target
+        and normalized_statement(record.skill) == wanted
+    ]
 
 
 def _merge(

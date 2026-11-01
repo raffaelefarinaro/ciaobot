@@ -6737,6 +6737,11 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
     evidence goes in ``private_evidence`` and stays in this workspace; ``body`` is
     refused if it carries a transcript excerpt, a path, a name or a credential,
     because a public issue is public.
+
+    ``same_as`` (an existing draft id of the same skill, to fold this sighting
+    into) and ``distinct_from`` (every existing draft id of that skill when this is
+    a different defect) are optional. A filing for a skill that already has drafts
+    is refused until one of them is given.
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
@@ -6766,6 +6771,8 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
             version=str(payload.get("version") or ""),
             private_evidence=str(payload.get("private_evidence") or ""),
             origins=origins,
+            same_as=str(payload.get("same_as") or "").strip(),
+            distinct_from=[str(x).strip() for x in payload.get("distinct_from") or []],
         )
     except DraftError as exc:
         print(f"cannot file the draft: {exc}", file=sys.stderr)
@@ -6867,6 +6874,13 @@ def _read_skill_draft_input(path: str) -> tuple[dict[str, Any] | None, str]:
     for field in ("body", "repository", "version", "private_evidence", "rationale"):
         if field in payload and not isinstance(payload[field], str):
             return None, f'{path} "{field}" must be a string'
+    if "same_as" in payload and not isinstance(payload["same_as"], str):
+        return None, f'{path} "same_as" must be a string'
+    if "distinct_from" in payload and not (
+        isinstance(payload["distinct_from"], list)
+        and all(isinstance(item, str) for item in payload["distinct_from"])
+    ):
+        return None, f'{path} "distinct_from" must be a list of draft ids'
     return payload, ""
 
 
