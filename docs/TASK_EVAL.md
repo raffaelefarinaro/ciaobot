@@ -52,6 +52,11 @@ debugging, and the path is printed to stderr.
 `--model` is required and never defaulted. `--jobs` boots that many engines
 at once; each is a full engine, so keep it low.
 
+`--mode` sets the permission mode the run's chats start in: `manual`, `auto` or
+`bypass`, the same vocabulary as the Settings default. Without it, the provider
+default applies (see [Permission mode](#permission-mode)). The mode is recorded
+on every row.
+
 ## How a run works
 
 1. A temporary directory `T` is made. `setup_workspace(T/ws, ...)` runs with
@@ -66,6 +71,8 @@ at once; each is a full engine, so keep it low.
    over `T/ws/personal/`. The workspace defaults to the requested provider, and
    its `personal` registry entry pins the requested model for that provider
    (`provider_overrides`), so delegated chats run on the requested pair too.
+   `ws/.runtime/app_settings.json` gets `provider_default_modes: {provider: mode}`,
+   so chats (delegated ones too) start in the run's permission mode.
    Steps 1 and 2 are `prepare_workspace`, which runs without booting an engine.
 3. The engine is started with `ciao run` (cwd `T/ws`, the same environment
    scrub), and the harness waits until `/api/status` answers 401. It then
@@ -98,22 +105,42 @@ Each run is one JSON object per line:
 | `schema` | `ciao-task-eval/1` |
 | `label`, `task_id`, `tier`, `category`, `repeat` | the run's identity |
 | `provider`, `model` | what was requested |
+| `mode` | the permission mode the chats started in: the `--mode` given, else the provider default. Set on skipped and error rows too |
 | `code_revision` | short HEAD of the checkout, plus `-dirty` when the tree is not clean |
 | `provider_version` | first line of `<provider> --version` |
 | `catalog_sha256` | hash over the task catalog bytes |
 | `status` | `passed`, `failed`, `skipped` or `error` |
 | `answer` | the last 2000 characters of the answer text (all turns of all chats, most recent last) |
 | `checks` | per check: `kind`, `ok`, `detail` |
-| `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run |
+| `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run. OpenCode's camelCase usage keys (`inputTokens` and so on) are read too; a field present in both spellings counts the snake_case one |
 | `tool_calls`, `tool_errors` | from the turns' tool-call lists |
 | `ciao_calls`, `ciao_errors` | from `mcp_tool_calls.jsonl`; an error is any status other than `ok` |
 | `cost_usd` | the engine's recorded cost, or null |
 | `wall_s`, `timed_out`, `chat_ids` | timing and the chats measured |
 
-`summarize` groups rows by label, provider, model, code revision and task. Its
-pass rate and medians exclude skipped runs. `compare` joins two reports by task
-id and reports the pass-rate difference and the percentage change in context,
-wall time and cost.
+`summarize` groups rows by label, provider, model, mode, code revision and task,
+so two runs that differ only in mode appear as separate rows (`Mode` column).
+Reports written before the `mode` field group under `-`. Its pass rate and
+medians exclude skipped runs. `compare` joins two reports by task id and reports
+the pass-rate difference and the percentage change in context, wall time and
+cost; its table shows each side's mode.
+
+## Permission mode
+
+The chats of a run start in a permission mode, and the default depends on the
+provider:
+
+| Provider | Default | Why |
+| --- | --- | --- |
+| `claude` | `auto` | Claude's `auto` is classifier-backed and lets the eval's tool calls through. |
+| `opencode` | `bypass` | OpenCode's `auto` keeps every shell call behind an approval card (`_permissive_auto_rules` in `ciao/providers/opencode.py`). Nobody answers that card in an eval, so the turn hangs to its timeout with zero usage. The default matches a typical operator install, which pins `opencode: bypass`. |
+
+The defaults live in `DEFAULT_MODES` in `ciao/task_eval.py`. An explicit
+`--mode manual|auto|bypass` replaces the default for both providers' runs. The
+mode is written into the throwaway workspace's `app_settings.json`, so it is the
+same setting Settings writes, and it is applied to delegated chats as well.
+Pick `--mode` deliberately when you compare runs: a mode difference changes what
+the agent may do without asking, so it can change the score as well as the cost.
 
 ## The catalog
 
@@ -142,8 +169,9 @@ Each task is `ciao/stock/evals/tasks/<task_id>/task.json`:
   that exact title.
 - `setup` steps are `{"kind": "task", "title", "body"?, "due"?}` and
   `{"kind": "project", "name", "context"?}`.
-- `requires` lists capability names. Only the empty set is available today, so
-  any task that names one is recorded as skipped.
+- `requires` lists capability names. `gws_fake` is the only one (see
+  [Capabilities](#capabilities)). A task that names a capability the platform
+  lacks is recorded as skipped: `gws_fake` is skipped on Windows.
 - An optional `overlay/` directory sits beside `task.json`. Its files are
   copied over `ws/personal/` before the engine starts, for example
   `overlay/memory-vault/People/x.md`.
@@ -155,16 +183,20 @@ tasks; `_fixture/` is the base vault.
 
 ### Tasks
 
-| Id | Tier | Category | Entry |
-| --- | --- | --- | --- |
-| `E1-task-capture` | easy | `task_capture` | prompt |
-| `E2-recall-abstain` | easy | `abstention` | prompt |
-| `E2-recall-guest-count` | easy | `recall` | prompt |
-| `E3-schedule-create` | easy | `schedule_create` | prompt |
-| `M1-proposal-merge` | medium | `curation` | prompt, with a queued proposal in `overlay/` |
-| `M2-project-exists` | medium | `project_create` | prompt; the fixture's `projects/active/garden-shed/` folder registers itself as a project at boot |
-| `M2-project-missing` | medium | `project_create` | prompt |
-| `M3-delegated-task` | medium | `delegated_task` | delegate, with a `task` setup step |
+| Id | Tier | Category | Entry | What it grades |
+| --- | --- | --- | --- | --- |
+| `E1-task-capture` | easy | `task_capture` | prompt | a task is created with the right title and due day |
+| `E2-recall-abstain` | easy | `abstention` | prompt | an unknown person's phone number is declined, not invented |
+| `E2-recall-guest-count` | easy | `recall` | prompt | the guest count of the summer party is read from the vault |
+| `E3-schedule-create` | easy | `schedule_create` | prompt | a weekly schedule is created at the requested day and time |
+| `M1-proposal-merge` | medium | `curation` | prompt, with a queued proposal in `overlay/` | the fact lands in the person note, the stale line goes, the proposal is resolved |
+| `M2-project-exists` | medium | `project_create` | prompt; the fixture's `projects/active/garden-shed/` folder registers itself as a project at boot | no duplicate project or scaffolding is created |
+| `M2-project-missing` | medium | `project_create` | prompt | exactly one project is created, and nothing else |
+| `M3-delegated-task` | medium | `delegated_task` | delegate, with a `task` setup step | the delegated chat reports the task done once, with the answer |
+| `M4-email-draft` | medium | `email_draft` | prompt; requires `gws_fake` (see [Capabilities](#capabilities)) | a reply-only draft lands in the right Gmail thread and nothing is sent |
+| `H1-multi-source-synthesis` | hard | `synthesis` | prompt, with inbox notes in `overlay/` | three inbox notes (Slack, call, email) are merged into the summer party doc, and the superseded 45 quote is not stated as the current price (mentioning it as history is fine) |
+| `H2-code-bugfix` | hard | `coding` | prompt, with a toy package in `overlay/` | the seeded bug in `code/invoice_tool/invoice.py` is fixed and the unittest suite passes without touching the tests |
+| `H3-doc-revision` | hard | `doc_revision` | prompt, with the doc and its review in `overlay/` | four review comments are applied to `house-rules.md`, untouched sections survive, and the review file itself is left unchanged |
 
 ### Check kinds
 
@@ -189,9 +221,95 @@ matching is case-insensitive.
 | `unchanged` | `path` | the file is byte-identical to its snapshot |
 | `task_attempt` | `title_contains`, `outcome`, `count` | the matching task has exactly `count` attempts with that outcome (`done`, `blocked`, `needs_input`) |
 | `command` | `argv`, `cwd`, `timeout_s` | the command exits 0; `{python}` in argv is `sys.executable` |
+| `gws_calls` | `must`, `must_not`, `min_calls` | over the fake gws call log (see [Capabilities](#capabilities)): every `must` regex matches at least one call summary, no `must_not` regex matches any, and there are at least `min_calls` calls. Fails with "no gws fake in this run" when the task has no fake |
 
 A check that raises is a failed check with the exception in its detail. It does
 not stop grading of the other checks.
+
+## Capabilities
+
+A task lists the capabilities it needs in `requires`. `ciao eval tasks run`
+passes the platform's capabilities (`available_capabilities()`), and a task
+whose requirement is missing is recorded as skipped.
+
+### `gws_fake`
+
+Tasks that need Google Workspace state (M4, the email draft) set
+`"requires": ["gws_fake"]` and a `gws_fake` block:
+
+```json
+"gws_fake": {
+  "profile": "eval-sandbox",
+  "account": "eval.user@example.com",
+  "messages": [
+    {"id": "19a2b7e4c9f60002", "threadId": "19a0f3c2b1d40001", "from": "Tomas Berg <tomas.berg@example.com>",
+     "to": "eval.user@example.com", "subject": "Re: Team offsite: pick a day", "date": "Thu, 29 Oct 2026 16:40:00 +0100",
+     "rfc822_id": "<offsite-2@mail.example.com>", "labelIds": ["INBOX", "UNREAD"], "body": "Can you confirm Thursday?"}
+  ]
+}
+```
+
+`profile` must be a profile slug. `messages` is a non-empty list; each message
+has string `id`, `threadId`, `from`, `to`, `subject`, `date` (RFC 2822),
+`rfc822_id` and `body`, and a `labelIds` list. Message ids are unique.
+
+When a run boots, the harness does the following:
+
+- Writes dummy credentials, a profile registry and a fresh token-health reading
+  into the workspace. Nothing real is stored: the client and refresh tokens are
+  placeholders. The profile is `ws/secrets/gws-<profile>/`.
+- Writes the mailbox and an empty call log into `ws/secrets/gws-<profile>/eval-gws/`,
+  together with a launcher named `gws`.
+- Sets `CIAO_GWS_BIN` to that launcher in the engine's environment. `ciao gws` and
+  the token health check run it and never fall back to the installed `gws`
+  (`ciao/gws_auth.py`, `gws_bin_override`). It is applied after the `CIAO_*`
+  variables are dropped, so it reaches the engine.
+- Prepends the `eval-gws` folder to the engine's `PATH`, so a bare `gws` in the
+  agent's shell also reaches the fake.
+- After signing in, links the workspace to the profile with
+  `PATCH /api/workspaces/personal`. That also resyncs the gws skills before the
+  call returns, so the agent sees a connected account.
+
+The fake answers the Gmail calls the M4 task and its neighbours use, from the
+mailbox, and never contacts Google. The launcher is a POSIX shell script, so the
+capability is POSIX only. Windows skips tasks that require it.
+
+The fake and its call log live in a folder the agent can write, so the eval is
+not tamper-proof: a deliberately adversarial agent could edit the log or the
+launcher. The grading assumes an honest run.
+
+Every call appends one JSON row to `ws/secrets/gws-<profile>/eval-gws/calls.jsonl`
+before it is answered. A row has `ts`, `argv`, `op`, `effect`, `thread_id`,
+`message_id`, `to`, `body` and `summary`. The `effect` is one of `read`,
+`draft_created`, `sent`, `modified`, `dry_run` or `unknown`. The `summary` is a
+single line:
+
+```
+op=gmail +reply effect=draft_created thread=19a0f3c2b1d40001 message=eval-draft-msg-3 to=tomas.berg@example.com body=Thursday works for me
+```
+
+`to` lists every To, Cc and Bcc address (and every `--to`, `--cc` and `--bcc`
+flag), comma-joined. `body` comes last and keeps the first 2000 characters, so a
+`.*` in a regex can reach it. The `gws_calls` check applies its regexes to these
+summaries, case-insensitively.
+
+`gmail +triage` prints JSON unless `--format table` is given, as the real tool
+does. The fake covers `auth status`, `schema`, `gmail +triage`, `+read`, `+reply`,
+`+reply-all`, `+forward` and `+send` (with `--draft` and `--dry-run`), and the
+`gmail users` messages, threads, drafts and labels methods. An unknown command
+is logged as `unknown` and exits 2. The M4 task's check is:
+
+```json
+{"kind": "gws_calls",
+ "must": ["effect=draft_created thread=19a0f3c2b1d40001 .*to=tomas\\.berg@example\\.com body=.*thursday"],
+ "must_not": ["effect=sent", "effect=modified", "effect=draft_created thread=(?!19a0f3c2b1d40001 )",
+              "body=.*(thursday (does not|doesn't|won't|will not|isn't|is not|can't|cannot)|(can't|cannot|can not|won't|unable to) (do|make) thursday|not thursday)"]}
+```
+
+The `must_not` list is what catches a send, a change to a message, or a draft
+in the wrong thread, including the two distractor threads in the fixture
+mailbox. Because the recipient must be exactly the sender, a draft that adds a
+Cc or a second To fails too: the task asks for a reply, not a group message.
 
 ## Fixture vault
 
@@ -226,6 +344,12 @@ match the fixture exactly.
 
 ## Known limits
 
+- The `gws_fake` capability is POSIX only; `run` skips M4 on Windows.
 - `--jobs` above 1 has a small port race: each engine's port is probed free when its harness object is created and bound only when the engine starts, so two concurrent boots can collide. Use `--jobs 1` for a run whose numbers you will compare.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.
+- The engine runs with the real `HOME`, so OpenCode also loads the global skills
+  from `~/.agents/skills` and `~/.config/opencode`, not only the workspace's own.
+  A run therefore sees the operator's global skills, which the isolation
+  guarantees above do not cover. Treat results as fidelity to a real install, not
+  to a clean room.
