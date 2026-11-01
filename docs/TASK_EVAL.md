@@ -151,6 +151,19 @@ does not match its directory, and any file under the catalog that contains a
 `behavioral_eval.PRIVATE_MARKERS` string. Directories starting with `_` are not
 tasks; `_fixture/` is the base vault.
 
+| Id | Tier | Category | What it grades |
+| --- | --- | --- | --- |
+| `E1-task-capture` | easy | `task_capture` | a task is created with the right title and due day |
+| `E2-recall-guest-count` | easy | `recall` | the guest count of the summer party is read from the vault |
+| `E2-recall-abstain` | easy | `abstention` | an unknown person's phone number is declined, not invented |
+| `E3-schedule-create` | easy | `schedule_create` | a weekly schedule is created at the requested day and time |
+| `H1-multi-source-synthesis` | hard | `synthesis` | three inbox notes (Slack, call, email) are merged into the summer party doc, and the superseded 45 quote is gone |
+| `H2-code-bugfix` | hard | `coding` | the seeded bug in `code/invoice_tool/invoice.py` is fixed and the unittest suite passes without touching the tests |
+| `H3-doc-revision` | hard | `doc_revision` | four review comments are applied to `house-rules.md`, and the review file itself is left unchanged |
+
+The hard tasks ship their own `overlay/` trees, for example
+`H1-multi-source-synthesis/overlay/memory-vault/Documents/inbox/`.
+
 ### Check kinds
 
 Paths are relative to the agent root (`T/ws/personal/`), so vault notes start
@@ -211,7 +224,7 @@ match the fixture exactly.
 
 ## Known limits
 
-- Only the easy tier and the `prompt` entry are in the catalog. Medium and hard
+- Only the easy and hard tiers and the `prompt` entry are in the catalog. Medium
   tasks, and gws fakes for `requires`, come later.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.
