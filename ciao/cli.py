@@ -1650,6 +1650,19 @@ def setup_workspace(
             scaffold_vault_path / "projects" / "active" / "general" / "general.md",
             "---\ntype: project\ntitle: General\ndescription: Default project.\nstatus: active\ntags: [project]\n---\n\n# General\n",
         )
+        # The memory pass types every new note from VOCABULARY.md's Categories
+        # section, and nothing else writes that file before the first vault
+        # index run. A failure here is reported, never fatal to setup.
+        from ciao.vault_index import write_vocabulary_if_missing
+
+        try:
+            if write_vocabulary_if_missing(scaffold_vault_path):
+                written.append(scaffold_vault_path / "VOCABULARY.md")
+        except Exception as exc:  # noqa: BLE001 — a scaffold step, never fatal
+            print(
+                f"vocabulary not written for {scaffold_vault_path}: {exc}",
+                file=sys.stderr,
+            )
         (scaffold_vault_path / "Logs" / "Chats").mkdir(parents=True, exist_ok=True)
         written.append(scaffold_vault_path)
         # Onboarding an existing folder is the one path that adopts notes this
