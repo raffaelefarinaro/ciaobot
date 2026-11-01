@@ -631,6 +631,28 @@ def test_terminal_path_reprobes_when_the_shell_changes(monkeypatch: pytest.Monke
 
 
 @posix_only
+def test_rc_fingerprint_survives_an_unreadable_paths_d(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sandboxed `ciao gws` cannot read /etc/paths.d, and Python 3.12+
+    Path.is_dir() re-raises that EPERM. The fingerprint must mark the path and
+    carry on, or every login_shell_path() caller crashes (#2448)."""
+    real_is_dir = Path.is_dir
+
+    def is_dir(self: Path) -> bool:
+        if str(self) == "/etc/paths.d":
+            raise PermissionError(1, "Operation not permitted", "/etc/paths.d")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    assert ("/etc/paths.d", None) in os_tool_path._rc_fingerprint()
+
+    _probe_counter(monkeypatch)
+    assert os_tool_path.terminal_path() == "/usr/bin:/opt/homebrew/bin"
+    os_tool_path.clear_terminal_path_cache()
+
+
+@posix_only
 def test_concurrent_probes_share_one_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     """Single-flight: an rc file slower than the poll interval used to make every
     overlapping poll spawn its own login shell."""
