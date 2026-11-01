@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -403,6 +404,33 @@ def test_native_mode_streams_shell_phases_then_hands_over(tmp_path: Path) -> Non
     assert "--workspace" not in argv
     assert not (h["home"] / "uv-tool-calls.log").exists()
     assert not list(tmp_path.glob("ciaobot-engine.*"))
+    _assert_the_real_coordinator_accepts(argv)
+
+
+def _assert_the_real_coordinator_accepts(argv: list[str]) -> None:
+    """The shell's handover argv parses with the coordinator's real CLI.
+
+    The fake coordinator records what the shell sent; this feeds the same argv
+    to ``native_installer.main`` with the install itself stubbed, so a flag the
+    shell sends and the coordinator does not know (or the reverse) fails here
+    rather than on a real Mac.
+    """
+    seen: dict[str, object] = {}
+
+    def fake_run(request: object, artifacts: object, **_: object) -> object:
+        seen["request"] = request
+        seen["artifacts"] = artifacts
+        return SimpleNamespace(exit_code=0)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(native, "run_native_install", fake_run)
+        assert native.main(argv) == 0
+    pairs = dict(zip(argv[1::2], argv[2::2]))
+    artifacts = seen["artifacts"]
+    assert getattr(artifacts, "uv_sha256") == pairs["--uv-sha256"]
+    assert getattr(artifacts, "wheel_sha256") == pairs["--wheel-sha256"]
+    assert str(getattr(artifacts, "host_archive")) == pairs["--host-archive"]
+    assert getattr(seen["request"], "first_seq") == int(pairs["--first-seq"])
 
 
 def test_native_mode_passes_the_workspace_suggestion(tmp_path: Path) -> None:
