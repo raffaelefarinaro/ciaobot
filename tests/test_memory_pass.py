@@ -283,6 +283,28 @@ def test_prompt_routes_categories_to_the_vocabulary_block() -> None:
     assert "instead of inventing a type" in prompt
 
 
+def test_repo_section_asks_only_for_what_the_code_cannot_say() -> None:
+    """Repository facts are filed only when reading the code could not answer them.
+
+    On a real install most repository proposals were dismissed: a version, a
+    single file, a single function's trap, or a status snapshot. The section
+    names those exclusions and makes proposing nothing the normal outcome.
+    """
+    rendered = memory_pass.REPO_SECTION_PROMPT.format(
+        repo="/repos/example",
+        doc="It has no AGENTS.md that could be quoted here.",
+        command=memory_pass.REPO_PROPOSAL_COMMAND,
+    )
+    for phrase in (
+        "Proposing nothing is the normal outcome",
+        "code comment",
+        "project doc",
+    ):
+        assert phrase in rendered, phrase
+    assert "where something lives" not in rendered
+    assert "Never queue a status snapshot" in memory_pass.MEMORY_PASS_PROMPT
+
+
 def test_superseded_guidance_is_rewritten_not_annotated() -> None:
     """A later reader must not be left with two current instructions (#1132).
 

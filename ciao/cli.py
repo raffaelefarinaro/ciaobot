@@ -5093,7 +5093,8 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     into a ``ciao:memory`` / ``ciao:profile`` region is an explicit ``Edit`` of
     the workspace guide first, then this dismiss removes the resolved item
     so the queue stops re-asking. TEXT matches one proposal by a unique
-    substring.
+    substring. A skill-draft row is refused (exit 2): it is settled with
+    ``skill-draft-approve`` / ``skill-draft-reject``, never dismissed here.
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
@@ -5213,6 +5214,17 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        from ciao.upstream_drafts import DRAFT_KIND, decision_text
+
+        if parsed.kind == DRAFT_KIND and parsed.target and parsed.source == decision_text(parsed.target):
+            print(
+                f"this row is skill draft {parsed.target}, not a memory proposal: the queue "
+                f"cannot settle it. Use `ciao skill-draft-approve {parsed.target}` to file or "
+                f"link the issue, or `ciao skill-draft-reject {parsed.target} --reason R` to "
+                "turn it down. Do not re-file it with `ciao skill-draft-add`.",
+                file=sys.stderr,
+            )
+            return 2
         if args.handover:
             refusal = _handover_gate(workspace, name, path, parsed, "dismiss")
             if refusal:

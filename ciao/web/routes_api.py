@@ -9319,9 +9319,16 @@ async def proposals_batch(request: Request) -> JSONResponse:
                 # before the bullet goes. A refusal that could not be written
                 # aborts the batch whole rather than half-resolving it.
                 for row in entry["rows"]:
-                    if row.get("kind") not in {"category", "note_edit"}:
+                    if proposal_service._is_skill_draft_row(config, row):
+                        # Settled first, like the others. The settlement removes the
+                        # bullet itself, so its line is kept out of the rewrite below.
+                        keep_lines.add(int(row["line"]))
+                        refusal = await asyncio.to_thread(
+                            proposal_service._settle_skill_draft, config, row
+                        )
+                    elif row.get("kind") not in {"category", "note_edit"}:
                         continue
-                    if row["kind"] == "category":
+                    elif row["kind"] == "category":
                         refusal = await asyncio.to_thread(
                             proposal_service.decline_category_row, config, row
                         )
@@ -9752,6 +9759,24 @@ async def proposal_action(request: Request) -> JSONResponse:
         )
         if decline_error:
             return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
+
+    if action == "dismiss" and proposal_service._is_skill_draft_row(config, row):
+        # The same rule again: the draft's settlement is on record before anything
+        # else. It removes its own bullet, so the line removal below must not run
+        # for this row; by index it would take a different line.
+        decline_error = await asyncio.to_thread(
+            proposal_service._settle_skill_draft, config, row, reason=reason
+        )
+        if decline_error:
+            return JSONResponse({"error": decline_error, "id": pid}, status_code=409)
+        return JSONResponse(
+            {
+                "ok": True,
+                "result": proposal_actions.ProposalActionResult(
+                    id=pid, action="dismiss", dismissed=True
+                ).as_dict(),
+            }
+        )
 
     if ctx.get("file"):
         # A whole file, not a bullet in a queue: the line-removal path below

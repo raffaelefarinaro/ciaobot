@@ -4616,3 +4616,120 @@ def test_list_with_rehome_rows_scans_the_vault_once(
     assert len(rehome_rows) == 2
     assert all(isinstance(r["rehome"], dict) for r in rehome_rows)
     assert len(calls) == 1
+
+
+def _file_skill_draft(config: CiaoConfig, workspace: str) -> str:
+    """File one synthetic skill draft into ``workspace``; return its id."""
+    from ciao.upstream_drafts import UPSTREAM_ISSUE, file_draft
+
+    draft = file_draft(
+        config,
+        workspace,
+        target=UPSTREAM_ISSUE,
+        skill="web-research",
+        title="Document the offline fallback for a timed-out fetch",
+        change="State that a fetch that times out must be retried once with a longer budget.",
+        body="A search fetch that times out is reported as no results. Retry once first.",
+        repository="example/tools",
+        version="1.4.0",
+        private_evidence="chat-42 turn 7: the fetch reported no results",
+    )
+    return draft.id
+
+
+def test_dismissing_a_skill_draft_row_rejects_the_draft(tmp_path: Path) -> None:
+    from ciao.memory_proposals import read_decisions
+    from ciao.upstream_drafts import DRAFT_REJECTED, read_records
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] An ordinary bullet before the draft.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    draft_id = _file_skill_draft(config, "personal")
+    with queue.open("a", encoding="utf-8") as fh:
+        fh.write("- [memory] An ordinary bullet after the draft.  _(from: Decisions)_\n")
+
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    draft_row = next(r for r in rows if r["kind"] == "review")
+
+    resp = client.post(f"/api/proposals/{draft_row['id']}/dismiss")
+
+    assert resp.status_code == 200
+    draft = next(d for d in read_records(config, "personal") if d.id == draft_id)
+    assert draft.lifecycle == DRAFT_REJECTED
+    assert any(d["text"] == f"skill-draft:{draft_id}" for d in read_decisions(queue))
+    text = queue.read_text(encoding="utf-8")
+    assert f"skill-draft:{draft_id}" not in text
+    assert "An ordinary bullet before the draft." in text
+    assert "An ordinary bullet after the draft." in text
+
+
+def test_dismissing_an_orphan_skill_draft_row_removes_its_bullet(tmp_path: Path) -> None:
+    from ciao import upstream_drafts
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] An ordinary bullet before the orphan.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    draft = upstream_drafts.file_draft(
+        config,
+        "personal",
+        target=upstream_drafts.UPSTREAM_ISSUE,
+        skill="web-research",
+        title="Document the offline fallback for a timed-out fetch",
+        change="State that a fetch that times out must be retried once with a longer budget.",
+        body="A search fetch that times out is reported as no results. Retry once first.",
+        repository="example/tools",
+        version="1.4.0",
+        private_evidence="chat-42 turn 7: the fetch reported no results",
+    )
+    upstream_drafts.sidecar_path(config, "personal", draft.id).unlink()
+
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    orphan_row = next(r for r in rows if r["kind"] == "review")
+
+    resp = client.post(f"/api/proposals/{orphan_row['id']}/dismiss")
+
+    assert resp.status_code == 200
+    text = queue.read_text(encoding="utf-8")
+    assert f"skill-draft:{draft.id}" not in text
+    assert "An ordinary bullet before the orphan." in text
+
+
+def test_batch_dismiss_settles_a_skill_draft_and_keeps_other_rows(tmp_path: Path) -> None:
+    from ciao.upstream_drafts import DRAFT_REJECTED, read_records
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] An ordinary row in the batch.  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    draft_id = _file_skill_draft(config, "personal")
+    with queue.open("a", encoding="utf-8") as fh:
+        fh.write("- [memory] A bullet outside the batch that must survive.  _(from: Decisions)_\n")
+
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    ordinary = next(r for r in rows if r["text"].startswith("An ordinary row in the batch"))
+    draft_row = next(r for r in rows if r["kind"] == "review")
+
+    resp = client.post(
+        "/api/proposals/batch",
+        json={"action": "dismiss", "ids": [ordinary["id"], draft_row["id"]]},
+    )
+
+    assert resp.status_code == 200
+    assert all(r["dismissed"] for r in resp.json()["results"])
+    text = queue.read_text(encoding="utf-8")
+    assert "An ordinary row in the batch" not in text
+    assert f"skill-draft:{draft_id}" not in text
+    assert "A bullet outside the batch that must survive." in text
+    draft = next(d for d in read_records(config, "personal") if d.id == draft_id)
+    assert draft.lifecycle == DRAFT_REJECTED

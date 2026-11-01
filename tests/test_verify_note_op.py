@@ -76,6 +76,14 @@ UNCITED = nv.Evidence(
     quoted="I think she moved teams",
     supports=f"{NOTE}: who Sofia runs",
 ).as_dict()
+# Evidence about something else entirely. Do not put "sofia" or "People" in
+# `supports`: the file stem counts as naming the note.
+ELSEWHERE = nv.Evidence(
+    source_type="url",
+    source_ref="https://example.test/release",
+    quoted="the release shipped",
+    supports="the release train shipped on 2026-03-02",
+).as_dict()
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
@@ -1336,3 +1344,254 @@ def test_a_note_verdict_and_an_entry_verdict_are_not_the_same_read(
     )
     # And the note's verdict re-stamped the frontmatter rather than the bullet.
     assert "updated: " + date.today().isoformat() in note.read_text(encoding="utf-8")
+
+
+# ── Judgements that change nothing, or that no evidence is about ────────────
+#
+# An edit planned against other text, an edit that is the note as it already
+# stands, and an edit no evidence row is about are not proposals: a person has
+# nothing to decide about them. Before this, each one was queued as a
+# `note_edit` the user could only dismiss, and one whole-note `replace` was
+# queued with a `before` that was a fragment of a 15 KB note.
+
+
+def test_an_update_whose_before_is_a_fragment_is_a_conflict_not_a_proposal(
+    tmp_path: Path,
+) -> None:
+    """The reproduction. A whole-note `before` that is a fragment of the note is
+    a plan made against other text: nothing is written, nothing is queued, and no
+    check is recorded, so the next pass re-reads the note and judges it again."""
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    vault = install._vault
+    plane = _plane(install)
+    name = _payload(
+        root,
+        _verdict(
+            vault,
+            note,
+            outcome=nv.UPDATE,
+            before="- [ ] Ship the release train",
+            after="- [x] Ship the release train\n\nupdated: 2026-03-14",
+            evidence=[ELSEWHERE],
+        ),
+    )
+
+    data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+
+    assert data["status"] == nv.CONFLICT
+    assert data["proposal"] is None
+    assert _sidecars(vault) == []
+    assert "[note_edit " not in _queue(vault)
+    assert nv.read_note_checks(vault) == {}
+    assert note.read_bytes() == PLAIN.encode("utf-8")
+
+
+def test_an_update_whose_evidence_never_names_the_note_is_unverified_not_queued(
+    tmp_path: Path,
+) -> None:
+    """Evidence about something else cannot support an edit to this note. That is
+    `unverified` with a cooldown, not a question for a person: there is no
+    decision a reviewer could make about this note from that evidence."""
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    vault = install._vault
+    plane = _plane(install)
+    name = _payload(
+        root,
+        _verdict(
+            vault,
+            note,
+            outcome=nv.UPDATE,
+            before=PLAIN,
+            after=FOURTH,
+            coverage=nv.COVERAGE_COMPLETE,
+            evidence=[ELSEWHERE],
+        ),
+    )
+
+    data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+
+    assert data["status"] == nv.UNVERIFIED
+    assert data["proposal"] is None
+    assert _sidecars(vault) == []
+    assert "[note_edit " not in _queue(vault)
+    check = nv.read_note_checks(vault)[NOTE]
+    assert check.outcome == nv.UNVERIFIED
+    assert check.proposal_id == ""
+    assert "names this note" in data["message"]
+    assert note.read_bytes() == PLAIN.encode("utf-8")
+
+
+def test_a_byte_identical_update_is_unverified_not_queued(tmp_path: Path) -> None:
+    """An `update` whose replacement is the note's own text changes nothing. It is
+    recorded as a check so the note is not re-asked for a month, and it is not a
+    proposal: "accept" would write the bytes that are already there."""
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    vault = install._vault
+    plane = _plane(install)
+    name = _payload(
+        root,
+        _verdict(
+            vault,
+            note,
+            outcome=nv.UPDATE,
+            before=PLAIN,
+            after=PLAIN,
+            evidence=[UNCITED],
+        ),
+    )
+
+    data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+
+    assert data["status"] == nv.UNVERIFIED
+    assert "byte-identical" in data["message"]
+    assert data["proposal"] is None
+    assert _sidecars(vault) == []
+    assert "[note_edit " not in _queue(vault)
+    assert nv.read_note_checks(vault)[NOTE].outcome == nv.UNVERIFIED
+    assert note.read_bytes() == PLAIN.encode("utf-8")
+
+
+def test_a_byte_identical_entry_update_is_unverified_not_queued(tmp_path: Path) -> None:
+    """The same rule one level in: an entry replaced by its own text is a no-op
+    and is recorded as `unverified`, not filed as a replace for a person."""
+    from ciao import entry_verification as ev
+
+    install, root, note, entry = _entry_install(tmp_path)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+
+    body = _verify(
+        plane,
+        root,
+        _entry_verdict(
+            note,
+            entry,
+            outcome=nv.UPDATE,
+            before=entry.text,
+            after=entry.text,
+            evidence=[CITATION, UNCITED],
+        ),
+    )
+
+    assert body["status"] == nv.UNVERIFIED
+    assert body["proposal"] is None
+    assert _sidecars(vault) == []
+    assert ev.read_entry_checks(vault)[entry.identity].outcome == nv.UNVERIFIED
+    assert note.read_text(encoding="utf-8") == ENTRY_PLAIN
+
+
+def test_an_entry_update_whose_evidence_never_names_the_note_is_unverified_not_queued(
+    tmp_path: Path,
+) -> None:
+    """Evidence about another subject cannot support a rewrite of this entry, so
+    the entry is `unverified` with its cooldown rather than queued."""
+    from ciao import entry_verification as ev
+
+    install, root, note, entry = _entry_install(tmp_path)
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+
+    body = _verify(
+        plane,
+        root,
+        _entry_verdict(
+            note,
+            entry,
+            outcome=nv.UPDATE,
+            before=entry.text,
+            after="- Sofia runs the platform team [verified: 2024-01-05]",
+            evidence=[ELSEWHERE],
+        ),
+    )
+
+    assert body["status"] == nv.UNVERIFIED
+    assert body["proposal"] is None
+    assert _sidecars(vault) == []
+    assert "[note_edit " not in _queue(vault)
+    row = ev.read_entry_checks(vault)[entry.identity]
+    assert row.outcome == nv.UNVERIFIED
+    assert row.proposal_id == ""
+    assert "names this note" in body["message"]
+    assert note.read_text(encoding="utf-8") == ENTRY_PLAIN
+
+
+def test_a_cited_unstamped_entry_is_stamped_not_queued(tmp_path: Path) -> None:
+    """Guard for adc9b6f4: a cited `still_valid` on an entry with no stamp is
+    stamped automatically. It was once queued as a `restamp_entry` a person could
+    only dismiss."""
+    install, root, note, _entry = _entry_install(tmp_path)
+    unstamped = ne.parse_note_entries(
+        ENTRY_PLAIN, note_path=ENTRY_NOTE, workspace="personal"
+    ).entries[1]
+    vault = install.workspace_vault_root("personal")
+    plane = _plane(install)
+
+    body = _verify(plane, root, _entry_verdict(note, unstamped, outcome=nv.STILL_VALID))
+
+    assert body["status"] == nv.APPLIED
+    assert body["proposal"] is None
+    assert _sidecars(vault) == []
+    assert f"[verified: {date.today().isoformat()}]" in note.read_text(encoding="utf-8")
+
+
+def test_an_update_with_no_evidence_at_all_still_goes_to_review(tmp_path: Path) -> None:
+    """No evidence is not evidence about another note. An `update` with nothing
+    behind it is the uncited-edit case: a person decides, nothing is written."""
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    vault = install._vault
+    plane = _plane(install)
+    name = _payload(
+        root,
+        _verdict(
+            vault,
+            note,
+            outcome=nv.UPDATE,
+            before=PLAIN,
+            after=FOURTH,
+            evidence=[],
+        ),
+    )
+
+    data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+
+    assert data["status"] == nv.NEEDS_REVIEW
+    assert data["proposal"] is not None
+    assert len(_sidecars(vault)) == 1
+    assert _queue(vault).count("- [note_edit ") == 1
+    assert note.read_bytes() == PLAIN.encode("utf-8")
+
+
+def test_an_entry_update_with_no_evidence_at_all_still_goes_to_review(
+    tmp_path: Path,
+) -> None:
+    """The entry form of the same rule: no evidence at all is a person's decision,
+    filed as an entry replacement, not an `unverified` cooldown."""
+    install, root, note, entry = _entry_install(tmp_path)
+    plane = _plane(install)
+    replacement = "- Sofia runs the platform team [verified: 2024-01-05]"
+
+    body = _verify(
+        plane,
+        root,
+        _entry_verdict(
+            note,
+            entry,
+            outcome=nv.UPDATE,
+            before=entry.text,
+            after=replacement,
+            evidence=[],
+        ),
+    )
+
+    assert body["status"] == nv.NEEDS_REVIEW
+    assert body["proposal"] is not None
+    assert body["proposal"]["operation"] == nep.REPLACE_ENTRY
+    assert note.read_text(encoding="utf-8") == ENTRY_PLAIN
