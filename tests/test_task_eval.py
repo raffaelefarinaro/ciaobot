@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from ciao import agent_paths
 from ciao import behavioral_eval
 from ciao import cli
 from ciao import task_eval as te
@@ -380,10 +381,21 @@ def test_isolated_engine_env_strips_live_vars(tmp_path: Path) -> None:
 class FakeSession:
     """An ``EngineSession`` stand-in: no process, no HTTP, canned answers."""
 
-    def __init__(self, root: Path, *, answer: str = "I saw the insurance task.") -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        answer: str = "I saw the insurance task.",
+        provider_errors: int = 0,
+        provider_error: str | None = None,
+        settled: bool = True,
+    ) -> None:
         self.agent_root = root
+        self.settled = settled
         self.tasks: list[dict[str, Any]] = []
         self.answer = answer
+        self.provider_errors = provider_errors
+        self.provider_error = provider_error
         self.closed = False
         self.stopped: list[str] = []
 
@@ -402,7 +414,7 @@ class FakeSession:
         raise AssertionError("prompt entry must not delegate")
 
     def wait_settled(self, timeout_s: float) -> bool:
-        return True
+        return self.settled
 
     def stop_chat(self, chat_id: str) -> None:
         self.stopped.append(chat_id)
@@ -419,6 +431,8 @@ class FakeSession:
             "ciao_errors": 0,
             "cost_usd": 0.5,
             "chat_ids": ["chat-1"],
+            "provider_errors": self.provider_errors,
+            "provider_error": self.provider_error,
         }
 
     def close(self) -> None:
@@ -529,6 +543,77 @@ def test_run_task_error_never_raises(tmp_path: Path, stable_provenance: None) ->
     assert "boom" in record["error"]
 
 
+def test_run_task_provider_error_with_failed_checks_is_error(
+    tmp_path: Path, stable_provenance: None
+) -> None:
+    session = FakeSession(
+        tmp_path,
+        provider_errors=1,
+        provider_error="weekly usage limit reached",
+    )
+
+    record = te.run_task(
+        _insurance_task(checks=[{"kind": "answer_contains", "any": ["zzz"]}]),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "error"
+    assert record["error"].startswith("provider error:")
+    assert "weekly usage limit reached" in record["error"]
+    assert record["provider_errors"] == 1
+
+
+def test_run_task_provider_error_on_settle_timeout_with_passing_checks_is_error(
+    tmp_path: Path, stable_provenance: None
+) -> None:
+    session = FakeSession(
+        tmp_path,
+        provider_errors=1,
+        provider_error="weekly usage limit reached",
+        settled=False,
+    )
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "error"
+    assert record["error"].startswith("provider error:")
+    assert record["timed_out"] is True
+
+
+def test_run_task_provider_error_with_passing_checks_stays_passed(
+    tmp_path: Path, stable_provenance: None
+) -> None:
+    session = FakeSession(
+        tmp_path,
+        provider_errors=1,
+        provider_error="transient overload",
+    )
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "passed"
+    assert record["error"] is None
+    assert record["provider_errors"] == 1
+
+
 def test_usage_sums_all_transcripts(tmp_path: Path) -> None:
     runtime = tmp_path / ".runtime"
     turns_a = [
@@ -569,6 +654,22 @@ def test_usage_sums_all_transcripts(tmp_path: Path) -> None:
     assert usage["ciao_errors"] == 1
     assert usage["cost_usd"] == 1.25
     assert usage["chat_ids"] == ["chat-a", "chat-b"]
+
+
+def test_collect_usage_counts_provider_error_turns(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    folder = runtime / "transcripts" / "chat-a"
+    folder.mkdir(parents=True)
+    turns = [
+        {"response": "weekly usage limit reached", "usage": {}, "is_error": True},
+        {"response": "normal answer", "usage": {"input_tokens": "2"}, "tool_calls": []},
+    ]
+    (folder / "ollama.json").write_text(json.dumps({"turns": turns}), encoding="utf-8")
+
+    usage = te.collect_usage(runtime)
+
+    assert usage["provider_errors"] == 1
+    assert usage["provider_error"].startswith("weekly usage limit")
 
 
 def _row(
@@ -623,6 +724,106 @@ def test_summarize_and_compare() -> None:
     table = te.render_summary(summary)
     assert "| E2-recall-guest-count" in table
     assert "E2-recall-guest-count" in te.render_comparison(comparison)
+
+
+def test_summarize_excludes_errors_from_pass_rate() -> None:
+    rows = [
+        _row(status="passed"),
+        _row(status="error"),
+    ]
+
+    group = te.summarize(rows)[0]
+
+    assert group["pass_rate"] == 1.0
+    assert group["errors"] == 1
+
+
+def test_summarize_excludes_error_rows_from_medians() -> None:
+    blocked = _row(status="error", context_total=0, output=0, wall_s=0.5, cost_usd=0.0)
+    rows = [
+        _row(status="passed", context_total=100, output=10, wall_s=10.0, cost_usd=0.1),
+        _row(status="failed", context_total=300, output=30, wall_s=30.0, cost_usd=0.3),
+        blocked,
+    ]
+
+    group = te.summarize(rows)[0]
+
+    assert group["median_context_total"] == 200
+    assert group["median_output"] == 20
+    assert group["median_wall_s"] == 20.0
+    assert group["median_cost_usd"] == pytest.approx(0.2)
+
+
+def _claude_session_folder(home: Path, agent_root: Path) -> Path:
+    folder = agent_paths.claude_projects_dir(agent_root)
+    folder = home / ".claude" / "projects" / folder.name
+    folder.mkdir(parents=True)
+    (folder / "x.jsonl").write_text("{}\n", encoding="utf-8")
+    return folder
+
+
+def _isolated_engine_at(workdir: Path, *, keep_workdir: bool) -> te.IsolatedEngine:
+    workdir.mkdir(parents=True)
+    engine = te.IsolatedEngine(workdir, keep_workdir=keep_workdir)
+    engine.agent_root.mkdir(parents=True)
+    return engine
+
+
+def test_close_removes_claude_project_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    engine = _isolated_engine_at(tmp_path / "ciao-task-eval-run", keep_workdir=False)
+    folder = _claude_session_folder(home, engine.agent_root)
+
+    engine.close()
+
+    assert not folder.exists()
+    assert not engine.workdir.exists()
+
+
+def test_close_keeps_claude_project_folder_with_keep_workdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    engine = _isolated_engine_at(tmp_path / "ciao-task-eval-run", keep_workdir=True)
+    folder = _claude_session_folder(home, engine.agent_root)
+
+    engine.close()
+
+    assert folder.is_dir()
+    assert engine.workdir.is_dir()
+
+
+def test_claude_project_cleanup_refuses_non_eval_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    real_root = tmp_path / "my-real-project" / "personal"
+    real_root.mkdir(parents=True)
+    folder = _claude_session_folder(home, real_root)
+
+    assert te._claude_project_dirs(real_root) == []
+    assert folder.is_dir()
+
+
+def test_claude_project_dirs_includes_resolved_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    real = tmp_path / "ciao-task-eval-real"
+    (real / "ws" / "personal").mkdir(parents=True)
+    link = tmp_path / "ciao-task-eval-link"
+    link.symlink_to(real, target_is_directory=True)
+    unresolved_root = link / "ws" / "personal"
+    _claude_session_folder(home, unresolved_root)
+    _claude_session_folder(home, unresolved_root.resolve())
+
+    found = te._claude_project_dirs(unresolved_root)
+
+    assert len(found) == 2
 
 
 def test_read_jsonl_loads_every_row(tmp_path: Path) -> None:

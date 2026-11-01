@@ -440,6 +440,8 @@ class _FakeGwsSession:
             "ciao_errors": 0,
             "cost_usd": None,
             "chat_ids": ["chat-1"],
+            "provider_errors": 0,
+            "provider_error": None,
         }
 
     def close(self) -> None:
