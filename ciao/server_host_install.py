@@ -201,9 +201,10 @@ TARGET_UNSAFE = "target_unsafe"
 #: choose.
 POLICY_REFUSED = "policy_refused"
 #: The kernel's executable identity could not be read (a missing process, a
-#: truncated path, a platform without libproc) or did not name the installed
-#: host. Both fail the candidate probe; neither is ever a warning when a signed
-#: host may replace the running one.
+#: truncated path, a libproc that will not load, a pid outside the 32-bit range)
+#: or did not name the installed host. A non-Darwin platform is
+#: ``UNSUPPORTED_PLATFORM`` instead. Both fail the candidate probe; neither is
+#: ever a warning when a signed host may replace the running one.
 EXECUTABLE_MISMATCH = "executable_mismatch"
 EXECUTABLE_UNREADABLE = "executable_unreadable"
 #: A legacy host can only become the signed host through the recoverable
@@ -772,6 +773,23 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+#: The largest pid a C ``pid_t`` holds; ``proc_pidpath`` takes it as a C ``int``.
+_MAX_KERNEL_PID = 2**31 - 1
+
+
+def _require_kernel_pid(pid: object) -> None:
+    """Refuse anything that is not a 32-bit positive ``int`` before any ctypes call.
+
+    ``bool`` is an ``int`` subclass and is refused by exact type. The message is
+    fixed: the value is never interpolated into a refusal line.
+    """
+    if type(pid) is not int or not 0 < pid <= _MAX_KERNEL_PID:
+        raise ServerHostInstallError(
+            "process id is not a positive 32-bit integer",
+            code=EXECUTABLE_UNREADABLE,
+        )
+
+
 def _kernel_executable_path(pid: int) -> str:
     """The executable path the kernel holds for ``pid``, via Darwin libproc.
 
@@ -786,15 +804,11 @@ def _kernel_executable_path(pid: int) -> str:
     are refusals. Nothing here is best effort: the caller is deciding whether a
     signed host may replace the one on disk.
     """
+    _require_kernel_pid(pid)
     if sys.platform != "darwin":
         raise ServerHostInstallError(
             "the kernel executable identity is only available on macOS",
             code=UNSUPPORTED_PLATFORM,
-        )
-    if type(pid) is not int or pid <= 0:
-        raise ServerHostInstallError(
-            f"process id {pid!r} is not a positive integer",
-            code=EXECUTABLE_UNREADABLE,
         )
     try:
         libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
@@ -842,9 +856,13 @@ def _kernel_executable_path(pid: int) -> str:
 def verify_process_executable(pid: int, expected: Path) -> str:
     """Prove ``pid`` runs the kernel-named ``expected`` executable.
 
-    Both names are canonicalised and must currently resolve to the same regular
-    file. A pid the kernel cannot name, a path that no longer resolves, a
-    non-regular target and any other executable are refusals. ``proc_pidpath``
+    The kernel's path and ``expected``, each canonicalised, must be the same
+    canonical path, and that path must be a regular file. ``expected`` must
+    already be canonical: a path containing a symlink is refused rather than
+    resolved. This is path equality, not byte or inode identity after an in-place
+    replacement. A pid outside the 32-bit range, a pid the kernel cannot name, a
+    path that no longer resolves, a non-regular target and any other executable
+    are refusals. ``proc_pidpath``
     reports a path, not a descriptor for the process's executable vnode: these
     path-based stat calls do not prove that a running process uses the current
     file's inode or bytes. The signed on-disk bundle is verified separately by
@@ -857,6 +875,7 @@ def verify_process_executable(pid: int, expected: Path) -> str:
     would still pass. The listener/lock/ancestry/liveness checks above narrow that
     window but cannot eliminate it without a kernel start-time token.
     """
+    _require_kernel_pid(pid)
     actual = _kernel_executable_path(pid)
     try:
         actual_path = os.path.realpath(actual, strict=True)
@@ -866,6 +885,11 @@ def verify_process_executable(pid: int, expected: Path) -> str:
             f"the executable named for pid {pid} cannot be resolved: {exc}",
             code=EXECUTABLE_UNREADABLE,
         ) from exc
+    if os.path.abspath(expected) != expected_path:
+        raise ServerHostInstallError(
+            "the installed host path is not canonical (it contains a symlink)",
+            code=EXECUTABLE_MISMATCH,
+        )
     try:
         actual_info = os.stat(actual_path)
         expected_info = os.stat(expected_path)
@@ -881,10 +905,7 @@ def verify_process_executable(pid: int, expected: Path) -> str:
             f"the executable named for pid {pid} is not a regular file",
             code=EXECUTABLE_UNREADABLE,
         )
-    if actual_path != expected_path or (
-        actual_info.st_dev,
-        actual_info.st_ino,
-    ) != (expected_info.st_dev, expected_info.st_ino):
+    if actual_path != expected_path:
         raise ServerHostInstallError(
             f"pid {pid} runs {actual_path}, not the installed host at {expected_path}",
             code=EXECUTABLE_MISMATCH,
@@ -3161,7 +3182,17 @@ def main(argv: list[str] | None = None) -> int:
             rollback_host_upgrade(operation=args.operation, owner_pid=args.owner_pid)
             return 0
         if args.command == "executable":
-            print(verify_process_executable(args.pid, args.expect))
+            # The path is read as surrogate escapes; a name that is not UTF-8 cannot
+            # be written as text. That is an unreadable identity, refused with
+            # nothing on stdout, not a raw codec error.
+            try:
+                identity = verify_process_executable(args.pid, args.expect)
+                print(identity)
+            except UnicodeError as exc:
+                raise ServerHostInstallError(
+                    "the kernel executable path is not printable text",
+                    code=EXECUTABLE_UNREADABLE,
+                ) from exc
             return 0
         raw = args.manifest.read_bytes()
         signature_text = args.signature.read_text(encoding="utf-8")

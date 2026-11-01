@@ -11,6 +11,7 @@ here touches the real ``~/Applications``, ``launchctl``, a running engine or TCC
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import importlib.util
@@ -2171,8 +2172,10 @@ def _spawn_with_spoofed_argv0(spoof: Path) -> subprocess.Popen[bytes]:
 def test_kernel_executable_identity_ignores_a_spoofed_argv0(tmp_path: Path) -> None:
     # The process is really this interpreter, but its argv[0] is a different file
     # that exists. `proc_pidpath` must name the interpreter; the expected host is
-    # compared as the same regular file object, and the spoofed name is refused.
-    expected = Path(sys.executable)
+    # compared as the same canonical path, and the spoofed name is refused. The
+    # expected path is canonical: a venv's `sys.executable` is a symlink, which
+    # the installer refuses as an expected path.
+    expected = Path(os.path.realpath(sys.executable))
     spoof = tmp_path / "Ciaobot Server"
     spoof.write_text("", encoding="utf-8")
     child = _spawn_with_spoofed_argv0(spoof)
@@ -2189,6 +2192,7 @@ def test_kernel_executable_identity_ignores_a_spoofed_argv0(tmp_path: Path) -> N
                     raise
                 time.sleep(0.05)
         assert Path(proven) == Path(os.path.realpath(expected, strict=True))
+        assert proven != str(spoof)
         with pytest.raises(server_host_install.ServerHostInstallError) as caught:
             server_host_install.verify_process_executable(child.pid, spoof)
         assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
@@ -2203,12 +2207,13 @@ def test_kernel_executable_identity_ignores_a_spoofed_argv0(tmp_path: Path) -> N
 def test_kernel_executable_identity_fails_closed_for_a_missing_pid() -> None:
     # A pid the kernel cannot name is not a pass: a pid outside the kernel's
     # range and a non-positive id may not authorize the host replacement.
+    canonical = Path(os.path.realpath(sys.executable))
     with pytest.raises(server_host_install.ServerHostInstallError) as caught:
-        server_host_install.verify_process_executable(2**31 - 1, Path(sys.executable))
+        server_host_install.verify_process_executable(2**31 - 1, canonical)
     assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
 
     with pytest.raises(server_host_install.ServerHostInstallError) as caught:
-        server_host_install.verify_process_executable(0, Path(sys.executable))
+        server_host_install.verify_process_executable(0, canonical)
     assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
 
 
@@ -2232,3 +2237,264 @@ def test_executable_cli_prints_nothing_on_stdout_when_it_refuses(
     assert captured.out == ""
     assert len(captured.err.splitlines()) == 1
     assert captured.err.startswith("Error: ")
+
+
+# --- executable identity, platform-independent --------------------------------
+#
+# These run on every platform: `sys.platform` is patched to "darwin" where the
+# kernel path is read, and `ctypes.CDLL` is replaced by a fake libproc whose
+# `proc_pidpath` writes a chosen payload into the caller's buffer and returns a
+# chosen count. Nothing here loads the real libproc or needs a macOS host.
+
+
+class _FakeProcPidpath:
+    """A `proc_pidpath` stand-in: writes ``payload`` and returns ``written``."""
+
+    def __init__(self, payload: bytes, written: int) -> None:
+        self.payload = payload
+        self.written = written
+        self.argtypes: Any = None
+        self.restype: Any = None
+
+    def __call__(self, pid: int, buffer: Any, size: int) -> int:
+        data = self.payload[:size]
+        ctypes.memmove(buffer, data, len(data))
+        return self.written
+
+
+class _FakeLibproc:
+    def __init__(self, proc_pidpath: _FakeProcPidpath) -> None:
+        self.proc_pidpath = proc_pidpath
+
+
+def _kernel_reports(
+    monkeypatch: pytest.MonkeyPatch, payload: bytes, written: int | None = None
+) -> None:
+    """Make the kernel-path read see a libproc that returns ``payload``."""
+    proc = _FakeProcPidpath(payload, len(payload) if written is None else written)
+    libproc = _FakeLibproc(proc)
+    monkeypatch.setattr(
+        server_host_install.ctypes, "CDLL", lambda *args, **kwargs: libproc
+    )
+
+
+def _canonical_file(directory: Path, name: str) -> Path:
+    path = directory / name
+    path.write_text("", encoding="utf-8")
+    return Path(os.path.realpath(path))
+
+
+@pytest.mark.parametrize("platform_name", ["darwin", "linux", "win32"])
+@pytest.mark.parametrize(
+    "bad_pid", [2**32 + os.getpid(), 0, -1, True], ids=["overflow", "zero", "neg", "bool"]
+)
+def test_a_pid_outside_the_32_bit_range_is_refused_on_every_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform_name: str,
+    bad_pid: Any,
+) -> None:
+    # The range check runs before the platform check, so a non-darwin host with a
+    # hostile pid is refused for the pid, not reported as merely unsupported.
+    monkeypatch.setattr(sys, "platform", platform_name)
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(bad_pid, expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+    assert str(caught.value) == "process id is not a positive 32-bit integer"
+
+
+@pytest.mark.parametrize(
+    ("payload_size", "written_size"),
+    [
+        (server_host_install._KERNEL_PATH_LIMIT - 1, server_host_install._KERNEL_PATH_LIMIT - 1),
+        (server_host_install._KERNEL_PATH_LIMIT, server_host_install._KERNEL_PATH_LIMIT),
+    ],
+    ids=["limit_minus_one", "limit"],
+)
+def test_kernel_path_that_fills_the_buffer_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    payload_size: int,
+    written_size: int,
+) -> None:
+    # proc_pidpath truncates into the fixed buffer; a path that reaches the limit
+    # may be a prefix of the real one, so it is never read as complete.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    _kernel_reports(monkeypatch, b"/" * payload_size, written=written_size)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+@pytest.mark.parametrize(
+    ("payload", "written"),
+    [
+        (b"/a\n/b", 5),
+        (b"/a\x7f", 3),
+        (b"/a\x00/b", 5),
+        (b"/a/b", 2),
+    ],
+    ids=["newline", "del", "embedded_nul", "written_differs_from_length"],
+)
+def test_kernel_path_with_control_byte_or_embedded_nul_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    payload: bytes,
+    written: int,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    _kernel_reports(monkeypatch, payload, written=written)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_kernel_path_zero_return_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    _kernel_reports(monkeypatch, b"", written=0)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_unloadable_libproc_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+
+    def _missing(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("libproc is not installed")
+
+    monkeypatch.setattr(server_host_install.ctypes, "CDLL", _missing)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_non_darwin_platform_is_unsupported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.UNSUPPORTED_PLATFORM
+
+
+@pytest.mark.parametrize("kind", ["directory", "missing"])
+def test_directory_or_missing_expected_path_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    kernel_file = _canonical_file(tmp_path, "running")
+    _kernel_reports(monkeypatch, str(kernel_file).encode())
+    if kind == "directory":
+        expected = Path(os.path.realpath(tmp_path / "bundle"))
+        expected.mkdir()
+    else:
+        expected = Path(os.path.realpath(tmp_path)) / "missing"
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_different_file_at_a_different_path_is_a_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    other = _canonical_file(tmp_path, "other")
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(other)
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), host)
+    assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_a_symlinked_expected_path_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The expected path must already be canonical. A symlink that resolves to the
+    # running file is still refused: the installer names the path it trusts.
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    link = tmp_path / "Ciaobot Server link"
+    os.symlink(host, link)
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(host)
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), link)
+    assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
+    assert str(caught.value) == (
+        "the installed host path is not canonical (it contains a symlink)"
+    )
+
+
+def test_executable_cli_prints_only_the_canonical_path_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(host)
+    )
+    status = server_host_install.main(
+        ["executable", "--pid", str(os.getpid()), "--expect", str(host)]
+    )
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == f"{host}\n"
+
+
+def test_executable_cli_refuses_a_mismatch_with_empty_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    other = _canonical_file(tmp_path, "other")
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(other)
+    )
+    status = server_host_install.main(
+        ["executable", "--pid", str(os.getpid()), "--expect", str(host)]
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("Error: ")
+
+
+def test_executable_cli_refuses_a_path_that_is_not_printable_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A non-UTF-8 path name is read as surrogate escapes; it cannot be written as
+    # text. That is a clean unreadable refusal with nothing on stdout, not a raw
+    # codec error.
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    monkeypatch.setattr(
+        server_host_install,
+        "verify_process_executable",
+        lambda pid, expected: "/tmp/caf\udce9",
+    )
+    status = server_host_install.main(
+        ["executable", "--pid", str(os.getpid()), "--expect", str(host)]
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "Error: the kernel executable path is not printable text\n"
+    )

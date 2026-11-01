@@ -3257,6 +3257,26 @@ def test_quiescence_fails_closed_and_retains_the_recovery_material(
     assert stat.S_IMODE((before / "record").stat().st_mode) == 0o600
 
 
+def _assert_identity_probes_ask_launchd_job(harness: dict[str, Any]) -> None:
+    """Every kernel identity probe asked about launchd's job pid and the host.
+
+    The health gate retries the candidate probe until its deadline, so the log
+    holds one line per attempt, not one line per run. What is asserted is that
+    each attempt is the same question: the listener is pid 5151 in this harness
+    and launchd's job is 4343, so every probe must carry 4343 and the expected
+    installed host, and at least one must have been asked.
+    """
+    identity_calls = _log(harness, "native-host-executable.log").splitlines()
+    assert identity_calls
+    expect = (
+        f"--expect {harness['home']}/Applications/Ciaobot Server.app"
+        "/Contents/MacOS/Ciaobot Server"
+    )
+    for call in identity_calls:
+        assert "--pid 4343" in call
+        assert expect in call
+
+
 def _assert_no_commit_and_legacy_pair(
     harness: dict[str, Any], result: subprocess.CompletedProcess[str], *, step: str
 ) -> None:
@@ -3291,6 +3311,7 @@ def test_a_wrong_boundary_executable_does_not_commit(tmp_path: Path) -> None:
     result = _run_installer(harness, "--version", VERSION)
 
     _assert_no_commit_and_legacy_pair(harness, result, step="executable")
+    _assert_identity_probes_ask_launchd_job(harness)
 
 
 @runs_the_sh_installer
@@ -3311,6 +3332,7 @@ def test_an_unreadable_kernel_executable_probe_does_not_commit(
     _assert_no_commit_and_legacy_pair(
         harness, result, step="kernel executable identity"
     )
+    _assert_identity_probes_ask_launchd_job(harness)
 
 
 def test_the_engine_runtime_lock_is_created_private_under_a_typical_umask(
@@ -3377,6 +3399,10 @@ def test_many_mapped_executable_segments_do_not_hide_a_correct_host(
     ]
     assert lsof_calls
     assert not any("-d txt" in line for line in lsof_calls)
+    # The listener query is still asked: plain `-t` on the TCP listen socket.
+    assert any(
+        "-iTCP" in line or "-t" in line.split() for line in lsof_calls
+    )
     identity_calls = _log(harness, "native-host-executable.log").splitlines()
     assert len(identity_calls) == 1
     assert "--pid 4343" in identity_calls[0]
