@@ -166,6 +166,35 @@ def _reset_exported_dotenv() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _restore_ciao_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put ``CIAO_*`` / ``PWA_*`` back as the test found them.
+
+    ``/api/setup/finish`` writes ``CIAO_WORKSPACE``, ``PWA_PORT`` and
+    ``PWA_AUTH_TOKEN`` straight into ``os.environ`` on purpose (a foreground
+    ``ciao run`` re-execs with its environment, see ``_publish_setup_environment``),
+    so a test that drives it leaks them to every later test in the process.
+    ``monkeypatch`` cannot undo a key it never saw set. A later test's implicit
+    workspace resolution then skipped install discovery, because a workspace was
+    already named, and read an unregistered root: ``memory-proposals`` listed
+    nothing, but only in the serial full run, where ``test_installer_handoff``
+    precedes ``test_memory_proposal_cli``.
+
+    Depends on ``monkeypatch`` so it is torn down before it: both then restore
+    to the same pre-test state.
+    """
+    before = {k: v for k, v in os.environ.items() if k.startswith(INHERITED_ENV_PREFIXES)}
+    yield
+    # Only drop what the test added and revert what it rewrote. A key present
+    # before and gone now was removed by the test's own ``monkeypatch.undo()``
+    # (or ``delenv``) and is not put back.
+    for key in [k for k in os.environ if k.startswith(INHERITED_ENV_PREFIXES)]:
+        if key not in before:
+            del os.environ[key]
+        elif os.environ[key] != before[key]:
+            os.environ[key] = before[key]
+
+
+@pytest.fixture(autouse=True)
 def _reset_claude_session_scan_cache() -> None:
     """Drop the cross-test ``~/.claude/projects`` listing cache.
 
