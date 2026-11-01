@@ -52,6 +52,11 @@ debugging, and the path is printed to stderr.
 `--model` is required and never defaulted. `--jobs` boots that many engines
 at once; each is a full engine, so keep it low.
 
+`--mode` sets the permission mode the run's chats start in: `manual`, `auto` or
+`bypass`, the same vocabulary as the Settings default. Without it, the provider
+default applies (see [Permission mode](#permission-mode)). The mode is recorded
+on every row.
+
 ## How a run works
 
 1. A temporary directory `T` is made. `setup_workspace(T/ws, ...)` runs with
@@ -66,6 +71,8 @@ at once; each is a full engine, so keep it low.
    over `T/ws/personal/`. The workspace defaults to the requested provider, and
    its `personal` registry entry pins the requested model for that provider
    (`provider_overrides`), so delegated chats run on the requested pair too.
+   `ws/.runtime/app_settings.json` gets `provider_default_modes: {provider: mode}`,
+   so chats (delegated ones too) start in the run's permission mode.
    Steps 1 and 2 are `prepare_workspace`, which runs without booting an engine.
 3. The engine is started with `ciao run` (cwd `T/ws`, the same environment
    scrub), and the harness waits until `/api/status` answers 401. It then
@@ -98,22 +105,42 @@ Each run is one JSON object per line:
 | `schema` | `ciao-task-eval/1` |
 | `label`, `task_id`, `tier`, `category`, `repeat` | the run's identity |
 | `provider`, `model` | what was requested |
+| `mode` | the permission mode the chats started in: the `--mode` given, else the provider default. Set on skipped and error rows too |
 | `code_revision` | short HEAD of the checkout, plus `-dirty` when the tree is not clean |
 | `provider_version` | first line of `<provider> --version` |
 | `catalog_sha256` | hash over the task catalog bytes |
 | `status` | `passed`, `failed`, `skipped` or `error` |
 | `answer` | the last 2000 characters of the answer text (all turns of all chats, most recent last) |
 | `checks` | per check: `kind`, `ok`, `detail` |
-| `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run |
+| `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run. OpenCode's camelCase usage keys (`inputTokens` and so on) are read too; a field present in both spellings counts the snake_case one |
 | `tool_calls`, `tool_errors` | from the turns' tool-call lists |
 | `ciao_calls`, `ciao_errors` | from `mcp_tool_calls.jsonl`; an error is any status other than `ok` |
 | `cost_usd` | the engine's recorded cost, or null |
 | `wall_s`, `timed_out`, `chat_ids` | timing and the chats measured |
 
-`summarize` groups rows by label, provider, model, code revision and task. Its
-pass rate and medians exclude skipped runs. `compare` joins two reports by task
-id and reports the pass-rate difference and the percentage change in context,
-wall time and cost.
+`summarize` groups rows by label, provider, model, mode, code revision and task,
+so two runs that differ only in mode appear as separate rows (`Mode` column).
+Reports written before the `mode` field group under `-`. Its pass rate and
+medians exclude skipped runs. `compare` joins two reports by task id and reports
+the pass-rate difference and the percentage change in context, wall time and
+cost; its table shows each side's mode.
+
+## Permission mode
+
+The chats of a run start in a permission mode, and the default depends on the
+provider:
+
+| Provider | Default | Why |
+| --- | --- | --- |
+| `claude` | `auto` | Claude's `auto` is classifier-backed and lets the eval's tool calls through. |
+| `opencode` | `bypass` | OpenCode's `auto` keeps every shell call behind an approval card (`_permissive_auto_rules` in `ciao/providers/opencode.py`). Nobody answers that card in an eval, so the turn hangs to its timeout with zero usage. The default matches a typical operator install, which pins `opencode: bypass`. |
+
+The defaults live in `DEFAULT_MODES` in `ciao/task_eval.py`. An explicit
+`--mode manual|auto|bypass` replaces the default for both providers' runs. The
+mode is written into the throwaway workspace's `app_settings.json`, so it is the
+same setting Settings writes, and it is applied to delegated chats as well.
+Pick `--mode` deliberately when you compare runs: a mode difference changes what
+the agent may do without asking, so it can change the score as well as the cost.
 
 ## The catalog
 
@@ -321,3 +348,8 @@ match the fixture exactly.
 - `--jobs` above 1 has a small port race: each engine's port is probed free when its harness object is created and bound only when the engine starts, so two concurrent boots can collide. Use `--jobs 1` for a run whose numbers you will compare.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.
+- The engine runs with the real `HOME`, so OpenCode also loads the global skills
+  from `~/.agents/skills` and `~/.config/opencode`, not only the workspace's own.
+  A run therefore sees the operator's global skills, which the isolation
+  guarantees above do not cover. Treat results as fidelity to a real install, not
+  to a clean room.
