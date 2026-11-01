@@ -6889,6 +6889,7 @@ def test_uv_bootstrap_digest_table_matches_reviewed_01217_assets() -> None:
     assert "uv-installer" not in SCRIPT_TEXT
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(
     ("arch", "triple"),
@@ -6927,6 +6928,7 @@ def test_uv_bootstrap_verifies_before_execution(
     _assert_only_uv_extracted(paths, triple)
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_uv_bootstrap_digest_does_not_trust_a_path_awk(tmp_path: Path) -> None:
     """A lying `awk` earlier on PATH cannot substitute the reviewed digest.
@@ -6953,6 +6955,7 @@ def test_uv_bootstrap_digest_does_not_trust_a_path_awk(tmp_path: Path) -> None:
     _assert_nothing_executed(paths)
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_uv_bootstrap_leaves_an_existing_uv_untouched(tmp_path: Path) -> None:
     """A native mode can verify uv without replacing the one this Mac has."""
@@ -6984,6 +6987,7 @@ def test_uv_bootstrap_leaves_an_existing_uv_untouched(tmp_path: Path) -> None:
     assert f"verified_uv={stage / 'uv'}" in result.stdout
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_legacy_missing_uv_publishes_the_verified_copy(tmp_path: Path) -> None:
     """Only the legacy branch writes ~/.local/bin/uv, from the verified copy."""
@@ -7860,6 +7864,7 @@ def test_migrate_help_does_not_call_the_published_uv_a_before_image() -> None:
     assert "leaves the published `uv` where it is" in doc
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_uv_bootstrap_mismatch_executes_nothing(tmp_path: Path) -> None:
     """A digest mismatch stops before inspection, extraction or installation."""
@@ -7975,6 +7980,7 @@ UNSAFE_UV_ARCHIVES: list[
 ]
 
 
+@runs_the_sh_installer
 @needs_local_tools
 @pytest.mark.parametrize(("entries", "reason"), UNSAFE_UV_ARCHIVES)
 def test_uv_bootstrap_rejects_unsafe_archive_members(
@@ -8019,6 +8025,7 @@ def test_uv_bootstrap_rejects_unknown_architecture(tmp_path: Path) -> None:
     assert not paths["trace"].exists()
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_uv_bootstrap_accepts_an_archive_without_uvx(tmp_path: Path) -> None:
     """uvx is optional; an archive with only the directory and uv is valid."""
@@ -8041,6 +8048,7 @@ def test_uv_bootstrap_accepts_an_archive_without_uvx(tmp_path: Path) -> None:
     _assert_nothing_executed(paths)
 
 
+@runs_the_sh_installer
 @needs_local_tools
 def test_uv_bootstrap_accepts_an_archive_without_the_directory(
     tmp_path: Path,
@@ -8070,6 +8078,7 @@ def test_uv_bootstrap_accepts_an_archive_without_the_directory(
     _assert_nothing_executed(paths)
 
 
+@runs_the_sh_installer
 @pytest.mark.parametrize(
     ("name", "kind", "archive_format", "reasons"),
     [
@@ -8184,6 +8193,7 @@ def _run_find_uv_selection(
     return result, home
 
 
+@runs_the_sh_installer
 def test_existing_uv_legacy_selection_is_unchanged(tmp_path: Path) -> None:
     """An ordinary CLI install still reuses the uv it already has."""
     # `command -v uv` wins even when ~/.local/bin/uv is also there: the order

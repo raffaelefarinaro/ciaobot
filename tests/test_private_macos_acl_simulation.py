@@ -244,6 +244,7 @@ def test_read_bounded_file_refuses_a_missing_native_acl(tmp_path: Path) -> None:
     assert "Could not inspect" in child.stdout
 
 
+@requires_posix
 def test_the_harness_does_not_override_a_present_native_acl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -256,6 +257,7 @@ def test_the_harness_does_not_override_a_present_native_acl(
     assert private._acl_grants_another_account is before
 
 
+@requires_posix
 def test_the_harness_never_overrides_a_real_mac(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,6 +271,7 @@ def test_the_harness_never_overrides_a_real_mac(
     assert private._acl_grants_another_account is before
 
 
+@requires_posix
 def test_the_harness_injects_on_a_non_mac_without_a_native_acl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
