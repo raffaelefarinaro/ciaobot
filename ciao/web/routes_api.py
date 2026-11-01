@@ -6372,8 +6372,21 @@ _NATIVE_SETUP_FIELDS: frozenset[str] = frozenset(
         "app_dir",
     }
 )
+#: String fields the native branch reads; anything else is a malformed body.
+_NATIVE_SETUP_STRING_FIELDS: tuple[str, ...] = (
+    "workspace",
+    "provider",
+    "vault_root",
+    "vault_mode",
+    "workspace_name",
+    "password",
+    "auth_token",
+)
 _NATIVE_SETUP_STATE_CHANGED = (
     "the installer state changed while setup was open; nothing was written"
+)
+_NATIVE_SETUP_ALREADY_CLAIMED = (
+    "setup already ran for this native bootstrap; nothing else was written"
 )
 _NATIVE_SETUP_WRITE_REFUSED = (
     "setup could not write this install because the on-disk state differs from "
@@ -6391,11 +6404,15 @@ def _request_native_failure_exit(request: Request) -> None:
     Retrying a setup that wrote a workspace, wrote a definition or recorded a
     result could compound partial state, so the child asks the server to leave
     with a nonzero code. The installer parent observes that as a failed run and
-    never activates.
+    never activates. Only the native branch calls this. With no usable restart
+    hook the child exits right here: silently continuing would leave a
+    half-written bootstrap serving.
     """
     restart_fn = getattr(request.app.state, "request_restart", None)
     if callable(restart_fn):
         restart_fn(1)
+        return
+    os._exit(1)
 
 
 async def setup_finish_endpoint(request: Request) -> JSONResponse:
@@ -6441,10 +6458,21 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
                 {"error": "the native setup request carries an unsupported field"},
                 status_code=400,
             )
+        # Only absent, null or the empty string may reach the trust seams. A
+        # non-empty string is the explicit override refusal; any other value
+        # (0, false, [], {}) is refused as a state conflict, never coerced.
         for key in ("launch_agents_dir", "app_dir", "python"):
-            if str(body.get(key, "") or "").strip():
+            value = body.get(key)
+            if value not in (None, ""):
                 return JSONResponse(
                     {"error": f"the native setup request must not override {key}"},
+                    status_code=400 if type(value) is str else 409,
+                )
+        for key in _NATIVE_SETUP_STRING_FIELDS:
+            value = body.get(key)
+            if value is not None and type(value) is not str:
+                return JSONResponse(
+                    {"error": f"the native setup request field {key} must be a string"},
                     status_code=400,
                 )
 
@@ -6514,6 +6542,12 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         # loop because the host check reads files and runs the codesign probe.
         from ciao.native_installer import NativeBootstrapError
 
+        # Single flight: claimed synchronously before the first await below and
+        # never released, so a second request, or a retry after a refusal, is
+        # refused rather than racing the non-exclusive workspace writes.
+        if getattr(request.app.state, "native_finish_claimed", False):
+            return JSONResponse({"error": _NATIVE_SETUP_ALREADY_CLAIMED}, status_code=409)
+        request.app.state.native_finish_claimed = True
         try:
             resolved_workspace = await asyncio.to_thread(
                 native_context.assert_ready_to_write,
@@ -6538,12 +6572,18 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         "vault_mode": vault_mode,
         "workspace_name": workspace_name,
         "default_provider": default_provider,
-        "python_path": str(body.get("python", "")).strip() or None,
         "port": port,
-        "launch_agents_dir": str(body.get("launch_agents_dir", "")).strip() or None,
-        "app_dir": str(body.get("app_dir", "")).strip() or None,
     }
-    if native_context is not None:
+    if native_context is None:
+        setup_kwargs["python_path"] = str(body.get("python", "")).strip() or None
+        setup_kwargs["launch_agents_dir"] = str(body.get("launch_agents_dir", "")).strip() or None
+        setup_kwargs["app_dir"] = str(body.get("app_dir", "")).strip() or None
+    else:
+        # The installer fixed the interpreter and the definition directory; the
+        # body is never read for these, so no request can move the trust seams.
+        setup_kwargs["python_path"] = None
+        setup_kwargs["launch_agents_dir"] = None
+        setup_kwargs["app_dir"] = None
         # An existing definition is a refusal, not an overwrite. Only the
         # native branch opts in; every legacy caller keeps `write_text`.
         setup_kwargs["exclusive_service_definition"] = True
@@ -6554,12 +6594,17 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         written = await asyncio.to_thread(
             functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
         )
-    except RuntimeError as exc:
+    except Exception as exc:
         if native_context is not None:
+            # The write may have touched the destination before failing, so the
+            # child leaves nonzero rather than serving a partial install.
+            _request_native_failure_exit(request)
             return JSONResponse(
                 {"error": _NATIVE_SETUP_WRITE_REFUSED}, status_code=409
             )
-        return JSONResponse({"error": str(exc)}, status_code=409)
+        if isinstance(exc, RuntimeError):
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        raise
     # Hand the chosen workspace to the relaunched process. A foreground
     # `ciao run` restarts by re-execing itself with the current environment,
     # and nothing else tells the fresh process where setup landed — without

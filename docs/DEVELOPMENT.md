@@ -655,7 +655,8 @@ opens no browser. `_mark_bound_when_serving` calls the context only after
 `uvicorn.Server.started` and `tracker.done(BIND_PHASE)`, writes exactly one
 bounded `{"schema":1,"port":N}` line, makes the private descriptor
 non-inheritable and closes it; a refused or failed write stops the child instead
-of serving invisibly. The existing authenticated `POST /api/setup/finish` is
+of serving invisibly. The existing loopback-only, bootstrap-mode-only
+`POST /api/setup/finish` (no session cookie; see docs/REMOTE_BOUNDARY.md) is
 the only native route: it refuses unknown body fields and any non-empty
 `python`, `launch_agents_dir` or `app_dir` override, re-runs
 `assert_ready_to_write` in a worker thread before the first write (config

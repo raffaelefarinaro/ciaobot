@@ -9,10 +9,12 @@ exercised once, against that isolated home.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import plistlib
 import select
+import socket
 import stat
 import subprocess
 import sys
@@ -22,6 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import uvicorn
 from itsdangerous import URLSafeTimedSerializer
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -936,6 +939,117 @@ def test_the_private_native_handover_requires_a_bootstrap_and_run_id(
     assert "non-stdio" in capsys.readouterr().err
 
 
+_HANDOVER_RUN_ID = str(uuid.uuid4())
+_HANDOVER_REFUSALS = [
+    pytest.param(
+        ["run", "--installer-native-workspace", "/abs/ws"],
+        "--installer-native-workspace requires --installer-bootstrap",
+        id="workspace-without-bootstrap",
+    ),
+    pytest.param(
+        ["run", "--installer-native-fd", "7"],
+        "--installer-native-fd requires --installer-bootstrap",
+        id="fd-without-bootstrap",
+    ),
+    pytest.param(
+        ["run", "--installer-native-fd", "7", "--installer-native-workspace", "/abs/ws"],
+        "--installer-native-workspace requires --installer-bootstrap",
+        id="fd-and-workspace-without-bootstrap",
+    ),
+    pytest.param(
+        [
+            "run", "--installer-bootstrap", "--installer-run-id", _HANDOVER_RUN_ID,
+            "--installer-native-workspace", "/abs/ws",
+        ],
+        "--installer-native-workspace requires --installer-native-fd",
+        id="workspace-without-fd",
+    ),
+    pytest.param(
+        ["run", "--installer-bootstrap", "--installer-native-fd", "7"],
+        "--installer-native-fd requires --installer-run-id",
+        id="fd-without-run-id",
+    ),
+    pytest.param(
+        ["run", "--installer-bootstrap", "--installer-run-id", _HANDOVER_RUN_ID, "--installer-native-fd", "0"],
+        "--installer-native-fd must be a non-stdio descriptor",
+        id="fd-0-refused",
+    ),
+    pytest.param(
+        ["run", "--installer-bootstrap", "--installer-run-id", _HANDOVER_RUN_ID, "--installer-native-fd", "1"],
+        "--installer-native-fd must be a non-stdio descriptor",
+        id="fd-1-refused",
+    ),
+    pytest.param(
+        ["run", "--installer-bootstrap", "--installer-run-id", _HANDOVER_RUN_ID, "--installer-native-fd", "2"],
+        "--installer-native-fd must be a non-stdio descriptor",
+        id="fd-2-refused",
+    ),
+]
+
+
+@pytest.mark.parametrize(("argv", "message"), _HANDOVER_REFUSALS)
+def test_native_handover_refuses_each_bad_flag_combination(
+    argv: list[str],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    started: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: started.append(kwargs) or 0)
+    args = cli.build_parser().parse_args(argv)
+    assert args.func(args) == 2
+    assert capsys.readouterr().err == f"{message}\n"
+    assert started == []
+
+
+_HANDOVER_ACCEPTED = [
+    pytest.param(
+        ["--installer-native-fd", "3", "--installer-native-workspace", "/abs/ws"],
+        {"installer_native_fd": 3, "installer_native_workspace": "/abs/ws"},
+        id="fd-3-with-workspace",
+    ),
+    pytest.param(
+        ["--installer-native-fd", "3"],
+        {"installer_native_fd": 3, "installer_native_workspace": None},
+        id="fd-3-without-workspace",
+    ),
+    pytest.param(
+        [
+            "--installer-native-fd", "3", "--installer-native-workspace", "/abs/ws",
+            "--installer-suggest-workspace", "/abs/suggest",
+        ],
+        {
+            "installer_native_fd": 3,
+            "installer_native_workspace": "/abs/ws",
+            "installer_suggest_workspace": "/abs/suggest",
+        },
+        id="fd-with-suggest-workspace",
+    ),
+]
+
+
+@pytest.mark.parametrize(("extra", "forwarded"), _HANDOVER_ACCEPTED)
+def test_native_handover_forwards_each_accepted_combination(
+    extra: list[str],
+    forwarded: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(cli, "_run_server", lambda **kwargs: seen.append(kwargs) or 0)
+    args = cli.build_parser().parse_args(
+        ["run", "--installer-bootstrap", "--installer-run-id", _HANDOVER_RUN_ID, *extra]
+    )
+    assert args.func(args) == 0
+    expected: dict[str, object] = {
+        "supervised": False,
+        "installer_bootstrap": True,
+        "installer_run_id": _HANDOVER_RUN_ID,
+        "installer_suggest_workspace": None,
+    }
+    expected.update(forwarded)
+    assert seen == [expected]
+
+
 def test_an_existing_definition_is_never_overwritten_by_the_native_setup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -982,3 +1096,476 @@ def test_native_setup_uses_the_verified_host_snapshot(
     parsed = plistlib.loads(definition.read_bytes())
     assert parsed["ProgramArguments"][1] == "serve"
     assert parsed["ProgramArguments"][0].endswith(server_host.EXECUTABLE_NAME)
+
+
+# ── native finish hardening (#2340 review) ──────────────────────────────────
+
+_STATE_CHANGED = (
+    "the installer state changed while setup was open; nothing was written"
+)
+_WRITE_REFUSED = (
+    "setup could not write this install because the on-disk state differs from "
+    "the one the installer prepared; nothing was started"
+)
+_ALREADY_CLAIMED = (
+    "setup already ran for this native bootstrap; nothing else was written"
+)
+
+
+class _Exited(Exception):
+    """Stands in for os._exit so the test can observe the call and stop there."""
+
+
+@pytest.mark.parametrize("key", ["python", "launch_agents_dir", "app_dir"])
+@pytest.mark.parametrize(
+    "value", [0, False, [], {}], ids=["zero", "false", "empty-list", "empty-dict"]
+)
+def test_native_setup_refuses_falsy_non_string_trust_overrides(
+    key: str, value: object, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    monkeypatch.setattr(
+        cli, "setup_workspace", lambda *a, **k: pytest.fail("setup wrote")
+    )
+    resp = _post(client, isolated_home / "workspace", **{key: value})
+    assert resp.status_code == 409
+    assert not (isolated_home / "workspace").exists()
+    assert restarts == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("workspace", 5),
+        ("provider", ["claude"]),
+        ("vault_root", 5),
+        ("vault_mode", 1),
+        ("workspace_name", 1),
+        ("password", 12345678),
+        ("auth_token", 12345678),
+    ],
+)
+def test_native_setup_refuses_non_string_fields_before_writing(
+    field: str, value: object, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    monkeypatch.setattr(
+        cli, "setup_workspace", lambda *a, **k: pytest.fail("setup wrote")
+    )
+    body: dict[str, object] = {
+        "password": "wizard-pass",
+        "workspace": str(isolated_home / "workspace"),
+        "workspace_name": "personal",
+        "port": 8443,
+    }
+    body[field] = value
+    resp = client.post("/api/setup/finish", json=body)
+    assert resp.status_code == 400
+    assert restarts == []
+
+
+def test_a_second_native_finish_request_is_refused_and_setup_runs_once(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    real_setup = cli.setup_workspace
+    calls: list[str] = []
+
+    def counting(*args, **kwargs):
+        calls.append("write")
+        return real_setup(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "setup_workspace", counting)
+    first = _post(client, isolated_home / "workspace")
+    second = _post(client, isolated_home / "workspace")
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409
+    assert second.json() == {"error": _ALREADY_CLAIMED}
+    assert calls == ["write"]
+    assert restarts == [0]
+
+
+def test_a_refused_native_finish_keeps_the_claim(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, launch, _restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    monkeypatch.setattr(
+        cli, "setup_workspace", lambda *a, **k: pytest.fail("setup wrote")
+    )
+    definition = launch / "com.ciao.server.plist"
+    definition.write_text("present", encoding="utf-8")
+    first = _post(client, isolated_home / "workspace")
+    assert first.status_code == 409
+    definition.unlink()
+    second = _post(client, isolated_home / "workspace")
+    assert second.status_code == 409
+    assert second.json() == {"error": _ALREADY_CLAIMED}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("write failed"), OSError("disk gone")],
+    ids=["runtime-error", "os-error"],
+)
+def test_a_native_write_failure_fails_closed(
+    error: Exception, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+
+    def failing(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(cli, "setup_workspace", failing)
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _WRITE_REFUSED}
+    assert restarts == [1]
+
+
+@pytest.mark.parametrize("state", ["missing", "not-callable"])
+def test_native_failure_exit_never_silently_does_nothing(
+    state: str,
+    isolated_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _context, _launch, _restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    if state == "missing":
+        monkeypatch.delattr(client.app.state, "request_restart")
+    else:
+        client.app.state.request_restart = None
+    exits: list[int] = []
+
+    def recording_exit(code: int) -> None:
+        exits.append(code)
+        raise _Exited
+
+    monkeypatch.setattr(os, "_exit", recording_exit)
+
+    def failing(*args, **kwargs):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(cli, "setup_workspace", failing)
+    with pytest.raises(_Exited):
+        _post(client, isolated_home / "workspace")
+    assert exits == [1]
+
+
+def test_a_written_definition_mismatch_fails_closed(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    real_setup = cli.setup_workspace
+
+    def reports_nothing(*args, **kwargs):
+        real_setup(*args, **kwargs)
+        return []
+
+    monkeypatch.setattr(cli, "setup_workspace", reports_nothing)
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _RECORD_REFUSED}
+    assert "ok" not in resp.json()
+    assert restarts == [1]
+    assert (launch / "com.ciao.server.plist").is_file()
+
+
+_RECORD_REFUSED = (
+    "setup wrote the workspace but could not record the native handoff result; "
+    "nothing was started"
+)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        native_handoff.NativeHandoffError("record"),
+        OSError("record"),
+        ValueError("record"),
+    ],
+    ids=["handoff-error", "os-error", "value-error"],
+)
+def test_a_handoff_record_failure_fails_closed(
+    error: Exception, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+
+    def failing(**kwargs):
+        raise error
+
+    monkeypatch.setattr(native_handoff, "record_setup_completion", failing)
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _RECORD_REFUSED}
+    assert "ok" not in resp.json()
+    assert restarts == [1]
+
+
+def test_a_handoff_read_back_failure_fails_closed(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+
+    def failing(**kwargs):
+        raise native_handoff.NativeHandoffError("read")
+
+    monkeypatch.setattr(native_handoff, "read_result", failing)
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _RECORD_REFUSED}
+    assert "ok" not in resp.json()
+    assert restarts == [1]
+
+
+def test_a_handoff_identity_mismatch_fails_closed(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    real_read = native_handoff.read_result
+
+    def other_run(**kwargs):
+        return dataclasses.replace(real_read(**kwargs), run_id=str(uuid.uuid4()))
+
+    monkeypatch.setattr(native_handoff, "read_result", other_run)
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _RECORD_REFUSED}
+    assert "ok" not in resp.json()
+    assert restarts == [1]
+
+
+def test_a_native_context_outside_installer_mode_is_inconsistent(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    client.app.state.installer_bootstrap = False
+    monkeypatch.setattr(
+        cli, "setup_workspace", lambda *a, **k: pytest.fail("setup wrote")
+    )
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "the native bootstrap state is inconsistent"}
+    assert not (isolated_home / "workspace").exists()
+    assert restarts == []
+
+
+def test_native_finish_refuses_a_handoff_that_appears_during_the_wizard(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    context.handoff_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        cli, "setup_workspace", lambda *a, **k: pytest.fail("setup wrote")
+    )
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _STATE_CHANGED}
+    assert not (isolated_home / "workspace").exists()
+    assert context.handoff_path.read_text(encoding="utf-8") == "{}"
+    assert restarts == []
+
+
+def test_capture_refuses_a_read_only_notification_descriptor(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, notification_pipe: tuple[int, int]
+) -> None:
+    read_fd, _write_fd = notification_pipe
+    with pytest.raises(NativeBootstrapError, match="invalid_context"):
+        _capture(monkeypatch, isolated_home, fd=read_fd)
+
+
+# ── bind notification and the native stop (#2340 review) ────────────────────
+
+
+class _RaisingNotify:
+    def notify_bound(self, port: int) -> None:
+        raise RuntimeError("the pipe is gone")
+
+
+def test_a_raising_bind_notification_stops_the_server() -> None:
+    server = SimpleNamespace(started=True, should_exit=False)
+    reported = main._report_native_bound(_RaisingNotify(), 8443, server)
+    assert reported is False
+    assert server.should_exit is True
+
+
+def test_a_bind_watcher_cancelled_before_the_server_starts_reports_nothing() -> None:
+    tracker = main.StartupTracker(startup_id="startup-1")
+    reported: list[str] = []
+    server = SimpleNamespace(started=False, should_exit=False)
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            main._mark_bound_when_serving(
+                server,
+                tracker,
+                poll_interval=0.001,
+                on_bound=lambda: reported.append("notified"),
+            )
+        )
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert reported == []
+    assert tracker.phase(BIND_PHASE).status == "pending"
+
+
+def test_a_refused_capture_exits_with_the_native_refusal_code(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, notification_pipe: tuple[int, int]
+) -> None:
+    read_fd, write_fd = notification_pipe
+
+    def refused(cls, **kwargs):
+        raise NativeBootstrapError("definition_changed")
+
+    monkeypatch.setattr(NativeBootstrapContext, "capture", classmethod(refused))
+    code = asyncio.run(
+        main._run_server_locked(
+            _config(isolated_home),
+            supervised=False,
+            startup_id="startup-1",
+            engine_pid=os.getpid(),
+            installer_bootstrap=True,
+            installer_run_id=str(uuid.uuid4()),
+            installer_native_fd=write_fd,
+            installer_native_workspace=None,
+        )
+    )
+    assert code == native_installer.NATIVE_BOOTSTRAP_REFUSED_EXIT_CODE
+
+
+# ── the wizard's ready signal and the live-state recheck (#2340 review) ─────
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_wizard_ready_follows_a_successful_bind(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, notification_pipe: tuple[int, int]
+) -> None:
+    read_fd, write_fd = notification_pipe
+    context = _capture(monkeypatch, isolated_home, fd=write_fd)
+    port = _free_loopback_port()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            Starlette(routes=[]),
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            lifespan="off",
+        )
+    )
+    tracker = main.StartupTracker(startup_id="startup-1")
+
+    def nothing_yet() -> bool:
+        ready, _, _ = select.select([read_fd], [], [], 0)
+        return not ready
+
+    async def run() -> None:
+        assert nothing_yet()
+        serving = asyncio.create_task(server.serve())
+        watcher = asyncio.create_task(
+            main._mark_bound_when_serving(
+                server,
+                tracker,
+                poll_interval=0.001,
+                on_bound=lambda: main._report_native_bound(context, port, server),
+            )
+        )
+        await asyncio.wait_for(watcher, timeout=10)
+        bound_port = server.servers[0].sockets[0].getsockname()[1]
+        assert bound_port == port
+        record = os.read(read_fd, MAX_BIND_NOTIFICATION_BYTES + 1)
+        assert json.loads(record) == {"schema": 1, "port": bound_port}
+        assert os.read(read_fd, 1) == b""
+        server.should_exit = True
+        await asyncio.wait_for(serving, timeout=10)
+
+    asyncio.run(run())
+    assert tracker.phase(BIND_PHASE).status == "done"
+
+
+def test_native_save_refuses_a_service_changed_while_wizard_open(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    monkeypatch.setattr(native_installer, "_server_job_absent", lambda: False)
+    definition = launch / "com.ciao.server.plist"
+    definition.write_text("created after capture", encoding="utf-8")
+    monkeypatch.setattr(
+        cli, "setup_workspace", lambda *a, **k: pytest.fail("setup wrote")
+    )
+    workspace = isolated_home / "workspace"
+    resp = _post(client, workspace)
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _STATE_CHANGED}
+    assert not workspace.exists()
+    assert not native_handoff.result_path().exists()
+    assert definition.read_text(encoding="utf-8") == "created after capture"
+    assert restarts == []
+
+
+def test_public_event_fd_is_not_inherited_by_children(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, notification_pipe: tuple[int, int]
+) -> None:
+    _read_fd, write_fd = notification_pipe
+    _capture(monkeypatch, isolated_home, fd=write_fd)
+    probe = (
+        "import os, sys\n"
+        "try:\n"
+        "    os.fstat(int(sys.argv[1]))\n"
+        "except OSError:\n"
+        "    sys.exit(0)\n"
+        "sys.exit(1)\n"
+    )
+    child = subprocess.run(
+        [sys.executable, "-c", probe, str(write_fd)],
+        close_fds=False,
+        timeout=30,
+    )
+    assert child.returncode == 0, "the private event descriptor leaked into a child"
+
+    # Control: the same probe on a descriptor that is inheritable must see it,
+    # so the zero above is a real refusal rather than a broken probe.
+    control_read, control_write = os.pipe()
+    try:
+        os.set_inheritable(control_write, True)
+        control = subprocess.run(
+            [sys.executable, "-c", probe, str(control_write)],
+            close_fds=False,
+            timeout=30,
+        )
+        assert control.returncode == 1
+    finally:
+        os.close(control_read)
+        os.close(control_write)

@@ -401,8 +401,30 @@ def _open_browser_when_ready(url: str) -> None:
     ).start()
 
 
+def _report_native_bound(
+    native_bootstrap: NativeBootstrapContext, port: int, server: uvicorn.Server
+) -> bool:
+    """Tell the native parent the loopback port, or stop serving invisibly.
+
+    Any failure (a closed pipe, a refused record, an unexpected error) makes the
+    server exit rather than serve a wizard nobody can see. The log line is fixed
+    text: no descriptor, path or OS detail. Returns False on that failure; the
+    caller turns it into a nonzero exit.
+    """
+    try:
+        native_bootstrap.notify_bound(port)
+    except Exception:
+        logger.error(
+            "The native bootstrap could not report its bound port; stopping "
+            "instead of serving invisibly."
+        )
+        server.should_exit = True
+        return False
+    return True
+
+
 def _open_wizard_browser(
-    url: str, native_bootstrap: "NativeBootstrapContext | None"
+    url: str, native_bootstrap: NativeBootstrapContext | None
 ) -> None:
     """Open the wizard tab for a legacy bootstrap, never for a native one.
 
@@ -513,7 +535,7 @@ def _restart_watchdog(
     restart_code: int,
     *,
     supervised: bool,
-    installer_bootstrap: bool = False,
+    native_bootstrap: bool = False,
     sleep: Callable[[float], None] = time.sleep,
     execv: Callable[[str, list[str]], object] = os.execv,
     exit_now: Callable[[int], object] = os._exit,
@@ -523,11 +545,12 @@ def _restart_watchdog(
     A clean-exit request (``restart_code == 0``) just exits. Under ``ciao supervise``
     the supervisor owns the relaunch, so the process exits with the restart code and
     never execs (an exec would bypass the supervisor's loop and backoff, and on
-    Windows would end the child with no relaunch). An installer bootstrap is the
+    Windows would end the child with no relaunch). A native bootstrap is the
     same: its parent owns the lifetime and reads the child's exit code, so a
-    relaunch would detach the outcome it is waiting for. Otherwise re-exec a fresh
-    interpreter, as before, so launchd keeps tracking the same pid and the
-    relaunch picks up the current environment.
+    relaunch would detach the outcome it is waiting for. Only that flag takes
+    this branch; the legacy installer bootstrap re-execs like any unsupervised
+    run. Otherwise re-exec a fresh interpreter, as before, so launchd keeps
+    tracking the same pid and the relaunch picks up the current environment.
     """
     sleep(RESTART_WATCHDOG_GRACE_S)
     if restart_code == 0:
@@ -539,8 +562,8 @@ def _restart_watchdog(
         logger.info("Cleanup did not finish; exiting for the supervisor to relaunch")
         exit_now(restart_code)
         return
-    if installer_bootstrap:
-        logger.info("Installer bootstrap did not finish cleanup; exiting for its parent")
+    if native_bootstrap:
+        logger.info("Native bootstrap did not finish cleanup; exiting for its parent")
         exit_now(restart_code)
         return
     logger.info("Cleanup did not finish; re-execing for the requested restart")
@@ -606,11 +629,7 @@ async def _async_main(
         config.import_legacy_gws_profile_env()
         if config._workspace_registry_changed:
             config.persist_workspace_registry()
-        if installer_bootstrap:
-            native_kwargs: dict[str, object] = {}
-            if installer_native_fd is not None:
-                native_kwargs["installer_native_fd"] = installer_native_fd
-                native_kwargs["installer_native_workspace"] = installer_native_workspace
+        if installer_bootstrap and installer_native_fd is None:
             return await _run_server_locked(
                 config,
                 supervised=supervised,
@@ -618,7 +637,17 @@ async def _async_main(
                 engine_pid=os.getpid(),
                 installer_bootstrap=True,
                 installer_run_id=installer_run_id,
-                **native_kwargs,  # type: ignore[arg-type]
+            )
+        if installer_bootstrap:
+            return await _run_server_locked(
+                config,
+                supervised=supervised,
+                startup_id=lock.startup_id,
+                engine_pid=os.getpid(),
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+                installer_native_fd=installer_native_fd,
+                installer_native_workspace=installer_native_workspace,
             )
         return await _run_server_locked(
             config,
@@ -1572,7 +1601,7 @@ async def _run_server_locked(
                 args=(restart_code,),
                 kwargs={
                     "supervised": supervised,
-                    "installer_bootstrap": installer_bootstrap,
+                    "native_bootstrap": native_bootstrap is not None,
                 },
                 daemon=True,
                 name="ciao-restart-watchdog",
@@ -1692,25 +1721,13 @@ async def _run_server_locked(
 
     native_notify_failed: list[bool] = [False]
 
-    def _report_native_bound() -> None:
-        from ciao.native_installer import NativeBootstrapError
-
+    def _on_native_bound() -> None:
         assert native_bootstrap is not None
-        try:
-            native_bootstrap.notify_bound(config.pwa_port)
-        except NativeBootstrapError:
-            # The parent is gone or the record could not be written. Stop
-            # instead of serving a wizard nobody can see. The message has no
-            # descriptor, path or OS detail.
+        if not _report_native_bound(native_bootstrap, config.pwa_port, server):
             native_notify_failed[0] = True
-            logger.error(
-                "The native bootstrap could not report its bound port; stopping "
-                "instead of serving invisibly."
-            )
-            server.should_exit = True
 
     native_bound_callback = (
-        _report_native_bound if native_bootstrap is not None else None
+        _on_native_bound if native_bootstrap is not None else None
     )
     bind_watch = asyncio.create_task(_mark_bound_when_serving(server, tracker, on_bound=native_bound_callback))
     try:
@@ -1742,16 +1759,22 @@ def main(
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:
-        kwargs: dict[str, object] = {
-            "supervised": supervised,
-            "installer_bootstrap": installer_bootstrap,
-            "installer_run_id": installer_run_id,
-            "installer_suggest_workspace": installer_suggest_workspace,
-        }
-        if installer_native_fd is not None:
-            kwargs["installer_native_fd"] = installer_native_fd
-            kwargs["installer_native_workspace"] = installer_native_workspace
-        code = asyncio.run(_async_main(**kwargs))  # type: ignore[arg-type]
+        if installer_native_fd is None:
+            code = asyncio.run(_async_main(
+                supervised=supervised,
+                installer_bootstrap=installer_bootstrap,
+                installer_run_id=installer_run_id,
+                installer_suggest_workspace=installer_suggest_workspace,
+            ))
+        else:
+            code = asyncio.run(_async_main(
+                supervised=supervised,
+                installer_bootstrap=installer_bootstrap,
+                installer_run_id=installer_run_id,
+                installer_suggest_workspace=installer_suggest_workspace,
+                installer_native_fd=installer_native_fd,
+                installer_native_workspace=installer_native_workspace,
+            ))
     except WorkspaceAlreadyRunningError as exc:
         print(f"Ciaobot did not start: {exc}", file=sys.stderr)
         code = 2

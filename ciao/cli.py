@@ -86,7 +86,7 @@ def _run_command(args: argparse.Namespace) -> int:
     if args.installer_native_workspace is not None and not args.installer_bootstrap:
         print("--installer-native-workspace requires --installer-bootstrap", file=sys.stderr)
         return 2
-    if (args.installer_native_fd is not None or args.installer_native_workspace is not None) and not args.installer_bootstrap:
+    if args.installer_native_fd is not None and not args.installer_bootstrap:
         print("--installer-native-fd requires --installer-bootstrap", file=sys.stderr)
         return 2
     if args.installer_native_fd is not None and args.installer_native_fd < 3:
@@ -107,18 +107,22 @@ def _run_command(args: argparse.Namespace) -> int:
             print("--installer-native-fd requires --installer-run-id", file=sys.stderr)
             return 2
         return _resume_installer_bootstrap(args.installer_suggest_workspace)
-    kwargs: dict[str, object] = {
-        "supervised": args.supervised,
-        "installer_bootstrap": True,
-        "installer_run_id": args.installer_run_id,
-        "installer_suggest_workspace": args.installer_suggest_workspace,
-    }
-    # Only the native handover adds these, so the legacy call shape (and the
-    # exact-kwargs tests that pin it) stays unchanged.
-    if args.installer_native_fd is not None:
-        kwargs["installer_native_fd"] = args.installer_native_fd
-        kwargs["installer_native_workspace"] = args.installer_native_workspace
-    return _run_server(**kwargs)  # type: ignore[arg-type]
+    if args.installer_native_fd is None:
+        # The legacy call shape, unchanged; the exact-kwargs tests pin it.
+        return _run_server(
+            supervised=args.supervised,
+            installer_bootstrap=True,
+            installer_run_id=args.installer_run_id,
+            installer_suggest_workspace=args.installer_suggest_workspace,
+        )
+    return _run_server(
+        supervised=args.supervised,
+        installer_bootstrap=True,
+        installer_run_id=args.installer_run_id,
+        installer_suggest_workspace=args.installer_suggest_workspace,
+        installer_native_fd=args.installer_native_fd,
+        installer_native_workspace=args.installer_native_workspace,
+    )
 
 
 def _resume_installer_bootstrap(suggestion: str | None) -> int:
@@ -187,19 +191,23 @@ def _run_server(
     from ciao.main import main as server_main
 
     try:
-        if installer_bootstrap:
-            kwargs: dict[str, object] = {
-                "supervised": supervised,
-                "installer_bootstrap": True,
-                "installer_run_id": installer_run_id,
-                "installer_suggest_workspace": installer_suggest_workspace,
-            }
-            # The legacy bootstrap keeps its exact call shape; only the native
-            # handover adds the private descriptor and the fixed workspace.
-            if installer_native_fd is not None:
-                kwargs["installer_native_fd"] = installer_native_fd
-                kwargs["installer_native_workspace"] = installer_native_workspace
-            server_main(**kwargs)  # type: ignore[arg-type]
+        if installer_bootstrap and installer_native_fd is None:
+            # The legacy bootstrap keeps its exact call shape.
+            server_main(
+                supervised=supervised,
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+                installer_suggest_workspace=installer_suggest_workspace,
+            )
+        elif installer_bootstrap:
+            server_main(
+                supervised=supervised,
+                installer_bootstrap=True,
+                installer_run_id=installer_run_id,
+                installer_suggest_workspace=installer_suggest_workspace,
+                installer_native_fd=installer_native_fd,
+                installer_native_workspace=installer_native_workspace,
+            )
         else:
             server_main(supervised=supervised)
     except SystemExit as exc:

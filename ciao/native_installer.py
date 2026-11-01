@@ -2519,6 +2519,18 @@ def _require_bootstrap_absent(path: Path, reason: str) -> None:
     raise NativeBootstrapError(reason)
 
 
+def _descriptor_access_mode(fd: int) -> int:
+    """The descriptor's access mode (``O_RDONLY``, ``O_WRONLY`` or ``O_RDWR``)."""
+    if sys.platform == "win32":  # pragma: no cover - the native path is macOS
+        raise NativeBootstrapError("invalid_context")
+    import fcntl
+
+    try:
+        return fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE
+    except OSError:
+        raise NativeBootstrapError("invalid_context") from None
+
+
 def notify_native_bind(fd: int, port: int) -> None:
     """Write exactly one bounded private bind record, then close ``fd``.
 
@@ -2568,8 +2580,9 @@ class NativeBootstrapContext:
     This is an internal value, not a public route, environment variable or
     on-disk receipt. It is built once, after the installer parent has created
     the host and before the wizard serves, by :meth:`capture`; the only
-    consumers are the bootstrap server and the existing authenticated
-    ``POST /api/setup/finish`` handler. Nothing here starts, stops, reloads or
+    consumers are the bootstrap server and the existing loopback-only,
+    bootstrap-mode-only ``POST /api/setup/finish`` handler (no session cookie;
+    see docs/REMOTE_BOUNDARY.md). Nothing here starts, stops, reloads or
     quiesces a service, and the context is never persisted.
 
     The fields are snapshots, not proof. ``config_root`` and ``runtime_root``
@@ -2678,6 +2691,9 @@ class NativeBootstrapContext:
             stat.S_ISFIFO(notification_status.st_mode)
             or stat.S_ISSOCK(notification_status.st_mode)
         ):
+            raise NativeBootstrapError("invalid_context")
+        # The child only writes the record, so a read-only end is no channel.
+        if _descriptor_access_mode(notification_fd) not in (os.O_WRONLY, os.O_RDWR):
             raise NativeBootstrapError("invalid_context")
         try:
             # This is the child's descriptor entry. Mark it now so no provider,

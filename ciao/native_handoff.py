@@ -5,8 +5,9 @@ schema. The legacy ``ciao.installer_handoff`` remains the production bootstrap
 and activation path: it writes schema 1 and verifies exactly what it did
 before. This module is the native handoff. The legacy CLI, routes and installer
 paths never import it; the native bootstrap child imports it through
-:class:`ciao.native_installer.NativeBootstrapContext`, the existing authenticated
-``POST /api/setup/finish`` handler's native branch, and
+:class:`ciao.native_installer.NativeBootstrapContext`, the existing loopback-only,
+bootstrap-mode-only ``POST /api/setup/finish`` (no session cookie; see
+docs/REMOTE_BOUNDARY.md) handler's native branch, and
 :func:`ciao.native_installer._run_native_install`'s activation dep. The public
 ``run_native_install`` still refuses until the shell/readiness integration
 completes, so nothing here runs without that explicit native context.
