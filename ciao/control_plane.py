@@ -46,6 +46,7 @@ from ciao.note_related import RELATED_NOTES_LIMIT
 from ciao.schedule_command import normalize_schedule_command
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
+    DEFAULT_TIMEZONE,
     FREQUENCIES,
     INTERVAL_FREQUENCY,
     ScheduleEntry,
@@ -6350,7 +6351,10 @@ class CiaoControlPlane:
             # honoured, a stronger one is clamped), never left to inherit the
             # workspace/engine default at dispatch time.
             mode=self._child_mode(principal, str(values.get("mode") or "") or None),
-            timezone_name=str(values.get("timezone") or values.get("timezone_name") or "UTC"),
+            # Same zone the Automations page and REST create default to (#2449).
+            timezone_name=str(
+                values.get("timezone") or values.get("timezone_name") or DEFAULT_TIMEZONE
+            ),
             days_of_week=days_of_week,
             frequency=frequency,
             interval_minutes=interval_minutes,
