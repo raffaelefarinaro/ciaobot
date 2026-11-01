@@ -176,6 +176,9 @@ native_code=internal_error
 native_coordinator_pid=
 native_python=
 native_uv_sha=
+native_redirect=0
+native_bin_home=
+native_data_home=
 native_watchdog=
 native_writer=
 native_write_status=0
@@ -202,7 +205,11 @@ uv_curl_limits=
 tmp=
 
 usage() {
-    cat >&2 <<'USAGE'
+    # read and printf are builtins: usage runs before the descriptor is checked,
+    # so no program on the caller's PATH may run here. The heredoc is the legacy text.
+    while IFS= read -r usage_line; do
+        printf '%s\n' "$usage_line"
+    done >&2 <<'USAGE'
 Usage: install-engine.sh [--version VERSION] [--workspace DIRECTORY] [--no-start] [--no-modify-path]
                          [--migrate [--as-host | --as-client URL]]
                          [--native-install --events-fd N --run-id UUID]
@@ -964,20 +971,49 @@ native_report_failure() {
     native_write_event "\"type\":\"failed\",\"code\":\"$native_code\"" || true
 }
 
+native_scrub_env() {
+    # Unsets every exported variable except the three a native child needs, so a
+    # function's own external commands (curl, tar, shasum, launchctl) inherit only
+    # those. Runs inside a native_isolated subshell: the caller's environment is
+    # not touched.
+    native_scrub_all=$(export -p)
+    while IFS= read -r native_scrub_line; do
+        native_scrub_name=${native_scrub_line#export }
+        native_scrub_name=${native_scrub_name%%=*}
+        case "$native_scrub_name" in
+            PATH|HOME|LANG) ;;
+            *) unset "$native_scrub_name" 2>/dev/null || true ;;
+        esac
+    done <<NATIVE_SCRUB_EOF
+$native_scrub_all
+NATIVE_SCRUB_EOF
+    # Set, not kept: a child must get the same three whatever the caller exported.
+    PATH=$NATIVE_PATH
+    LANG=C
+    export PATH LANG
+}
+
 native_isolated() {
-    # Runs one command with the public descriptor closed for it and its children.
+    # Runs one command with the public descriptor closed for it and its children,
+    # and with the caller's environment cleared. An external program runs under
+    # `env -i` with the pinned PATH, HOME and LANG. A shell function runs after
+    # native_scrub_env, so its externals get the same three. Neither gets TMPDIR:
+    # the working directory is always passed explicitly, and uv_call sets it.
     # A `fail` inside only exits the subshell; the caller reports the fixed code.
     # A subshell killed by a signal is a cancellation, not a download failure.
     native_isolated_rc=0
+    case "$(command -v "$1")" in
+        /*) set -- /usr/bin/env -i PATH="$NATIVE_PATH" HOME="$HOME" LANG=C "$@" ;;
+    esac
     case "$events_fd" in
-        3) ( native_channel_open=0; "$@" ) 3>&- || native_isolated_rc=$? ;;
-        4) ( native_channel_open=0; "$@" ) 4>&- || native_isolated_rc=$? ;;
-        5) ( native_channel_open=0; "$@" ) 5>&- || native_isolated_rc=$? ;;
-        6) ( native_channel_open=0; "$@" ) 6>&- || native_isolated_rc=$? ;;
-        7) ( native_channel_open=0; "$@" ) 7>&- || native_isolated_rc=$? ;;
-        8) ( native_channel_open=0; "$@" ) 8>&- || native_isolated_rc=$? ;;
-        9) ( native_channel_open=0; "$@" ) 9>&- || native_isolated_rc=$? ;;
-        *) ( native_channel_open=0; "$@" ) || native_isolated_rc=$? ;;
+        3) ( native_channel_open=0; native_scrub_env; "$@" ) 3>&- || native_isolated_rc=$? ;;
+        4) ( native_channel_open=0; native_scrub_env; "$@" ) 4>&- || native_isolated_rc=$? ;;
+        5) ( native_channel_open=0; native_scrub_env; "$@" ) 5>&- || native_isolated_rc=$? ;;
+        6) ( native_channel_open=0; native_scrub_env; "$@" ) 6>&- || native_isolated_rc=$? ;;
+        7) ( native_channel_open=0; native_scrub_env; "$@" ) 7>&- || native_isolated_rc=$? ;;
+        8) ( native_channel_open=0; native_scrub_env; "$@" ) 8>&- || native_isolated_rc=$? ;;
+        9) ( native_channel_open=0; native_scrub_env; "$@" ) 9>&- || native_isolated_rc=$? ;;
+        *) ( native_channel_open=0; native_scrub_env; "$@" ) || native_isolated_rc=$? ;;
     esac
     case "$native_isolated_rc" in
         129|130|143) native_code=cancelled ;;
@@ -2817,6 +2853,17 @@ native_lock_report() {
     fi
 }
 
+native_redirect_check() {
+    # Reads the redirect and XDG variables in the caller's environment. It runs in
+    # native_main, before native_isolated clears the environment for the preflight.
+    native_redirect=0
+    if [ -n "${CIAO_WORKSPACE:-}${CIAO_WORKSPACES:-}${CIAO_RUNTIME_ROOT:-}${CIAO_MEMORY_DIR:-}${CIAO_VAULT_DIR:-}${CIAO_VAULT_ROOT:-}${CIAO_LAUNCH_AGENTS_DIR:-}${UV_TOOL_DIR:-}${UV_TOOL_BIN_DIR:-}" ]; then
+        native_redirect=1
+    fi
+    native_bin_home=${XDG_BIN_HOME:-$HOME/.local/bin}
+    native_data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+}
+
 native_preflight() {
     # Returns 10 existing, 13 install in progress, 12 unknown, 11 partial, 0 fresh.
     # Precedence is existing > in progress > unknown > partial.
@@ -2828,7 +2875,7 @@ native_preflight() {
     np_env_pattern='^[[:space:]]*CIAO_WORKSPACES[[:space:]]*=[[:space:]]*["'"'"']?[^[:space:]"'"'"']'
 
     # Unknown: an inherited redirect hides the surface this check inspects.
-    if [ -n "${CIAO_WORKSPACE:-}${CIAO_WORKSPACES:-}${CIAO_RUNTIME_ROOT:-}${CIAO_MEMORY_DIR:-}${CIAO_VAULT_DIR:-}${CIAO_VAULT_ROOT:-}${CIAO_LAUNCH_AGENTS_DIR:-}${UV_TOOL_DIR:-}${UV_TOOL_BIN_DIR:-}" ]; then
+    if [ "$native_redirect" -eq 1 ]; then
         np_unknown=1
     fi
     if [ -L "$native_state" ] || { [ -e "$native_state" ] && [ ! -d "$native_state" ]; }; then
@@ -2887,8 +2934,8 @@ native_preflight() {
         "$native_state/server-host.json" \
         "$native_state/server-host-upgrade.json" \
         "$HOME/.ciao/installer-bootstrap/handoff.json" \
-        "${XDG_BIN_HOME:-$HOME/.local/bin}/ciao" \
-        "${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/ciaobot" \
+        "$native_bin_home/ciao" \
+        "$native_data_home/uv/tools/ciaobot" \
         "$HOME/Applications/Ciaobot Server.app" \
         "$HOME/Applications/Ciaobot.app"; do
         np_rc=0
@@ -2951,6 +2998,7 @@ native_handover() {
 }
 
 native_main() {
+    native_redirect_check
     np_rc=0
     native_isolated native_preflight || np_rc=$?
     case "$np_rc" in

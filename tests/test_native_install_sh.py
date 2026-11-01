@@ -369,6 +369,12 @@ def _native_harness(tmp_path: Path, *, host: bool = True) -> dict[str, Any]:
             .replace("__NAME__", name)
             .replace("__TARGET__", target),
         )
+    # shasum records the environment it was started with, then runs the real one.
+    (fakebin / "shasum").rename(fakebin / "shasum-real")
+    _write_exec(
+        fakebin / "shasum",
+        f'#!/bin/sh\n{{ printf "%s\\n" ---; /usr/bin/env; }} >> "{home}/shasum-env.log"\nexec "{fakebin}/shasum-real" "$@"\n',
+    )
     _write_exec(
         fakebin / "native-uv",
         _NATIVE_UV.replace("__PROBE__", _PROBE)
@@ -795,17 +801,7 @@ def test_native_mode_refuses_existing_setups_before_any_download(tmp_path: Path,
     assert _snapshot(h["home"]) == before
 
 
-_LOCK_CASES = {
-    # run.json names a reaped pid: launchd-free liveness says "not running".
-    "dead-pid": "not running",
-    # run.json names this test process: a live owner.
-    "live-pid": "running",
-    # run.json has no readable pid: the owner cannot be read.
-    "garbage": "cannot be read",
-}
-
-
-@pytest.mark.parametrize("case", sorted(_LOCK_CASES))
+@pytest.mark.parametrize("case", ["dead-pid", "live-pid", "garbage"])
 def test_a_held_lock_reports_owner_liveness_and_is_kept(tmp_path: Path, case: str) -> None:
     h = _native_harness(tmp_path)
     lock = h["home"] / ".local/state/ciaobot/native-install.lock"
@@ -815,19 +811,63 @@ def test_a_held_lock_reports_owner_liveness_and_is_kept(tmp_path: Path, case: st
         child = subprocess.Popen([sys.executable, "-c", "pass"])
         child.wait()
         body = json.dumps({"schema": 1, "run_id": OTHER_RUN_ID, "pid": child.pid}, separators=(",", ":"))
+        expected = f"(pid {child.pid}, not running)".encode()
     elif case == "live-pid":
         body = json.dumps({"schema": 1, "run_id": OTHER_RUN_ID, "pid": os.getpid()}, separators=(",", ":"))
+        expected = f"(pid {os.getpid()}, running)".encode()
     else:
         body = "not json at all"
+        expected = b"cannot be read"
     record.write_text(body, encoding="utf-8")
     before = record.read_bytes()
     completed, payload = _run(h)
     events = _events(payload)
     assert events[-1]["code"] == "install_in_progress"
     assert events[-1]["seq"] == 2
-    assert _LOCK_CASES[case].encode() in completed.stderr
+    assert expected in completed.stderr
+    if case == "live-pid":
+        # "running" is a substring of "not running": a live owner must never read as dead.
+        assert b"not running" not in completed.stderr
     assert record.read_bytes() == before
     assert "curl" not in _trace(h)
+
+
+# The legacy `--help` text as committed at HEAD (#2405 round 1). Every byte is
+# pinned: the usage can gain no native-only line that changes the legacy output.
+LEGACY_USAGE = b"Usage: install-engine.sh [--version VERSION] [--workspace DIRECTORY] [--no-start] [--no-modify-path]\n                         [--migrate [--as-host | --as-client URL]]\n                         [--native-install --events-fd N --run-id UUID]\n\nInstalls the Ciaobot engine for the current user with uv; the PWA is its UI.\n\n  --migrate            Move an engine Ciaobot.app currently manages to this\n                       installer. The workspace, its .env and the runtime root\n                       are left untouched: only the LaunchAgents, the shim, the\n                       uv tool environment, ~/.local/bin/uv when this Mac had no\n                       uv, and ~/.local/state/ciaobot/ change.\n                       Before-images of the LaunchAgents, the shim, the install\n                       receipt and any existing uv tool environment are kept in\n                       ~/.local/state/ciaobot/migration/before/; a uv this run\n                       had to publish is not one of them and stays after a\n                       rollback. Any failure after the install puts the old\n                       engine back. If Ciaobot.app\n                       is still running 20s after it is asked to quit, the run\n                       stops with that engine and its service unchanged. A\n                       hand-over keeps the workspace that engine runs in:\n                       --workspace may only name that same existing workspace,\n                       and no workspace is ever created.\n  --no-modify-path     Do not add ciao to a shell startup file.\n  --as-host            With --migrate: treat this Mac as the host, even when its\n                       node state cannot be read or trusted.\n  --as-client URL      With --migrate: treat this Mac as a client of URL, which\n                       has to be an http:// or https:// address with a host name.\n                       Its local engine is disabled and never replaced, so the\n                       Mac does not become a second writer.\n  --native-install     The Mac client's fresh-only mode. Requires --version,\n                       --events-fd N (an open, writable descriptor from 3 to 9,\n                       not stdout or stderr) and --run-id UUID (lowercase).\n                       Progress is NDJSON on that descriptor only.\n"
+
+
+def _help(h: dict[str, Any], *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["sh", str(h["script"]), *args],
+        env=_native_env(h, env),
+        cwd=str(h["home"] / "cwd"),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_help_output_is_byte_identical_to_the_legacy_text(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    completed = _help(h, "--help")
+    assert completed.returncode == 0
+    assert completed.stderr == LEGACY_USAGE
+
+
+def test_help_runs_no_program_before_the_descriptor_is_checked(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    planted = tmp_path / "planted-help"
+    planted.mkdir()
+    marker = h["home"] / "cat-ran"
+    _write_exec(planted / "cat", f"#!/bin/sh\necho ran > {marker}\nexit 9\n")
+    env = {"PATH": f"{planted}:{h['env']['PATH']}"}
+    for args in (("--help",), ("--native-install", "--help")):
+        completed = _help(h, *args, env=env)
+        assert completed.returncode == 0
+        assert completed.stderr == LEGACY_USAGE
+    assert not marker.exists()
 
 
 _REDIRECTS = [
@@ -1067,6 +1107,25 @@ def test_a_relative_tmpdir_falls_back_to_tmp(tmp_path: Path) -> None:
     completed, payload = _run(h, env={"TMPDIR": "relative-tmp"})
     assert completed.returncode == 0, completed.stderr
     assert "mktemp closed -d /tmp/ciaobot-engine." in _read(h["home"], "fd.log")
+
+
+def test_native_children_get_only_the_pinned_environment(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    completed, _ = _run(
+        h,
+        env={"PERL5OPT": "-MEvilHook", "PERL5LIB": "/evil/lib", "R2_SENTINEL": "leaked"},
+    )
+    assert completed.returncode == 0, completed.stderr
+    # Every shasum the run starts is checked, including the bootstrap's own, which
+    # runs inside a function rather than as a direct isolated command.
+    blocks = [b.splitlines() for b in _read(h["home"], "shasum-env.log").split("---\n") if b.strip()]
+    assert len(blocks) >= 3, "the isolated shasum ran fewer times than the install does"
+    for recorded in blocks:
+        names = {line.partition("=")[0] for line in recorded if "=" in line}
+        assert {"PATH", "HOME", "LANG"} <= names
+        assert names <= {"PATH", "HOME", "LANG", "PWD", "SHLVL", "_"}, names
+        assert "PERL5OPT" not in names and "PERL5LIB" not in names and "R2_SENTINEL" not in names
+        assert f"PATH={h['fakebin']}:{PINNED_PATH}" in recorded
 
 
 def test_children_never_see_the_public_descriptor(tmp_path: Path) -> None:
