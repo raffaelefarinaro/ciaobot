@@ -191,7 +191,7 @@ which are the user's decision rather than yours to resolve:
 |---|---|---|
 | `schedule list` | List schedules in the active workspace with their next run. | — |
 | `schedule preview ...flags` | Validate fields and compute `next_run` without saving. | Run before `create` for a new recurring schedule; a missing or invalid `next_run` means the fields don't validate yet. |
-| `schedule create ...flags` | Create a validated schedule (recurring, one-off, or manual-only). | Show the user a draft — `next_run`, workspace, project — and get confirmation unless they already asked to apply it. |
+| `schedule create ...flags` | Create a validated schedule (recurring, one-off, or manual-only). Days take `mon,tue,wed,thu,fri,sat,sun` (full names and any case accepted; any other value is refused). | Show the user a draft — `next_run`, workspace, project — and get confirmation unless they already asked to apply it. |
 | `schedule update ID ...flags` | Update an existing schedule; only fields you pass change. | A system schedule (`scope=system`) only accepts workspace, model, provider and archive-policy changes — anything else raises `system_schedule_read_only`. Pause or resume one with `schedule pause|resume`; there is no `--enabled` flag. |
 | `schedule pause ID` | Pause a schedule without deleting it. | Destructive. |
 | `schedule resume ID` | Resume a paused schedule. | Destructive. |
