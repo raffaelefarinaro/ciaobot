@@ -972,25 +972,38 @@ native_report_failure() {
 }
 
 native_scrub_env() {
-    # Unsets every exported variable except the three a native child needs, so a
-    # function's own external commands (curl, tar, shasum, launchctl) inherit only
-    # those. Runs inside a native_isolated subshell: the caller's environment is
-    # not touched.
+    # Clears the export attribute from every variable except PATH, HOME and LANG.
+    # The value is kept, and the variable is re-assigned without export: a caller
+    # that exports a name the script also uses (tmp, version, SHASUM, base) must not
+    # wipe the script's own value. Names come from `export -p`, in POSIX form or
+    # bash's `declare -x` form, and each is checked as an identifier before any eval.
+    # Runs inside a native_isolated subshell only, so the caller's shell is untouched.
     native_scrub_all=$(export -p)
     while IFS= read -r native_scrub_line; do
         native_scrub_name=${native_scrub_line#export }
+        native_scrub_name=${native_scrub_name#declare -x }
         native_scrub_name=${native_scrub_name%%=*}
         case "$native_scrub_name" in
-            PATH|HOME|LANG) ;;
-            *) unset "$native_scrub_name" 2>/dev/null || true ;;
+            ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) continue ;;
         esac
+        case "$native_scrub_name" in
+            PATH|HOME|LANG) continue ;;
+        esac
+        if eval "[ \"\${$native_scrub_name+set}\" = set ]"; then
+            eval "native_scrub_value=\${$native_scrub_name}"
+            # A name that cannot be unset (readonly) is left alone rather than re-set.
+            unset "$native_scrub_name" 2>/dev/null || continue
+            eval "$native_scrub_name=\$native_scrub_value"
+        else
+            unset "$native_scrub_name" 2>/dev/null || true
+        fi
     done <<NATIVE_SCRUB_EOF
 $native_scrub_all
 NATIVE_SCRUB_EOF
-    # Set, not kept: a child must get the same three whatever the caller exported.
+    # Set and exported, whatever the caller had: the three names a child needs.
     PATH=$NATIVE_PATH
     LANG=C
-    export PATH LANG
+    export PATH HOME LANG
 }
 
 native_isolated() {

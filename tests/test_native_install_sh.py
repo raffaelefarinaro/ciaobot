@@ -17,6 +17,7 @@ import json
 import os
 import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -30,6 +31,7 @@ from ciao import native_installer as native
 from ciao.release_manifest import SERVER_HOST_FILENAME, build_manifest, server_host_artifact_entry
 from tests.test_engine_installer import (
     SCRIPT_TEXT,
+    _function_source,
     UV_SHA256,
     VERSION,
     WHEEL_NAME,
@@ -1126,6 +1128,52 @@ def test_native_children_get_only_the_pinned_environment(tmp_path: Path) -> None
         assert names <= {"PATH", "HOME", "LANG", "PWD", "SHLVL", "_"}, names
         assert "PERL5OPT" not in names and "PERL5LIB" not in names and "R2_SENTINEL" not in names
         assert f"PATH={h['fakebin']}:{PINNED_PATH}" in recorded
+
+
+def test_native_mode_survives_caller_exported_script_variables(tmp_path: Path) -> None:
+    # The caller exports names the script uses for itself. The scrub must keep the
+    # script's own values for them, and the children must still see only the three.
+    h = _native_harness(tmp_path)
+    completed, payload = _run(
+        h,
+        env={"tmp": "/nonexistent", "version": "9", "SHASUM": "/nonexistent", "base": "x"},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert _events(payload)[-1]["type"] == "service_ready"
+    blocks = [b.splitlines() for b in _read(h["home"], "shasum-env.log").split("---\n") if b.strip()]
+    assert blocks, "the isolated shasum never ran"
+    for recorded in blocks:
+        names = {line.partition("=")[0] for line in recorded if "=" in line}
+        assert {"PATH", "HOME", "LANG"} <= names
+        assert names <= {"PATH", "HOME", "LANG", "PWD", "SHLVL", "_"}, names
+
+
+SCRUB_SHELLS = [name for name in ("sh", "bash", "dash") if shutil.which(name)]
+
+
+@pytest.mark.parametrize("shell", SCRUB_SHELLS)
+def test_scrub_keeps_the_script_value_and_clears_the_export(shell: str) -> None:
+    # Sourced directly, under each shell present: the script's own `tmp` is exported
+    # because the caller exported it, and must come back unexported with its value.
+    # `export -p` prints `declare -x NAME=...` under bash in non-POSIX mode.
+    script = "\n".join([
+        "NATIVE_PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+        _function_source("native_scrub_env"),
+        "export PERL5OPT=-MEvil R3_SENTINEL=leak",
+        "export tmp=/caller-tmp",
+        "tmp=/script-tmp",
+        "native_scrub_env",
+        "printf 'TMP=%s\\n' \"$tmp\"",
+        "/usr/bin/env",
+    ])
+    completed = subprocess.run([shell, "-c", script], capture_output=True, text=True, check=False, env={"PATH": "/usr/bin:/bin"})
+    assert completed.returncode == 0, completed.stderr
+    lines = completed.stdout.splitlines()
+    assert "TMP=/script-tmp" in lines
+    exported = {line.partition("=")[0] for line in lines if "=" in line and not line.startswith("TMP=")}
+    assert "PERL5OPT" not in exported and "R3_SENTINEL" not in exported
+    assert "tmp" not in exported
+    assert "PATH=/usr/bin:/bin:/usr/sbin:/sbin" in lines
 
 
 def test_children_never_see_the_public_descriptor(tmp_path: Path) -> None:
