@@ -31,14 +31,12 @@ import pytest
 
 from ciao import native_handoff
 from ciao import native_installer as native
+from ciao import native_lock
 from ciao import release_manifest, server_host, server_host_install
 from ciao.install_discovery import NativeInstallState
-from ciao.native_installer import (
-    EventError,
-    EventWriter,
-    NativeLockError,
-    NativeRunLock,
-)
+from ciao.native_installer import EventError, EventWriter
+from ciao.native_lock import NativeLockError, NativeRunLock
+from ciao.native_readiness import NativeReadinessProof
 from tests.test_server_host_install import APP_NAME, _FakeRunner, _fixture
 
 #: A canonical run id: lowercase, hyphenated, exactly what ``--run-id`` accepts.
@@ -142,17 +140,22 @@ def _state_dir(tmp_path: Path) -> Path:
     return state
 
 
+def _prepared(state: Path) -> native_lock.NativeStateDir:
+    """The validated handle acquisition now requires, for an existing test state dir."""
+    return native_lock.prepare_native_state_dir(state, trusted_root=state.parent)
+
+
 def _lock_path(state: Path) -> Path:
-    return state / native.LOCK_DIR_NAME
+    return state / native_lock.LOCK_DIR_NAME
 
 
 def _record_path(state: Path) -> Path:
-    return _lock_path(state) / native.LOCK_RECORD_NAME
+    return _lock_path(state) / native_lock.LOCK_RECORD_NAME
 
 
 def _record_bytes(run_id: str = RUN_ID, *, pid: int | None = None) -> bytes:
     payload = {
-        "schema": native.LOCK_SCHEMA_VERSION,
+        "schema": native_lock.LOCK_SCHEMA_VERSION,
         "run_id": run_id,
         "pid": os.getpid() if pid is None else pid,
     }
@@ -166,7 +169,7 @@ def _make_lock_dir(state: Path, run_id: str = RUN_ID) -> Path:
     lock_dir = _lock_path(state)
     lock_dir.mkdir(mode=0o700)
     os.chmod(lock_dir, 0o700)
-    record = lock_dir / native.LOCK_RECORD_NAME
+    record = lock_dir / native_lock.LOCK_RECORD_NAME
     descriptor = os.open(
         record, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
     )
@@ -184,9 +187,9 @@ def _run_lock_child(
     child = (
         "import sys\n"
         "from pathlib import Path\n"
-        "from ciao.native_installer import NativeLockError, NativeRunLock\n"
+        "from ciao.native_lock import NativeLockError, NativeRunLock, prepare_native_state_dir\n"
         "try:\n"
-        "    lock = NativeRunLock.acquire(Path(sys.argv[1]), run_id=sys.argv[2])\n"
+        "    lock = NativeRunLock.acquire(prepare_native_state_dir(Path(sys.argv[1]), trusted_root=Path(sys.argv[1]).parent), run_id=sys.argv[2])\n"
         "except NativeLockError as exc:\n"
         "    print('refused', exc.reason, flush=True)\n"
         "    raise SystemExit(7)\n"
@@ -1026,7 +1029,7 @@ def test_close_restores_the_inherited_descriptor_flags() -> None:
 def test_prepare_refuses_a_relative_or_dotdot_path(tmp_path: Path) -> None:
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             Path("relative"),
             trusted_root=tmp_path,
         )
@@ -1037,7 +1040,7 @@ def test_prepare_refuses_a_relative_or_dotdot_path(tmp_path: Path) -> None:
     os.chmod(parent, 0o700)
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             parent / ".." / "escaped",
             trusted_root=tmp_path,
         )
@@ -1054,7 +1057,8 @@ def test_prepare_creates_only_missing_private_state_components(
     os.chmod(existing, 0o755)
     state = existing / "intermediate" / "ciaobot"
 
-    assert native.prepare_native_state_dir(state, trusted_root=tmp_path) == state
+    with native_lock.prepare_native_state_dir(state, trusted_root=tmp_path) as prepared:
+        assert prepared.path == state
     # The existing component is judged, never chmod'ed.
     assert stat.S_IMODE(os.lstat(existing).st_mode) == 0o755
     intermediate = existing / "intermediate"
@@ -1066,8 +1070,9 @@ def test_prepare_creates_only_missing_private_state_components(
 def test_prepare_then_acquire_works_on_a_fresh_chain(tmp_path: Path) -> None:
     state = tmp_path / "fresh" / "ciaobot"
     assert not state.exists()
-    assert native.prepare_native_state_dir(state, trusted_root=tmp_path) == state
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    prepared = native_lock.prepare_native_state_dir(state, trusted_root=tmp_path)
+    assert prepared.path == state
+    lock = NativeRunLock.acquire(prepared, run_id=RUN_ID)
     lock.release()
     assert not _lock_path(state).exists()
 
@@ -1077,7 +1082,8 @@ def test_prepare_is_a_noop_for_an_existing_private_state_dir(
 ) -> None:
     state = _state_dir(tmp_path)
     before = os.lstat(state)
-    assert native.prepare_native_state_dir(state, trusted_root=tmp_path) == state
+    with native_lock.prepare_native_state_dir(state, trusted_root=tmp_path) as prepared:
+        assert prepared.path == state
     after = os.lstat(state)
     assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
     assert after.st_mtime_ns == before.st_mtime_ns
@@ -1092,7 +1098,7 @@ def test_prepare_refuses_an_existing_unprivate_state_dir_without_repair(
     os.chmod(state, 0o755)
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             state,
             trusted_root=tmp_path,
         )
@@ -1109,7 +1115,7 @@ def test_prepare_refuses_a_symlinked_or_writable_ancestor(tmp_path: Path) -> Non
     os.symlink(target, link)
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             link / "state",
             trusted_root=tmp_path,
         )
@@ -1122,7 +1128,7 @@ def test_prepare_refuses_a_symlinked_or_writable_ancestor(tmp_path: Path) -> Non
     os.chmod(writable, 0o777)
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             writable / "state",
             trusted_root=tmp_path,
         )
@@ -1149,7 +1155,7 @@ def test_prepare_validates_the_whole_trusted_root_chain(tmp_path: Path) -> None:
     assert (link / "state").is_dir()
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             link / "state",
             trusted_root=root,
         )
@@ -1158,7 +1164,7 @@ def test_prepare_validates_the_whole_trusted_root_chain(tmp_path: Path) -> None:
     missing = link / "state" / "new"
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             missing,
             trusted_root=root,
         )
@@ -1176,7 +1182,7 @@ def test_prepare_refuses_a_target_outside_the_trusted_root(
     outside = tmp_path / "outside"
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             outside,
             trusted_root=root,
         )
@@ -1193,7 +1199,7 @@ def test_prepare_refuses_a_symlinked_trusted_root(tmp_path: Path) -> None:
     os.symlink(real, link)
     assert (
         _lock_reason(
-            native.prepare_native_state_dir,
+            native_lock.prepare_native_state_dir,
             link / "state",
             trusted_root=link,
         )
@@ -1212,7 +1218,7 @@ def test_prepare_defaults_to_home_as_trusted_root(
     # A sibling of home, so it lies outside the default trusted root.
     target = home.parent / f"ciaobot-outside-{uuid.uuid4().hex}"
     assert (
-        _lock_reason(native.prepare_native_state_dir, target)
+        _lock_reason(native_lock.prepare_native_state_dir, target)
         == "state_dir_unsafe"
     )
     assert not target.exists()
@@ -1225,7 +1231,7 @@ def test_prepare_maps_fstat_failure_to_state_dir_unsafe(
     root.mkdir(mode=0o700)
     os.chmod(root, 0o700)
     state = root / "state"
-    real_fstat = native._fstat
+    real_fstat = native_lock._fstat
     calls = 0
 
     def bad_fstat(fd: int) -> os.stat_result:
@@ -1235,10 +1241,10 @@ def test_prepare_maps_fstat_failure_to_state_dir_unsafe(
             raise OSError(errno.EIO, "fstat failed")
         return real_fstat(fd)
 
-    monkeypatch.setattr(native, "_fstat", bad_fstat)
+    monkeypatch.setattr(native_lock, "_fstat", bad_fstat)
     assert (
         _lock_reason(
-            native.prepare_native_state_dir, state, trusted_root=root
+            native_lock.prepare_native_state_dir, state, trusted_root=root
         )
         == "state_dir_unsafe"
     )
@@ -1253,7 +1259,7 @@ def test_prepare_umask_failure_leaves_the_created_component(
     try:
         assert (
             _lock_reason(
-                native.prepare_native_state_dir,
+                native_lock.prepare_native_state_dir,
                 state,
                 trusted_root=tmp_path,
             )
@@ -1273,7 +1279,7 @@ def test_the_lock_records_run_identity_privately_and_releases(
     state = _state_dir(tmp_path)
     sibling = state / "install-receipt.json"
     sibling.write_text("keep", encoding="utf-8")
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     try:
         assert lock.path == _lock_path(state)
         assert lock.record_path == _record_path(state)
@@ -1288,7 +1294,7 @@ def test_the_lock_records_run_identity_privately_and_releases(
         assert record.st_nlink == 1
         payload = json.loads(lock.record_path.read_text(encoding="utf-8"))
         assert payload == {
-            "schema": native.LOCK_SCHEMA_VERSION,
+            "schema": native_lock.LOCK_SCHEMA_VERSION,
             "run_id": RUN_ID,
             "pid": os.getpid(),
         }
@@ -1303,7 +1309,7 @@ def test_invalid_run_id_is_refused_before_creating_anything(tmp_path: Path) -> N
     state = _state_dir(tmp_path)
     for bad in (RUN_ID.upper(), "{" + RUN_ID + "}", "not-a-uuid"):
         assert (
-            _lock_reason(NativeRunLock.acquire, state, run_id=bad)
+            _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=bad)
             == "invalid_run_id"
         )
     assert list(state.iterdir()) == []
@@ -1313,25 +1319,21 @@ def test_the_lock_refuses_a_non_native_platform(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _state_dir(tmp_path)
+    prepared = _prepared(state)
     monkeypatch.setattr(native.sys, "platform", "win32")
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, prepared, run_id=RUN_ID)
         == "unsupported_platform"
     )
+    prepared.close()
     assert list(state.iterdir()) == []
 
 
-def test_an_unsafe_or_missing_state_directory_is_refused(tmp_path: Path) -> None:
-    missing = tmp_path / "missing"
-    assert (
-        _lock_reason(NativeRunLock.acquire, missing, run_id=RUN_ID)
-        == "state_dir_unsafe"
-    )
-
+def test_an_unsafe_state_directory_is_refused_at_preparation(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
     os.chmod(state, 0o777)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(native_lock.prepare_native_state_dir, state, trusted_root=tmp_path)
         == "state_dir_unsafe"
     )
     os.chmod(state, 0o700)
@@ -1342,14 +1344,14 @@ def test_an_unsafe_or_missing_state_directory_is_refused(tmp_path: Path) -> None
     link = tmp_path / "state-link"
     os.symlink(target, link)
     assert (
-        _lock_reason(NativeRunLock.acquire, link, run_id=RUN_ID)
+        _lock_reason(native_lock.prepare_native_state_dir, link, trusted_root=tmp_path)
         == "state_dir_unsafe"
     )
 
     regular = tmp_path / "state-file"
     regular.write_text("not a directory", encoding="utf-8")
     assert (
-        _lock_reason(NativeRunLock.acquire, regular, run_id=RUN_ID)
+        _lock_reason(native_lock.prepare_native_state_dir, regular, trusted_root=tmp_path)
         == "state_dir_unsafe"
     )
     assert not _lock_path(state).exists()
@@ -1360,13 +1362,13 @@ def test_an_unsafe_or_missing_state_directory_is_refused(tmp_path: Path) -> None
 
 def test_exclusive_acquisition_refuses_a_second_holder(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     try:
         record_before = _record_path(state).read_bytes()
         inode_before = os.lstat(_record_path(state)).st_ino
         assert (
             _lock_reason(
-                NativeRunLock.acquire, state, run_id=OTHER_RUN_ID
+                NativeRunLock.acquire, _prepared(state), run_id=OTHER_RUN_ID
             )
             == "lock_busy"
         )
@@ -1384,7 +1386,7 @@ def test_acquire_umask_failure_leaves_the_lock_as_evidence(
     previous = os.umask(0o777)
     try:
         assert (
-            _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+            _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
             == "lock_create_failed"
         )
     finally:
@@ -1406,7 +1408,7 @@ def test_concurrent_threads_cannot_both_acquire(tmp_path: Path) -> None:
     def attempt() -> None:
         barrier.wait(timeout=5)
         try:
-            lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+            lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
         except NativeLockError as exc:
             results.append(("refused", exc.reason))
             return
@@ -1446,7 +1448,7 @@ def test_two_real_processes_race_and_exactly_one_acquires(
     child = (
         "import sys, time\n"
         "from pathlib import Path\n"
-        "from ciao.native_installer import NativeLockError, NativeRunLock\n"
+        "from ciao.native_lock import NativeLockError, NativeRunLock, prepare_native_state_dir\n"
         "state = Path(sys.argv[1])\n"
         "run_id = sys.argv[2]\n"
         "start = Path(sys.argv[3])\n"
@@ -1454,7 +1456,7 @@ def test_two_real_processes_race_and_exactly_one_acquires(
         "while not start.exists():\n"
         "    time.sleep(0.01)\n"
         "try:\n"
-        "    lock = NativeRunLock.acquire(state, run_id=run_id)\n"
+        "    lock = NativeRunLock.acquire(prepare_native_state_dir(state, trusted_root=state.parent), run_id=run_id)\n"
         "except NativeLockError as exc:\n"
         "    print('refused', exc.reason, flush=True)\n"
         "    release.touch()\n"
@@ -1508,7 +1510,7 @@ def test_a_competing_process_is_refused_then_can_acquire_after_release(
     tmp_path: Path,
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     try:
         refused = _run_lock_child(state, OTHER_RUN_ID)
         assert refused.returncode == 7, (refused.stdout, refused.stderr)
@@ -1526,7 +1528,7 @@ def test_a_competing_process_is_refused_then_can_acquire_after_release(
 def test_a_dead_runs_valid_lock_is_busy_and_left_untouched(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
     lock_dir = _make_lock_dir(state, OTHER_RUN_ID)
-    record = lock_dir / native.LOCK_RECORD_NAME
+    record = lock_dir / native_lock.LOCK_RECORD_NAME
     before = (
         record.read_bytes(),
         os.lstat(record).st_ino,
@@ -1534,7 +1536,7 @@ def test_a_dead_runs_valid_lock_is_busy_and_left_untouched(tmp_path: Path) -> No
         os.lstat(lock_dir).st_ino,
     )
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID) == "lock_busy"
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID) == "lock_busy"
     )
     after = (
         record.read_bytes(),
@@ -1551,8 +1553,8 @@ def test_a_crashed_process_leaves_a_busy_lock(tmp_path: Path) -> None:
     child = (
         "import os, sys\n"
         "from pathlib import Path\n"
-        "from ciao.native_installer import NativeRunLock\n"
-        "lock = NativeRunLock.acquire(Path(sys.argv[1]), run_id=sys.argv[2])\n"
+        "from ciao.native_lock import NativeRunLock, prepare_native_state_dir\n"
+        "lock = NativeRunLock.acquire(prepare_native_state_dir(Path(sys.argv[1]), trusted_root=Path(sys.argv[1]).parent), run_id=sys.argv[2])\n"
         "print('acquired', flush=True)\n"
         "os._exit(99)\n"
     )
@@ -1570,7 +1572,7 @@ def test_a_crashed_process_leaves_a_busy_lock(tmp_path: Path) -> None:
     assert payload["run_id"] == OTHER_RUN_ID
     assert payload["pid"] != os.getpid()
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID) == "lock_busy"
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID) == "lock_busy"
     )
     assert _lock_path(state).is_dir()
 
@@ -1583,11 +1585,11 @@ def test_empty_and_partial_lock_directories_are_unknown_and_left_untouched(
     lock_dir.mkdir(mode=0o700)
     os.chmod(lock_dir, 0o700)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
         == "lock_unknown"
     )
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
         == "lock_unknown"
     )
     assert lock_dir.is_dir()
@@ -1595,16 +1597,16 @@ def test_empty_and_partial_lock_directories_are_unknown_and_left_untouched(
 
     lock_dir.rmdir()
     lock_dir = _make_lock_dir(state, OTHER_RUN_ID)
-    record = lock_dir / native.LOCK_RECORD_NAME
+    record = lock_dir / native_lock.LOCK_RECORD_NAME
     record.write_bytes(b'{"schema":1,"run_id":"')
     os.chmod(record, 0o600)
     before = record.read_bytes()
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
         == "lock_unknown"
     )
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
         == "lock_unknown"
     )
     assert record.read_bytes() == before
@@ -1621,13 +1623,13 @@ def test_a_lock_that_disappears_before_stat_is_unknown(
     real_stat = native.os.stat
 
     def missing_stat(path: object, *args: object, **kwargs: object) -> object:
-        if path == native.LOCK_DIR_NAME:
+        if path == native_lock.LOCK_DIR_NAME:
             raise FileNotFoundError(errno.ENOENT, "gone")
         return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(native.os, "stat", missing_stat)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
         == "lock_unknown"
     )
     assert lock_dir.is_dir()
@@ -1643,13 +1645,13 @@ def test_a_lock_that_disappears_before_open_is_unknown(
     real_open = native.os.open
 
     def missing_open(path: object, *args: object, **kwargs: object) -> int:
-        if path == native.LOCK_DIR_NAME:
+        if path == native_lock.LOCK_DIR_NAME:
             raise FileNotFoundError(errno.ENOENT, "gone")
         return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(native.os, "open", missing_open)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
         == "lock_unknown"
     )
     assert lock_dir.is_dir()
@@ -1663,13 +1665,13 @@ def test_a_record_that_disappears_before_stat_is_unknown(
     real_stat = native.os.stat
 
     def missing_stat(path: object, *args: object, **kwargs: object) -> object:
-        if path == native.LOCK_RECORD_NAME:
+        if path == native_lock.LOCK_RECORD_NAME:
             raise FileNotFoundError(errno.ENOENT, "gone")
         return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(native.os, "stat", missing_stat)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
         == "lock_unknown"
     )
     assert lock_dir.is_dir()
@@ -1683,13 +1685,13 @@ def test_a_record_that_disappears_before_open_is_unknown(
     real_open = native.os.open
 
     def missing_open(path: object, *args: object, **kwargs: object) -> int:
-        if path == native.LOCK_RECORD_NAME:
+        if path == native_lock.LOCK_RECORD_NAME:
             raise FileNotFoundError(errno.ENOENT, "gone")
         return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(native.os, "open", missing_open)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
         == "lock_unknown"
     )
     assert lock_dir.is_dir()
@@ -1700,7 +1702,8 @@ def test_classification_maps_fstat_failure_to_lock_unsafe(
 ) -> None:
     state = _state_dir(tmp_path)
     lock_dir = _make_lock_dir(state, OTHER_RUN_ID)
-    real_fstat = native._fstat
+    prepared = _prepared(state)
+    real_fstat = native_lock._fstat
     calls = 0
 
     def bad_fstat(fd: int) -> os.stat_result:
@@ -1710,9 +1713,9 @@ def test_classification_maps_fstat_failure_to_lock_unsafe(
             raise OSError(errno.EIO, "fstat failed")
         return real_fstat(fd)
 
-    monkeypatch.setattr(native, "_fstat", bad_fstat)
+    monkeypatch.setattr(native_lock, "_fstat", bad_fstat)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+        _lock_reason(NativeRunLock.acquire, prepared, run_id=RUN_ID)
         == "lock_unsafe"
     )
     assert lock_dir.is_dir()
@@ -1721,11 +1724,11 @@ def test_classification_maps_fstat_failure_to_lock_unsafe(
 def test_an_incompatible_record_is_unsafe_not_unknown(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
     lock_dir = _make_lock_dir(state, OTHER_RUN_ID)
-    record = lock_dir / native.LOCK_RECORD_NAME
+    record = lock_dir / native_lock.LOCK_RECORD_NAME
     record.write_text(
         json.dumps(
             {
-                "schema": native.LOCK_SCHEMA_VERSION + 1,
+                "schema": native_lock.LOCK_SCHEMA_VERSION + 1,
                 "run_id": OTHER_RUN_ID,
                 "pid": os.getpid(),
             },
@@ -1736,7 +1739,7 @@ def test_an_incompatible_record_is_unsafe_not_unknown(tmp_path: Path) -> None:
     )
     os.chmod(record, 0o600)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID) == "lock_unsafe"
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID) == "lock_unsafe"
     )
     assert record.exists()
 
@@ -1746,7 +1749,7 @@ def test_an_existing_lock_directory_is_never_repaired(tmp_path: Path) -> None:
     lock_dir = _make_lock_dir(state, OTHER_RUN_ID)
     os.chmod(lock_dir, 0o755)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID) == "lock_unsafe"
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID) == "lock_unsafe"
     )
     assert stat.S_IMODE(os.lstat(lock_dir).st_mode) == 0o755
 
@@ -1754,11 +1757,11 @@ def test_an_existing_lock_directory_is_never_repaired(tmp_path: Path) -> None:
 def test_an_existing_record_must_stay_owner_only(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
     lock_dir = _make_lock_dir(state, OTHER_RUN_ID)
-    record = lock_dir / native.LOCK_RECORD_NAME
+    record = lock_dir / native_lock.LOCK_RECORD_NAME
     os.chmod(record, 0o644)
     content = record.read_bytes()
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID) == "lock_unsafe"
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID) == "lock_unsafe"
     )
     assert stat.S_IMODE(os.lstat(record).st_mode) == 0o644
     assert record.read_bytes() == content
@@ -1772,7 +1775,7 @@ def test_a_symlinked_lock_directory_is_unsafe_and_left_alone(tmp_path: Path) -> 
     link = _lock_path(state)
     os.symlink(target, link)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID) == "lock_unsafe"
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID) == "lock_unsafe"
     )
     assert link.is_symlink()
     assert target.is_dir()
@@ -1780,11 +1783,11 @@ def test_a_symlinked_lock_directory_is_unsafe_and_left_alone(tmp_path: Path) -> 
 
 def test_a_hard_linked_record_is_unsafe_and_blocks_cleanup(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     link = state / "record-link"
     os.link(lock.record_path, link)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=OTHER_RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=OTHER_RUN_ID)
         == "lock_unsafe"
     )
     assert _lock_reason(lock.release) == "lock_cleanup_refused"
@@ -1795,7 +1798,7 @@ def test_a_hard_linked_record_is_unsafe_and_blocks_cleanup(tmp_path: Path) -> No
 
 def test_a_replaced_record_is_not_removed(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     original_inode = os.lstat(lock.record_path).st_ino
     # Create the substitute while the original still exists, then rename it over
     # the record: unlink-then-create lets Linux hand back the freed inode number.
@@ -1814,19 +1817,19 @@ def test_a_replaced_record_is_not_removed(tmp_path: Path) -> None:
 
 def test_a_replaced_lock_directory_is_not_removed(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     original = state / "moved-lock"
     os.rename(lock.path, original)
     replacement = _make_lock_dir(state, OTHER_RUN_ID)
     assert replacement == lock.path
     assert _lock_reason(lock.release) == "lock_cleanup_refused"
-    assert (original / native.LOCK_RECORD_NAME).exists()
-    assert (lock.path / native.LOCK_RECORD_NAME).exists()
+    assert (original / native_lock.LOCK_RECORD_NAME).exists()
+    assert (lock.path / native_lock.LOCK_RECORD_NAME).exists()
 
 
 def test_a_symlinked_record_is_not_removed(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     target = state / "foreign.txt"
     target.write_text("foreign", encoding="utf-8")
     os.unlink(lock.record_path)
@@ -1839,12 +1842,12 @@ def test_a_symlinked_record_is_not_removed(tmp_path: Path) -> None:
 
 def test_release_refuses_a_record_made_non_private(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     os.chmod(lock.record_path, 0o644)
     with pytest.raises(NativeLockError) as caught:
         lock.release()
     assert caught.value.reason == "lock_cleanup_refused"
-    assert caught.value.cleanup == native.LockCleanupReport(False, False)
+    assert caught.value.cleanup == native_lock.LockCleanupReport(False, False)
     assert lock.record_path.exists()
     assert stat.S_IMODE(os.lstat(lock.record_path).st_mode) == 0o644
     assert _lock_path(state).is_dir()
@@ -1852,12 +1855,12 @@ def test_release_refuses_a_record_made_non_private(tmp_path: Path) -> None:
 
 def test_release_refuses_a_lock_dir_made_non_private(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     os.chmod(lock.path, 0o755)
     with pytest.raises(NativeLockError) as caught:
         lock.release()
     assert caught.value.reason == "lock_cleanup_refused"
-    assert caught.value.cleanup == native.LockCleanupReport(False, False)
+    assert caught.value.cleanup == native_lock.LockCleanupReport(False, False)
     assert lock.record_path.exists()
     assert stat.S_IMODE(os.lstat(lock.path).st_mode) == 0o755
 
@@ -1866,16 +1869,16 @@ def test_release_maps_fstat_failure_to_cleanup_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
 
     def bad_fstat(fd: int) -> os.stat_result:
         raise OSError(errno.EIO, "fstat failed")
 
-    monkeypatch.setattr(native, "_fstat", bad_fstat)
+    monkeypatch.setattr(native_lock, "_fstat", bad_fstat)
     with pytest.raises(NativeLockError) as caught:
         lock.release()
     assert caught.value.reason == "lock_cleanup_refused"
-    assert caught.value.cleanup == native.LockCleanupReport(False, False)
+    assert caught.value.cleanup == native_lock.LockCleanupReport(False, False)
     assert lock.record_path.exists()
     assert _lock_path(state).is_dir()
 
@@ -1884,7 +1887,7 @@ def test_release_refuses_same_inode_same_size_record_mutation(
     tmp_path: Path,
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     before_stat = os.lstat(lock.record_path)
     before = lock.record_path.read_bytes()
     index = before.index(b'"run_id":"') + len(b'"run_id":"')
@@ -1904,7 +1907,7 @@ def test_release_refuses_same_inode_same_size_record_mutation(
     with pytest.raises(NativeLockError) as caught:
         lock.release()
     assert caught.value.reason == "lock_cleanup_refused"
-    assert caught.value.cleanup == native.LockCleanupReport(False, False)
+    assert caught.value.cleanup == native_lock.LockCleanupReport(False, False)
     assert lock.record_path.exists()
     assert _lock_path(state).is_dir()
 
@@ -1913,7 +1916,7 @@ def test_a_foreign_file_inside_the_lock_makes_cleanup_refuse(
     tmp_path: Path,
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     foreign = lock.path / "foreign.txt"
     foreign.write_text("keep", encoding="utf-8")
     assert _lock_reason(lock.release) == "lock_cleanup_refused"
@@ -1928,10 +1931,10 @@ def test_a_foreign_file_inside_an_existing_lock_is_unsafe(tmp_path: Path) -> Non
     foreign = lock_dir / "foreign.txt"
     foreign.write_text("keep", encoding="utf-8")
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID) == "lock_unsafe"
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID) == "lock_unsafe"
     )
     assert foreign.read_text(encoding="utf-8") == "keep"
-    assert (lock_dir / native.LOCK_RECORD_NAME).exists()
+    assert (lock_dir / native_lock.LOCK_RECORD_NAME).exists()
 
 
 def test_a_record_write_failure_removes_only_the_new_lock(
@@ -1945,16 +1948,16 @@ def test_a_record_write_failure_removes_only_the_new_lock(
         raise OSError("boom")
 
     with monkeypatch.context() as patch:
-        patch.setattr(native, "_write_record", explode)
+        patch.setattr(native_lock, "_write_record", explode)
         assert (
-            _lock_reason(NativeRunLock.acquire, state, run_id=RUN_ID)
+            _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=RUN_ID)
             == "lock_record_failed"
         )
     assert not _lock_path(state).exists()
     assert sibling.read_text(encoding="utf-8") == "keep"
     assert list(state.iterdir()) == [sibling]
 
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     lock.release()
     assert not _lock_path(state).exists()
 
@@ -1963,12 +1966,12 @@ def test_the_context_manager_releases_on_success_and_failure(
     tmp_path: Path,
 ) -> None:
     state = _state_dir(tmp_path)
-    with NativeRunLock.acquire(state, run_id=RUN_ID) as lock:
+    with NativeRunLock.acquire(_prepared(state), run_id=RUN_ID) as lock:
         assert lock.path.is_dir()
     assert not _lock_path(state).exists()
 
     with pytest.raises(RuntimeError):
-        with NativeRunLock.acquire(state, run_id=OTHER_RUN_ID):
+        with NativeRunLock.acquire(_prepared(state), run_id=OTHER_RUN_ID):
             raise RuntimeError("body failed")
     assert not _lock_path(state).exists()
 
@@ -1977,7 +1980,7 @@ def test_release_refuses_same_thread_reentrancy_without_fd_reuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     original = lock._release_checked
 
     def reenter(parent_fd: int, dir_fd: int) -> None:
@@ -1996,7 +1999,7 @@ def test_concurrent_release_calls_close_once_without_fd_reuse(
     tmp_path: Path,
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     barrier = threading.Barrier(4)
     results: list[str] = []
 
@@ -2022,7 +2025,7 @@ def test_an_interrupted_release_keeps_no_fabricated_cleanup_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
 
     def interrupt(parent_fd: int, dir_fd: int) -> None:
         raise KeyboardInterrupt()
@@ -2041,7 +2044,7 @@ def test_release_after_record_unlink_and_rmdir_failure_is_not_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     real_rmdir = native.os.rmdir
 
     def fail_rmdir(*args: object, **kwargs: object) -> None:
@@ -2052,7 +2055,7 @@ def test_release_after_record_unlink_and_rmdir_failure_is_not_success(
         with pytest.raises(NativeLockError) as caught:
             lock.release()
         assert caught.value.reason == "lock_cleanup_refused"
-        assert caught.value.cleanup == native.LockCleanupReport(True, False)
+        assert caught.value.cleanup == native_lock.LockCleanupReport(True, False)
     finally:
         monkeypatch.setattr(native.os, "rmdir", real_rmdir)
     # The record unlink already happened; the directory is the evidence.
@@ -2063,9 +2066,9 @@ def test_release_after_record_unlink_and_rmdir_failure_is_not_success(
     with pytest.raises(NativeLockError) as retry:
         lock.release()
     assert retry.value.reason == "lock_cleanup_refused"
-    assert retry.value.cleanup == native.LockCleanupReport(True, False)
+    assert retry.value.cleanup == native_lock.LockCleanupReport(True, False)
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=OTHER_RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=OTHER_RUN_ID)
         == "lock_unknown"
     )
 
@@ -2081,11 +2084,11 @@ def test_context_manager_surfaces_body_and_cleanup_failures(
 
     monkeypatch.setattr(native.os, "rmdir", fail_rmdir)
     with pytest.raises(NativeLockError) as caught:
-        with NativeRunLock.acquire(state, run_id=RUN_ID):
+        with NativeRunLock.acquire(_prepared(state), run_id=RUN_ID):
             raise body_error
     assert caught.value.reason == "lock_cleanup_refused"
     assert caught.value.__cause__ is body_error
-    assert caught.value.cleanup == native.LockCleanupReport(True, False)
+    assert caught.value.cleanup == native_lock.LockCleanupReport(True, False)
     assert _lock_path(state).is_dir()
     assert not _record_path(state).exists()
 
@@ -2098,23 +2101,23 @@ def test_a_failed_acquire_surfaces_cleanup_and_original_failure(
     def explode(fd: int, data: bytes) -> None:
         raise OSError("write failed")
 
-    def no_cleanup(*args: object, **kwargs: object) -> native.LockCleanupReport:
-        return native.LockCleanupReport(False, False)
+    def no_cleanup(*args: object, **kwargs: object) -> native_lock.LockCleanupReport:
+        return native_lock.LockCleanupReport(False, False)
 
     with monkeypatch.context() as patch:
-        patch.setattr(native, "_write_record", explode)
-        patch.setattr(native, "_remove_new_lock_best_effort", no_cleanup)
+        patch.setattr(native_lock, "_write_record", explode)
+        patch.setattr(native_lock, "_remove_new_lock_best_effort", no_cleanup)
         with pytest.raises(NativeLockError) as caught:
-            NativeRunLock.acquire(state, run_id=RUN_ID)
+            NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     assert caught.value.reason == "lock_cleanup_refused"
     assert caught.value.original_reason == "lock_record_failed"
-    assert caught.value.cleanup == native.LockCleanupReport(False, False)
+    assert caught.value.cleanup == native_lock.LockCleanupReport(False, False)
     assert isinstance(caught.value.__cause__, NativeLockError)
     assert caught.value.__cause__.reason == "lock_record_failed"
     assert _lock_path(state).is_dir()
     assert _record_path(state).is_file()
     assert (
-        _lock_reason(NativeRunLock.acquire, state, run_id=OTHER_RUN_ID)
+        _lock_reason(NativeRunLock.acquire, _prepared(state), run_id=OTHER_RUN_ID)
         == "lock_unknown"
     )
 
@@ -2126,7 +2129,7 @@ def test_assert_held_accepts_the_unmodified_lock_and_changes_nothing(
     tmp_path: Path,
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     try:
         record = _record_path(state)
         inode = record.stat().st_ino
@@ -2141,7 +2144,7 @@ def test_assert_held_accepts_the_unmodified_lock_and_changes_nothing(
 
 def test_assert_held_refuses_a_released_lock(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     lock.release()
 
     assert _lock_reason(lock.assert_held, run_id=RUN_ID) == "lock_not_held"
@@ -2151,7 +2154,7 @@ def test_assert_held_refuses_changed_record_bytes_without_repairing_them(
     tmp_path: Path,
 ) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     record = _record_path(state)
     record.write_bytes(_record_bytes(OTHER_RUN_ID))
     changed = record.read_bytes()
@@ -2168,7 +2171,7 @@ def test_assert_held_refuses_changed_record_bytes_without_repairing_them(
 
 def test_assert_held_refuses_a_substituted_lock_directory(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     _lock_path(state).rename(state / "moved-lock")
     _lock_path(state).mkdir(mode=0o700)
     os.chmod(_lock_path(state), 0o700)
@@ -2206,7 +2209,7 @@ def _manifest_verifier(
 @contextlib.contextmanager
 def _held_lock(tmp_path: Path) -> object:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     try:
         yield lock
     finally:
@@ -2540,7 +2543,7 @@ def test_create_fresh_host_requires_a_held_run_lock(
     target, record = _fresh_paths()
 
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     lock.release()
     with pytest.raises(NativeLockError) as caught:
         native.create_fresh_host(
@@ -2564,7 +2567,7 @@ def test_create_fresh_host_refuses_a_substituted_lock_record(
     target, record = _fresh_paths()
 
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     _record_path(state).write_bytes(_record_bytes(OTHER_RUN_ID))
     try:
         with pytest.raises(NativeLockError) as caught:
@@ -2615,7 +2618,7 @@ def test_create_fresh_host_refuses_a_changed_archive_before_install(
 
 def test_assert_held_refuses_a_substituted_state_directory(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
-    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock = NativeRunLock.acquire(_prepared(state), run_id=RUN_ID)
     moved = tmp_path / "moved-state"
     state.rename(moved)
     state.mkdir(mode=0o700)
@@ -2727,19 +2730,46 @@ def _fresh_host_value(tmp_path: Path) -> native.FreshHostInstall:
     )
 
 
+#: The file whose existence releases a default wizard child to exit 0.
+WIZARD_RELEASE_NAME = "wizard-release"
+
+
 def _bind_script(port: int = 54321) -> str:
+    # After its bind record the child holds until the release sentinel (argv[2])
+    # exists. The autouse fixture below creates it right after the real
+    # listener-ownership check, so the check always sees a live child. The
+    # give-up bound only ends a child that nothing releases.
     return (
-        "import os, sys\n"
+        "import os, sys, time\n"
         "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":%d}\\n')\n"
-        "os.close(int(sys.argv[1]))\n" % port
+        "os.close(int(sys.argv[1]))\n"
+        "give_up = time.monotonic() + 30\n"
+        "while not os.path.exists(sys.argv[2]) and time.monotonic() < give_up:\n"
+        "    time.sleep(0.01)\n" % port
     )
+
+
+@pytest.fixture(autouse=True)
+def _release_wizard_after_listener_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Run the real ownership check, then let a default wizard child exit."""
+    real_owns_process = native._OwnedChild.owns_process
+    release = tmp_path / WIZARD_RELEASE_NAME
+
+    def owns_then_release(self: native._OwnedChild, pid: int) -> bool:
+        result = real_owns_process(self, pid)
+        release.touch()
+        return result
+
+    monkeypatch.setattr(native._OwnedChild, "owns_process", owns_then_release)
 
 
 def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
     state = tmp_path / "state"
     values: dict[str, object] = {
         "classify": lambda workspace: NativeInstallState.fresh,
-        "prepare_state_dir": lambda: _state_dir(tmp_path),
+        "prepare_state_dir": lambda: _prepared(_state_dir(tmp_path)),
         "acquire_lock": lambda directory, run_id: NativeRunLock.acquire(
             directory, run_id=run_id
         ),
@@ -2752,9 +2782,17 @@ def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
             "-c",
             _bind_script(),
             str(fd),
+            str(tmp_path / WIZARD_RELEASE_NAME),
         ),
         "read_handoff": lambda run_id: _handoff(run_id),
         "activate": lambda run_id, remaining: _handoff(run_id),
+        "wizard_listener": lambda port, child_pid: frozenset({child_pid}),
+        "prove_ready": lambda host, handoff, remaining: NativeReadinessProof(
+            ready=False,
+            failure="startup_status_invalid",
+            port=handoff.port,
+            version="0",
+        ),
     }
     values.update(overrides)
     return native._CoordinatorDeps(**values)  # type: ignore[arg-type]
@@ -2899,26 +2937,24 @@ def test_coordinator_runs_the_fresh_lifecycle_without_claiming_service_ready(
     assert types == [
         "phase",
         "phase",
-        "phase",
-        "phase",
         "wizard_ready",
         "setup_saved",
         "phase",
         "phase",
         "failed",
     ]
-    assert [event["seq"] for event in events] == list(range(1, 10))
-    assert events[4]["origin"] == "http://127.0.0.1:54321"
+    assert [event["seq"] for event in events] == list(range(1, 8))
+    assert events[2]["origin"] == "http://127.0.0.1:54321"
     assert events[-1] == {
         "schema": 1,
         "run_id": RUN_ID,
-        "seq": 9,
+        "seq": 7,
         "type": "failed",
         "code": "service_not_ready",
     }
     assert [
         event["phase"] for event in events if event["type"] == "phase"
-    ] == ["preflight", "bootstrap", "install", "wizard", "activation", "readiness"]
+    ] == ["install", "wizard", "activation", "readiness"]
     assert all(
         len(line) + 1 <= native.MAX_EVENT_BYTES for line in raw.splitlines()
     )
@@ -2959,8 +2995,7 @@ def test_a_non_fresh_classification_refuses_before_any_mutation(
     assert outcome.host_step_completed is False
     assert outcome.activation_attempted is False
     assert outcome.activation_completed is False
-    assert [event["type"] for event in events] == ["phase", "failed"]
-    assert events[0]["phase"] == "preflight"
+    assert [event["type"] for event in events] == ["failed"]
     assert not (tmp_path / "state").exists()
 
 
@@ -2978,7 +3013,7 @@ def test_an_unreadable_classification_is_unknown_and_never_echoed(
     assert outcome.failure_code == "unknown_state"
     assert sentinel.encode() not in raw
     assert b"/Users/someone/private" not in raw
-    assert [event["type"] for event in events] == ["phase", "failed"]
+    assert [event["type"] for event in events] == ["failed"]
 
 
 def test_a_stale_lock_refuses_before_tool_install_and_preserves_partial_state(
@@ -2988,12 +3023,12 @@ def test_a_stale_lock_refuses_before_tool_install_and_preserves_partial_state(
     state = _state_dir(tmp_path)
     partial = state / "partial-artifact"
     partial.write_text("left by an earlier run", encoding="utf-8")
-    stale = NativeRunLock.acquire(state, run_id=OTHER_RUN_ID)
+    stale = NativeRunLock.acquire(_prepared(state), run_id=OTHER_RUN_ID)
     try:
         before = _record_path(state).read_bytes()
         outcome, events, _raw = _run_coordinator(
             tmp_path,
-            prepare_state_dir=lambda: state,
+            prepare_state_dir=lambda: _prepared(state),
             create_host=lambda *args: (_ for _ in ()).throw(
                 AssertionError("the host step ran over a held lock")
             ),
@@ -3010,11 +3045,7 @@ def test_a_stale_lock_refuses_before_tool_install_and_preserves_partial_state(
         assert _lock_path(state).is_dir()
         assert _record_path(state).read_bytes() == before
         assert partial.read_text(encoding="utf-8") == "left by an earlier run"
-        assert [event["type"] for event in events] == [
-            "phase",
-            "phase",
-            "failed",
-        ]
+        assert [event["type"] for event in events] == ["failed"]
         assert events[-1]["code"] == "install_in_progress"
     finally:
         stale.release()
@@ -3045,12 +3076,7 @@ def test_a_changed_host_refuses_before_engine_install_and_is_preserved(
     assert engine_calls == []
     assert artifact.read_text(encoding="utf-8") == "partially installed host"
     assert not _lock_path(tmp_path / "state").exists()
-    assert [event["type"] for event in events] == [
-        "phase",
-        "phase",
-        "phase",
-        "failed",
-    ]
+    assert [event["type"] for event in events] == ["phase", "failed"]
     assert "wizard" not in [
         event.get("phase") for event in events if event["type"] == "phase"
     ]
@@ -3255,12 +3281,7 @@ def test_a_failed_engine_install_is_fixed_and_preserves_the_host(
     assert b"/Users/someone/private" not in raw
     assert host_marker.read_text(encoding="utf-8") == "present"
     assert not _lock_path(tmp_path / "state").exists()
-    assert [event["type"] for event in events] == [
-        "phase",
-        "phase",
-        "phase",
-        "failed",
-    ]
+    assert [event["type"] for event in events] == ["phase", "failed"]
     assert events[-1]["code"] == "install_failed"
 
 
@@ -3299,8 +3320,8 @@ def test_invalid_requests_are_refused_before_the_descriptor_is_used(
             native.NativeInstallRequest(
                 run_id=RUN_ID,
                 events_fd=event_fd,
-                first_seq=25,
-                prior_events=24,
+                first_seq=27,
+                prior_events=26,
             ),
             native.NativeInstallRequest(
                 run_id=RUN_ID,
@@ -3358,8 +3379,8 @@ def test_sigkill_leaves_the_lock_and_the_owned_child_as_evidence(
     script = (
         "import subprocess, sys, time\n"
         "from pathlib import Path\n"
-        "from ciao.native_installer import NativeRunLock\n"
-        "lock = NativeRunLock.acquire(Path(sys.argv[1]), run_id=sys.argv[2])\n"
+        "from ciao.native_lock import NativeRunLock, prepare_native_state_dir\n"
+        "lock = NativeRunLock.acquire(prepare_native_state_dir(Path(sys.argv[1]), trusted_root=Path(sys.argv[1]).parent), run_id=sys.argv[2])\n"
         "child = subprocess.Popen(\n"
         "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
         "    start_new_session=True,\n"
@@ -3477,11 +3498,7 @@ def test_a_second_preflight_refuses_a_service_that_appeared_before_host_install(
     assert outcome.host_step_completed is False
     assert host_calls == []
     assert not _lock_path(tmp_path / "state").exists()
-    assert [event["type"] for event in events] == [
-        "phase",
-        "phase",
-        "failed",
-    ]
+    assert [event["type"] for event in events] == ["failed"]
     assert events[-1]["code"] == "existing_install"
 
 
@@ -3518,7 +3535,7 @@ def test_an_expired_run_deadline_refuses_before_any_mutation(
     assert outcome.host_step_attempted is False
     assert outcome.host_step_completed is False
     assert not (tmp_path / "state").exists()
-    assert [event["type"] for event in events] == ["phase", "failed"]
+    assert [event["type"] for event in events] == ["failed"]
 
 
 def test_the_public_coordinator_exposes_no_injection_seams() -> None:
@@ -4397,3 +4414,534 @@ def test_an_invalid_request_leaves_the_public_fd_to_the_caller(
         with pytest.raises(native.NativeCoordinatorError):
             native.run_native_install(bad)
         os.fstat(event_fd)
+
+
+def test_a_ready_proof_ends_the_run_with_service_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    proofs: list[native_handoff.NativeHandoffResult] = []
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        proofs.append(handoff)
+        return NativeReadinessProof(
+            ready=True, failure=None, port=handoff.port, version="1"
+        )
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=prove_ready)
+
+    assert len(proofs) == 1
+    assert outcome.terminal == "service_ready"
+    assert outcome.exit_code == 0
+    assert outcome.failure_code is None
+    assert outcome.activation_completed is True
+    assert outcome.lock_retained is False
+    assert not _lock_path(tmp_path / "state").exists()
+    assert [event["type"] for event in events] == [
+        "phase",
+        "phase",
+        "wizard_ready",
+        "setup_saved",
+        "phase",
+        "phase",
+        "service_ready",
+    ]
+    assert [event["seq"] for event in events] == list(range(1, 8))
+    assert [
+        event["phase"] for event in events if event["type"] == "phase"
+    ] == ["install", "wizard", "activation", "readiness"]
+    assert events[-1] == {
+        "schema": 1,
+        "run_id": RUN_ID,
+        "seq": 7,
+        "type": "service_ready",
+        "origin": "http://127.0.0.1:54321",
+    }
+    assert b"failed" not in raw
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param("listener_missing", id="listener"),
+        pytest.param("startup_status_unavailable", id="status"),
+        pytest.param("startup_not_ready", id="not-ready"),
+    ],
+)
+def test_readiness_retries_only_transient_answers_within_its_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    answers = [
+        NativeReadinessProof(ready=False, failure=failure, port=54321, version="1"),
+        NativeReadinessProof(ready=False, failure=failure, port=54321, version="1"),
+        NativeReadinessProof(ready=True, failure=None, port=54321, version="1"),
+    ]
+    calls: list[float] = []
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        calls.append(remaining)
+        return answers[len(calls) - 1]
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        prove_ready=prove_ready,
+        policy=native._CoordinatorPolicy(
+            readiness_interval=0.01, poll_interval=0.01
+        ),
+    )
+
+    assert len(calls) == 3
+    assert outcome.terminal == "service_ready"
+    assert events[-1]["type"] == "service_ready"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param("startup_pid_mismatch", id="pid"),
+        pytest.param("lock_missing", id="lock"),
+        pytest.param("executable_mismatch", id="exec"),
+        pytest.param("timeout", id="timeout"),
+    ],
+)
+def test_a_non_transient_readiness_answer_is_service_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls: list[float] = []
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        calls.append(remaining)
+        return NativeReadinessProof(
+            ready=False, failure=failure, port=54321, version="1"
+        )
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=prove_ready)
+
+    assert len(calls) == 1
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "service_not_ready"
+    assert events[-1]["code"] == "service_not_ready"
+    assert b"service_ready" not in raw
+
+
+@pytest.mark.parametrize("case", ["budget", "non-proof", "port", "raises"])
+def test_readiness_budget_and_bad_answers_are_service_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    sentinel = "sk-live-READINESS-SECRET-0123456789"
+
+    def transient(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        return NativeReadinessProof(
+            ready=False, failure="listener_missing", port=handoff.port, version="1"
+        )
+
+    def not_a_proof(host: object, handoff: object, remaining: float) -> object:
+        return "ready"
+
+    def wrong_port(host: object, handoff: object, remaining: float) -> object:
+        return NativeReadinessProof(ready=True, failure=None, port=9999, version="1")
+
+    def explode(host: object, handoff: object, remaining: float) -> object:
+        raise RuntimeError(f"{sentinel} /Users/someone/private")
+
+    prove_ready = {
+        "budget": transient,
+        "non-proof": not_a_proof,
+        "port": wrong_port,
+        "raises": explode,
+    }[case]
+    policy = (
+        native._CoordinatorPolicy(
+            readiness_timeout=0.05, readiness_interval=0.01, poll_interval=0.01
+        )
+        if case == "budget"
+        else None
+    )
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path, prove_ready=prove_ready, policy=policy
+    )
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "service_not_ready"
+    assert events[-1]["code"] == "service_not_ready"
+    assert b"service_ready" not in raw
+    assert sentinel.encode() not in raw
+    assert b"/Users/someone/private" not in raw
+
+
+def test_cancellation_during_readiness_is_cancelled_and_never_stops_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+    activated: list[str] = []
+
+    def activate(run_id: str, remaining: float) -> native_handoff.NativeHandoffResult:
+        activated.append(run_id)
+        return _handoff(run_id)
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        cancellation.cancel()
+        return NativeReadinessProof(
+            ready=False, failure="listener_missing", port=handoff.port, version="1"
+        )
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path,
+        activate=activate,
+        prove_ready=prove_ready,
+        cancellation=cancellation,
+    )
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "cancelled"
+    assert outcome.activation_completed is True
+    assert outcome.service_may_be_running is True
+    assert len(activated) == 1
+    assert events[-1]["code"] == "cancelled"
+    assert b"service_ready" not in raw
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_a_lock_release_failure_after_readiness_is_not_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    real_locks: list[NativeRunLock] = []
+
+    class BadRelease:
+        def __init__(self, real: NativeRunLock) -> None:
+            self._real = real
+
+        def assert_held(self, *, run_id: str | None = None) -> None:
+            self._real.assert_held(run_id=run_id)
+
+        def release(self) -> None:
+            raise NativeLockError("lock_cleanup_refused")
+
+    def acquire(directory: native_lock.NativeStateDir, run_id: str) -> object:
+        real = NativeRunLock.acquire(directory, run_id=run_id)
+        real_locks.append(real)
+        return BadRelease(real)
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        return NativeReadinessProof(
+            ready=True, failure=None, port=handoff.port, version="1"
+        )
+
+    try:
+        outcome, events, raw = _run_coordinator(
+            tmp_path, acquire_lock=acquire, prove_ready=prove_ready
+        )
+    finally:
+        for real in real_locks:
+            real.release()
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "internal_error"
+    assert outcome.lock_retained is True
+    assert outcome.activation_completed is True
+    assert events[-1]["code"] == "internal_error"
+    assert b"service_ready" not in raw
+
+
+@pytest.mark.parametrize("case", ["foreign", "shared", "empty", "raises"])
+def test_wizard_ready_requires_the_child_to_hold_the_listener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    child_pids: list[int] = []
+    activated: list[str] = []
+
+    def listener(port: int, child_pid: int) -> frozenset[int]:
+        child_pids.append(child_pid)
+        if case == "foreign":
+            return frozenset({os.getpid()})
+        if case == "shared":
+            return frozenset({child_pid, os.getpid()})
+        if case == "empty":
+            return frozenset()
+        raise RuntimeError("listener lookup failed")
+
+    def activate(run_id: str, remaining: float) -> native_handoff.NativeHandoffResult:
+        activated.append(run_id)
+        return _handoff(run_id)
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path, wizard_listener=listener, activate=activate
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.activation_attempted is False
+    assert activated == []
+    assert [event["type"] for event in events] == ["phase", "phase", "failed"]
+    assert b"wizard_ready" not in raw
+    assert len(child_pids) == 1
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pids[0], 0)
+
+
+def test_the_wizard_child_that_exited_before_the_listener_check_is_wizard_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    # Released up front, so the child exits right after writing its record.
+    (tmp_path / WIZARD_RELEASE_NAME).touch()
+    exited: list[int] = []
+
+    def listener(port: int, child_pid: int) -> frozenset[int]:
+        # WNOWAIT observes the exit without reaping, so the coordinator's own
+        # liveness check still sees a child that has exited.
+        os.waitid(os.P_PID, child_pid, os.WEXITED | os.WNOWAIT)
+        exited.append(child_pid)
+        return frozenset({child_pid})
+
+    outcome, events, raw = _run_coordinator(tmp_path, wizard_listener=listener)
+
+    assert exited
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.activation_attempted is False
+    assert [event["type"] for event in events] == ["phase", "phase", "failed"]
+    assert b"wizard_ready" not in raw
+
+
+def test_owns_process_accepts_only_the_child_or_its_session_group() -> None:
+    script = (
+        "import subprocess, sys, time\n"
+        "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "print(grandchild.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+    )
+    grandchild_pid = 0
+    try:
+        assert process.stdout is not None
+        grandchild_pid = int(process.stdout.readline().strip())
+        owned = native._OwnedChild(
+            process,
+            term_grace=1.0,
+            reap_timeout=5.0,
+            poll_interval=0.01,
+        )
+        assert owned.owns_process(process.pid) is True
+        assert owned.owns_process(grandchild_pid) is True
+        assert owned.owns_process(os.getpid()) is False
+        assert owned.owns_process(0) is False
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        assert owned.owns_process(process.pid) is False
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+        if grandchild_pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild_pid, signal.SIGKILL)
+
+
+def test_the_coordinator_writer_refuses_the_shell_phases() -> None:
+    writer, read_fd = _writer(after_phase="download")
+    try:
+        for name in ("preflight", "bootstrap", "download"):
+            assert _reason(writer.phase, name) == "phase_out_of_order"
+        writer.phase("install")
+        writer.close()
+        assert [event.get("phase") for event in _events(read_fd)] == ["install"]
+    finally:
+        os.close(read_fd)
+
+
+def test_an_unknown_after_phase_is_refused_before_any_write() -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        assert (
+            _reason(EventWriter, write_fd, run_id=RUN_ID, after_phase="nope")
+            == "unknown_phase"
+        )
+        assert _available(read_fd) == b""
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [pytest.param(1, id="stdout"), pytest.param(2, id="stderr")],
+)
+def test_an_events_fd_aliasing_stdout_or_stderr_is_refused(target: int) -> None:
+    import fcntl
+
+    alias = os.dup(target)
+    try:
+        flags_before = fcntl.fcntl(alias, fcntl.F_GETFL)
+        assert _reason(EventWriter, alias, run_id=RUN_ID) == "stdio_alias"
+        assert fcntl.fcntl(alias, fcntl.F_GETFL) == flags_before
+    finally:
+        os.close(alias)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [pytest.param(1, id="stdout"), pytest.param(2, id="stderr")],
+)
+def test_a_coordinator_events_fd_aliasing_stdio_is_refused_before_classify(
+    tmp_path: Path, target: int
+) -> None:
+    calls: list[object] = []
+
+    def forbidden(workspace: Path | None) -> NativeInstallState:
+        calls.append(workspace)
+        raise AssertionError("the coordinator classified over an aliased channel")
+
+    with _public_event_pipe() as (read_fd, event_fd):
+        source = os.dup(target)
+        os.dup2(source, event_fd)
+        os.close(source)
+        outcome = native._run_native_install(
+            _coordinator_request(event_fd),
+            deps=_coordinator_deps(tmp_path, classify=forbidden),
+        )
+        raw = _drain(read_fd)
+
+    assert outcome.failure_code == "event_channel_failed"
+    assert outcome.terminal is None
+    assert calls == []
+    assert raw == b""
+
+
+@pytest.mark.parametrize("field", ["readiness_timeout", "readiness_interval"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="neg"),
+        pytest.param(float("inf"), id="inf"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(native.COORDINATOR_MAX_TIMEOUT_SECONDS + 1, id="huge"),
+    ],
+)
+def test_readiness_policy_values_are_bounded(field: str, value: float) -> None:
+    with pytest.raises(native.NativeCoordinatorError) as caught:
+        native._CoordinatorPolicy(**{field: value})
+    assert caught.value.reason == "invalid_timeout"
+    assert caught.value.failure_code == "internal_error"
+
+
+def test_a_cancelled_readiness_proof_ends_the_run_as_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        return NativeReadinessProof(
+            ready=False, failure="cancelled", port=handoff.port, version="1"
+        )
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=prove_ready)
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "cancelled"
+    assert outcome.activation_completed is True
+    assert events[-1]["code"] == "cancelled"
+    assert b"service_ready" not in raw
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_a_ready_proof_that_also_carries_a_failure_is_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        # The dataclass refuses this combination, so build it past __init__.
+        proof = object.__new__(NativeReadinessProof)
+        object.__setattr__(proof, "ready", True)
+        object.__setattr__(proof, "failure", "listener_missing")
+        object.__setattr__(proof, "port", handoff.port)
+        object.__setattr__(proof, "version", "1")
+        return proof
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=prove_ready)
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "service_not_ready"
+    assert b"service_ready" not in raw
+
+
+def test_a_failed_service_ready_after_a_ready_proof_is_a_channel_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        return NativeReadinessProof(
+            ready=True, failure=None, port=handoff.port, version="1"
+        )
+
+    def refuse_service_ready(self: EventWriter, port: int) -> None:
+        raise EventError("setup_not_saved")
+
+    monkeypatch.setattr(EventWriter, "service_ready", refuse_service_ready)
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=ready)
+
+    assert outcome.terminal is None
+    assert outcome.failure_code == "event_channel_failed"
+    assert outcome.activation_completed is True
+    assert not _lock_path(tmp_path / "state").exists()
+    types = [event["type"] for event in events]
+    assert "service_ready" not in types
+    assert "failed" not in types
+    assert b"service_ready" not in raw
+
+
+def test_cancellation_during_a_long_readiness_interval_returns_promptly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+    timers: list[threading.Timer] = []
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        # The fake schedules the cancel while the coordinator waits out a
+        # 60-second interval, so only the sliced wait can observe it.
+        timer = threading.Timer(0.2, cancellation.cancel)
+        timers.append(timer)
+        timer.start()
+        return NativeReadinessProof(
+            ready=False, failure="listener_missing", port=handoff.port, version="1"
+        )
+
+    policy = native._CoordinatorPolicy(readiness_interval=60.0, poll_interval=0.01)
+    started = time.monotonic()
+    try:
+        outcome, events, raw = _run_coordinator(
+            tmp_path,
+            prove_ready=prove_ready,
+            cancellation=cancellation,
+            policy=policy,
+        )
+    finally:
+        for timer in timers:
+            timer.cancel()
+    elapsed = time.monotonic() - started
+
+    assert outcome.failure_code == "cancelled"
+    assert events[-1]["code"] == "cancelled"
+    assert elapsed < 2.0

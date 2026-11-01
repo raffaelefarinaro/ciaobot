@@ -91,58 +91,17 @@ is a last resort, not a supported cancellation mechanism.
 The supported public descriptor range is 3–9 (the POSIX shell portable range);
 the shell and coordinator entry points own that check because they are the ones
 parsing the command line. This writer requires a non-stdio descriptor (``>= 3``)
-and refuses a read-only or closed one. It accepts any writable descriptor the
-platform can write to, including pipes and sockets; it never requires a
-regular file. The native path is macOS-only: on Windows the constructor refuses
+and refuses a read-only or closed one. It also refuses (``stdio_alias``) a
+descriptor that is the same underlying file (device and inode) as stdout or
+stderr, so events and
+diagnostics never share one stream. ``after_phase`` pre-sets the last phase
+already announced by the shell, so the writer refuses to re-emit it. It accepts
+any writable descriptor the platform can write to, including pipes and sockets;
+it never requires a regular file. The native path is macOS-only: on Windows the constructor refuses
 rather than pretend a descriptor protocol the legacy installer does not
 implement.
 
-The module also owns the separate run-bound native-install lock
-(``NativeRunLock``): one ``0700`` directory ``native-install.lock`` with one
-``0600`` ``run.json`` provenance record under the caller's private
-install-state directory. ``prepare_native_state_dir`` is the explicit,
-mutating preparation step: call it after the read-only freshness preflight.
-The target must lie below a trusted root (the home directory by default, or an
-explicit caller-supplied root), and every component from that root down is
-opened descriptor-relative and no-follow before anything is created; a symlink
-anywhere in the controlled chain is refused rather than followed. It creates
-only missing components with ``0700`` while never chmod'ing, repairing or
-replacing an existing one; a umask or permission failure leaves what was
-created as evidence and refuses. The trusted root keeps macOS system prefixes
-such as ``/var`` outside the validated chain. ``NativeRunLock.acquire`` itself
-never creates the state directory. Creation of a lock is one atomic ``mkdir``
-plus one exclusive record create, both descriptor-relative. An existing lock
-is classified honestly and refused: a valid record is ``lock_busy`` (a run may
-be live or stale, and no same-run shortcut adopts it); an empty directory or a
-missing, empty, truncated or undecodable private record is ``lock_unknown``
-(concurrent or interrupted, never corruption — it may be a live creator
-between ``mkdir`` and record write, an interrupted one, or a lock/record that
-disappeared between classification steps during a concurrent release); a symlink,
-non-directory, non-private directory, foreign entry, unsafe record shape or a complete
-record this version cannot accept is ``lock_unsafe`` (not a corruption
-diagnosis). Neither is repaired, deleted or
-adopted; a partial retry stays refused and there is no stale-lock recovery, no
-flock unlock as authorization, and no silent reinstall. Manual
-recovery is an operator decision outside this primitive: if no native install is
-running, re-run the read-only freshness preflight and inspect the fixed private
-state-directory evidence; the tooling does not delete, adopt or roll it back
-automatically, and its errors never print the inspected path. A released lock
-is removed only when its directory and record still match the device/inode and
-exact bytes this run created, it is the only entry, the record has no extra hard
-link, and both are still private. A refusal before the record unlink leaves the
-state untouched; a failure after the unlink (for example, a final ``rmdir``) has
-already removed the record and leaves the directory, and still raises
-``lock_cleanup_refused`` instead of reporting success. The error carries a
-path-free ``LockCleanupReport`` (record/directory removed) and a
-``original_reason`` where one exists, so the coordinator can record what
-happened; ``cleanup`` can be ``None`` after an asynchronous interruption before
-a report was recorded. There is no recursive deletion or chmod. Release is serialized by an
-internal lock and a re-entrant call is refused with ``lock_reentrant_release``;
-a failed release is not silently retried and keeps its cleanup report. A
-``SIGKILL`` or unprovable cleanup leaves evidence for the next refusal. Signal
-handlers must not call ``release`` either; cancellation belongs to the
-coordinator's normal loop. A same-UID writer can still race between a check and
-the mutation it guards, so these checks are evidence, not proof.
+The run-bound lock lives in :mod:`ciao.native_lock`.
 
 The module also contains the first, deliberately partial native coordinator
 lifecycle (#2340). ``_run_native_install`` is the private test seam: callers
@@ -152,12 +111,13 @@ so the order and the cleanup rules can be driven with fakes and real short-lived
 child processes. The public ``run_native_install`` exposes none of those seams
 and still refuses before it touches the descriptor: the setup child now has an
 explicit :class:`NativeBootstrapContext` and can record schema 2 through it, but
-the parent side is not wired to start that child, and the readiness proof in
-``ciao.native_readiness`` exists but is not wired into the coordinator, so the
-coordinator must not claim success. The lifecycle enforces the fresh-only
-preflight and the run lock before the engine install, creates the host through
-the real fresh-host helper, rechecks the lock and host immediately before each
-mutation, never passes the public event descriptor to a child, and terminates
+the parent side is not wired to start that child. The coordinator reaches
+``service_ready`` only through its injected readiness proof: a ``ready`` answer
+for the handoff port, reached after clean child and lock cleanup, and the
+production proof in ``ciao.native_readiness`` is supplied by the next slice. The
+lifecycle enforces the fresh-only preflight and the run lock before the engine
+install, creates the host through the real fresh-host helper, rechecks the lock
+and host immediately before each mutation, never passes the public event descriptor to a child, and terminates
 and reaps only the child it started before releasing the lock. Cancellation is
 a flag the caller sets (a signal handler may only set it); the normal loop emits
 ``failed("cancelled")``. An activated service is never stopped, reloaded,
@@ -198,17 +158,13 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import TracebackType
 from typing import Any, Final, NoReturn
 
 from ciao import native_handoff
 from ciao.install_discovery import NativeInstallState
 from ciao.native_handoff import NativeHandoffError, NativeHandoffResult
-from ciao.os_support.private import (
-    descriptor_acl_grants_another_account,
-    is_owned_descriptor,
-    is_private_descriptor_strict,
-)
+from ciao.native_lock import NativeLockError, NativeRunLock, NativeStateDir
+from ciao.native_readiness import NativeReadinessProof
 from ciao.release_manifest import (
     RELEASE_PUBLIC_KEY,
     select_server_host_artifact,
@@ -256,15 +212,6 @@ WRITE_TIMEOUT_SECONDS: Final[float] = 5.0
 #: The longest test/embedding timeout this writer will accept.
 MAX_WRITE_TIMEOUT_SECONDS: Final[float] = 60.0
 
-#: The machine-level native-install lock directory, under ciaobot's state dir.
-LOCK_DIR_NAME: Final[str] = "native-install.lock"
-#: The one provenance record inside that directory.
-LOCK_RECORD_NAME: Final[str] = "run.json"
-#: The lock record schema. Independent of the public event schema.
-LOCK_SCHEMA_VERSION: Final[int] = 1
-#: The provenance record is one small JSON object.
-MAX_LOCK_RECORD_BYTES: Final[int] = 1024
-
 #: The fixed phase vocabulary, in the only order a run may emit it.
 PHASES: Final[tuple[str, ...]] = (
     "preflight",
@@ -308,9 +255,6 @@ _PHASE_ORDER: Final[dict[str, int]] = {
 }
 _NONBLOCK: Final[int] = getattr(os, "O_NONBLOCK", 0)
 _ACCMODE: Final[int] = getattr(os, "O_ACCMODE", 3)
-#: Test seam: all lock inode checks go through this alias so a focused test
-#: can inject an fstat failure without changing the private-descriptor helper.
-_fstat = os.fstat
 #: Test seam for the owned-host check the native bootstrap child performs.
 _verify_owned_host = verify_owned_host
 
@@ -413,6 +357,7 @@ class EventWriter:
         first_seq: int = 1,
         prior_events: int = 0,
         write_timeout: float = WRITE_TIMEOUT_SECONDS,
+        after_phase: str | None = None,
     ) -> None:
         self._run_id = _canonical_run_id(run_id)
         if type(first_seq) is not int or first_seq < 1:
@@ -432,6 +377,7 @@ class EventWriter:
             or timeout > MAX_WRITE_TIMEOUT_SECONDS
         ):
             raise EventError("invalid_timeout")
+        last_phase = -1 if after_phase is None else _phase_index(after_phase)
         if type(fd) is not int or fd < MIN_EVENT_FD:
             raise EventError("invalid_fd")
         if not _sigpipe_is_ignored():
@@ -448,6 +394,16 @@ class EventWriter:
             raise EventError("invalid_fd") from None
         if stat.S_ISDIR(info.st_mode):
             raise EventError("invalid_fd")
+        # Diagnostics and events must never share one stream. Refuse before any
+        # flag change: a descriptor on the same underlying file (device and
+        # inode) as stdout or stderr would share its O_NONBLOCK flag.
+        for stdio in (1, 2):
+            try:
+                other = os.fstat(stdio)
+            except OSError:
+                continue
+            if (other.st_dev, other.st_ino) == (info.st_dev, info.st_ino):
+                raise EventError("stdio_alias")
         try:
             _set_descriptor_flags(fd, flags | _NONBLOCK)
         except EventError:
@@ -462,7 +418,7 @@ class EventWriter:
         self._next_seq = first_seq
         self._emitted = 0
         self._phases: set[str] = set()
-        self._last_phase = -1
+        self._last_phase = last_phase
         self._wizard_ready = False
         self._setup_saved = False
         self._terminal: str | None = None
@@ -661,981 +617,6 @@ class EventWriter:
             os.close(fd)
         except OSError:
             pass
-
-
-@dataclass(frozen=True, slots=True)
-class LockCleanupReport:
-    """What a refused cleanup actually removed, with no paths or inodes."""
-
-    record_removed: bool
-    directory_removed: bool
-
-
-class NativeLockError(RuntimeError):
-    """A fixed native-install lock refusal with no interpolated path detail.
-
-    ``cleanup`` is a path-free :class:`LockCleanupReport` when a cleanup
-    refusal recorded one. It is ``None`` for a non-cleanup error, and can be
-    ``None`` after an asynchronous interruption (for example a signal or
-    ``KeyboardInterrupt``) before any report could be recorded; callers must
-    not fabricate a success or a removal state from a missing report.
-    """
-
-    def __init__(
-        self,
-        reason: str,
-        *,
-        original_reason: str | None = None,
-        cleanup: LockCleanupReport | None = None,
-    ) -> None:
-        super().__init__(reason)
-        self.reason = reason
-        self.original_reason = original_reason
-        self.cleanup = cleanup
-
-
-def _is_missing(exc: OSError) -> bool:
-    """Whether an OS error means the name disappeared during a concurrent release."""
-    return isinstance(exc, FileNotFoundError) or exc.errno == errno.ENOENT
-
-
-def _open_existing_dir(path: Path, *, exact_private: bool) -> int:
-    """Open an existing real directory, optionally requiring exact ``0700``."""
-    try:
-        status = os.lstat(path)
-    except OSError:
-        raise NativeLockError("state_dir_unsafe") from None
-    if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
-        raise NativeLockError("state_dir_unsafe")
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        raise NativeLockError("state_dir_unsafe") from None
-    try:
-        try:
-            opened = _fstat(descriptor)
-        except OSError:
-            raise NativeLockError("state_dir_unsafe") from None
-        if (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino):
-            raise NativeLockError("state_dir_unsafe")
-        if not stat.S_ISDIR(opened.st_mode):
-            raise NativeLockError("state_dir_unsafe")
-        if exact_private:
-            try:
-                private = is_private_descriptor_strict(descriptor)
-            except OSError:
-                raise NativeLockError("state_dir_unsafe") from None
-            if not private:
-                raise NativeLockError("state_dir_unsafe")
-        else:
-            try:
-                owned = is_owned_descriptor(descriptor)
-                acl_grant = descriptor_acl_grants_another_account(descriptor)
-            except OSError:
-                raise NativeLockError("state_dir_unsafe") from None
-            if (
-                not owned
-                or acl_grant
-                or stat.S_IMODE(opened.st_mode) & 0o022
-            ):
-                raise NativeLockError("state_dir_unsafe")
-    except BaseException:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-        raise
-    return descriptor
-
-
-def _open_private_state_dir(state_dir: Path) -> int:
-    """Open the caller's existing install-state directory, descriptor-bound.
-
-    The native lock lives inside ``~/.local/state/ciaobot`` (or whatever the
-    caller passes). That directory must already exist and be an owner-only real
-    directory; this primitive never creates, chmods or repairs it. Use
-    :func:`prepare_native_state_dir` explicitly after the read-only freshness
-    preflight when the chain is still missing.
-    """
-    return _open_existing_dir(state_dir, exact_private=True)
-
-
-def prepare_native_state_dir(
-    state_dir: Path, *, trusted_root: Path | None = None
-) -> Path:
-    """Explicitly create the missing private install-state chain, or refuse.
-
-    This is the only mutating preparation step. It must run after the native
-    installer's read-only freshness preflight and before lock acquisition. The
-    target must lie below ``trusted_root`` (the caller's home directory by
-    default; tests and embedding callers may pass another explicit root). Every
-    component from that root down to the target is opened descriptor-relative
-    and no-follow: a symlink anywhere in the HOME-relative chain is a refusal,
-    not something to follow. Existing components are judged and never
-    chmod'ed, repaired, replaced or removed. Missing components are created
-    ``0700`` and immediately checked; a restrictive umask or permission failure
-    is ``state_dir_unsafe`` and leaves what was created as evidence. The final
-    state directory is never created by :meth:`NativeRunLock.acquire` itself.
-
-    The trusted root is the portability boundary: on macOS the system prefix
-    above the user's home (including ``/var``) is not inspected, while every
-    component the user controls below the root is. A same-UID writer can still
-    race between validating a component and creating its child; each created
-    component is checked, but that is evidence, not proof of exclusive
-    ownership.
-    """
-    if sys.platform == "win32":
-        raise NativeLockError("unsupported_platform")
-    target = Path(state_dir)
-    try:
-        root = Path.home() if trusted_root is None else Path(trusted_root)
-    except (OSError, RuntimeError):
-        raise NativeLockError("state_dir_unsafe") from None
-    for path in (target, root):
-        if not path.is_absolute():
-            raise NativeLockError("state_dir_unsafe")
-        if any(part in {".", ".."} for part in path.parts):
-            raise NativeLockError("state_dir_unsafe")
-    if target != root and root not in target.parents:
-        raise NativeLockError("state_dir_unsafe")
-
-    parent_fd = _open_existing_dir(root, exact_private=target == root)
-    current = root
-    try:
-        for part in target.relative_to(root).parts:
-            component = current / part
-            created = False
-            try:
-                os.lstat(component)
-            except FileNotFoundError:
-                try:
-                    os.mkdir(part, 0o700, dir_fd=parent_fd)
-                    created = True
-                except FileExistsError:
-                    pass
-                except OSError:
-                    raise NativeLockError("state_dir_unsafe") from None
-            except OSError:
-                raise NativeLockError("state_dir_unsafe") from None
-
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
-            try:
-                child_fd = os.open(part, flags, dir_fd=parent_fd)
-            except OSError:
-                raise NativeLockError("state_dir_unsafe") from None
-            try:
-                try:
-                    opened = _fstat(child_fd)
-                except OSError:
-                    raise NativeLockError("state_dir_unsafe") from None
-                if not stat.S_ISDIR(opened.st_mode):
-                    raise NativeLockError("state_dir_unsafe")
-                try:
-                    named = os.stat(
-                        part, dir_fd=parent_fd, follow_symlinks=False
-                    )
-                except OSError:
-                    raise NativeLockError("state_dir_unsafe") from None
-                if (named.st_dev, named.st_ino) != (
-                    opened.st_dev,
-                    opened.st_ino,
-                ):
-                    raise NativeLockError("state_dir_unsafe")
-                if created or component == target:
-                    try:
-                        private = is_private_descriptor_strict(child_fd)
-                    except OSError:
-                        raise NativeLockError("state_dir_unsafe") from None
-                    if not private:
-                        raise NativeLockError("state_dir_unsafe")
-                else:
-                    try:
-                        owned = is_owned_descriptor(child_fd)
-                        acl_grant = descriptor_acl_grants_another_account(
-                            child_fd
-                        )
-                    except OSError:
-                        raise NativeLockError("state_dir_unsafe") from None
-                    if (
-                        not owned
-                        or acl_grant
-                        or stat.S_IMODE(opened.st_mode) & 0o022
-                    ):
-                        raise NativeLockError("state_dir_unsafe")
-            except BaseException:
-                try:
-                    os.close(child_fd)
-                except OSError:
-                    pass
-                raise
-            try:
-                os.close(parent_fd)
-            except OSError:
-                pass
-            parent_fd = child_fd
-            current = component
-        return target
-    finally:
-        try:
-            os.close(parent_fd)
-        except OSError:
-            pass
-
-
-def _lock_record_bytes(run_id: str) -> bytes:
-    payload = {
-        "schema": LOCK_SCHEMA_VERSION,
-        "run_id": run_id,
-        "pid": os.getpid(),
-    }
-    encoded = (
-        json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
-        + b"\n"
-    )
-    if len(encoded) > MAX_LOCK_RECORD_BYTES:
-        raise NativeLockError("lock_record_failed")
-    return encoded
-
-
-def _write_record(fd: int, data: bytes) -> None:
-    """Write the small provenance record, completing short writes."""
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError("the lock record write made no progress")
-        view = view[written:]
-
-
-def _read_bounded_fd(fd: int, limit: int) -> bytes | None:
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        try:
-            chunk = os.read(fd, 4096)
-        except OSError:
-            return None
-        if not chunk:
-            return b"".join(chunks)
-        total += len(chunk)
-        if total > limit:
-            return None
-        chunks.append(chunk)
-
-
-def _record_state(data: bytes) -> str:
-    """Classify record bytes as ``busy``, ``unknown`` or ``unsafe``.
-
-    Empty, truncated or undecodable bytes are ``unknown`` (an interrupted
-    write). A complete JSON value this schema cannot accept is ``unsafe``
-    (foreign or incompatible), never described as corruption.
-    """
-    try:
-        payload = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return "unknown"
-    if not isinstance(payload, dict) or set(payload) != {"schema", "run_id", "pid"}:
-        return "unsafe"
-    if type(payload["schema"]) is not int or payload["schema"] != LOCK_SCHEMA_VERSION:
-        return "unsafe"
-    run_id = payload["run_id"]
-    if type(run_id) is not str:
-        return "unsafe"
-    try:
-        _canonical_run_id(run_id)
-    except EventError:
-        return "unsafe"
-    pid = payload["pid"]
-    if type(pid) is not int or pid <= 0:
-        return "unsafe"
-    return "busy"
-
-
-def _lock_record_state(dir_fd: int) -> str:
-    """Classify an existing record as ``busy``, ``unknown`` or ``unsafe``.
-
-    A missing, empty, truncated or undecodable record in an otherwise private
-    single-record directory is ``unknown``: a live creator may not have written
-    it yet, or an earlier run was interrupted. A record with a foreign shape or
-    privacy (symlink, hard link, non-regular file, oversized, wrong owner, mode
-    or ACL) or a complete record this schema cannot accept is ``unsafe``.
-    """
-    try:
-        entry = os.stat(LOCK_RECORD_NAME, dir_fd=dir_fd, follow_symlinks=False)
-    except OSError as exc:
-        return "unknown" if _is_missing(exc) else "unsafe"
-    if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
-        return "unsafe"
-    if entry.st_size > MAX_LOCK_RECORD_BYTES:
-        return "unsafe"
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    try:
-        descriptor = os.open(LOCK_RECORD_NAME, flags, dir_fd=dir_fd)
-    except OSError as exc:
-        return "unknown" if _is_missing(exc) else "unsafe"
-    try:
-        try:
-            opened = _fstat(descriptor)
-        except OSError as exc:
-            return "unknown" if _is_missing(exc) else "unsafe"
-        if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
-            return "unsafe"
-        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-            return "unsafe"
-        try:
-            if not is_private_descriptor_strict(descriptor):
-                return "unsafe"
-        except OSError:
-            return "unsafe"
-        if opened.st_size > MAX_LOCK_RECORD_BYTES:
-            return "unsafe"
-        data = _read_bounded_fd(descriptor, MAX_LOCK_RECORD_BYTES)
-        if data is None:
-            return "unknown"
-        return _record_state(data)
-    finally:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-
-
-def _existing_lock_reason(parent_fd: int) -> str:
-    """Classify a pre-existing lock directory without changing it.
-
-    A valid record is ``lock_busy``. An empty directory or a missing, empty,
-    truncated or undecodable record is ``lock_unknown``: concurrent (a live
-    creator between ``mkdir`` and its record write) or interrupted, never
-    corruption. A symlink, non-directory, non-private directory, foreign entry
-    or unsafe record shape is ``lock_unsafe``. Every answer leaves the state
-    untouched.
-    """
-    try:
-        entry = os.stat(LOCK_DIR_NAME, dir_fd=parent_fd, follow_symlinks=False)
-    except OSError as exc:
-        return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
-    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
-        return "lock_unsafe"
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        dir_fd = os.open(LOCK_DIR_NAME, flags, dir_fd=parent_fd)
-    except OSError as exc:
-        return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
-    try:
-        try:
-            opened = _fstat(dir_fd)
-        except OSError as exc:
-            return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
-        if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
-            return "lock_unsafe"
-        try:
-            if not is_private_descriptor_strict(dir_fd):
-                return "lock_unsafe"
-        except OSError as exc:
-            return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
-        try:
-            names = sorted(os.listdir(dir_fd))
-        except OSError as exc:
-            return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
-        if not names:
-            return "lock_unknown"
-        if names != [LOCK_RECORD_NAME]:
-            return "lock_unsafe"
-        state = _lock_record_state(dir_fd)
-        if state == "busy":
-            return "lock_busy"
-        return "lock_unknown" if state == "unknown" else "lock_unsafe"
-    finally:
-        try:
-            os.close(dir_fd)
-        except OSError:
-            pass
-
-
-def _remove_new_lock_best_effort(
-    parent_fd: int,
-    dir_fd: int,
-    dir_identity: tuple[int, int],
-    record_identity: tuple[int, int] | None,
-) -> LockCleanupReport:
-    """Remove only a lock this call just created, or leave it all in place.
-
-    Used after a failed acquisition. Every step is descriptor-relative and
-    inode-checked; a substituted directory, a foreign entry, a hard-linked
-    record or any error leaves the remaining state for the next run to refuse.
-    The returned report says exactly what was removed, without paths or inodes.
-    """
-    record_removed = False
-    directory_removed = False
-    try:
-        named = os.stat(LOCK_DIR_NAME, dir_fd=parent_fd, follow_symlinks=False)
-        if (named.st_dev, named.st_ino) != dir_identity:
-            return LockCleanupReport(record_removed, directory_removed)
-        if not stat.S_ISDIR(named.st_mode):
-            return LockCleanupReport(record_removed, directory_removed)
-        names = sorted(os.listdir(dir_fd))
-        if record_identity is not None and names == [LOCK_RECORD_NAME]:
-            entry = os.stat(
-                LOCK_RECORD_NAME, dir_fd=dir_fd, follow_symlinks=False
-            )
-            if (entry.st_dev, entry.st_ino) != record_identity:
-                return LockCleanupReport(record_removed, directory_removed)
-            if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
-                return LockCleanupReport(record_removed, directory_removed)
-            os.unlink(LOCK_RECORD_NAME, dir_fd=dir_fd)
-            record_removed = True
-        elif names:
-            return LockCleanupReport(record_removed, directory_removed)
-        if os.listdir(dir_fd):
-            return LockCleanupReport(record_removed, directory_removed)
-        named = os.stat(LOCK_DIR_NAME, dir_fd=parent_fd, follow_symlinks=False)
-        if (named.st_dev, named.st_ino) != dir_identity:
-            return LockCleanupReport(record_removed, directory_removed)
-        os.rmdir(LOCK_DIR_NAME, dir_fd=parent_fd)
-        directory_removed = True
-        return LockCleanupReport(record_removed, directory_removed)
-    except OSError:
-        return LockCleanupReport(record_removed, directory_removed)
-
-
-class NativeRunLock:
-    """A run-bound, exclusive native-install lock with inode-bound cleanup.
-
-    Acquisition atomically creates ``<state_dir>/native-install.lock`` with
-    ``0700`` and one ``0600`` ``run.json`` provenance record (schema, canonical
-    run id, pid). An existing directory is classified and refused, never
-    repaired: a valid record is ``lock_busy``; an empty directory or a partial,
-    truncated or undecodable private record is ``lock_unknown`` (concurrent or
-    interrupted, never corruption); a symlink, foreign entry, non-private
-    directory, unsafe record shape or a complete record this version cannot
-    accept is ``lock_unsafe`` (not a corruption diagnosis). There is deliberately no
-    same-run shortcut and no stale-lock recovery — a dead process's valid record
-    is still evidence that a native install may have run.
-
-    Release removes only the directory and record this object created. Both are
-    re-opened relative to held directory descriptors, required to match the
-    recorded device/inode, required to have no extra link or foreign entry, and
-    the record's exact bytes must still be present. A refusal before the record
-    unlink leaves the state untouched; a refusal after it (for example, the
-    final ``rmdir`` fails because a foreign entry appeared) has already removed
-    the record and leaves the directory, and still raises
-    ``lock_cleanup_refused`` — it is never reported as success and is not
-    retried. There is no recursive deletion and no path is chmod'ed, replaced or
-    recovered. Call :meth:`release` or use the context manager; dropping the
-    object does not remove the lock. Release is serialized by an internal
-    re-entrant lock; a same-thread re-entrant call raises
-    ``lock_reentrant_release`` instead of reusing descriptors.
-
-    Limits: a same-UID writer can race between an identity check and a
-    ``mkdir``/``unlink``/``rmdir``; the checks are evidence, not proof, and this
-    module does not claim otherwise. A ``SIGKILL`` leaves the lock in place, and
-    the next acquisition refuses it as ``lock_busy`` or ``lock_unknown``. A
-    failed acquisition removes the directory it just created only when that
-    removal can be proven. When an attempted removal cannot be proven (a
-    substituted name, a foreign entry, an extra hard link), it leaves the state
-    and raises ``lock_cleanup_refused`` from the original refusal; a permission
-    or umask failure preserves the new evidence and reports the original lock
-    refusal without attempting an unsafe cleanup. Acquiring never creates or
-    repairs the state directory: call :func:`prepare_native_state_dir`
-    explicitly after the read-only freshness preflight.
-    """
-
-    def __init__(
-        self,
-        *,
-        state_dir: Path,
-        run_id: str,
-        parent_fd: int,
-        dir_fd: int,
-        dir_identity: tuple[int, int],
-        record_identity: tuple[int, int],
-        record_bytes: bytes,
-    ) -> None:
-        self._state_dir = state_dir
-        self._run_id = run_id
-        self._parent_fd = parent_fd
-        self._dir_fd = dir_fd
-        self._dir_identity = dir_identity
-        self._record_identity = record_identity
-        self._record_bytes = record_bytes
-        self._released = False
-        self._cleanup_failed = False
-        self._cleanup_report: LockCleanupReport | None = None
-        self._releasing = False
-        self._release_guard = threading.RLock()
-
-    @classmethod
-    def acquire(cls, state_dir: Path, *, run_id: str) -> NativeRunLock:
-        """Atomically create this run's lock, or refuse an existing one."""
-        if sys.platform == "win32":
-            raise NativeLockError("unsupported_platform")
-        try:
-            canonical = _canonical_run_id(run_id)
-        except EventError:
-            raise NativeLockError("invalid_run_id") from None
-        parent_fd = _open_private_state_dir(state_dir)
-        dir_fd: int | None = None
-        record_fd: int | None = None
-        dir_identity: tuple[int, int] | None = None
-        record_identity: tuple[int, int] | None = None
-        record_bytes = b""
-        cleanup_ok = False
-        keep_open = False
-        try:
-            try:
-                os.mkdir(LOCK_DIR_NAME, 0o700, dir_fd=parent_fd)
-            except FileExistsError:
-                raise NativeLockError(_existing_lock_reason(parent_fd)) from None
-            except OSError:
-                raise NativeLockError("lock_create_failed") from None
-
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
-            try:
-                dir_fd = os.open(LOCK_DIR_NAME, flags, dir_fd=parent_fd)
-            except OSError:
-                # The new name cannot be proven safe to remove without a
-                # descriptor, so it is left for the next run to classify.
-                raise NativeLockError("lock_create_failed") from None
-            try:
-                opened = _fstat(dir_fd)
-            except OSError:
-                raise NativeLockError("lock_create_failed") from None
-            dir_identity = (opened.st_dev, opened.st_ino)
-            try:
-                private_dir = is_private_descriptor_strict(dir_fd)
-            except OSError:
-                raise NativeLockError("lock_create_failed") from None
-            if not stat.S_ISDIR(opened.st_mode) or not private_dir:
-                raise NativeLockError("lock_create_failed")
-            try:
-                named = os.stat(
-                    LOCK_DIR_NAME, dir_fd=parent_fd, follow_symlinks=False
-                )
-            except OSError:
-                raise NativeLockError("lock_unsafe") from None
-            if (named.st_dev, named.st_ino) != dir_identity:
-                raise NativeLockError("lock_unsafe")
-            try:
-                if os.listdir(dir_fd):
-                    raise NativeLockError("lock_unsafe")
-            except OSError:
-                raise NativeLockError("lock_unsafe") from None
-            cleanup_ok = True
-
-            record_bytes = _lock_record_bytes(canonical)
-            record_flags = (
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
-            try:
-                record_fd = os.open(
-                    LOCK_RECORD_NAME, record_flags, 0o600, dir_fd=dir_fd
-                )
-            except OSError:
-                raise NativeLockError("lock_record_failed") from None
-            try:
-                try:
-                    opened_record = _fstat(record_fd)
-                except OSError:
-                    raise NativeLockError("lock_record_failed") from None
-                record_identity = (opened_record.st_dev, opened_record.st_ino)
-                try:
-                    private_record = is_private_descriptor_strict(record_fd)
-                except OSError:
-                    cleanup_ok = False
-                    raise NativeLockError("lock_record_failed") from None
-                if not private_record:
-                    cleanup_ok = False
-                    raise NativeLockError("lock_record_failed")
-                try:
-                    _write_record(record_fd, record_bytes)
-                except OSError:
-                    raise NativeLockError("lock_record_failed") from None
-                try:
-                    opened_record = _fstat(record_fd)
-                except OSError:
-                    raise NativeLockError("lock_record_failed") from None
-                if (
-                    not stat.S_ISREG(opened_record.st_mode)
-                    or opened_record.st_nlink != 1
-                    or opened_record.st_size != len(record_bytes)
-                ):
-                    cleanup_ok = False
-                    raise NativeLockError("lock_record_failed")
-            finally:
-                if record_fd is not None:
-                    try:
-                        os.close(record_fd)
-                    except OSError:
-                        pass
-                    record_fd = None
-
-            if dir_fd is None or record_identity is None:
-                raise NativeLockError("lock_record_failed")
-            lock = cls(
-                state_dir=state_dir,
-                run_id=canonical,
-                parent_fd=parent_fd,
-                dir_fd=dir_fd,
-                dir_identity=dir_identity,
-                record_identity=record_identity,
-                record_bytes=record_bytes,
-            )
-            keep_open = True
-            return lock
-        except BaseException as original:
-            if cleanup_ok:
-                report = LockCleanupReport(False, False)
-                if dir_fd is not None and dir_identity is not None:
-                    try:
-                        report = _remove_new_lock_best_effort(
-                            parent_fd, dir_fd, dir_identity, record_identity
-                        )
-                    except BaseException:
-                        report = LockCleanupReport(False, False)
-                if not report.directory_removed:
-                    # The original failure and the failed cleanup are both
-                    # surfaced; neither is hidden behind the other.
-                    raise NativeLockError(
-                        "lock_cleanup_refused",
-                        original_reason=(
-                            original.reason
-                            if isinstance(original, NativeLockError)
-                            else None
-                        ),
-                        cleanup=report,
-                    ) from original
-            raise
-        finally:
-            if record_fd is not None:
-                try:
-                    os.close(record_fd)
-                except OSError:
-                    pass
-            if not keep_open:
-                if dir_fd is not None:
-                    try:
-                        os.close(dir_fd)
-                    except OSError:
-                        pass
-                try:
-                    os.close(parent_fd)
-                except OSError:
-                    pass
-
-    @property
-    def path(self) -> Path:
-        return self._state_dir / LOCK_DIR_NAME
-
-    @property
-    def record_path(self) -> Path:
-        return self.path / LOCK_RECORD_NAME
-
-    @property
-    def run_id(self) -> str:
-        return self._run_id
-
-    def assert_held(self, *, run_id: str | None = None) -> None:
-        """Prove this object still holds the exact lock it created; never mutates.
-
-        The check is descriptor-bound: the held directory descriptor must still
-        name the created device/inode, the public name under the parent must still
-        resolve to that same directory, the directory must still be private and
-        contain exactly the one record, and the record must still be the same
-        inode, private, single-linked, the expected size and the exact bytes this
-        run wrote. Those bytes bind the schema, canonical run id and pid, so an
-        optional ``run_id`` must also match both this object and the record.
-
-        A released object, a descriptor closed by a failed release, a substituted
-        directory or record, an extra entry or link, changed bytes and a changed
-        run id are all refusals with fixed reasons: ``lock_not_held``,
-        ``lock_changed``, ``lock_unsafe``, ``lock_run_mismatch`` or
-        ``invalid_run_id``. Nothing here writes, unlinks, renames, chmods or
-        repairs; a refusal leaves the state for release or the next acquisition
-        to classify. As everywhere else in this lock, a same-UID writer can still
-        race between a check and the next operation; this narrows and reports the
-        window, it does not claim to close it.
-        """
-        with self._release_guard:
-            if (
-                self._released
-                or self._cleanup_failed
-                or self._dir_fd < 0
-                or self._parent_fd < 0
-            ):
-                raise NativeLockError("lock_not_held")
-            if run_id is not None:
-                try:
-                    canonical = _canonical_run_id(run_id)
-                except EventError:
-                    raise NativeLockError("invalid_run_id") from None
-                if canonical != self._run_id:
-                    raise NativeLockError("lock_run_mismatch")
-            try:
-                state_named = os.lstat(self._state_dir)
-                state_held = _fstat(self._parent_fd)
-            except OSError:
-                raise NativeLockError("lock_changed") from None
-            if (
-                not stat.S_ISDIR(state_named.st_mode)
-                or (state_named.st_dev, state_named.st_ino)
-                != (state_held.st_dev, state_held.st_ino)
-            ):
-                raise NativeLockError("lock_changed")
-            try:
-                if not is_private_descriptor_strict(self._parent_fd):
-                    raise NativeLockError("lock_unsafe")
-            except OSError:
-                raise NativeLockError("lock_unsafe") from None
-            try:
-                held = _fstat(self._dir_fd)
-            except OSError:
-                raise NativeLockError("lock_not_held") from None
-            if (
-                not stat.S_ISDIR(held.st_mode)
-                or (held.st_dev, held.st_ino) != self._dir_identity
-            ):
-                raise NativeLockError("lock_changed")
-            try:
-                named = os.stat(
-                    LOCK_DIR_NAME,
-                    dir_fd=self._parent_fd,
-                    follow_symlinks=False,
-                )
-            except OSError:
-                raise NativeLockError("lock_changed") from None
-            if (
-                not stat.S_ISDIR(named.st_mode)
-                or (named.st_dev, named.st_ino) != self._dir_identity
-            ):
-                raise NativeLockError("lock_changed")
-            try:
-                if not is_private_descriptor_strict(self._dir_fd):
-                    raise NativeLockError("lock_unsafe")
-            except OSError:
-                raise NativeLockError("lock_unsafe") from None
-            try:
-                names = os.listdir(self._dir_fd)
-            except OSError:
-                raise NativeLockError("lock_changed") from None
-            if names != [LOCK_RECORD_NAME]:
-                raise NativeLockError("lock_changed")
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_BINARY", 0)
-            )
-            try:
-                descriptor = os.open(
-                    LOCK_RECORD_NAME, flags, dir_fd=self._dir_fd
-                )
-            except OSError:
-                raise NativeLockError("lock_changed") from None
-            try:
-                try:
-                    opened = _fstat(descriptor)
-                except OSError:
-                    raise NativeLockError("lock_not_held") from None
-                if (
-                    not stat.S_ISREG(opened.st_mode)
-                    or opened.st_nlink != 1
-                    or (opened.st_dev, opened.st_ino) != self._record_identity
-                ):
-                    raise NativeLockError("lock_changed")
-                try:
-                    if not is_private_descriptor_strict(descriptor):
-                        raise NativeLockError("lock_unsafe")
-                except OSError:
-                    raise NativeLockError("lock_unsafe") from None
-                if opened.st_size != len(self._record_bytes):
-                    raise NativeLockError("lock_changed")
-                data = _read_bounded_fd(descriptor, MAX_LOCK_RECORD_BYTES)
-                if data != self._record_bytes:
-                    raise NativeLockError("lock_changed")
-            finally:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-
-    def release(self) -> None:
-        """Remove this run's own lock, or refuse and leave it untouched."""
-        with self._release_guard:
-            if self._released:
-                return
-            if self._cleanup_failed:
-                # A previous attempt already refused. Do not turn that into a
-                # silent success, and do not reuse descriptors that were closed.
-                raise NativeLockError(
-                    "lock_cleanup_refused", cleanup=self._cleanup_report
-                )
-            if self._releasing:
-                # A signal handler or callback re-entered release on the same
-                # thread while the first attempt owned the descriptors.
-                raise NativeLockError("lock_reentrant_release")
-            self._releasing = True
-            parent_fd = self._parent_fd
-            dir_fd = self._dir_fd
-            self._parent_fd = -1
-            self._dir_fd = -1
-            try:
-                self._release_checked(parent_fd, dir_fd)
-            except BaseException as failure:
-                self._cleanup_failed = True
-                if isinstance(failure, NativeLockError):
-                    self._cleanup_report = failure.cleanup
-                raise
-            else:
-                self._released = True
-            finally:
-                self._releasing = False
-                for descriptor in (dir_fd, parent_fd):
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        pass
-
-    def _release_checked(self, parent_fd: int, dir_fd: int) -> None:
-        record_removed = False
-        directory_removed = False
-
-        def refuse() -> NoReturn:
-            raise NativeLockError(
-                "lock_cleanup_refused",
-                cleanup=LockCleanupReport(
-                    record_removed, directory_removed
-                ),
-            ) from None
-
-        try:
-            named = os.stat(LOCK_DIR_NAME, dir_fd=parent_fd, follow_symlinks=False)
-        except OSError:
-            refuse()
-        if (named.st_dev, named.st_ino) != self._dir_identity:
-            refuse()
-        if not stat.S_ISDIR(named.st_mode):
-            refuse()
-        try:
-            if not is_private_descriptor_strict(dir_fd):
-                refuse()
-        except OSError:
-            refuse()
-        try:
-            names = sorted(os.listdir(dir_fd))
-        except OSError:
-            refuse()
-        if names != [LOCK_RECORD_NAME]:
-            refuse()
-        try:
-            entry = os.stat(
-                LOCK_RECORD_NAME, dir_fd=dir_fd, follow_symlinks=False
-            )
-        except OSError:
-            refuse()
-        if (entry.st_dev, entry.st_ino) != self._record_identity:
-            refuse()
-        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
-            refuse()
-        flags = (
-            os.O_RDONLY
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
-        )
-        try:
-            descriptor = os.open(LOCK_RECORD_NAME, flags, dir_fd=dir_fd)
-        except OSError:
-            refuse()
-        try:
-            try:
-                opened = _fstat(descriptor)
-            except OSError:
-                refuse()
-            if (opened.st_dev, opened.st_ino) != self._record_identity:
-                refuse()
-            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-                refuse()
-            try:
-                if not is_private_descriptor_strict(descriptor):
-                    refuse()
-            except OSError:
-                refuse()
-            if opened.st_size != len(self._record_bytes):
-                refuse()
-            data = _read_bounded_fd(descriptor, MAX_LOCK_RECORD_BYTES)
-            if data != self._record_bytes:
-                refuse()
-        finally:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        try:
-            os.unlink(LOCK_RECORD_NAME, dir_fd=dir_fd)
-        except OSError:
-            refuse()
-        record_removed = True
-        try:
-            named = os.stat(LOCK_DIR_NAME, dir_fd=parent_fd, follow_symlinks=False)
-        except OSError:
-            refuse()
-        if (named.st_dev, named.st_ino) != self._dir_identity:
-            refuse()
-        if not stat.S_ISDIR(named.st_mode):
-            refuse()
-        try:
-            if os.listdir(dir_fd):
-                refuse()
-        except OSError:
-            refuse()
-        try:
-            os.rmdir(LOCK_DIR_NAME, dir_fd=parent_fd)
-        except OSError:
-            refuse()
-        directory_removed = True
-
-    def __enter__(self) -> NativeRunLock:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        try:
-            self.release()
-        except NativeLockError as cleanup_error:
-            if exc is not None:
-                # Surface the cleanup refusal and keep the body's exception
-                # visible as its cause instead of suppressing either one.
-                raise cleanup_error from exc
-            raise
 
 
 # ── the native fresh-host creation helper (#2340) ───────────────────────────
@@ -1899,11 +880,22 @@ COORDINATOR_REAP_TIMEOUT_SECONDS: Final[float] = 5.0
 COORDINATOR_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 #: Hard ceiling for every configurable coordinator deadline.
 COORDINATOR_MAX_TIMEOUT_SECONDS: Final[float] = 7200.0
-#: The most events this coordinator can write on its longest path: six phases,
-#: ``wizard_ready``, ``setup_saved`` and the terminal ``failed``. The run must
-#: have room for all of them or it could reach a mutation with no way to report
-#: an outcome.
-COORDINATOR_EVENT_BUDGET: Final[int] = 9
+#: The last phase the shell announces before handing the descriptor over. The
+#: coordinator's writer refuses it and every earlier phase.
+SHELL_LAST_PHASE: Final[str] = "download"
+#: How long the coordinator may wait for a live readiness proof after activation.
+COORDINATOR_READINESS_TIMEOUT_SECONDS: Final[float] = 60.0
+#: Pause between readiness proofs that answered with a transient failure.
+COORDINATOR_READINESS_INTERVAL_SECONDS: Final[float] = 1.0
+#: Readiness answers that may be retried. Every other failure is final.
+_READINESS_RETRYABLE: Final[frozenset[str]] = frozenset(
+    {"listener_missing", "startup_status_unavailable", "startup_not_ready"}
+)
+#: The most events this coordinator can write on its longest path: four phases
+#: (install, wizard, activation, readiness), ``wizard_ready``, ``setup_saved``
+#: and one terminal event. The run must have room for all of them or it could
+#: reach a mutation with no way to report an outcome.
+COORDINATOR_EVENT_BUDGET: Final[int] = 7
 
 _STATE_FAILURES: Final[dict[NativeInstallState, str]] = {
     NativeInstallState.configured: "existing_install",
@@ -2089,6 +1081,8 @@ class _CoordinatorPolicy:
     term_grace: float = COORDINATOR_TERM_GRACE_SECONDS
     reap_timeout: float = COORDINATOR_REAP_TIMEOUT_SECONDS
     poll_interval: float = COORDINATOR_POLL_INTERVAL_SECONDS
+    readiness_timeout: float = COORDINATOR_READINESS_TIMEOUT_SECONDS
+    readiness_interval: float = COORDINATOR_READINESS_INTERVAL_SECONDS
 
     def __post_init__(self) -> None:
         for name in (
@@ -2098,6 +1092,8 @@ class _CoordinatorPolicy:
             "term_grace",
             "reap_timeout",
             "poll_interval",
+            "readiness_timeout",
+            "readiness_interval",
         ):
             value = getattr(self, name)
             if type(value) not in (int, float):
@@ -2118,12 +1114,14 @@ class _CoordinatorDeps:
     The public entry point exposes none of this. The production wiring must
     supply the real classifier, the private state/lock helpers, the real
     :func:`create_fresh_host` step, the verified-wheel engine install, the
-    native bootstrap command and :func:`ciao.native_handoff.activate`.
+    native bootstrap command, :func:`ciao.native_handoff.activate`, the listener
+    lookup that proves the wizard child holds the reported port, and the
+    readiness proof :func:`ciao.native_readiness.prove_native_readiness`.
     """
 
     classify: Callable[[Path | None], NativeInstallState]
-    prepare_state_dir: Callable[[], Path]
-    acquire_lock: Callable[[Path, str], NativeRunLock]
+    prepare_state_dir: Callable[[], NativeStateDir]
+    acquire_lock: Callable[[NativeStateDir, str], NativeRunLock]
     prepare_scratch: Callable[[], Path]
     create_host: Callable[[NativeRunLock, str, float], FreshHostInstall]
     recheck_host: Callable[[FreshHostInstall], None]
@@ -2131,6 +1129,14 @@ class _CoordinatorDeps:
     wizard_command: Callable[[int], tuple[str, ...]]
     read_handoff: Callable[[str], NativeHandoffResult]
     activate: Callable[[str, float], NativeHandoffResult]
+    #: ``(port, child_pid) -> frozenset`` of every pid holding a listening socket
+    #: on ``port``. The lookup must cover every listening socket on that port,
+    #: IPv4 and IPv6, so a foreign same-UID listener (``SO_REUSEPORT`` or a more
+    #: specific bind) is returned too and fails the owned-listener check.
+    wizard_listener: Callable[[int, int], frozenset[int]]
+    prove_ready: Callable[
+        [FreshHostInstall, NativeHandoffResult, float], NativeReadinessProof
+    ]
 
 
 class _OwnedChild:
@@ -2163,6 +1169,19 @@ class _OwnedChild:
 
     def poll(self) -> int | None:
         return self._process.poll()
+
+    def owns_process(self, pid: int) -> bool:
+        """Whether ``pid`` is this child or in the session group it leads."""
+        if type(pid) is not int or pid <= 0 or self._process.poll() is not None:
+            return False
+        if pid == self._process.pid:
+            return True
+        if _GETPGID is None:
+            return False
+        try:
+            return _GETPGID(pid) == self._process.pid
+        except OSError:
+            return False
 
     def wait_for_exit(
         self, deadline: _Deadline, cancellation: NativeCancellation
@@ -2926,6 +1945,20 @@ def _check_stage(
         raise _TimedOut
 
 
+def _wait_observing(
+    seconds: float, cancellation: NativeCancellation, poll_interval: float
+) -> None:
+    """Sleep for ``seconds`` in slices so a cancellation is seen promptly."""
+    end = time.monotonic() + seconds
+    while True:
+        if cancellation.cancelled:
+            raise _Cancelled
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(poll_interval, left))
+
+
 def _remaining(deadline: _Deadline) -> float:
     remaining = deadline.remaining()
     if remaining <= 0:
@@ -3021,9 +2054,8 @@ def run_native_install(request: NativeInstallRequest) -> NativeInstallOutcome:
 
     This is the production entry point. It deliberately exposes no injection
     seams: the next slice must supply the native bootstrap context and schema-2
-    handoff recording in the setup child, and wiring the readiness proof in
-    ``ciao.native_readiness`` (it exists but is not wired into this coordinator)
-    before this can start a run. Invalid
+    handoff recording in the setup child, and the production readiness and
+    listener deps before this can start a run. Invalid
     inputs are refused first with ``invalid_arguments``; a valid request then
     fails with ``coordinator_unavailable`` before reading the descriptor,
     acquiring the lock, touching the host or starting a child.
@@ -3049,9 +2081,11 @@ def _run_native_install(
     engine, then start the wizard. Every mutation is preceded by a cancellation
     and deadline check and (after acquisition) by ``assert_held``. The engine
     install cannot begin on ``configured``, ``partial``, ``unknown`` or a held
-    lock. The readiness proof in ``ciao.native_readiness`` exists but is not
-    wired into the coordinator, so this slice still ends with
-    ``failed("service_not_ready")``; it never emits ``service_ready``.
+    lock. After activation the injected ``prove_ready`` is polled within
+    ``readiness_timeout``: transient answers are retried every
+    ``readiness_interval``, any other answer is ``service_not_ready``, and
+    ``service_ready`` is emitted only for a ready proof on the handoff port
+    after the child and the lock were cleaned up successfully.
 
     The injected synchronous steps cannot be preempted by this module: the
     deadline is checked before and after each one and the real implementation
@@ -3078,6 +2112,7 @@ def _run_native_install(
             run_id=request.run_id,
             first_seq=request.first_seq,
             prior_events=request.prior_events,
+            after_phase=SHELL_LAST_PHASE,
         )
     except EventError:
         _close_fd(request.events_fd)
@@ -3090,6 +2125,7 @@ def _run_native_install(
     activation_attempted = False
     activation_completed = False
     selected_workspace: Path | None = None
+    ready_port: int | None = None
     failure: str | None = None
     channel_dead = False
     lock_retained = False
@@ -3102,7 +2138,6 @@ def _run_native_install(
                 deadline = _Deadline.after(policy.run_timeout)
                 _check_stage(deadline, cancellation)
 
-                writer.phase("preflight")
                 try:
                     classification = deps.classify(request.workspace)
                 except Exception:
@@ -3111,9 +2146,11 @@ def _run_native_install(
                 _map_classification(classification)
                 _check_stage(deadline, cancellation)
 
-                writer.phase("bootstrap")
                 state_dir = deps.prepare_state_dir()
-                lock = deps.acquire_lock(state_dir, request.run_id)
+                try:
+                    lock = deps.acquire_lock(state_dir, request.run_id)
+                finally:
+                    state_dir.close()
                 lock.assert_held(run_id=request.run_id)
                 try:
                     deps.prepare_scratch()
@@ -3204,6 +2241,21 @@ def _run_native_install(
                 finally:
                     _close_fd(write_fd)
                     _close_fd(read_fd)
+                # The child's self-reported port is only a claim. The port must
+                # have a listener owned by this child or its session group.
+                try:
+                    listeners = deps.wizard_listener(port, child.pid)
+                except (_Cancelled, _TimedOut):
+                    raise
+                except Exception:
+                    raise _Refusal("wizard_failed") from None
+                if (
+                    not isinstance(listeners, frozenset)
+                    or not listeners
+                    or not all(child.owns_process(pid) for pid in listeners)
+                ):
+                    raise _Refusal("wizard_failed")
+                _check_stage(deadline, cancellation)
                 writer.wizard_ready(port)
                 try:
                     code = child.wait_for_exit(
@@ -3266,11 +2318,39 @@ def _run_native_install(
                 _check_stage(deadline, cancellation)
 
                 writer.phase("readiness")
-                # The readiness proof (ciao.native_readiness) exists but is not wired
-                # in here. A truthful service_not_ready failure is the only terminal
-                # this slice may emit;
-                # there is deliberately no service_ready call in the coordinator.
-                raise _Refusal("service_not_ready")
+                readiness_deadline = _sub_deadline(
+                    deadline, policy.readiness_timeout
+                )
+                while True:
+                    _check_stage(deadline, cancellation)
+                    remaining = readiness_deadline.remaining()
+                    if remaining <= 0:
+                        raise _Refusal("service_not_ready")
+                    try:
+                        proof = deps.prove_ready(host, handoff, remaining)
+                    except (_Cancelled, _TimedOut):
+                        raise
+                    except Exception:
+                        raise _Refusal("service_not_ready") from None
+                    if not isinstance(proof, NativeReadinessProof):
+                        raise _Refusal("service_not_ready")
+                    if proof.ready:
+                        if proof.failure is not None or proof.port != handoff.port:
+                            raise _Refusal("service_not_ready")
+                        ready_port = handoff.port
+                        break
+                    if proof.failure == "cancelled":
+                        raise _Cancelled
+                    if proof.failure not in _READINESS_RETRYABLE:
+                        raise _Refusal("service_not_ready")
+                    _wait_observing(
+                        min(
+                            policy.readiness_interval,
+                            max(readiness_deadline.remaining(), 0.0),
+                        ),
+                        cancellation,
+                        policy.poll_interval,
+                    )
             except _Refusal as refusal:
                 failure = refusal.code
             except _Cancelled:
@@ -3317,24 +2397,34 @@ def _run_native_install(
             if cleanup_failed and failure is None:
                 failure = "internal_error"
 
-        try:
+        terminal: str | None = None
+        if failure is None and ready_port is not None:
+            # Success is reported only here: no failure, and child and lock
+            # cleanup both succeeded in the finally above.
+            try:
+                writer.service_ready(ready_port)
+                terminal = "service_ready"
+            except EventError:
+                channel_dead = True
+                failure = "event_channel_failed"
+        else:
             if failure is None:
                 failure = "internal_error"
             if not channel_dead:
                 try:
                     writer.failed(failure)
+                    terminal = "failed"
                 except EventError:
                     channel_dead = True
                     failure = "event_channel_failed"
-        finally:
-            writer.close()
-
+        if channel_dead:
+            terminal = None
     finally:
         writer.close()
     return NativeInstallOutcome(
         run_id=request.run_id,
-        terminal=None if channel_dead else "failed",
-        failure_code=failure,
+        terminal=terminal,
+        failure_code=None if terminal == "service_ready" else failure,
         host_step_attempted=host_step_attempted,
         host_step_completed=host_step_completed,
         activation_attempted=activation_attempted,

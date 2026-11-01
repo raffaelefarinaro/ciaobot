@@ -576,7 +576,7 @@ authenticated manifest bytes and signature, not a caller-selected entry, and cal
 `verify_manifest`, `select_server_host_artifact` and `verify_host_archive` itself.
 It fixes the host bundle and ownership record to the canonical home paths and the
 release public key; there is no caller-supplied path, key or pre-selected entry.
-It requires the run's `NativeRunLock.assert_held(run_id=…)` and refuses a bundle,
+It requires the run's `native_lock.NativeRunLock.assert_held(run_id=…)` and refuses a bundle,
 ownership record or host-upgrade journal that already exists, including terminal
 journal evidence it must not settle. Fresh mode also requires canonical absolute
 paths with no `.`, `..` or symlinked ancestor within the trusted home, a record
@@ -603,45 +603,98 @@ returned; a changed host is refused and left in place, never rolled back. The
 checks are refusal points, not proof: a same-UID writer can still interleave
 between a check and the write it guards, and a lost rename may leave the record the
 fresh attempt wrote (the existing `keep_record` path) while the run reports
-`HOST_EXISTS` and never claims that host as its own.
+`HOST_EXISTS` and never claims that host as its own. When a fresh install fails
+after its rename, it renames the bundle it placed into a unique name inside its
+own staging directory, re-checks that entry's inode, and only then removes it. A
+substitute swapped in before that rename is kept in the staging directory and
+named in the error, never deleted. The race is moved onto a name no other writer
+knows in advance and narrowed, not closed: a same-UID writer can still swap the
+stage directory or the scratch entry between the checks and the removal.
 
-The first coordinator lifecycle slice is now in `ciao.native_installer`, but it
-has **no production caller and no public run path**: `run_native_install`
-refuses with `coordinator_unavailable` until the setup child can write its
-schema-2 handoff from a native context and the readiness proof in
-`ciao.native_readiness` is wired in. That proof exists but is not wired into the
-coordinator, so the coordinator still ends with `service_not_ready`. The testable private seam,
-`_run_native_install`, takes injected callables for every external effect. Its
-`NativeInstallOutcome` records attempted and completed flags separately, so a
-host or activation step that mutates and then raises is never reported as
-unattempted; `activation_attempted` means the service may be running. It
-classifies fresh, prepares the private state directory, takes the run lock,
-prepares the bootstrap scratch chain, classifies again immediately before the
-first host/engine mutation, creates the host through the real
+The coordinator lifecycle is in `ciao.native_installer`, but it has **no
+production caller and no public run path**: `run_native_install` still refuses
+with `coordinator_unavailable` until the setup child can write its schema-2
+handoff from a native context and the production readiness and listener deps are
+supplied. The testable private seam, `_run_native_install`, takes injected
+callables for every external effect. Its `NativeInstallOutcome` records attempted
+and completed flags separately, so a host or activation step that mutates and then
+raises is never reported as unattempted; `activation_attempted` means the service
+may be running.
+
+The phases are split between the shell and the coordinator. The shell owns
+`preflight`, `bootstrap` and `download` and hands the descriptor over after them.
+The coordinator's `EventWriter` is built with `after_phase="download"`, so it
+refuses any re-emitted shell phase (`phase_out_of_order`). The coordinator owns
+`install`, `wizard`, `activation` and `readiness`. Its longest path is seven
+events (four phases, `wizard_ready`, `setup_saved` and one terminal), and it
+refuses a handoff that leaves fewer than seven event slots instead of mutating
+with no room to report an outcome. The public event descriptor must be in the
+shell's 3–9 range, and the writer refuses a descriptor that is the same underlying file (device and
+inode) as stdout or stderr (`stdio_alias`) before it changes any flag.
+
+The coordinator classifies fresh, prepares the private state directory, takes the
+run lock, prepares the bootstrap scratch chain, classifies again immediately
+before the first host/engine mutation, creates the host through the real
 `create_fresh_host`, rechecks the host and lock before the engine install,
 installs the engine, starts the wizard with only a private bind-notification
 pipe, reads one bounded `{schema:1,port:N}` record **and waits for the producer
-to close the pipe** (so a delayed second record is a refusal), emits
-`wizard_ready`, validates the run-bound handoff, emits `setup_saved`, and calls
-activation. `workspace` is
-only the classifier suggestion; the selected directory is read from the handoff
-and reported, and an optional `expected_workspace` is the only exact-match
-check. Because its longest path is nine events, it refuses a handoff that leaves
-fewer than nine event slots instead of mutating with no room to report an
-outcome. The public event descriptor must be in the shell's 3–9 range at the
-coordinator boundary. It never emits `service_ready` in this slice: after
-activation it reports `failed("service_not_ready")`. Cancellation is a flag the
-normal loop observes; the loop sends SIGTERM, waits a finite grace, sends
-SIGKILL, and reaps only the child it started in that child's own session before
-releasing the lock, keeping the lock when reaping cannot be proven. The child
-waits are clamped to the whole-run budget, cleanup has its own bounded
-grace/reap deadlines, and injected synchronous steps are checked before and
-after but cannot be preempted by this module. It never passes the public event
-descriptor to a child (the wizard sees only the private pipe), never stops,
-reloads, quiesces or rolls back an activated service, preserves partial
-artifacts, writes no onboarding or install receipt, and adds no route. `SIGKILL`
-runs no cleanup and leaves the lock and child as evidence. Tests:
-`tests/test_native_installer.py`.
+to close the pipe** (so a delayed second record is a refusal). The self-reported
+port is only a claim: `wizard_listener(port, child_pid)` must return every pid
+holding a listening socket on that port, IPv4 and IPv6. The set must be non-empty,
+and every pid must be the wizard child or in the session group it leads
+(`_OwnedChild.owns_process`), or the run is `wizard_failed` before `wizard_ready`
+is emitted. It then emits `wizard_ready`, validates the run-bound handoff, emits
+`setup_saved`, and calls activation. After `wizard_ready`, a wizard exit or any
+`failed` event ends trust in that origin, and the client must stop using it.
+`workspace` is only the classifier suggestion; the selected directory is read from
+the handoff and reported, and an optional `expected_workspace` is the only
+exact-match check.
+
+After activation a bounded readiness loop calls the injected `prove_ready`. The
+answers `listener_missing`, `startup_status_unavailable` and `startup_not_ready`
+are retried every `readiness_interval` up to `readiness_timeout` (60 s). Any other
+answer, an exception, a non-proof value or a ready proof for another port is
+`service_not_ready`, and a cancelled proof is `cancelled`. `service_ready` is
+emitted once, and only after a ready proof on the handoff port and a clean child
+and lock cleanup. If lock release or child cleanup fails, the run reports
+`failed("internal_error")` with `activation_completed=True`.
+
+The public event descriptor must be in the shell's 3–9 range at the coordinator
+boundary. Cancellation is a flag the caller sets; the normal loop observes it,
+sends SIGTERM, waits a finite grace, sends SIGKILL, and reaps only the child it
+started in that child's own session before releasing the lock, keeping the lock
+when reaping cannot be proven. The child waits are clamped to the whole-run
+budget, cleanup has its own bounded grace/reap deadlines, and injected synchronous
+steps are checked before and after but cannot be preempted by this module. It
+never passes the public event descriptor to a child (the wizard sees only the
+private pipe), never stops, reloads, quiesces or rolls back an activated service
+on a later failure or cancellation, preserves partial artifacts, writes no
+onboarding or install receipt, and adds no route. `SIGKILL` runs no cleanup and
+leaves the lock and child as evidence. Tests: `tests/test_native_installer.py`.
+
+**Recovering a native-install lock**
+
+A lock at `~/.local/state/ciaobot/native-install.lock` means a native install is
+running, or one was killed (SIGKILL or power loss) before it could clean up. That
+path is the default state directory the coordinator will use from #2404; the
+coordinator is not wired to it yet.
+
+1. Nothing in the tool removes, adopts or repairs the lock automatically. A busy
+   or unknown lock refuses every native run with `install_in_progress`. An unsafe
+   lock, or an unsafe state directory, refuses with `unknown_state` instead,
+   because the tool cannot tell what wrote it.
+2. Read `run.json` in the lock directory. It holds `schema`, `run_id` and `pid`.
+3. Check whether that pid is still running with `ps -p <pid>`. A live pid is not
+   proof that an installer is running: pids are reused, and a process owned by
+   another user can hold one. A dead pid does not by itself authorise removal.
+4. Remove the lock directory by hand only when you have confirmed that no
+   installer is running (the pid check alone is not enough) and no Ciaobot
+   installer window is open. A later native run still refuses a partial install
+   that the killed run left behind (receipt, tool environment or host). Inspect
+   or remove those separately: the native installer never repairs them.
+5. `ciao.native_lock.inspect_native_lock(state_dir)` returns the same
+   classification read-only, including the recorded pid and whether it is alive.
+   The coordinator does not print it yet.
 
 The native bootstrap child side is now explicit but internal. When the native
 coordinator starts it with the private `--installer-native-fd` (hidden, and
