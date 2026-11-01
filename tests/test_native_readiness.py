@@ -1688,9 +1688,19 @@ def test_http_adapter_refuses_ambiguous_or_failed_answers(response: bytes) -> No
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="libproc is macOS-only")
 def test_proc_pidpath_is_the_authoritative_kernel_path() -> None:
-    path = readiness._proc_pidpath(os.getpid())
-    assert path is not None
-    assert os.path.samefile(path, sys.executable)
+    # A child running a known real binary: ``sys.executable`` can be a launcher
+    # that execs another file (the python.org framework build execs Python.app),
+    # so the kernel path of this process is not a fixed expectation.
+    child = subprocess.Popen(
+        ["/bin/sleep", "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        path = readiness._proc_pidpath(child.pid)
+        assert path is not None
+        assert os.path.samefile(path, "/bin/sleep")
+    finally:
+        child.kill()
+        child.wait(timeout=10)
     assert readiness._proc_pidpath(0) is None
 
 
