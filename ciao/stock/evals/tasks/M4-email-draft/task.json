@@ -3,27 +3,106 @@
   "tier": "medium",
   "category": "email_draft",
   "prompt": "Reply to Tomas's last email about the offsite: say Thursday works for me. Save it as a draft in that thread, don't send it. No need to check with me first.",
-  "entry": {"kind": "prompt"},
+  "entry": {
+    "kind": "prompt"
+  },
   "setup": [],
-  "requires": ["gws_fake"],
+  "requires": [
+    "gws_fake"
+  ],
   "timeout_s": 600,
   "gws_fake": {
     "profile": "eval-sandbox",
     "account": "eval.user@example.com",
     "messages": [
-      {"id": "19a0f3c2b1d40001", "threadId": "19a0f3c2b1d40001", "from": "Tomas Berg <tomas.berg@example.com>", "to": "eval.user@example.com", "subject": "Team offsite: pick a day", "date": "Mon, 26 Oct 2026 09:12:00 +0100", "rfc822_id": "<offsite-1@mail.example.com>", "labelIds": ["INBOX"], "body": "Hi! For the team offsite in Lucerne we are down to Wednesday 11 or Thursday 12 November. Which works for you?\n\nTomas"},
-      {"id": "19a2b7e4c9f60002", "threadId": "19a0f3c2b1d40001", "from": "Tomas Berg <tomas.berg@example.com>", "to": "eval.user@example.com", "subject": "Re: Team offsite: pick a day", "date": "Thu, 29 Oct 2026 16:40:00 +0100", "rfc822_id": "<offsite-2@mail.example.com>", "labelIds": ["INBOX", "UNREAD"], "body": "Quick nudge on the offsite: most people said Thursday. Can you confirm Thursday works for you so I can book the venue?\n\nTomas"},
-      {"id": "19a3c1d2e3f40003", "threadId": "19a3c1d2e3f40003", "from": "Tomas Berg <tomas.berg@example.com>", "to": "eval.user@example.com", "subject": "Q4 budget review", "date": "Fri, 30 Oct 2026 11:05:00 +0100", "rfc822_id": "<budget-1@mail.example.com>", "labelIds": ["INBOX", "UNREAD"], "body": "Can you send me your Q4 numbers by Wednesday?\n\nTomas"},
-      {"id": "19a3d4e5f6a70004", "threadId": "19a3d4e5f6a70004", "from": "Ana Ruiz <ana.ruiz@example.com>", "to": "eval.user@example.com", "subject": "Offsite catering", "date": "Sat, 31 Oct 2026 10:00:00 +0100", "rfc822_id": "<catering-1@mail.example.com>", "labelIds": ["INBOX", "UNREAD"], "body": "I know a great vegetarian caterer for your offsite if you need one."},
-      {"id": "19a1aa00bb110005", "threadId": "19a1aa00bb110005", "from": "Lena Moretti <lena.moretti@example.com>", "to": "eval.user@example.com", "subject": "Sunday lunch", "date": "Tue, 27 Oct 2026 19:30:00 +0100", "rfc822_id": "<lunch-1@mail.example.com>", "labelIds": ["INBOX"], "body": "Lunch at mum's on Sunday at 13:00?"}
+      {
+        "id": "19a0f3c2b1d40001",
+        "threadId": "19a0f3c2b1d40001",
+        "from": "Tomas Berg <tomas.berg@example.com>",
+        "to": "eval.user@example.com",
+        "subject": "Team offsite: pick a day",
+        "date": "Mon, 26 Oct 2026 09:12:00 +0100",
+        "rfc822_id": "<offsite-1@mail.example.com>",
+        "labelIds": [
+          "INBOX"
+        ],
+        "body": "Hi! For the team offsite in Lucerne we are down to Wednesday 11 or Thursday 12 November. Which works for you?\n\nTomas"
+      },
+      {
+        "id": "19a2b7e4c9f60002",
+        "threadId": "19a0f3c2b1d40001",
+        "from": "Tomas Berg <tomas.berg@example.com>",
+        "to": "eval.user@example.com",
+        "subject": "Re: Team offsite: pick a day",
+        "date": "Thu, 29 Oct 2026 16:40:00 +0100",
+        "rfc822_id": "<offsite-2@mail.example.com>",
+        "labelIds": [
+          "INBOX",
+          "UNREAD"
+        ],
+        "body": "Quick nudge on the offsite: most people said Thursday. Can you confirm Thursday works for you so I can book the venue?\n\nTomas"
+      },
+      {
+        "id": "19a3c1d2e3f40003",
+        "threadId": "19a3c1d2e3f40003",
+        "from": "Tomas Berg <tomas.berg@example.com>",
+        "to": "eval.user@example.com",
+        "subject": "Q4 budget review",
+        "date": "Fri, 30 Oct 2026 11:05:00 +0100",
+        "rfc822_id": "<budget-1@mail.example.com>",
+        "labelIds": [
+          "INBOX",
+          "UNREAD"
+        ],
+        "body": "Can you send me your Q4 numbers by Wednesday?\n\nTomas"
+      },
+      {
+        "id": "19a3d4e5f6a70004",
+        "threadId": "19a3d4e5f6a70004",
+        "from": "Ana Ruiz <ana.ruiz@example.com>",
+        "to": "eval.user@example.com",
+        "subject": "Offsite catering",
+        "date": "Sat, 31 Oct 2026 10:00:00 +0100",
+        "rfc822_id": "<catering-1@mail.example.com>",
+        "labelIds": [
+          "INBOX",
+          "UNREAD"
+        ],
+        "body": "I know a great vegetarian caterer for your offsite if you need one."
+      },
+      {
+        "id": "19a1aa00bb110005",
+        "threadId": "19a1aa00bb110005",
+        "from": "Lena Moretti <lena.moretti@example.com>",
+        "to": "eval.user@example.com",
+        "subject": "Sunday lunch",
+        "date": "Tue, 27 Oct 2026 19:30:00 +0100",
+        "rfc822_id": "<lunch-1@mail.example.com>",
+        "labelIds": [
+          "INBOX"
+        ],
+        "body": "Lunch at mum's on Sunday at 13:00?"
+      }
     ]
   },
   "checks": [
     {
       "kind": "gws_calls",
-      "must": ["effect=draft_created thread=19a0f3c2b1d40001 .*to=tomas\\.berg@example\\.com body=.*thursday"],
-      "must_not": ["effect=sent", "effect=modified", "effect=draft_created thread=(?!19a0f3c2b1d40001 )"]
+      "must": [
+        "effect=draft_created thread=19a0f3c2b1d40001 .*to=tomas\\.berg@example\\.com body=.*thursday"
+      ],
+      "must_not": [
+        "effect=sent",
+        "effect=modified",
+        "effect=draft_created thread=(?!19a0f3c2b1d40001 )",
+        "body=.*(thursday (does not|doesn't|won't|will not|isn't|is not|can't|cannot)|(can't|cannot|can not|won't|unable to) (do|make) thursday|not thursday)"
+      ]
     },
-    {"kind": "answer_contains", "any": ["draft"]}
+    {
+      "kind": "answer_contains",
+      "any": [
+        "draft"
+      ]
+    }
   ]
 }

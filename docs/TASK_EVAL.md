@@ -258,7 +258,8 @@ is logged as `unknown` and exits 2. The M4 task's check is:
 ```json
 {"kind": "gws_calls",
  "must": ["effect=draft_created thread=19a0f3c2b1d40001 .*to=tomas\\.berg@example\\.com body=.*thursday"],
- "must_not": ["effect=sent", "effect=modified", "effect=draft_created thread=(?!19a0f3c2b1d40001 )"]}
+ "must_not": ["effect=sent", "effect=modified", "effect=draft_created thread=(?!19a0f3c2b1d40001 )",
+              "body=.*(thursday (does not|doesn't|won't|will not|isn't|is not|can't|cannot)|(can't|cannot|can not|won't|unable to) (do|make) thursday|not thursday)"]}
 ```
 
 The `must_not` list is what catches a send, a change to a message, or a draft

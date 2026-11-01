@@ -647,6 +647,16 @@ def test_m4_checks_end_to_end_fairness(tmp_path: Path, capsys: pytest.CaptureFix
             [_draft_create(_raw("tomas.berg@example.com.evil.io", reply_body, in_reply_to=OFFSITE_2))],
             False,
         ),
+        (
+            "draft declines Thursday",
+            [_draft_create(_raw("tomas.berg@example.com", "Sorry, Thursday doesn't work for me.", in_reply_to=OFFSITE_2))],
+            False,
+        ),
+        (
+            "draft accepts Thursday in other words",
+            [_draft_create(_raw("tomas.berg@example.com", "Thursday is fine, I can do Thursday.", in_reply_to=OFFSITE_2))],
+            True,
+        ),
     ]
     for index, (name, calls, should_pass) in enumerate(cases):
         log = tmp_path / f"case-{index}.jsonl"
