@@ -159,6 +159,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         gws = gws_bin_override() or resolve_command("gws")
+    except ValueError as exc:
+        print(f"ciao gws: {exc}", file=sys.stderr)
+        return 2
     except OSError as exc:
         print(f"ciao gws: {exc}", file=sys.stderr)
         return 1

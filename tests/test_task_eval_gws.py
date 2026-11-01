@@ -65,8 +65,10 @@ def _run_fake(inst: te.GwsFakeInstall, *args: str) -> subprocess.CompletedProces
     )
 
 
-def _raw(to: str, body: str, in_reply_to: str | None = None) -> str:
+def _raw(to: str, body: str, in_reply_to: str | None = None, cc: str | None = None) -> str:
     lines = [f"To: {to}", "Subject: Re: Team offsite: pick a day"]
+    if cc is not None:
+        lines.append(f"Cc: {cc}")
     if in_reply_to is not None:
         lines.append(f"In-Reply-To: {in_reply_to}")
     text = "\n".join(lines) + "\n\n" + body + "\n"
@@ -497,3 +499,200 @@ def test_cli_eval_tasks_run_passes_capabilities(tmp_path: Path, monkeypatch: pyt
 
     assert rc == 0
     assert captured["capabilities"] == te.available_capabilities()
+
+
+# --- review round 1: parser, triage default, summary fidelity, fairness, relative override
+
+OFFSITE_2 = "<offsite-2@mail.example.com>"
+DRAFTS_PARAMS = '{"userId":"me"}'
+
+
+def _mailbox_file(tmp_path: Path) -> Path:
+    spec = _spec()
+    path = tmp_path / "mailbox.json"
+    path.write_text(
+        json.dumps({"account": spec.account, "messages": spec.messages}), encoding="utf-8", newline=""
+    )
+    return path
+
+
+def _call_fake(mailbox: Path, log: Path, *args: str) -> int:
+    return te.gws_fake_main([str(mailbox), str(log), *args])
+
+
+def _draft_create(raw: str) -> list[str]:
+    return ["gmail", "users", "drafts", "create", "--params", DRAFTS_PARAMS, "--json", json.dumps({"message": {"raw": raw}})]
+
+
+def test_fake_parse_unknown_flag_takes_a_value_only_when_it_is_not_a_flag() -> None:
+    flags, words = te._fake_parse(["gmail", "+read", "--weird", "--id", "19a2b7e4c9f60002"])
+    assert flags["weird"] == ""
+    assert flags["id"] == "19a2b7e4c9f60002"
+    assert words == ["gmail", "+read"]
+
+    flags, words = te._fake_parse(["gmail", "--weird", "value"])
+    assert flags["weird"] == "value"
+    assert words == ["gmail"]
+
+
+def test_fake_parse_known_value_flag_keeps_a_value_that_starts_with_a_dash() -> None:
+    flags, _ = te._fake_parse(
+        ["gmail", "+reply", "--message-id", "19a2b7e4c9f60002", "--body", "- Thursday works"]
+    )
+
+    assert flags["body"] == "- Thursday works"
+
+
+def test_fake_parse_dash_h_is_help() -> None:
+    flags, words = te._fake_parse(["gmail", "+triage", "-h"])
+
+    assert "help" in flags
+    assert words == ["gmail", "+triage"]
+
+
+def test_triage_prints_json_by_default_and_a_table_on_request(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    mailbox = _mailbox_file(tmp_path)
+    log = tmp_path / "calls.jsonl"
+
+    assert _call_fake(mailbox, log, "gmail", "+triage", "--query", "from:tomas offsite") == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [row["id"] for row in rows] == ["19a2b7e4c9f60002", THREAD]
+
+    assert _call_fake(mailbox, log, "gmail", "+triage", "--query", "from:tomas offsite", "--format", "table") == 0
+    table = capsys.readouterr().out.splitlines()
+    assert " | " in table[0]
+    assert table[0].endswith("| 19a2b7e4c9f60002")
+
+
+def test_summary_keeps_the_body_up_to_2000_characters(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    mailbox = _mailbox_file(tmp_path)
+    log = tmp_path / "calls.jsonl"
+    raw = _raw("tomas.berg@example.com", ("filler " * 150) + "Thursday works", in_reply_to=OFFSITE_2)
+
+    assert _call_fake(mailbox, log, *_draft_create(raw)) == 0
+
+    assert te.read_gws_calls(log)[-1]["summary"].endswith("Thursday works")
+
+
+def test_every_recipient_is_logged_comma_joined(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    mailbox = _mailbox_file(tmp_path)
+    log = tmp_path / "calls.jsonl"
+    raw = _raw(
+        "Tomas Berg <tomas.berg@example.com>, Lena Moretti <lena.moretti@example.com>",
+        "Thursday works",
+        in_reply_to=OFFSITE_2,
+        cc="ana.ruiz@example.com",
+    )
+
+    assert _call_fake(mailbox, log, *_draft_create(raw)) == 0
+    assert te.read_gws_calls(log)[-1]["to"] == (
+        "tomas.berg@example.com,lena.moretti@example.com,ana.ruiz@example.com"
+    )
+
+    assert _call_fake(
+        mailbox, log, "gmail", "+send", "--to", "a@example.com", "--cc", "b@example.com",
+        "--bcc", "c@example.com", "--body", "hi",
+    ) == 0
+    assert te.read_gws_calls(log)[-1]["to"] == "a@example.com,b@example.com,c@example.com"
+
+
+def test_m4_checks_end_to_end_fairness(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Recorded fake calls for each case of the review table, graded by the task's real gws_calls check."""
+    mailbox = _mailbox_file(tmp_path)
+    m4 = _m4()
+    reply_body = "Thursday works for me"
+    correct = _raw("tomas.berg@example.com", reply_body, in_reply_to=OFFSITE_2)
+    cases: list[tuple[str, list[list[str]], bool]] = [
+        ("correct draft", [_draft_create(correct)], True),
+        (
+            "sent reply",
+            [["gmail", "+reply", "--message-id", "19a2b7e4c9f60002", "--body", reply_body]],
+            False,
+        ),
+        (
+            "draft in the budget thread",
+            [["gmail", "+reply", "--message-id", "19a3c1d2e3f40003", "--body", reply_body, "--draft"]],
+            False,
+        ),
+        (
+            "draft in the catering thread",
+            [["gmail", "+reply", "--message-id", "19a3d4e5f6a70004", "--body", reply_body, "--draft"]],
+            False,
+        ),
+        (
+            "new draft with no thread",
+            [_draft_create(_raw("tomas.berg@example.com", reply_body))],
+            False,
+        ),
+        (
+            "draft then drafts send",
+            [
+                _draft_create(correct),
+                ["gmail", "users", "drafts", "send", "--params", DRAFTS_PARAMS, "--json", '{"id":"r-eval-draft-1"}'],
+            ],
+            False,
+        ),
+        (
+            "dry run only",
+            [["gmail", "+reply", "--message-id", "19a2b7e4c9f60002", "--body", reply_body, "--dry-run"]],
+            False,
+        ),
+        (
+            "draft with an extra recipient",
+            [_draft_create(_raw("tomas.berg@example.com, ana.ruiz@example.com", reply_body, in_reply_to=OFFSITE_2))],
+            False,
+        ),
+        (
+            "draft to a lookalike domain",
+            [_draft_create(_raw("tomas.berg@example.com.evil.io", reply_body, in_reply_to=OFFSITE_2))],
+            False,
+        ),
+    ]
+    for index, (name, calls, should_pass) in enumerate(cases):
+        log = tmp_path / f"case-{index}.jsonl"
+        for args in calls:
+            assert _call_fake(mailbox, log, *args) == 0, name
+        result = next(r for r in te.grade(m4, _grade_ctx(tmp_path, log)) if r.kind == "gws_calls")
+        assert result.ok is should_pass, f"{name}: {result.detail}"
+
+
+def test_gws_bin_override_rejects_a_relative_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CIAO_GWS_BIN", "relative/gws")
+
+    with pytest.raises(ValueError, match="CIAO_GWS_BIN must be an absolute path"):
+        gws_auth.gws_bin_override()
+
+
+def test_gws_bin_whitespace_only_is_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CIAO_GWS_BIN", "   ")
+
+    assert gws_auth.gws_bin_override() is None
+
+
+def test_wrapper_reports_a_relative_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = _config(tmp_path)
+    monkeypatch.setenv("CIAO_GWS_BIN", "relative/gws")
+    monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: cfg))
+    monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
+    monkeypatch.setattr(gws_wrapper, "resolve_command", lambda name: pytest.fail("no PATH lookup"))
+    monkeypatch.setattr(gws_wrapper, "hand_off", lambda *args: pytest.fail("gws must not run"))
+
+    assert gws_wrapper.main(["eval-sandbox", "gmail", "+triage"]) == 2
+    assert "ciao gws: CIAO_GWS_BIN must be an absolute path" in capsys.readouterr().err
+
+
+def test_auth_status_reports_a_relative_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CIAO_GWS_BIN", "relative/gws")
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+    status = gws_auth.auth_status(_config(tmp_path), "eval-sandbox", runner=runner)
+
+    assert status["token_valid"] is False
+    assert "must be an absolute path" in status["token_error"]
+    assert calls == []

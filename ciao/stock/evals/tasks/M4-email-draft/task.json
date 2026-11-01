@@ -21,7 +21,7 @@
   "checks": [
     {
       "kind": "gws_calls",
-      "must": ["effect=draft_created thread=19a0f3c2b1d40001 .*to=\\S*tomas\\.berg@example\\.com.* body=.*thursday"],
+      "must": ["effect=draft_created thread=19a0f3c2b1d40001 .*to=tomas\\.berg@example\\.com body=.*thursday"],
       "must_not": ["effect=sent", "effect=modified", "effect=draft_created thread=(?!19a0f3c2b1d40001 )"]
     },
     {"kind": "answer_contains", "any": ["draft"]}

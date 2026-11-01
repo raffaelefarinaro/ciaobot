@@ -104,9 +104,18 @@ GWS_BIN_ENV = "CIAO_GWS_BIN"
 
 
 def gws_bin_override() -> list[str] | None:
-    """[path] when CIAO_GWS_BIN is set (test/eval isolation); never resolves or falls back."""
+    """[path] when CIAO_GWS_BIN is set (test/eval isolation); never resolves or falls back.
+
+    Whitespace-only counts as unset. A value that is not an absolute path raises
+    ValueError, and the call sites report it instead of running anything else.
+    """
     explicit = os.environ.get(GWS_BIN_ENV, "").strip()
-    return [str(Path(explicit).expanduser())] if explicit else None
+    if not explicit:
+        return None
+    path = Path(explicit).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{GWS_BIN_ENV} must be an absolute path")
+    return [str(path)]
 
 
 def fingerprint(value: str) -> str:
@@ -847,6 +856,8 @@ def auth_status(
 
     try:
         gws = gws_bin_override() or resolve_command("gws")
+    except ValueError as exc:
+        return {"available": True, "token_valid": False, "token_error": str(exc), "has_refresh_token": False}
     except OSError as exc:
         return {"available": False, "reason": str(exc)}
     if not gws:

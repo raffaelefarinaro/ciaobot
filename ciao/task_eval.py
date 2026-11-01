@@ -34,7 +34,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from email.parser import BytesParser
-from email.utils import parseaddr, parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 from functools import partial
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
@@ -1188,12 +1188,21 @@ def read_gws_calls(log: Path) -> list[dict[str, Any]]:
     return rows
 
 
-# The fake's own code. Everything below runs inside the agent's sandbox on each
-# call, so it imports only the standard library (the imports at the top of this
-# module are stdlib too, and ciao.task_eval stays cheap to import).
+# The fake's own code. Each call runs gws_fake_main inside the agent's sandbox.
+# The launcher imports ciao.task_eval to reach it, which loads this module's
+# top-level imports (yaml and the ciao helpers above) before gws_fake_main runs.
+# gws_fake_main itself uses only the standard library and never imports ciao.cli.
 
 _FAKE_BOOL_FLAGS: frozenset[str] = frozenset(
     {"draft", "dry-run", "html", "headers", "labels", "page-all", "help", "version"}
+)
+# Flags that always take the next token, even one that starts with "-" (a body can).
+# Any other flag takes the next token only when that token is not itself a flag.
+_FAKE_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "query", "max", "format", "id", "message-id", "body", "to", "cc", "bcc",
+        "params", "json", "attach", "subject", "page-token",
+    }
 )
 _QUERY_TOKEN_RE = re.compile(r'(?:(\w+):\(([^)]*)\))|(?:(\w+):"([^"]*)")|"([^"]*)"|(\S+)')
 _FAKE_HELP = "gws 0.22.5 (ciaobot eval fake)\nusage: gws <service> <resource> <method> [flags]\n"
@@ -1201,6 +1210,7 @@ _FAKE_MODIFY_METHODS: frozenset[str] = frozenset(
     {"trash", "untrash", "delete", "modify", "batchModify", "insert", "import"}
 )
 _FAKE_LABELS: tuple[str, ...] = ("INBOX", "UNREAD", "SENT", "DRAFT")
+_FAKE_SUMMARY_BODY_CHARS = 2000
 
 
 @dataclass(frozen=True)
@@ -1241,7 +1251,7 @@ def gws_fake_main(argv: list[str]) -> int:
             "summary": (
                 f"op={' '.join(words) or '-'} effect={reply.effect} thread={reply.thread_id or '-'} "
                 f"message={reply.message_id or '-'} to={reply.to or '-'} "
-                f"body={_fake_one_line(reply.body)[:300] or '-'}"
+                f"body={_fake_one_line(reply.body)[:_FAKE_SUMMARY_BODY_CHARS] or '-'}"
             ),
         }
         with log.open("a", encoding="utf-8", newline="") as handle:
@@ -1259,23 +1269,28 @@ def _fake_one_line(text: str | None) -> str:
 
 
 def _fake_parse(args: list[str]) -> tuple[dict[str, str], list[str]]:
-    """Flags (``--x v``, ``--x=v``, boolean ``--x``, ``-a v``) and the positional words."""
+    """Flags (``--x v``, ``--x=v``, boolean ``--x``, ``-a v``, ``-h``) and the positional words."""
     flags: dict[str, str] = {}
     words: list[str] = []
     index = 0
     while index < len(args):
         token = args[index]
-        if token.startswith("--"):
+        next_token = args[index + 1] if index + 1 < len(args) else None
+        if token in ("-h", "--help"):
+            flags["help"] = "true"
+        elif token.startswith("--"):
             name, sep, value = token[2:].partition("=")
             if sep:
                 flags[name] = value
             elif name in _FAKE_BOOL_FLAGS:
                 flags[name] = "true"
-            else:
-                flags[name] = args[index + 1] if index + 1 < len(args) else ""
+            elif name in _FAKE_VALUE_FLAGS or (next_token is not None and not next_token.startswith("-")):
+                flags[name] = next_token or ""
                 index += 1
+            else:
+                flags[name] = ""
         elif token == "-a":
-            flags["attach"] = args[index + 1] if index + 1 < len(args) else ""
+            flags["attach"] = next_token or ""
             index += 1
         else:
             words.append(token)
@@ -1346,7 +1361,7 @@ def _fake_dispatch(
     if words[:2] in (["gmail", "+reply"], ["gmail", "+reply-all"], ["gmail", "+forward"]):
         return _fake_message_reply(words[1], flags, n, messages)
     if words[:2] == ["gmail", "+send"]:
-        return _fake_send(flags, n, thread=None, to=flags.get("to"))
+        return _fake_send(flags, n, thread=None, to=_fake_recipients(flags.get("to"), flags.get("cc"), flags.get("bcc")))
     if words[:2] == ["gmail", "users"]:
         return _fake_api(words[2:], flags, n, prior, account, messages)
     return _fake_error(2, 2, f"unknown command: {' '.join(words) or '(none)'}", "unknown")
@@ -1402,15 +1417,16 @@ def _fake_find(messages: list[dict[str, Any]], message_id: str | None) -> dict[s
 
 
 def _fake_triage(flags: dict[str, str], messages: list[dict[str, Any]]) -> _FakeReply:
+    """JSON by default, as the real ``gws gmail +triage``; ``--format table`` prints one line per message."""
     rows = _fake_select(messages, flags.get("query", "is:unread"))[: int(flags.get("max", "20"))]
-    if flags.get("format") == "json":
-        picked = [
-            {"id": m["id"], "threadId": m["threadId"], "from": m["from"], "subject": m["subject"], "date": m["date"]}
-            for m in rows
-        ]
-        return _FakeReply(effect="read", stdout=json.dumps(picked, indent=2) + "\n")
-    lines = "".join(f"{m['date']} | {m['from']} | {m['subject']} | {m['id']}\n" for m in rows)
-    return _FakeReply(effect="read", stdout=lines)
+    if flags.get("format") == "table":
+        lines = "".join(f"{m['date']} | {m['from']} | {m['subject']} | {m['id']}\n" for m in rows)
+        return _FakeReply(effect="read", stdout=lines)
+    picked = [
+        {"id": m["id"], "threadId": m["threadId"], "from": m["from"], "subject": m["subject"], "date": m["date"]}
+        for m in rows
+    ]
+    return _FakeReply(effect="read", stdout=json.dumps(picked, indent=2) + "\n")
 
 
 def _fake_read(flags: dict[str, str], messages: list[dict[str, Any]]) -> _FakeReply:
@@ -1437,11 +1453,18 @@ def _fake_send_effect(flags: dict[str, str]) -> str:
     return "sent"
 
 
+def _fake_recipients(*values: str | None) -> str | None:
+    """Every address in the given header or flag values, comma-joined, or None when there are none."""
+    addresses = [addr for _, addr in getaddresses([v for v in values if v]) if addr]
+    return ",".join(addresses) or None
+
+
 def _fake_message_reply(kind: str, flags: dict[str, str], n: int, messages: list[dict[str, Any]]) -> _FakeReply:
     found = _fake_find(messages, flags.get("message-id"))
     if found is None:
         return _fake_error(1, 404, f"no message {flags.get('message-id', '')!r}", "unknown")
-    to = flags.get("to", "") if kind == "+forward" else parseaddr(str(found["from"]))[1]
+    addressee = flags.get("to") if kind == "+forward" else str(found["from"])
+    to = _fake_recipients(addressee, flags.get("cc"), flags.get("bcc"))
     return _fake_send(flags, n, thread=str(found["threadId"]), to=to)
 
 
@@ -1479,13 +1502,14 @@ def _fake_draft_reply(n: int, thread: str | None, *, to: str | None, body: str |
     )
 
 
-def _fake_decode_raw(raw: str) -> tuple[str, str, str]:
-    """(To address, body, In-Reply-To) of a base64url RFC 822 message."""
+def _fake_decode_raw(raw: str) -> tuple[str | None, str, str]:
+    """(every To, Cc and Bcc address, body, In-Reply-To) of a base64url RFC 822 message."""
     padded = raw + "=" * (-len(raw) % 4)
     message = BytesParser().parsebytes(base64.urlsafe_b64decode(padded))
     payload: Any = message.get_payload(decode=True)
     body = payload.decode("utf-8", "replace") if isinstance(payload, bytes) else ""
-    return parseaddr(str(message.get("To", "")))[1], body, str(message.get("In-Reply-To", "")).strip()
+    headers = [str(value) for name in ("To", "Cc", "Bcc") for value in (message.get_all(name) or [])]
+    return _fake_recipients(*headers), body, str(message.get("In-Reply-To", "")).strip()
 
 
 def _fake_compose(payload: dict[str, Any], messages: list[dict[str, Any]]) -> tuple[str | None, str | None, str | None]:

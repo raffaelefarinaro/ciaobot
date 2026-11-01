@@ -227,8 +227,12 @@ When a run boots, the harness does the following:
   call returns, so the agent sees a connected account.
 
 The fake answers the Gmail calls the M4 task and its neighbours use, from the
-mailbox, and never contacts Google. It is a stdlib-only shell launcher, so the
+mailbox, and never contacts Google. The launcher is a POSIX shell script, so the
 capability is POSIX only. Windows skips tasks that require it.
+
+The fake and its call log live in a folder the agent can write, so the eval is
+not tamper-proof: a deliberately adversarial agent could edit the log or the
+launcher. The grading assumes an honest run.
 
 Every call appends one JSON row to `ws/secrets/gws-<profile>/eval-gws/calls.jsonl`
 before it is answered. A row has `ts`, `argv`, `op`, `effect`, `thread_id`,
@@ -240,23 +244,27 @@ single line:
 op=gmail +reply effect=draft_created thread=19a0f3c2b1d40001 message=eval-draft-msg-3 to=tomas.berg@example.com body=Thursday works for me
 ```
 
-`body` comes last, so a `.*` in a regex can reach it. The `gws_calls` check
-applies its regexes to these summaries, case-insensitively.
+`to` lists every To, Cc and Bcc address (and every `--to`, `--cc` and `--bcc`
+flag), comma-joined. `body` comes last and keeps the first 2000 characters, so a
+`.*` in a regex can reach it. The `gws_calls` check applies its regexes to these
+summaries, case-insensitively.
 
-The fake covers `auth status`, `schema`, `gmail +triage`, `+read`, `+reply`,
+`gmail +triage` prints JSON unless `--format table` is given, as the real tool
+does. The fake covers `auth status`, `schema`, `gmail +triage`, `+read`, `+reply`,
 `+reply-all`, `+forward` and `+send` (with `--draft` and `--dry-run`), and the
 `gmail users` messages, threads, drafts and labels methods. An unknown command
 is logged as `unknown` and exits 2. The M4 task's check is:
 
 ```json
 {"kind": "gws_calls",
- "must": ["effect=draft_created thread=19a0f3c2b1d40001 .*to=\\S*tomas\\.berg@example\\.com.* body=.*thursday"],
+ "must": ["effect=draft_created thread=19a0f3c2b1d40001 .*to=tomas\\.berg@example\\.com body=.*thursday"],
  "must_not": ["effect=sent", "effect=modified", "effect=draft_created thread=(?!19a0f3c2b1d40001 )"]}
 ```
 
 The `must_not` list is what catches a send, a change to a message, or a draft
 in the wrong thread, including the two distractor threads in the fixture
-mailbox.
+mailbox. Because the recipient must be exactly the sender, a draft that adds a
+Cc or a second To fails too: the task asks for a reply, not a group message.
 
 ## Fixture vault
 
