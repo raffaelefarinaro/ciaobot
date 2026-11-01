@@ -2253,6 +2253,54 @@ def _settle_note_edit(
     return ""
 
 
+def _is_skill_draft_row(config, row: dict[str, Any]) -> bool:
+    """Whether a queue row is a live skill draft's ``[review]`` bullet.
+
+    The draft's own sidecar text is the source the bullet cites, so a ``review``
+    row that cites anything else is an ordinary question and keeps the ordinary
+    path. A row whose draft no longer exists is an orphan: there is nothing to
+    settle, so it takes the ordinary path and its bullet is removed.
+    """
+    from ciao import upstream_drafts
+    from ciao.upstream_drafts import DRAFT_KIND, decision_text
+
+    target = str(row.get("target") or "").strip()
+    return (
+        row.get("kind") == DRAFT_KIND
+        and bool(target)
+        and str(row.get("source") or "") == decision_text(target)
+        and upstream_drafts.find_draft(config, target) is not None
+    )
+
+
+def _settle_skill_draft(config, row: dict[str, Any], *, reason: str = "") -> str:
+    """Reject the skill draft a ``[review]`` row belongs to; "" when it is settled.
+
+    The draft's settlement writes the decision and then removes its own bullet,
+    so a settled row must not have its line removed by the caller. A refusal
+    (unattended run, a draft that cannot be recorded) is returned as a string and
+    the row stays queued, the same contract as :func:`_settle_note_edit`.
+    """
+    from ciao import upstream_drafts
+    from ciao.memory_receipts import MemoryReceiptError, QueueLockError
+
+    try:
+        upstream_drafts.reject_draft(
+            config,
+            str(row["target"]),
+            reason or "dismissed from the memory-proposal queue",
+            via="pwa",
+        )
+    except (
+        upstream_drafts.DraftError,
+        MemoryReceiptError,
+        QueueLockError,
+        OSError,
+    ) as exc:
+        return str(exc)
+    return ""
+
+
 def _accept_note_edit_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Apply one `note_edit` proposal to the note it is about.
 

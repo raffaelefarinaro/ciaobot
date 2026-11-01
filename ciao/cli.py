@@ -5093,7 +5093,8 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     into a ``ciao:memory`` / ``ciao:profile`` region is an explicit ``Edit`` of
     the workspace guide first, then this dismiss removes the resolved item
     so the queue stops re-asking. TEXT matches one proposal by a unique
-    substring.
+    substring. A skill-draft row is refused (exit 2): it is settled with
+    ``skill-draft-approve`` / ``skill-draft-reject``, never dismissed here.
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
@@ -5213,6 +5214,17 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        from ciao.upstream_drafts import DRAFT_KIND, decision_text
+
+        if parsed.kind == DRAFT_KIND and parsed.target and parsed.source == decision_text(parsed.target):
+            print(
+                f"this row is skill draft {parsed.target}, not a memory proposal: the queue "
+                f"cannot settle it. Use `ciao skill-draft-approve {parsed.target}` to file or "
+                f"link the issue, or `ciao skill-draft-reject {parsed.target} --reason R` to "
+                "turn it down. Do not re-file it with `ciao skill-draft-add`.",
+                file=sys.stderr,
+            )
+            return 2
         if args.handover:
             refusal = _handover_gate(workspace, name, path, parsed, "dismiss")
             if refusal:
@@ -6737,6 +6749,11 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
     evidence goes in ``private_evidence`` and stays in this workspace; ``body`` is
     refused if it carries a transcript excerpt, a path, a name or a credential,
     because a public issue is public.
+
+    ``same_as`` (an existing draft id of the same skill, to fold this sighting
+    into) and ``distinct_from`` (every existing draft id of that skill when this is
+    a different defect) are optional. A filing for a skill that already has drafts
+    is refused until one of them is given.
     """
     refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
@@ -6766,6 +6783,8 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
             version=str(payload.get("version") or ""),
             private_evidence=str(payload.get("private_evidence") or ""),
             origins=origins,
+            same_as=str(payload.get("same_as") or "").strip(),
+            distinct_from=[str(x).strip() for x in payload.get("distinct_from") or []],
         )
     except DraftError as exc:
         print(f"cannot file the draft: {exc}", file=sys.stderr)
@@ -6867,6 +6886,13 @@ def _read_skill_draft_input(path: str) -> tuple[dict[str, Any] | None, str]:
     for field in ("body", "repository", "version", "private_evidence", "rationale"):
         if field in payload and not isinstance(payload[field], str):
             return None, f'{path} "{field}" must be a string'
+    if "same_as" in payload and not isinstance(payload["same_as"], str):
+        return None, f'{path} "same_as" must be a string'
+    if "distinct_from" in payload and not (
+        isinstance(payload["distinct_from"], list)
+        and all(isinstance(item, str) for item in payload["distinct_from"])
+    ):
+        return None, f'{path} "distinct_from" must be a list of draft ids'
     return payload, ""
 
 
