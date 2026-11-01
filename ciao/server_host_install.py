@@ -119,7 +119,13 @@ from typing import Any
 
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive
-from ciao.os_support.private import make_private, make_private_dir, mkstemp_private
+from ciao.os_support.private import (
+    descriptor_acl_grants_another_account,
+    is_private_descriptor_strict,
+    make_private,
+    make_private_dir,
+    mkstemp_private,
+)
 from ciao.release_manifest import (
     RELEASE_PUBLIC_KEY,
     SERVER_HOST_FILENAME,
@@ -564,18 +570,65 @@ def _record_bytes(snapshot: HostOwnership) -> bytes:
     )
 
 
-def _write_ownership_record(snapshot: HostOwnership, path: Path) -> None:
+def _write_ownership_record(
+    snapshot: HostOwnership,
+    path: Path,
+    *,
+    return_identity: bool = False,
+    preserve_parent_mode: bool = False,
+) -> tuple[int, int] | None:
     """Write the record owner-only, through a temp file and an atomic replace.
 
     The parent is created ``0700`` and the file ``0600``, matching the reader's
     macOS owner/mode contract. The JSON is written before the rename and fsynced,
     so a reader never observes a half-written record and a crash cannot leave a
     truncated one in its place.
+
+    With ``return_identity=True`` this also returns the device/inode of the file
+    that was written. ``replace_file`` moves that same inode onto the target, so a
+    native fresh install's cleanup can bind itself to exactly this record rather
+    than to whatever the name holds then. Legacy callers omit the flag and get
+    ``None``, preserving their existing path.
+
+    ``preserve_parent_mode`` is the native fresh mode: when the record parent
+    already exists, the ancestry preflight has proved it private, so this does not
+    chmod it again. A missing parent is created and made private.
     """
     target = Path(path)
+    parent_existed = False
+    if preserve_parent_mode:
+        try:
+            info = os.lstat(target.parent)
+        except FileNotFoundError:
+            parent_existed = False
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the ownership record directory could not be examined: {exc}",
+                code=INSTALL_FAILED,
+            ) from exc
+        else:
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise ServerHostInstallError(
+                    f"the ownership record parent is not a real directory: "
+                    f"{target.parent}",
+                    code=INSTALL_FAILED,
+                )
+            if hasattr(os, "getuid") and info.st_uid != _getuid():
+                raise ServerHostInstallError(
+                    f"the ownership record parent is not owned by this user: "
+                    f"{target.parent}",
+                    code=INSTALL_FAILED,
+                )
+            if stat.S_IMODE(info.st_mode) & 0o077:
+                raise ServerHostInstallError(
+                    f"the ownership record parent is not private: {target.parent}",
+                    code=INSTALL_FAILED,
+                )
+            parent_existed = True
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        make_private_dir(target.parent)
+        if not (preserve_parent_mode and parent_existed):
+            make_private_dir(target.parent)
         descriptor, tmp_name = mkstemp_private(
             dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
         )
@@ -585,11 +638,15 @@ def _write_ownership_record(snapshot: HostOwnership, path: Path) -> None:
             code=INSTALL_FAILED,
         ) from exc
     tmp = Path(tmp_name)
+    identity: tuple[int, int] | None = None
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
             handle.write(_record_bytes(snapshot).decode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
+            if return_identity:
+                opened = os.fstat(handle.fileno())
+                identity = (opened.st_dev, opened.st_ino)
         make_private(tmp)
         replace_file(tmp, target)
         _fsync_dir(target.parent)
@@ -599,6 +656,7 @@ def _write_ownership_record(snapshot: HostOwnership, path: Path) -> None:
         ) from exc
     finally:
         tmp.unlink(missing_ok=True)
+    return identity
 
 
 @dataclasses.dataclass(frozen=True)
@@ -941,8 +999,22 @@ def upgrade_lock_path() -> Path:
     return _upgrade_state_dir() / UPGRADE_LOCK_NAME
 
 
-def _ensure_state_dir(directory: Path) -> None:
-    """Create and tighten the fixed state directory, refusing anything else."""
+def _ensure_state_dir(
+    directory: Path,
+    *,
+    preserve_existing: bool = False,
+    trusted_root: Path | None = None,
+) -> None:
+    """Create and tighten the fixed state directory, refusing anything else.
+
+    ``preserve_existing`` is the native fresh mode: missing controlled
+    components are created one at a time, descriptor-relative and privately,
+    while an already-present directory is validated and never chmod'ed.
+    """
+    if preserve_existing:
+        root = Path.home() if trusted_root is None else Path(trusted_root)
+        _prepare_fresh_directory_chain(directory, root, private_final=True)
+        return
     try:
         directory.mkdir(parents=True, exist_ok=True)
         make_private_dir(directory)
@@ -965,7 +1037,9 @@ def _ensure_state_dir(directory: Path) -> None:
 
 
 @contextlib.contextmanager
-def _upgrade_lock() -> Iterator[None]:
+def _upgrade_lock(
+    *, preserve_existing: bool = False, trusted_root: Path | None = None
+) -> Iterator[None]:
     """Hold the short-lived upgrade lock, refusing rather than waiting.
 
     The lock serializes the check-and-prepare step of every mutating command. It
@@ -974,7 +1048,11 @@ def _upgrade_lock() -> Iterator[None]:
     journal's owner pid, which outlives this descriptor.
     """
     journal = upgrade_journal_path()
-    _ensure_state_dir(journal.parent)
+    _ensure_state_dir(
+        journal.parent,
+        preserve_existing=preserve_existing,
+        trusted_root=trusted_root,
+    )
     lock = upgrade_lock_path()
     flags = (
         os.O_RDWR
@@ -983,7 +1061,11 @@ def _upgrade_lock() -> Iterator[None]:
         | getattr(os, "O_BINARY", 0)
     )
     try:
-        descriptor = open_fd(lock, flags, 0o600, follow_symlinks=False)
+        descriptor = (
+            _open_fresh_upgrade_lock(lock)
+            if preserve_existing
+            else open_fd(lock, flags, 0o600, follow_symlinks=False)
+        )
     except OSError as exc:
         raise ServerHostInstallError(
             f"the host upgrade lock could not be opened: {exc}",
@@ -991,8 +1073,11 @@ def _upgrade_lock() -> Iterator[None]:
         ) from exc
     try:
         try:
-            make_private(lock)
+            if not preserve_existing:
+                make_private(lock)
             lock_exclusive(descriptor, blocking=False)
+            if preserve_existing:
+                _verify_fresh_lock_name(lock, descriptor)
         except BlockingIOError as exc:
             raise ServerHostInstallError(
                 "another Ciaobot installer is changing the server host on this Mac",
@@ -1006,6 +1091,227 @@ def _upgrade_lock() -> Iterator[None]:
         yield
     finally:
         os.close(descriptor)
+
+
+def _verify_fresh_lock_name(lock: Path, descriptor: int) -> None:
+    """Prove the acquired lock descriptor is still the single file at ``lock``.
+
+    The name can be replaced between the pre-open check and ``flock``. This
+    compares the held descriptor with the public name after the lock is held, so
+    a replaced or doubly linked name is a refusal rather than a lock on an orphan
+    inode. A same-UID writer can still replace it after this check; that is the
+    documented check-then-act limit.
+    """
+    try:
+        opened = os.fstat(descriptor)
+        named = os.lstat(lock)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the host upgrade lock could not be re-checked: {exc}",
+            code=TRANSACTION_FAILED,
+        ) from exc
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or opened.st_nlink != 1
+        or named.st_nlink != 1
+        or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        raise ServerHostInstallError(
+            "the host upgrade lock name changed while it was being acquired",
+            code=TRANSACTION_FAILED,
+        )
+
+
+def _open_fresh_upgrade_lock(lock: Path) -> int:
+    """Open the existing lock read-write only after proving it is safe, or create it once.
+
+    Fresh native mode never chmods an existing lock file. An existing name must
+    already be a regular, single-link, owner-only private file with no extended
+    ACL grant to another account. The descriptor is compared with the ``lstat``
+    result, so a name swapped between those steps is refused. A missing name is
+    created with ``O_EXCL`` and ``O_NOFOLLOW`` and made exactly ``0600`` with
+    ``fchmod`` on that descriptor, so no path is followed to set its mode. Any
+    uncertainty is a refusal; a file this call created and cannot verify is
+    removed only when the public name still names the same single-link inode.
+    """
+    try:
+        checked = os.lstat(lock)
+    except FileNotFoundError:
+        return _create_fresh_upgrade_lock(lock)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the host upgrade lock cannot be examined: {exc}",
+            code=TRANSACTION_FAILED,
+        ) from exc
+    if stat.S_ISLNK(checked.st_mode) or not stat.S_ISREG(checked.st_mode):
+        raise ServerHostInstallError(
+            "the existing host upgrade lock is not a regular file",
+            code=TRANSACTION_FAILED,
+        )
+    if checked.st_nlink != 1:
+        raise ServerHostInstallError(
+            "the existing host upgrade lock has another hard link",
+            code=TRANSACTION_FAILED,
+        )
+    open_flags = (
+        os.O_RDWR
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    try:
+        descriptor = open_fd(lock, open_flags, follow_symlinks=False)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the existing host upgrade lock could not be opened: {exc}",
+            code=TRANSACTION_FAILED,
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+            raise ServerHostInstallError(
+                "the host upgrade lock changed while it was being opened",
+                code=TRANSACTION_FAILED,
+            )
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise ServerHostInstallError(
+                "the existing host upgrade lock is not a single regular file",
+                code=TRANSACTION_FAILED,
+            )
+        try:
+            private = is_private_descriptor_strict(descriptor)
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the host upgrade lock privacy could not be checked: {exc}",
+                code=TRANSACTION_FAILED,
+            ) from exc
+        if not private:
+            raise ServerHostInstallError(
+                "the existing host upgrade lock is not owned, private and ACL-clean",
+                code=TRANSACTION_FAILED,
+            )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _create_fresh_upgrade_lock(lock: Path) -> int:
+    """Create the lock exactly once, privately, on a descriptor-bound path."""
+    create_flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    try:
+        descriptor = open_fd(
+            lock, create_flags, 0o600, follow_symlinks=False
+        )
+    except FileExistsError as exc:
+        raise ServerHostInstallError(
+            "the host upgrade lock appeared while this run was creating it",
+            code=TRANSACTION_FAILED,
+        ) from exc
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the host upgrade lock could not be created: {exc}",
+            code=TRANSACTION_FAILED,
+        ) from exc
+    try:
+        fchmod: Any = getattr(os, "fchmod", None)
+        if fchmod is None:
+            raise ServerHostInstallError(
+                "the host upgrade lock mode cannot be set on its descriptor",
+                code=TRANSACTION_FAILED,
+            )
+        try:
+            opened = os.fstat(descriptor)
+            named = os.lstat(lock)
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the new host upgrade lock could not be verified: {exc}",
+                code=TRANSACTION_FAILED,
+            ) from exc
+        # Prove the descriptor still names the single file this O_EXCL created
+        # before changing any mode. A hard link or replacement at this point is
+        # ambiguous, so no chmod is attempted on it.
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+            or stat.S_ISLNK(named.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or named.st_nlink != 1
+        ):
+            raise ServerHostInstallError(
+                "the new host upgrade lock is not the single file this run created",
+                code=TRANSACTION_FAILED,
+            )
+        try:
+            fchmod(descriptor, 0o600)
+            opened = os.fstat(descriptor)
+            named = os.lstat(lock)
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the new host upgrade lock could not be verified: {exc}",
+                code=TRANSACTION_FAILED,
+            ) from exc
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+            or stat.S_ISLNK(named.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or named.st_nlink != 1
+        ):
+            raise ServerHostInstallError(
+                "the new host upgrade lock is not the single file this run created",
+                code=TRANSACTION_FAILED,
+            )
+        try:
+            private = is_private_descriptor_strict(descriptor)
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the new host upgrade lock privacy could not be checked: {exc}",
+                code=TRANSACTION_FAILED,
+            ) from exc
+        if not private:
+            raise ServerHostInstallError(
+                "the new host upgrade lock is not owned, private and ACL-clean",
+                code=TRANSACTION_FAILED,
+            )
+        return descriptor
+    except BaseException:
+        _remove_created_lock_best_effort(lock, descriptor)
+        os.close(descriptor)
+        raise
+
+
+def _remove_created_lock_best_effort(lock: Path, descriptor: int) -> None:
+    """Remove a lock this call already proved it created, when the name still matches.
+
+    This is cleanup of our own failed creation, not of pre-existing state. The
+    device/inode, regular-file and single-link check narrows it to that object;
+    a same-UID replacement between the check and ``unlink`` remains the documented
+    check-then-act race and is not claimed to be closed.
+    """
+    try:
+        opened = os.fstat(descriptor)
+        named = os.lstat(lock)
+    except OSError:
+        return
+    if (
+        (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+        or not stat.S_ISREG(named.st_mode)
+        or named.st_nlink != 1
+    ):
+        return
+    try:
+        os.unlink(lock)
+    except OSError:
+        pass
 
 
 def _read_private_bytes(path: Path, *, what: str) -> bytes:
@@ -2235,6 +2541,8 @@ def install_server_host(
     runner: Runner = subprocess.run,
     defer_commit: bool = False,
     owner_pid: int | None = None,
+    require_absent: bool = False,
+    trusted_root: Path | None = None,
 ) -> HostOwnership:
     """Verify, inspect and install the host archive, then record and re-verify it.
 
@@ -2273,8 +2581,38 @@ def install_server_host(
     fails, the rollback stops there: the staging copy and the record are kept and
     the error names where the host is. No service, launchd, plist or permission
     surface is touched.
+
+    ``require_absent=True`` is the native fresh-install mode. Under the same
+    upgrade lock it refuses *any* pre-existing host bundle, ownership record or
+    upgrade journal - including a terminal journal and an orphan record with no
+    bundle - before creating the host bundle or its record. It never returns a
+    current host, never replaces a superseded host, and never settles or deletes a
+    journal. The legacy no-op/replacement behavior is unchanged with the default
+    ``False``. Fresh mode also requires canonical absolute paths with no ``.``,
+    ``..``, trailing slash or symlinked ancestor; the bundle must be named
+    :data:`APP_NAME`, the record must not live inside the bundle, and each
+    existing ancestor from ``trusted_root`` (home by default) must be a real
+    directory owned by this user and not group/other writable. The record's
+    parent and the journal's parent must already be private when they exist;
+    this path never chmods a pre-existing directory in fresh mode. A missing tail
+    is created privately by the install. The legacy default does not apply this
+    path policy.
+    As with the rest of this module, a same-UID writer that ignores the lock can
+    still interleave between a check and the write it guards; these are refusal
+    points, not proof. In that window a fresh attempt may leave the ownership
+    record it wrote when a concurrent bundle wins the rename (the existing
+    ``keep_record`` path); the run refuses and never reports that host as its
+    own, and it preserves the concurrent bundle and record.
     """
     _require_macos()
+    raw_bundle = None if bundle_path is None else os.fspath(bundle_path)
+    raw_record = None if ownership_path is None else os.fspath(ownership_path)
+    if require_absent and (defer_commit or owner_pid is not None):
+        raise ServerHostInstallError(
+            "a fresh host install cannot also defer a commit or name an "
+            "installer process id",
+            code=INSTALL_FAILED,
+        )
     path = Path(archive_path)
     verify_host_archive(path, entry)
     policy = _entry_policy(entry)
@@ -2291,6 +2629,28 @@ def install_server_host(
         raise ServerHostInstallError(
             f"the host bundle must be named {APP_NAME!r}: {bundle}", code=INSTALL_FAILED
         )
+    fresh_root: Path | None = None
+    if require_absent:
+        fresh_root = Path.home() if trusted_root is None else Path(trusted_root)
+        _require_fresh_install_paths(
+            bundle,
+            record_path,
+            fresh_root,
+            raw_bundle=raw_bundle if raw_bundle is not None else os.fspath(bundle),
+            raw_record=raw_record if raw_record is not None else os.fspath(record_path),
+        )
+        # Read-only surface check before the upgrade lock creates any directory.
+        # The same checks repeat under the lock after path preparation. An
+        # outstanding journal is the first evidence to report, even when a host
+        # and record are also present.
+        _refuse_present_journal()
+        _refuse_present_record(record_path)
+        if os.path.lexists(bundle):
+            raise ServerHostInstallError(
+                f"a host bundle already exists at {bundle}; a fresh install "
+                f"never adopts or replaces it",
+                code=HOST_EXISTS,
+            )
     if defer_commit:
         if owner_pid is None:
             raise ServerHostInstallError(
@@ -2310,9 +2670,26 @@ def install_server_host(
             code=INSTALL_FAILED,
         )
 
-    with _upgrade_lock():
-        _refuse_unfinished_journal(bundle, record_path)
+    with _upgrade_lock(
+        preserve_existing=require_absent, trusted_root=fresh_root
+    ):
+        if require_absent:
+            # Fresh native creation is stricter than the legacy installer: every
+            # known surface must be absent, and a terminal journal is evidence to
+            # refuse rather than material this run may settle.
+            _refuse_present_journal()
+            _refuse_present_record(record_path)
+        else:
+            _refuse_unfinished_journal(bundle, record_path)
         kind, existing = _classify_host(bundle, record_path, runner, policy)
+        if require_absent and kind != _ABSENT:
+            # A same-policy host the legacy path would return as a no-op is a
+            # refusal here: a fresh run never adopts a host it did not create.
+            raise ServerHostInstallError(
+                f"a host bundle already exists at {bundle}; a fresh install "
+                f"never adopts or replaces it",
+                code=HOST_EXISTS,
+            )
         if kind == _CURRENT:
             assert existing is not None
             return existing
@@ -2330,7 +2707,515 @@ def install_server_host(
             return _install_deferred(
                 path, entry, policy, bundle, record_path, existing, runner, owner_pid
             )
-        return _install_now(path, policy, bundle, record_path, existing, runner)
+        return _install_now(
+            path,
+            policy,
+            bundle,
+            record_path,
+            existing,
+            runner,
+            require_absent=require_absent,
+            trusted_root=fresh_root,
+        )
+
+
+def _refuse_present_journal() -> None:
+    """Refuse any journal evidence, including a terminal one, without touching it.
+
+    The legacy check may finish a terminal journal by deleting its before-images.
+    A fresh native install must not: an outstanding journal is evidence that
+    another host operation ran or is running, so this reads it and refuses. An
+    unsafe, unreadable or malformed journal is a refusal from the strict reader,
+    never an absent answer.
+    """
+    journal = _read_upgrade_journal()
+    if journal is None:
+        return
+    raise ServerHostInstallError(
+        f"a Ciaobot Server host upgrade journal is present at phase "
+        f"{journal.phase}; a fresh install never settles, deletes or reuses it",
+        code=TRANSACTION_CONFLICT,
+    )
+
+
+def _refuse_present_record(record_path: Path) -> None:
+    """Refuse any ownership record, without following a link or reading it.
+
+    A record with no bundle is exactly the partial state a fresh install must
+    not silently replace. This is a name check only: a symlink, directory, special
+    file or regular file at the record path is present, and presence is enough to
+    refuse. An inaccessible path is also a refusal, never an absent answer.
+    """
+    try:
+        info = os.lstat(record_path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the host ownership record at {record_path} cannot be examined: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise ServerHostInstallError(
+            f"an ownership record at {record_path} is a symlink; a fresh install "
+            f"never follows or replaces it",
+            code=HOST_EXISTS,
+        )
+    raise ServerHostInstallError(
+        f"an ownership record already exists at {record_path}; a fresh install "
+        f"never reuses or replaces it",
+        code=HOST_EXISTS,
+    )
+
+
+def _require_canonical_install_path(
+    path: Path, *, raw: str, what: str
+) -> None:
+    """Require a canonical absolute name, before any mutating step.
+
+    ``raw`` is the caller's spelling before :class:`~pathlib.Path` normalized it,
+    so a ``./`` or ``//`` component is still visible here. ``..`` is preserved by
+    ``Path`` and is caught by ``normpath``; a symlinked ancestor is caught by
+    ``realpath``. The final path may not exist yet.
+    """
+    if not isinstance(raw, str) or not raw:
+        raise ServerHostInstallError(
+            f"the {what} path is not a canonical absolute path", code=INSTALL_FAILED
+        )
+    try:
+        resolved = os.path.realpath(raw)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the {what} path cannot be resolved: {exc}", code=INSTALL_FAILED
+        ) from exc
+    if (
+        not os.path.isabs(raw)
+        or os.path.normpath(raw) != raw
+        or resolved != raw
+        or os.fspath(path) != raw
+    ):
+        raise ServerHostInstallError(
+            f"the {what} path is not canonical, absolute and symlink-free: {raw}",
+            code=INSTALL_FAILED,
+        )
+
+
+def _validate_dir_descriptor(
+    descriptor: int,
+    *,
+    what: str,
+    private_final: bool,
+    expected: tuple[int, int] | None = None,
+) -> None:
+    """Validate one opened directory without changing it.
+
+    The descriptor must be a real directory, owned by this user, not
+    group/other-writable, and its extended ACL must not grant another principal.
+    With ``private_final`` it must be exactly owner-only private as well. An ACL
+    API that cannot answer is a refusal, never a pass.
+    """
+    try:
+        opened = os.fstat(descriptor)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the {what} could not be inspected: {exc}", code=INSTALL_FAILED
+        ) from exc
+    if not stat.S_ISDIR(opened.st_mode):
+        raise ServerHostInstallError(
+            f"the {what} is not a directory", code=INSTALL_FAILED
+        )
+    if expected is not None and (opened.st_dev, opened.st_ino) != expected:
+        raise ServerHostInstallError(
+            f"the {what} changed while it was being checked", code=INSTALL_FAILED
+        )
+    if hasattr(os, "getuid") and opened.st_uid != _getuid():
+        raise ServerHostInstallError(
+            f"the {what} is not owned by this user", code=INSTALL_FAILED
+        )
+    mode = stat.S_IMODE(opened.st_mode)
+    if mode & 0o022:
+        raise ServerHostInstallError(
+            f"the {what} is group/other writable", code=INSTALL_FAILED
+        )
+    try:
+        acl_grant = descriptor_acl_grants_another_account(descriptor)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the {what} extended ACL could not be inspected: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    if acl_grant:
+        raise ServerHostInstallError(
+            f"the {what} grants an extended ACL to another account",
+            code=INSTALL_FAILED,
+        )
+    if private_final:
+        try:
+            private = is_private_descriptor_strict(descriptor)
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the {what} privacy could not be inspected: {exc}",
+                code=INSTALL_FAILED,
+            ) from exc
+        if not private:
+            raise ServerHostInstallError(
+                f"the {what} is not private", code=INSTALL_FAILED
+            )
+
+
+def _check_existing_ancestor(
+    path: Path, *, what: str, private_final: bool
+) -> bool:
+    """Check one existing directory in a fresh path's ancestry.
+
+    Returns ``False`` only when the component is missing (a tail the install may
+    create). A symlink, non-directory, foreign owner, group/other-writable
+    component, or an unreadable path is a refusal. When ``private_final`` is set
+    and this is the final parent, group/other access is refused as well. Nothing
+    is chmod'ed, created or repaired.
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the {what} at {path} cannot be examined: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise ServerHostInstallError(
+            f"the {what} at {path} is a symlink; a fresh install never follows it",
+            code=INSTALL_FAILED,
+        )
+    if not stat.S_ISDIR(info.st_mode):
+        raise ServerHostInstallError(
+            f"the {what} at {path} is not a directory", code=INSTALL_FAILED
+        )
+    open_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    try:
+        descriptor = open_fd(path, open_flags, follow_symlinks=False)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the {what} at {path} could not be opened: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    try:
+        _validate_dir_descriptor(
+            descriptor,
+            what=f"{what} at {path}",
+            private_final=private_final,
+            expected=(info.st_dev, info.st_ino),
+        )
+        return True
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _require_safe_ancestry(
+    parent: Path, root: Path, *, what: str, private: bool
+) -> None:
+    """Validate every existing component from ``root`` down to ``parent``.
+
+    The root is required to exist. A missing tail is allowed (the install creates
+    it privately). Existing components must be real directories, owned by this
+    user, not group/other writable; the final record/journal parent must also be
+    private. No component is chmod'ed or repaired.
+    """
+    try:
+        relative = parent.relative_to(root)
+    except ValueError as exc:
+        raise ServerHostInstallError(
+            f"the {what} is outside the trusted root {root}", code=INSTALL_FAILED
+        ) from exc
+    if not _check_existing_ancestor(
+        root, what="trusted root", private_final=(private and root == parent)
+    ):
+        raise ServerHostInstallError(
+            f"the trusted root does not exist: {root}", code=INSTALL_FAILED
+        )
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if not _check_existing_ancestor(
+            current, what=what, private_final=(private and current == parent)
+        ):
+            return
+
+
+def _prepare_fresh_directory_chain(
+    target: Path, root: Path, *, private_final: bool
+) -> None:
+    """Create only missing controlled directories, privately and descriptor-relative.
+
+    Existing components are opened with no-follow directory descriptors and
+    validated in place; they are never chmod'ed. Missing components are created
+    one at a time relative to the held parent descriptor, opened the same way,
+    given exactly ``0700`` with ``fchmod`` on that descriptor, and re-validated
+    for ownership and extended ACL. No process-global umask is touched.
+
+    A umask that strips the owner bits can make a just-created directory
+    unopenable. That is a fail-closed refusal with the created name left as
+    evidence; this helper never falls back to a path-based chmod. A symlink,
+    foreign owner, group/other-writable component, ACL grant, missing ACL API,
+    or a name that appears after the missing check is refused. The final
+    ``private_final`` component must be exactly private when it already exists.
+    """
+    target = Path(target)
+    root = Path(root)
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise ServerHostInstallError(
+            f"the fresh directory {target} is outside the trusted root {root}",
+            code=INSTALL_FAILED,
+        ) from exc
+    _require_canonical_install_path(root, raw=os.fspath(root), what="trusted root")
+    open_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    try:
+        current_fd = open_fd(root, open_flags, follow_symlinks=False)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the trusted root {root} could not be opened: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    current_path = root
+    try:
+        _validate_dir_descriptor(
+            current_fd,
+            what=f"trusted root {root}",
+            private_final=private_final and target == root,
+        )
+        for part in relative.parts:
+            current_path = current_path / part
+            is_final = current_path == target
+            try:
+                child_fd = os.open(part, open_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                child_fd = _create_fresh_directory_component(
+                    current_fd, part, current_path
+                )
+            except OSError as exc:
+                raise ServerHostInstallError(
+                    f"the directory {current_path} could not be opened safely: {exc}",
+                    code=INSTALL_FAILED,
+                ) from exc
+            else:
+                try:
+                    _validate_dir_descriptor(
+                        child_fd,
+                        what=f"directory {current_path}",
+                        private_final=private_final and is_final,
+                    )
+                except BaseException:
+                    os.close(child_fd)
+                    raise
+            try:
+                os.close(current_fd)
+            except OSError:
+                pass
+            current_fd = child_fd
+    finally:
+        try:
+            os.close(current_fd)
+        except OSError:
+            pass
+
+
+def _create_fresh_directory_component(
+    parent_fd: int, part: str, path: Path
+) -> int:
+    """Create and prove one missing directory relative to a held parent descriptor."""
+    open_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    try:
+        os.mkdir(part, 0o700, dir_fd=parent_fd)
+    except FileExistsError as exc:
+        raise ServerHostInstallError(
+            f"the directory {path} appeared while this fresh install was creating it",
+            code=INSTALL_FAILED,
+        ) from exc
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the directory {path} could not be created: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    try:
+        descriptor = os.open(part, open_flags, dir_fd=parent_fd)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the newly created directory {path} could not be opened safely "
+            f"({exc}); it is left as evidence",
+            code=INSTALL_FAILED,
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ServerHostInstallError(
+                f"the newly created directory {path} is not a directory; it is "
+                f"left as evidence",
+                code=INSTALL_FAILED,
+            )
+        fchmod: Any = getattr(os, "fchmod", None)
+        if fchmod is None:
+            raise ServerHostInstallError(
+                f"the newly created directory {path} cannot have its mode set "
+                f"on its descriptor; it is left as evidence",
+                code=INSTALL_FAILED,
+            )
+        try:
+            fchmod(descriptor, 0o700)
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the newly created directory {path} could not be made private "
+                f"({exc}); it is left as evidence",
+                code=INSTALL_FAILED,
+            ) from exc
+        _validate_dir_descriptor(
+            descriptor,
+            what=f"newly created directory {path}",
+            private_final=True,
+            expected=(opened.st_dev, opened.st_ino),
+        )
+        try:
+            named = os.stat(part, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise ServerHostInstallError(
+                f"the newly created directory {path} could not be re-checked "
+                f"({exc}); it is left as evidence",
+                code=INSTALL_FAILED,
+            ) from exc
+        if (
+            not stat.S_ISDIR(named.st_mode)
+            or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise ServerHostInstallError(
+                f"the newly created directory {path} changed while it was being "
+                f"verified; it is left as evidence",
+                code=INSTALL_FAILED,
+            )
+        return descriptor
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _require_fresh_install_paths(
+    bundle: Path,
+    record_path: Path,
+    root: Path,
+    *,
+    raw_bundle: str,
+    raw_record: str,
+) -> None:
+    """The full pre-mutation path policy for a fresh native host install."""
+    if os.path.islink(bundle):
+        raise ServerHostInstallError(
+            f"the host bundle at {bundle} is a symlink; a fresh install never "
+            f"follows it",
+            code=TARGET_UNSAFE,
+        )
+    if os.path.islink(record_path):
+        raise ServerHostInstallError(
+            f"the ownership record at {record_path} is a symlink; a fresh install "
+            f"never follows or replaces it",
+            code=HOST_EXISTS,
+        )
+    _require_canonical_install_path(bundle, raw=raw_bundle, what="host bundle")
+    _require_canonical_install_path(
+        record_path, raw=raw_record, what="ownership record"
+    )
+    try:
+        real_record = Path(os.path.realpath(record_path))
+        real_bundle = Path(os.path.realpath(bundle))
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the host paths cannot be resolved: {exc}", code=INSTALL_FAILED
+        ) from exc
+    if real_record.is_relative_to(real_bundle):
+        raise ServerHostInstallError(
+            "the ownership record must live outside the host bundle it describes",
+            code=INSTALL_FAILED,
+        )
+    _require_canonical_install_path(
+        root, raw=os.fspath(root), what="trusted root"
+    )
+    _require_safe_ancestry(
+        bundle.parent, root, what="host bundle parent", private=False
+    )
+    _require_safe_ancestry(
+        record_path.parent, root, what="ownership record parent", private=True
+    )
+    journal_parent = upgrade_journal_path().parent
+    if journal_parent != record_path.parent:
+        _require_safe_ancestry(
+            journal_parent,
+            root,
+            what="host upgrade state directory",
+            private=True,
+        )
+
+
+def _remove_own_record(
+    record_path: Path,
+    snapshot: HostOwnership,
+    identity: tuple[int, int] | None,
+) -> bool:
+    """Remove the record only when it is still the exact file this call wrote.
+
+    ``identity`` is the device/inode captured immediately after this run's write;
+    the bytes are the exact serialization of the same snapshot. A missing file is
+    already clean. A substituted inode, changed bytes, a link, an extra hard link
+    or an unreadable path is left in place and reports ``False`` - a concurrent
+    writer may own it, and a fresh cleanup must not delete pre-existing state.
+    The check-then-unlink gap remains a same-UID race; this narrows the deletion
+    to the object that was proved ours at cleanup time.
+    """
+    expected = _record_bytes(snapshot)
+    try:
+        os.lstat(record_path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if identity is None:
+        return False
+    try:
+        data, observed = _read_private_bytes_and_identity(
+            record_path, what="the freshly written ownership record"
+        )
+    except (OSError, ServerHostInstallError):
+        return False
+    if observed != identity or data != expected:
+        return False
+    try:
+        os.unlink(record_path)
+    except OSError:
+        return False
+    return True
 
 
 def _refuse_unfinished_journal(bundle: Path, record_path: Path) -> None:
@@ -2625,12 +3510,63 @@ def _install_now(
     record_path: Path,
     superseded_snapshot: HostOwnership | None,
     runner: Runner,
+    *,
+    require_absent: bool = False,
+    trusted_root: Path | None = None,
 ) -> HostOwnership:
     """The established single-step install: a fresh host or a superseded one."""
 
-    parent = bundle.parent
+    if require_absent:
+        assert trusted_root is not None
+        _require_fresh_install_paths(
+            bundle,
+            record_path,
+            trusted_root,
+            raw_bundle=os.fspath(bundle),
+            raw_record=os.fspath(record_path),
+        )
+        if os.path.lexists(bundle):
+            raise ServerHostInstallError(
+                f"a host bundle already exists at {bundle}; a fresh install "
+                f"never adopts or replaces it",
+                code=HOST_EXISTS,
+            )
+        _refuse_present_record(record_path)
+        _refuse_present_journal()
+        parent = bundle.parent
+        # Create only missing controlled directories, descriptor-relative and
+        # privately. Existing safe parents are validated and never chmod'ed.
+        _prepare_fresh_directory_chain(
+            parent, trusted_root, private_final=False
+        )
+        _prepare_fresh_directory_chain(
+            record_path.parent, trusted_root, private_final=True
+        )
+        _prepare_fresh_directory_chain(
+            upgrade_journal_path().parent, trusted_root, private_final=True
+        )
+        # The directory preparation is a mutation; re-check every host surface
+        # immediately before the first staging temp is created.
+        _require_fresh_install_paths(
+            bundle,
+            record_path,
+            trusted_root,
+            raw_bundle=os.fspath(bundle),
+            raw_record=os.fspath(record_path),
+        )
+        if os.path.lexists(bundle):
+            raise ServerHostInstallError(
+                f"a host bundle appeared at {bundle} while this fresh install "
+                f"was preparing its directories",
+                code=HOST_EXISTS,
+            )
+        _refuse_present_record(record_path)
+        _refuse_present_journal()
+    else:
+        parent = bundle.parent
     try:
-        parent.mkdir(parents=True, exist_ok=True)
+        if not require_absent:
+            parent.mkdir(parents=True, exist_ok=True)
         stage = Path(tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=parent))
     except OSError as exc:
         raise ServerHostInstallError(
@@ -2640,6 +3576,8 @@ def _install_now(
 
     renamed = False
     recorded = False
+    recorded_identity: tuple[int, int] | None = None
+    installed_identity: tuple[int, int] | None = None
     keep_record = False
     superseded_record: HostOwnership | None = superseded_snapshot
     moved_aside = False
@@ -2658,6 +3596,16 @@ def _install_now(
             protocol=policy.protocol,
             signing=policy.signing,
         )
+        staged_identity: tuple[int, int] | None = None
+        if require_absent:
+            try:
+                staged_info = os.lstat(staged_app)
+            except OSError as exc:
+                raise ServerHostInstallError(
+                    f"the staged host could not be examined before the rename: {exc}",
+                    code=INSTALL_FAILED,
+                ) from exc
+            staged_identity = (staged_info.st_dev, staged_info.st_ino)
         if os.path.lexists(bundle):
             if superseded_record is None:
                 # Lost the race with another installer between the check above and
@@ -2690,6 +3638,29 @@ def _install_now(
         canonical = os.path.join(os.path.realpath(parent), APP_NAME)
         record_snapshot = dataclasses.replace(staged, bundle_path=canonical)
         _fsync_tree(staged_app)
+        if require_absent:
+            # Re-check immediately before the first write. A bundle, record,
+            # journal or symlinked/foreign parent that appeared after the
+            # caller's preflight and the initial check is a refusal, not something
+            # to overwrite or settle. A record that appears after this check but
+            # before the write below is the documented same-UID race; the run
+            # still refuses on a lost rename and preserves the concurrent state.
+            assert trusted_root is not None
+            _require_fresh_install_paths(
+                bundle,
+                record_path,
+                trusted_root,
+                raw_bundle=os.fspath(bundle),
+                raw_record=os.fspath(record_path),
+            )
+            if os.path.lexists(bundle):
+                raise ServerHostInstallError(
+                    f"a host bundle appeared at {bundle} while this fresh install "
+                    f"was staging",
+                    code=HOST_EXISTS,
+                )
+            _refuse_present_record(record_path)
+            _refuse_present_journal()
         if superseded_record is not None:
             # Move the superseded bundle out of the way first: a crash after this
             # leaves no bundle, and the next run installs fresh. It lives inside
@@ -2702,7 +3673,16 @@ def _install_now(
                     code=INSTALL_FAILED,
                 ) from exc
             moved_aside = True
-        _write_ownership_record(record_snapshot, record_path)
+        if require_absent:
+            recorded_identity = _write_ownership_record(
+                record_snapshot,
+                record_path,
+                return_identity=True,
+                preserve_parent_mode=True,
+            )
+        else:
+            _write_ownership_record(record_snapshot, record_path)
+            recorded_identity = None
         recorded = True
         try:
             os.rename(staged_app, bundle)
@@ -2716,7 +3696,9 @@ def _install_now(
                 # weakened. Leave the record; unlinking it here would strip the
                 # winner's bundle of the record this run just wrote and leave it
                 # recordless. This is the one refusal that must not roll back the
-                # record.
+                # record. `require_absent` keeps the same ordering: the caller
+                # gets HOST_EXISTS, never the winner's snapshot, and the winner's
+                # bundle and record are preserved.
                 keep_record = True
                 raise ServerHostInstallError(
                     f"a host bundle appeared at {bundle} while this install was "
@@ -2728,6 +3710,7 @@ def _install_now(
                 code=INSTALL_FAILED,
             ) from exc
         renamed = True
+        installed_identity = staged_identity
         _fsync_dir(parent)
 
         return verify_owned_host(bundle, ownership_path=record_path, runner=runner)
@@ -2748,7 +3731,38 @@ def _install_now(
         # directory, the record as it is - and the error says exactly where.
         problem = ""
         if renamed:
-            shutil.rmtree(bundle, ignore_errors=True)
+            if require_absent:
+                # Delete only the directory this call renamed into place. A
+                # same-UID writer can substitute the name after the rename; that
+                # object is not ours to remove, so leave it and report the
+                # unproven cleanup instead.
+                if installed_identity is None:
+                    problem = (
+                        f"the freshly installed host at {bundle} could not be "
+                        f"examined for cleanup; it is left in place"
+                    )
+                else:
+                    try:
+                        current = os.lstat(bundle)
+                    except FileNotFoundError:
+                        current = None
+                    except OSError:
+                        current = None
+                        problem = (
+                            f"the freshly installed host at {bundle} could not be "
+                            f"examined for cleanup; it is left in place"
+                        )
+                    if current is not None:
+                        if (current.st_dev, current.st_ino) != installed_identity:
+                            problem = (
+                                f"the freshly installed host at {bundle} was "
+                                f"replaced during the failed install; the "
+                                f"substitute is left in place"
+                            )
+                        else:
+                            shutil.rmtree(bundle, ignore_errors=True)
+            else:
+                shutil.rmtree(bundle, ignore_errors=True)
         if moved_aside:
             if os.path.lexists(bundle):
                 problem = (
@@ -2788,10 +3802,20 @@ def _install_now(
                         f"{record_path} ({exc}); the host is kept at {bundle}"
                     )
         if recorded and not keep_record and not problem:
-            try:
-                record_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if require_absent:
+                if not _remove_own_record(
+                    record_path, record_snapshot, recorded_identity
+                ):
+                    problem = (
+                        f"the ownership record at {record_path} was not removed "
+                        f"because it is no longer the exact file this run wrote; "
+                        f"it is left in place"
+                    )
+            else:
+                try:
+                    record_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         if problem and isinstance(failure, Exception):
             raise ServerHostInstallError(
                 f"{problem}; the install failed first: {failure}",

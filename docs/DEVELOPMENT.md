@@ -568,6 +568,79 @@ run placed. The host install is inert: it writes no launchd job itself;
 activation is `ciao setup` registering the hosted plist when a verified host
 is installed. No step requests a permission prompt.
 
+The native fresh-install path (#2340) is a separate, opt-in entry point and has no
+production caller yet. `ciao.native_installer.create_fresh_host` takes the
+authenticated manifest bytes and signature, not a caller-selected entry, and calls
+`verify_manifest`, `select_server_host_artifact` and `verify_host_archive` itself.
+It fixes the host bundle and ownership record to the canonical home paths and the
+release public key; there is no caller-supplied path, key or pre-selected entry.
+It requires the run's `NativeRunLock.assert_held(run_id=…)` and refuses a bundle,
+ownership record or host-upgrade journal that already exists, including terminal
+journal evidence it must not settle. Fresh mode also requires canonical absolute
+paths with no `.`, `..` or symlinked ancestor within the trusted home, a record
+outside the bundle, and every existing ancestor to be a real directory owned by
+this user, not group/other writable and free of a foreign extended-ACL grant; an
+existing record or journal parent must already be private and is never chmod'ed.
+The sibling upgrade lock follows the same rule: an existing lock must be a
+regular single-link owner-only ACL-clean file and is never chmod'ed; only a lock
+this run creates with `O_EXCL`/`O_NOFOLLOW` is set exactly `0600` with `fchmod`
+on its descriptor, and the public name is re-bound after `flock`. A replaced,
+hard-linked, ACL-granting or unverifiable lock refuses. Missing controlled
+directories are created one component at a time relative to held no-follow
+parent descriptors and made exactly `0700` with `fchmod`; existing safe `0755`
+parents (for example `.local`/`state` or `Applications`) are validated and left
+unchanged. A umask that strips the owner bits fails closed and leaves the new
+name as evidence instead of using a path-based chmod. It then calls
+`install_server_host(..., require_absent=True, trusted_root=Path.home())`: under
+the host upgrade lock that
+mode refuses any `_CURRENT` same-policy host or superseded replacement instead of
+adopting or replacing it, and it never finishes a journal. The default `False`
+keeps every legacy no-op/replacement path unchanged. After the install the helper
+re-verifies the owned host and requires equality with the snapshot the installer
+returned; a changed host is refused and left in place, never rolled back. The
+checks are refusal points, not proof: a same-UID writer can still interleave
+between a check and the write it guards, and a lost rename may leave the record the
+fresh attempt wrote (the existing `keep_record` path) while the run reports
+`HOST_EXISTS` and never claims that host as its own.
+
+The first coordinator lifecycle slice is now in `ciao.native_installer`, but it
+has **no production caller and no public run path**: `run_native_install`
+refuses with `coordinator_unavailable` until the setup child can write its
+schema-2 handoff from a native context and the readiness proof in
+`ciao.native_readiness` is wired in. That proof exists but is not wired into the
+coordinator, so the coordinator still ends with `service_not_ready`. The testable private seam,
+`_run_native_install`, takes injected callables for every external effect. Its
+`NativeInstallOutcome` records attempted and completed flags separately, so a
+host or activation step that mutates and then raises is never reported as
+unattempted; `activation_attempted` means the service may be running. It
+classifies fresh, prepares the private state directory, takes the run lock,
+prepares the bootstrap scratch chain, classifies again immediately before the
+first host/engine mutation, creates the host through the real
+`create_fresh_host`, rechecks the host and lock before the engine install,
+installs the engine, starts the wizard with only a private bind-notification
+pipe, reads one bounded `{schema:1,port:N}` record **and waits for the producer
+to close the pipe** (so a delayed second record is a refusal), emits
+`wizard_ready`, validates the run-bound handoff, emits `setup_saved`, and calls
+activation. `workspace` is
+only the classifier suggestion; the selected directory is read from the handoff
+and reported, and an optional `expected_workspace` is the only exact-match
+check. Because its longest path is nine events, it refuses a handoff that leaves
+fewer than nine event slots instead of mutating with no room to report an
+outcome. The public event descriptor must be in the shell's 3–9 range at the
+coordinator boundary. It never emits `service_ready` in this slice: after
+activation it reports `failed("service_not_ready")`. Cancellation is a flag the
+normal loop observes; the loop sends SIGTERM, waits a finite grace, sends
+SIGKILL, and reaps only the child it started in that child's own session before
+releasing the lock, keeping the lock when reaping cannot be proven. The child
+waits are clamped to the whole-run budget, cleanup has its own bounded
+grace/reap deadlines, and injected synchronous steps are checked before and
+after but cannot be preempted by this module. It never passes the public event
+descriptor to a child (the wizard sees only the private pipe), never stops,
+reloads, quiesces or rolls back an activated service, preserves partial
+artifacts, writes no onboarding or install receipt, and adds no route. `SIGKILL`
+runs no cleanup and leaves the lock and child as evidence. Tests:
+`tests/test_native_installer.py`.
+
 Replacing an owned legacy host with the signed one is the one host change that is
 a *transaction*, because the previous app and its exact ownership record have to
 survive until the engine this run installs has answered healthily — which is
