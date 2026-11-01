@@ -458,6 +458,19 @@ def test_the_lesson_path_names_both_non_owned_destinations() -> None:
     assert "neither may the nightly Workspace care run" in prompt
 
 
+def test_lesson_routing_prompt_says_how_to_recover_from_a_sibling_refusal() -> None:
+    """A refused re-file names the way out: `same_as` or `distinct_from`, read from the listed titles."""
+    prompt = memory_pass.LESSON_ROUTING_PROMPT.substitute(
+        inventory="notes",
+        routing=memory_pass.DRAFT_COMMAND,
+        source="conversation",
+        evidence="transcript",
+    )
+    assert "already has drafts" in prompt
+    assert '"same_as"' in prompt
+    assert '"distinct_from"' in prompt
+
+
 def _rendered_chat_lesson_routing() -> str:
     """The lesson section as a chat pass renders it, for the phrase checks above."""
     return memory_pass.LESSON_ROUTING_PROMPT.substitute(
