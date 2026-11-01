@@ -207,11 +207,67 @@ def _validate_check(task_id: str, spec: Any) -> dict[str, Any]:
     kind = spec.get("kind")
     if kind not in CHECKS:
         raise TaskCatalogError(f"{task_id}: unknown check kind {kind!r}")
+    if "normalize" in spec:
+        if kind not in NORMALIZABLE_KINDS:
+            raise TaskCatalogError(f"{task_id}: normalize applies only to {sorted(NORMALIZABLE_KINDS)}, not {kind!r}")
+        if not isinstance(spec["normalize"], bool):
+            raise TaskCatalogError(f"{task_id}: {kind} normalize must be true or false")
     if kind == "gws_calls":
         _validate_gws_calls(task_id, spec)
     elif kind == "proposals":
         _validate_proposals(task_id, spec)
+    elif kind == "new_tasks":
+        _validate_new_tasks(task_id, spec)
+    elif kind == "new_schedules":
+        _validate_new_schedules(task_id, spec)
+    elif kind == "any_of":
+        _validate_any_of(task_id, spec)
     return spec
+
+
+# A nested check that could itself pick a branch, or that compares against a snapshot of the whole
+# agent root, does not belong inside an any_of option.
+_NOT_NESTABLE: frozenset[str] = frozenset({"any_of", "unchanged"})
+
+
+def _validate_any_of(task_id: str, spec: dict[str, Any]) -> None:
+    options = spec.get("options")
+    if not isinstance(options, list) or len(options) < 2:
+        raise TaskCatalogError(f"{task_id}: any_of needs at least 2 options")
+    for option in options:
+        if not isinstance(option, list) or not option:
+            raise TaskCatalogError(f"{task_id}: each any_of option must be a non-empty list of checks")
+        for nested in option:
+            if isinstance(nested, dict) and nested.get("kind") in _NOT_NESTABLE:
+                raise TaskCatalogError(f"{task_id}: any_of cannot nest {nested.get('kind')!r}")
+            _validate_check(task_id, nested)
+
+
+def _validate_new_tasks(task_id: str, spec: dict[str, Any]) -> None:
+    if "project_name_contains" in spec:
+        names = spec["project_name_contains"]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise TaskCatalogError(f"{task_id}: new_tasks project_name_contains must be a list of strings")
+    if "titles_cover" in spec:
+        groups = spec["titles_cover"]
+        valid = (
+            isinstance(groups, list)
+            and bool(groups)
+            and all(isinstance(g, list) and bool(g) and all(isinstance(n, str) for n in g) for g in groups)
+        )
+        if not valid:
+            raise TaskCatalogError(f"{task_id}: new_tasks titles_cover must be a list of non-empty string lists")
+        if spec.get("count", 1) != len(groups):
+            raise TaskCatalogError(
+                f"{task_id}: new_tasks count {spec.get('count', 1)!r} must equal the {len(groups)} titles_cover groups"
+            )
+
+
+def _validate_new_schedules(task_id: str, spec: dict[str, Any]) -> None:
+    if "prompt_any" in spec:
+        needles = spec["prompt_any"]
+        if not isinstance(needles, list) or not needles or not all(isinstance(n, str) for n in needles):
+            raise TaskCatalogError(f"{task_id}: new_schedules prompt_any must be a non-empty list of strings")
 
 
 def _validate_regex_lists(task_id: str, kind: str, spec: dict[str, Any]) -> None:
@@ -395,9 +451,28 @@ def _fail(kind: str, detail: str) -> CheckResult:
     return CheckResult(kind=kind, ok=False, detail=detail)
 
 
-def _text_has(text: str, needles: list[str], *, all_of: bool) -> bool:
+# Checks that accept ``"normalize": true``, and the folding that option applies.
+NORMALIZABLE_KINDS: frozenset[str] = frozenset(
+    {"answer_contains", "answer_excludes", "file_contains", "file_excludes", "occurrences"}
+)
+_NORMALIZE_DROP_RE = re.compile(r"[*_`]")
+_NORMALIZE_TRANSLATE = str.maketrans({" ": " ", " ": " ", " ": " ", "’": "'"})
+_SPACE_RUN_RE = re.compile(r" {2,}")
+
+
+def _fold(text: str, normalize: bool) -> str:
+    """Lowercased text. With ``normalize``, markup (``*``, ``_``, backticks) is dropped, no-break and thin
+    spaces and curly apostrophes become plain ones, and runs of spaces collapse. Needles fold the same way."""
     lowered = text.lower()
-    hits = [needle.lower() in lowered for needle in needles]
+    if not normalize:
+        return lowered
+    folded = _NORMALIZE_DROP_RE.sub("", lowered).translate(_NORMALIZE_TRANSLATE)
+    return _SPACE_RUN_RE.sub(" ", folded)
+
+
+def _text_has(text: str, needles: list[str], *, all_of: bool, normalize: bool = False) -> bool:
+    lowered = _fold(text, normalize)
+    hits = [_fold(needle, normalize) in lowered for needle in needles]
     return all(hits) if all_of else any(hits)
 
 
@@ -407,11 +482,12 @@ def _contains_spec(text: str, spec: dict[str, Any]) -> tuple[bool, str]:
     any_needles = [str(n) for n in spec.get("any", [])]
     if not all_needles and not any_needles:
         return False, "check names no needles (all/any)"
+    normalize = bool(spec.get("normalize", False))
     ok = True
     if all_needles:
-        ok = ok and _text_has(text, all_needles, all_of=True)
+        ok = ok and _text_has(text, all_needles, all_of=True, normalize=normalize)
     if any_needles:
-        ok = ok and _text_has(text, any_needles, all_of=False)
+        ok = ok and _text_has(text, any_needles, all_of=False, normalize=normalize)
     return ok, f"all={all_needles} any={any_needles}"
 
 
@@ -434,7 +510,9 @@ def _check_answer_excludes(ctx: GradeContext, spec: dict[str, Any]) -> CheckResu
     needles = [str(n) for n in spec.get("any", [])]
     if not needles:
         return _fail("answer_excludes", "check names no needles (any)")
-    present = [n for n in needles if n.lower() in ctx.answer.lower()]
+    normalize = bool(spec.get("normalize", False))
+    haystack = _fold(ctx.answer, normalize)
+    present = [n for n in needles if _fold(n, normalize) in haystack]
     return CheckResult("answer_excludes", not present, f"present={present}")
 
 
@@ -460,6 +538,8 @@ def _check_new_tasks(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
         problems.append(f"expected {count} new task(s), found {len(new)}")
     needles = [str(n).lower() for n in spec.get("title_contains", [])]
     due_spec = spec.get("due")
+    project_needles = [str(n).lower() for n in spec.get("project_name_contains", [])]
+    names = _project_names(ctx) if project_needles else {}
     for row in new:
         title = str(row.get("title") or "")
         for needle in needles:
@@ -467,7 +547,39 @@ def _check_new_tasks(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
                 problems.append(f"title {title!r} lacks {needle!r}")
         if due_spec is not None and not _due_matches(row.get("due"), str(due_spec), ctx.run_date):
             problems.append(f"task {title!r} due {row.get('due')!r} != {due_spec!r}")
+        if project_needles:
+            pid = row.get("project_id")
+            pname = names.get(str(pid), str(pid)) if pid else ""
+            missing = [n for n in project_needles if n not in pname.lower()]
+            if missing:
+                problems.append(f"task {title!r} project {pname!r} lacks {missing}")
+    if "titles_cover" in spec:
+        problems.extend(_titles_cover_problems(new, spec["titles_cover"]))
     return CheckResult("new_tasks", not problems, "; ".join(problems) or f"{len(new)} new task(s) ok")
+
+
+def _project_names(ctx: GradeContext) -> dict[str, str]:
+    """Project id to display name, from ``GET /api/projects``."""
+    payload = ctx.api("GET", "/api/projects")
+    return {str(row["project_id"]): str(row.get("name") or "") for row in payload if row.get("project_id")}
+
+
+def _titles_cover_problems(new: list[dict[str, Any]], groups: list[list[str]]) -> list[str]:
+    """Each title group is matched by exactly one new task, and every new task matches some group."""
+    titles = [str(row.get("title") or "") for row in new]
+
+    def hits(title: str, group: list[str]) -> bool:
+        return any(str(needle).lower() in title.lower() for needle in group)
+
+    problems: list[str] = []
+    for group in groups:
+        matched = [title for title in titles if hits(title, group)]
+        if len(matched) != 1:
+            problems.append(f"titles {group} matched {len(matched)} task(s), want 1")
+    for title in titles:
+        if not any(hits(title, group) for group in groups):
+            problems.append(f"task {title!r} matches no title group")
+    return problems
 
 
 def _due_matches(due: Any, spec: str, run_date: date) -> bool:
@@ -511,6 +623,9 @@ def _check_new_schedules(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult
         for needle in spec.get("prompt_contains", []):
             if str(needle).lower() not in prompt:
                 problems.append(f"prompt lacks {needle!r}")
+        any_needles = [str(n) for n in spec.get("prompt_any", [])]
+        if any_needles and not any(n.lower() in prompt for n in any_needles):
+            problems.append(f"prompt lacks any of {any_needles}")
     return CheckResult("new_schedules", not problems, "; ".join(problems) or f"{len(new)} new schedule(s) ok")
 
 
@@ -532,7 +647,9 @@ def _check_file_excludes(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult
         text = _read_note(ctx, str(spec["path"]))
     except (OSError, ValueError) as exc:
         return _fail("file_excludes", f"cannot read {spec.get('path')!r}: {exc}")
-    present = [n for n in spec.get("any", []) if str(n).lower() in text.lower()]
+    normalize = bool(spec.get("normalize", False))
+    haystack = _fold(text, normalize)
+    present = [n for n in spec.get("any", []) if _fold(str(n), normalize) in haystack]
     return CheckResult("file_excludes", not present, f"present={present}")
 
 
@@ -541,8 +658,9 @@ def _check_occurrences(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
         text = _read_note(ctx, str(spec["path"]))
     except (OSError, ValueError) as exc:
         return _fail("occurrences", f"cannot read {spec.get('path')!r}: {exc}")
-    needle = str(spec["text"]).lower()
-    found = text.lower().count(needle)
+    normalize = bool(spec.get("normalize", False))
+    needle = _fold(str(spec["text"]), normalize)
+    found = _fold(text, normalize).count(needle)
     want = int(spec["count"])
     return CheckResult("occurrences", found == want, f"found {found}, want {want}")
 
@@ -794,6 +912,17 @@ def _check_proposals(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     return CheckResult("proposals", not problems, f"{summary} | {' / '.join(items)}"[:400])
 
 
+def _check_any_of(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    """Passes when every check of at least one option passes. Nested checks run under the same guard as grade."""
+    reports: list[str] = []
+    for index, option in enumerate(spec["options"], start=1):
+        results = [_run_check(ctx, nested) for nested in option]
+        if all(r.ok for r in results):
+            return CheckResult("any_of", True, f"option {index} passed")
+        reports.append(f"option {index}: " + "; ".join(f"{r.kind}={'ok' if r.ok else 'FAIL'} {r.detail}" for r in results))
+    return CheckResult("any_of", False, " | ".join(reports)[:800])
+
+
 CHECKS: dict[str, CheckFn] = {
     "answer_contains": _check_answer_contains,
     "answer_excludes": _check_answer_excludes,
@@ -812,19 +941,22 @@ CHECKS: dict[str, CheckFn] = {
     "command": _check_command,
     "gws_calls": _check_gws_calls,
     "proposals": _check_proposals,
+    "any_of": _check_any_of,
 }
+
+
+def _run_check(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    """One check. A check that raises is a failed check, never a crash."""
+    kind = str(spec.get("kind"))
+    try:
+        return CHECKS[kind](ctx, spec)
+    except Exception as exc:  # noqa: BLE001 - a broken check must not abort grading
+        return _fail(kind, f"check raised {exc!r}"[:400])
 
 
 def grade(task: EvalTask, ctx: GradeContext) -> list[CheckResult]:
     """Run every check of a task. A check that raises is a failed check, never a crash."""
-    results: list[CheckResult] = []
-    for spec in task.checks:
-        kind = str(spec.get("kind"))
-        try:
-            results.append(CHECKS[kind](ctx, spec))
-        except Exception as exc:  # noqa: BLE001 - a broken check must not abort grading
-            results.append(_fail(kind, f"check raised {exc!r}"[:400]))
-    return results
+    return [_run_check(ctx, spec) for spec in task.checks]
 
 
 # --- isolation --------------------------------------------------------------------

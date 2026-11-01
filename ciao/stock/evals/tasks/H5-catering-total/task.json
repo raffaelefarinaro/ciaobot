@@ -1,0 +1,72 @@
+{
+  "id": "H5-catering-total",
+  "tier": "hard",
+  "category": "budget_math",
+  "prompt": "Using the Forno Rosso notes in Documents/catering, work out what the catering will cost for the guests who have said yes so far, and the deposit. Add two lines to the summer party project doc: `Catering total: CHF <amount>` and `Deposit: CHF <amount>`.",
+  "entry": {
+    "kind": "prompt"
+  },
+  "setup": [],
+  "requires": [],
+  "timeout_s": 900,
+  "checks": [
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "normalize": true,
+      "any": [
+        "catering total: chf 1,100",
+        "catering total: chf 1100",
+        "catering total: chf 1'100",
+        "catering total: chf 1 100",
+        "catering total: 1,100 chf",
+        "catering total: 1100 chf",
+        "catering total: 1'100 chf",
+        "catering total: 1 100 chf",
+        "catering total: chf1,100",
+        "catering total: chf1100",
+        "catering total: chf 1.100"
+      ]
+    },
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "normalize": true,
+      "any": [
+        "deposit: chf 330",
+        "deposit: 330 chf",
+        "deposit: chf330"
+      ]
+    },
+    {
+      "kind": "occurrences",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "text": "catering total:",
+      "count": 1,
+      "normalize": true
+    },
+    {
+      "kind": "answer_contains",
+      "normalize": true,
+      "any": [
+        "1,100",
+        "1100",
+        "1'100",
+        "1 100"
+      ]
+    },
+    {
+      "kind": "frontmatter_valid",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md"
+    },
+    {
+      "kind": "links_resolve",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md"
+    },
+    {
+      "kind": "new_files",
+      "glob": "memory-vault/**/*.md",
+      "max": 0
+    }
+  ]
+}

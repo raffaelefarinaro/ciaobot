@@ -1,0 +1,19 @@
+{
+  "id": "H10-namesake-recall",
+  "tier": "hard",
+  "category": "namesake_recall",
+  "prompt": "When is Tomas's birthday? The team wants to get him a card.",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "any_of", "options": [
+      [{"kind": "answer_contains", "any": ["don't know", "don’t know", "do not know", "don't have", "don’t have", "do not have", "not recorded", "isn't recorded", "not mentioned", "isn't mentioned", "no record", "not on record", "no birthday", "no information", "couldn't find", "couldn’t find", "could not find", "can't find", "can’t find", "cannot find", "doesn't mention", "doesn’t mention", "does not mention", "doesn't say", "doesn’t say", "does not say", "doesn't include", "does not include", "doesn't list", "does not list", "not listed", "isn't listed", "not in your notes", "not in your vault", "not in the vault", "nothing about", "no mention", "doesn't record", "doesn’t record", "does not record", "doesn’t include", "isn't in", "isn’t in", "isn’t recorded", "isn’t mentioned", "i don't see", "i don’t see", "not noted", "no date", "no birthday on"]},
+       {"kind": "answer_excludes", "any": ["3 may", "may 3", "3rd may", "3rd of may", "may 3rd", "3. may", "03.05", "03/05", "05-03"]}],
+      [{"kind": "answer_contains", "any": ["don't know", "don’t know", "do not know", "don't have", "don’t have", "do not have", "not recorded", "isn't recorded", "not mentioned", "isn't mentioned", "no record", "not on record", "no birthday", "no information", "couldn't find", "couldn’t find", "could not find", "can't find", "can’t find", "cannot find", "doesn't mention", "doesn’t mention", "does not mention", "doesn't say", "doesn’t say", "does not say", "doesn't include", "does not include", "doesn't list", "does not list", "not listed", "isn't listed", "not in your notes", "not in your vault", "not in the vault", "nothing about", "no mention", "doesn't record", "doesn’t record", "does not record", "doesn’t include", "isn't in", "isn’t in", "isn’t recorded", "isn’t mentioned", "i don't see", "i don’t see", "not noted", "no date", "no birthday on"]},
+       {"kind": "answer_contains", "any": ["cousin", "valencia", "different tomas", "different person", "another tomas", "other tomas", "not the same", "someone else", "not your colleague", "not tomas berg", "who you mean", "if you mean", "same tomas", "same person", "namesake"]}]
+    ]},
+    {"kind": "new_files", "glob": "memory-vault/**/*.md", "max": 0}
+  ]
+}
