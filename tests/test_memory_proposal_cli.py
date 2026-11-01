@@ -2054,3 +2054,69 @@ def test_review_link_null_when_registry_config_invalid(tmp_path: Path, monkeypat
         (row["id"], row["review_key"], row["review_path"]) == (None, None, None)
         for row in listed
     )
+
+
+@pytest.mark.parametrize("promoted", [False, True])
+def test_cli_dismiss_refuses_a_skill_draft_row_and_changes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], promoted: bool
+) -> None:
+    """A skill-draft row is settled with skill-draft-approve/reject, never here.
+
+    The queue cannot settle a draft: the sidecar would stay pending with no
+    bullet, and a re-filed copy would re-enter the queue under a new id. The
+    refusal lands before anything is written, so the queue and decisions stay as
+    they were.
+    """
+    from ciao import cli
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.upstream_drafts import (
+        DRAFT_PENDING,
+        UPSTREAM_ISSUE,
+        file_draft,
+        read_records,
+    )
+    from ciao.workspace_reroot import mark_born_per_root
+
+    vault = tmp_path / "memory-vault"
+    runtime = tmp_path / ".runtime"
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        vault_root=vault,
+        workspaces={"work": WorkspaceConfig(name="work", vault_root=str(vault))},
+    )
+    mark_born_per_root(tmp_path, runtime, ["work"])
+    draft = file_draft(
+        config,
+        "work",
+        target=UPSTREAM_ISSUE,
+        skill="web-research",
+        title="Document the offline fallback for a timed-out fetch",
+        change="State that a fetch that times out must be retried once with a longer budget.",
+        body="A search fetch that times out is reported as no results. Retry once first.",
+        repository="example/tools",
+        version="1.4.0",
+        private_evidence="chat-42 turn 7: the fetch reported no results",
+    )
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    before = queue.read_text(encoding="utf-8")
+    assert f"skill-draft:{draft.id}" in before
+
+    rc = cli.main([
+        "memory-proposal-dismiss",
+        *(["--promoted"] if promoted else []),
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        draft.id,
+    ])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "skill-draft-approve" in err
+    assert "skill-draft-reject" in err
+    assert draft.id in err
+    assert queue.read_text(encoding="utf-8") == before
+    assert read_decisions(queue) == []
+    assert read_records(config, "work")[0].lifecycle == DRAFT_PENDING
