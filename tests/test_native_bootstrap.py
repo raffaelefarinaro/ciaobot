@@ -45,6 +45,10 @@ from ciao.web.app import create_app
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import setup_finish_endpoint
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32", reason="the native bootstrap child is macOS-only"
+)
+
 _LOOPBACK_PEER = ("127.0.0.1", 50000)
 
 

@@ -643,6 +643,9 @@ def test_startup_status_schema_failures_are_fixed(
         (b'{"latest_version": NaN}', "startup_status_invalid"),
         (b" " * (MAX_STARTUP_RESPONSE_BYTES + 1), "startup_status_invalid"),
     ],
+    # Short ids: pytest puts the node id in an environment variable, and the
+    # oversized body as an id passes Windows' 32767-character limit.
+    ids=["empty", "truncated", "array", "duplicate-key", "nan", "oversized"],
 )
 def test_startup_status_bytes_are_strict_and_bounded(
     tmp_path: Path, raw: bytes, failure: str
