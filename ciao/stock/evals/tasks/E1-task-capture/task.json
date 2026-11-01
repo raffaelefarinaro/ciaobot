@@ -9,6 +9,6 @@
   "timeout_s": 600,
   "checks": [
     {"kind": "new_tasks", "count": 1, "title_contains": ["insurance"], "due": "weekday:friday"},
-    {"kind": "new_files", "glob": "projects/**", "max": 0}
+    {"kind": "new_files", "glob": "memory-vault/projects/**", "max": 0}
   ]
 }

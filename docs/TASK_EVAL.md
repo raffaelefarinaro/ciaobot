@@ -35,6 +35,13 @@ ciao eval tasks report /tmp/base.jsonl
 ciao eval tasks compare --baseline /tmp/base.jsonl --candidate /tmp/cand.jsonl
 ```
 
+`run` first checks that the `ciao` an agent would run is this checkout's package
+(`cli_package_mismatch`). The engine's sandbox only reads the package running
+it, so on a mismatch `run` prints the two paths and the remedy to stderr and
+exits 2 before anything boots. The remedy is to run the eval from an install of
+the checkout under test, e.g. `uv venv .venv-eval && uv pip install -p .venv-eval -e .`
+in that checkout, then `.venv-eval/bin/ciao eval tasks run ...`.
+
 `run` prints the summary table and exits 0 unless every run errored. Without
 `--out`, the report goes to `.runtime/evals/tasks/<UTC stamp>-<label>.jsonl`
 (`CIAO_RUNTIME_ROOT` moves the `.runtime` root, as for the behavioral report).
@@ -54,14 +61,19 @@ at once; each is a full engine, so keep it low.
    into `T`, so nothing reaches the live install's index or LaunchAgent.
 2. The fixture vault `ciao/stock/evals/tasks/_fixture/` is copied over
    `T/ws/personal/memory-vault/`. The task's optional `overlay/` tree is copied
-   over `T/ws/personal/`.
+   over `T/ws/personal/`. The workspace defaults to the requested provider, and
+   its `personal` registry entry pins the requested model for that provider
+   (`provider_overrides`), so delegated chats run on the requested pair too.
+   Steps 1 and 2 are `prepare_workspace`, which runs without booting an engine.
 3. The engine is started with `ciao run` (cwd `T/ws`, the same environment
    scrub), and the harness waits until `/api/status` answers 401. It then
    signs in with the run's own token and creates a "Task eval host" project
    to hold the eval chat.
 4. Setup steps run (`task`, `project`), then the harness takes a snapshot:
-   task ids, schedule ids, project ids, the relative paths of every file in the
-   vault, and the bytes of any file a `unchanged` check names.
+   task ids, schedule ids, project ids, the relative paths of every file under
+   the agent root (`T/ws/personal/`), and the bytes of any file an `unchanged`
+   check names. The snapshot is taken after the host project exists, so its
+   scaffold files are never reported as new.
 5. The entry runs: `prompt` sends the task's prompt in a new chat, `delegate`
    hands an existing task to the agent.
 6. The run is settled when `/api/admin/restart-blockers` is empty on two
@@ -88,6 +100,7 @@ Each run is one JSON object per line:
 | `provider_version` | first line of `<provider> --version` |
 | `catalog_sha256` | hash over the task catalog bytes |
 | `status` | `passed`, `failed`, `skipped` or `error` |
+| `answer` | the last 2000 characters of the answer text (all turns of all chats, most recent last) |
 | `checks` | per check: `kind`, `ok`, `detail` |
 | `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run |
 | `tool_calls`, `tool_errors` | from the turns' tool-call lists |
@@ -116,7 +129,7 @@ Each task is `ciao/stock/evals/tasks/<task_id>/task.json`:
   "timeout_s": 600,
   "checks": [
     {"kind": "new_tasks", "count": 1, "title_contains": ["insurance"], "due": "weekday:friday"},
-    {"kind": "new_files", "glob": "projects/**", "max": 0}
+    {"kind": "new_files", "glob": "memory-vault/projects/**", "max": 0}
   ]
 }
 ```
@@ -140,7 +153,8 @@ tasks; `_fixture/` is the base vault.
 
 ### Check kinds
 
-Paths are relative to the vault root (`T/ws/personal/memory-vault/`). Text
+Paths are relative to the agent root (`T/ws/personal/`), so vault notes start
+with `memory-vault/`, for example `memory-vault/People/x.md`. Text
 matching is case-insensitive.
 
 | Kind | Fields | Passes when |
@@ -197,9 +211,6 @@ match the fixture exactly.
 
 ## Known limits
 
-- The `delegate` route does not accept a provider or model, so a delegated
-  chat runs on the workspace's default routing. The record still names what
-  was requested. Set the workspace default before running a delegate task.
 - Only the easy tier and the `prompt` entry are in the catalog. Medium and hard
   tasks, and gws fakes for `requires`, come later.
 - Settling is inferred from the restart-blocker list, not from the transcript.

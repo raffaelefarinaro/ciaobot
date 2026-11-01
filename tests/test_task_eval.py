@@ -459,9 +459,10 @@ def test_run_task_with_fake_session_passes_and_records_usage(
     assert set(record) >= {
         "schema", "label", "task_id", "tier", "category", "provider", "model", "repeat",
         "code_revision", "provider_version", "catalog_sha256", "started_at", "status",
-        "skip_reason", "error", "checks", "tokens", "tool_calls", "tool_errors",
+        "skip_reason", "error", "checks", "answer", "tokens", "tool_calls", "tool_errors",
         "ciao_calls", "ciao_errors", "cost_usd", "wall_s", "timed_out", "chat_ids",
     }
+    assert record["answer"] == "I saw the insurance task."
     assert record["schema"] == "ciao-task-eval/1"
     assert record["status"] == "passed"
     assert record["checks"][0]["ok"] is True
@@ -636,3 +637,144 @@ def test_cli_eval_tasks_list(capsys: pytest.CaptureFixture[str]) -> None:
     out = json.loads(capsys.readouterr().out)
     ids = {item["id"] for item in out}
     assert {"E1-task-capture", "E2-recall-guest-count", "E2-recall-abstain", "E3-schedule-create"} <= ids
+
+
+# --- Fix round: agent root, answer tail, CLI mismatch preflight, pinned workspace --
+
+
+def test_engine_agent_root_is_the_personal_workspace(tmp_path: Path) -> None:
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+
+    assert engine.agent_root == tmp_path / "T" / "ws" / "personal"
+
+
+def test_catalog_new_file_globs_are_agent_root_relative() -> None:
+    for task in te.load_tasks():
+        for spec in task.checks:
+            if spec["kind"] == "new_files":
+                assert spec["glob"].startswith("memory-vault/"), (task.id, spec["glob"])
+
+
+def test_snapshot_excludes_host_project_scaffold(tmp_path: Path) -> None:
+    agent_root = tmp_path / "personal"
+    scaffold = agent_root / "memory-vault" / "projects" / "active" / "task-eval-host"
+    scaffold.mkdir(parents=True)
+    (scaffold / "task-eval-host.md").write_text("scaffold", encoding="utf-8")
+
+    def api(method: str, path: str, body: Any = None) -> Any:
+        return {"tasks": []} if path.startswith("/api/tasks?") else []
+
+    snap = te.take_snapshot(agent_root, api, keep=())
+    ctx = _ctx(agent_root, snapshot=snap)
+    projects_glob = {"kind": "new_files", "glob": "memory-vault/projects/**", "max": 0}
+    assert te.CHECKS["new_files"](ctx, projects_glob).ok
+
+    (agent_root / "memory-vault" / "projects" / "active" / "x.md").write_text("new", encoding="utf-8")
+    result = te.CHECKS["new_files"](_ctx(agent_root, snapshot=snap), projects_glob)
+    assert not result.ok
+    assert "x.md" in result.detail
+    assert "task-eval-host" not in result.detail
+
+
+def test_run_task_records_answer_tail(tmp_path: Path, stable_provenance: None) -> None:
+    long_answer = "a" * 2500 + "THE-END"
+    session = FakeSession(tmp_path, answer=long_answer)
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["answer"] == long_answer[-2000:]
+    assert len(record["answer"]) == 2000
+    assert record["answer"].endswith("THE-END")
+
+
+def _completed(stdout: str, returncode: int = 0) -> Any:
+    import subprocess
+
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+
+def test_cli_package_mismatch_is_none_for_the_same_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness_init = Path(te.__file__).resolve().parent / "__init__.py"
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        calls.append(argv)
+        return _completed(f"{harness_init}\n")
+
+    monkeypatch.setattr(te.subprocess, "run", fake_run)
+
+    assert te.cli_package_mismatch() is None
+    assert calls[0][1:3] == ["-I", "-c"]
+
+
+def test_cli_package_mismatch_names_both_packages(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        te.subprocess, "run",
+        lambda argv, **kwargs: _completed("/Users/someone/repos/ciaobot/ciao/__init__.py\n"),
+    )
+
+    message = te.cli_package_mismatch()
+
+    assert message is not None
+    assert "/Users/someone/repos/ciaobot/ciao" in message
+    assert str(Path(te.__file__).resolve().parent) in message
+    assert "uv venv .venv-eval" in message
+    assert ".venv-eval/bin/ciao eval tasks run" in message
+
+
+def test_cli_package_mismatch_reports_failed_isolated_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(te.subprocess, "run", lambda argv, **kwargs: _completed("", returncode=1))
+
+    message = te.cli_package_mismatch()
+
+    assert message is not None
+    assert "could not import" in message
+
+
+def test_eval_tasks_run_refuses_before_running_on_mismatch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def refuse_run(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        raise AssertionError("run_suite must not start on a mismatch")
+
+    monkeypatch.setattr(te, "cli_package_mismatch", lambda: "MISMATCH: fix the install")
+    monkeypatch.setattr(te, "run_suite", refuse_run)
+
+    assert cli.main(["eval", "tasks", "run", "--model", "haiku"]) == 2
+    assert "MISMATCH: fix the install" in capsys.readouterr().err
+
+
+def _registry_entry(ws: Path, name: str) -> dict[str, Any]:
+    raw = (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
+    entries: Any = json.loads(raw)
+    return next(entry for entry in entries if entry["name"] == name)
+
+
+def test_prepare_workspace_pins_requested_provider_and_model(tmp_path: Path) -> None:
+    from ciao.config import CiaoConfig, _parse_workspaces_json
+
+    ws = te.prepare_workspace(tmp_path / "T", "claude", "haiku", _insurance_task())
+
+    assert ws == tmp_path / "T" / "ws"
+    assert (ws / "personal" / "memory-vault" / "People" / "tomas-berg.md").is_file()
+    entry = _registry_entry(ws, "personal")
+    assert entry["default_provider"] == "claude"
+    assert entry["provider_overrides"] == {"claude": {"model": "haiku"}}
+
+    registry = ws / ".runtime" / "workspaces.json"
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=ws,
+        state_path=ws / ".runtime" / "state.json",
+        media_root=ws / ".runtime" / "media",
+        workspaces=_parse_workspaces_json(registry.read_text(encoding="utf-8")),
+    )
+    assert config.default_provider_for_workspace("personal") == "claude"
+    assert config.default_model_for_workspace("personal", "claude") == "haiku"

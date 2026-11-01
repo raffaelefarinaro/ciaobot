@@ -30,6 +30,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from http.cookiejar import CookieJar
@@ -48,6 +49,7 @@ ENTRY_KINDS: frozenset[str] = frozenset({"prompt", "delegate"})
 SETUP_KINDS: frozenset[str] = frozenset({"task", "project"})
 SCHEMA = "ciao-task-eval/1"
 DEFAULT_TIMEOUT_S = 600.0
+ANSWER_TAIL_CHARS = 2000
 
 # Phrases that count as a clean refusal to answer from the vault. Curly
 # apostrophes are accepted too, since models often emit them.
@@ -638,6 +640,59 @@ def _tail(path: Path, limit: int = 2000) -> str:
         return ""
 
 
+def _pin_workspace_model(registry: Path, provider: str, model: str) -> None:
+    """Write the requested provider and model into the eval workspace's registry entry.
+
+    ``CiaoConfig.default_model_for_workspace`` reads ``provider_overrides`` from
+    the entry, so delegated chats (which take the workspace default) resolve to
+    the requested model.
+    """
+    entries: Any = json.loads(registry.read_text(encoding="utf-8"))
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("name") == WORKSPACE:
+            entry["provider_overrides"] = {provider: {"model": model}}
+            registry.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
+            return
+    raise RuntimeError(f"workspace registry has no {WORKSPACE!r} entry: {registry}")
+
+
+def prepare_workspace(
+    workdir: Path,
+    provider: str,
+    model: str,
+    task: EvalTask,
+    *,
+    auth_token: str | None = None,
+    port: int | None = None,
+) -> Path:
+    """Build the throwaway workspace under ``workdir/ws`` without booting anything.
+
+    ``setup_workspace`` runs with the live environment scrubbed and the working
+    directory set to ``workdir``. The fixture vault is copied into
+    ``ws/personal/memory-vault`` and the task overlay over ``ws/personal``. The
+    workspace defaults to ``provider`` and pins ``model`` for it.
+    """
+    from ciao import cli
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    ws = workdir / "ws"
+    with _PROCESS_STATE_LOCK, _engine_environ(workdir, ws), _in_directory(workdir):
+        cli.setup_workspace(
+            ws,
+            auth_token=auth_token or secrets.token_urlsafe(32),
+            port=port or _free_port(),
+            launch_agents_dir=workdir / "LA",
+            app_dir=workdir / "Apps",
+            default_provider=provider,
+        )
+    _pin_workspace_model(ws / ".runtime" / "workspaces.json", provider, model)
+    personal = ws / WORKSPACE
+    shutil.copytree(TASKS_ROOT / FIXTURE_DIRNAME, personal / "memory-vault", dirs_exist_ok=True)
+    if task.overlay is not None:
+        shutil.copytree(task.overlay, personal, dirs_exist_ok=True)
+    return ws
+
+
 class EngineSession(Protocol):
     """What a task run needs from an engine: API access, a chat, and its usage."""
 
@@ -671,7 +726,7 @@ class IsolatedEngine(EngineSession):
     def __init__(self, workdir: Path, *, keep_workdir: bool) -> None:
         self.workdir = workdir
         self.ws = workdir / "ws"
-        self.agent_root = self.ws / WORKSPACE / "memory-vault"
+        self.agent_root = self.ws / WORKSPACE
         self.port = _free_port()
         self.base = f"http://127.0.0.1:{self.port}"
         self.token = secrets.token_urlsafe(32)
@@ -687,32 +742,22 @@ class IsolatedEngine(EngineSession):
         self._closed = False
 
     @classmethod
-    def boot(cls, task: EvalTask, *, keep_workdir: bool = False) -> "IsolatedEngine":
+    def boot(
+        cls, task: EvalTask, *, provider: str, model: str, keep_workdir: bool = False
+    ) -> "IsolatedEngine":
         workdir = Path(tempfile.mkdtemp(prefix="ciao-task-eval-"))
         engine = cls(workdir, keep_workdir=keep_workdir)
         try:
-            engine._start(task)
+            engine._start(task, provider, model)
         except BaseException:
             engine.close()
             raise
         return engine
 
-    def _start(self, task: EvalTask) -> None:
-        from ciao import cli
-
-        with _PROCESS_STATE_LOCK, _engine_environ(self.workdir, self.ws), _in_directory(self.workdir):
-            cli.setup_workspace(
-                self.ws,
-                auth_token=self.token,
-                port=self.port,
-                launch_agents_dir=self.workdir / "LA",
-                app_dir=self.workdir / "Apps",
-            )
-        personal = self.ws / WORKSPACE
-        shutil.copytree(TASKS_ROOT / FIXTURE_DIRNAME, self.agent_root, dirs_exist_ok=True)
-        if task.overlay is not None:
-            shutil.copytree(task.overlay, personal, dirs_exist_ok=True)
-
+    def _start(self, task: EvalTask, provider: str, model: str) -> None:
+        prepare_workspace(
+            self.workdir, provider, model, task, auth_token=self.token, port=self.port
+        )
         self._log = self._log_path.open("wb")
         script = Path(sys.executable).with_name("ciao")
         command = [str(script), "run"] if script.exists() else [sys.executable, "-m", "ciao", "run"]
@@ -777,9 +822,10 @@ class IsolatedEngine(EngineSession):
         return chat_id
 
     def delegate(self, task_id: str, revision: str, *, provider: str, model: str) -> str:
-        # The delegate route does not accept provider or model (see _DELEGATE_KEYS
-        # in ciao/web/routes_tasks.py), so the spawned chat runs on the
-        # workspace's default routing. The caller records what it asked for.
+        # The delegate route takes no provider or model (_DELEGATE_KEYS in
+        # ciao/web/routes_tasks.py). The spawned chat takes the workspace's
+        # default provider and model, which prepare_workspace pinned to the
+        # requested pair.
         outcome = self.api(
             "POST",
             f"/api/tasks/{task_id}/delegate",
@@ -1003,6 +1049,35 @@ def provider_version(provider: str) -> str | None:
     return lines[0] if proc.returncode == 0 and lines else None
 
 
+def cli_package_mismatch() -> str | None:
+    """Why the ``ciao`` an agent would run is not this harness's package, or None.
+
+    The engine's sandbox only reads the package that is running it, so a
+    ``ciao`` on the agent's PATH that imports a different checkout is refused.
+    Isolated mode (``-I``) ignores PYTHONPATH, which is what the venv's ``ciao``
+    script sees.
+    """
+    harness = Path(__file__).resolve().parent
+    probe = [sys.executable, "-I", "-c", "import ciao; print(ciao.__file__)"]
+    try:
+        proc = subprocess.run(probe, capture_output=True, encoding="utf-8", errors="replace", timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"could not import ciao in isolated mode: {exc!r}"
+    printed = (proc.stdout or "").strip().splitlines()
+    if proc.returncode != 0 or not printed:
+        return f"could not import ciao in isolated mode (exit {proc.returncode}): {(proc.stderr or '')[-300:]}"
+    installed = Path(printed[-1]).resolve().parent
+    if installed == harness:
+        return None
+    return (
+        f"CLI package mismatch: the `ciao` an agent runs imports {installed}, "
+        f"but this harness runs {harness}. The engine sandbox only reads the running "
+        "package, so the agent's ciao calls would be refused. Remedy: run the eval from "
+        "an install of the checkout under test, e.g. `uv venv .venv-eval && uv pip install "
+        "-p .venv-eval -e .` in that checkout, then `.venv-eval/bin/ciao eval tasks run ...`."
+    )
+
+
 def code_revision() -> str | None:
     """Short HEAD of the repository this package lives in, ``-dirty`` when the tree is not clean."""
     repo = Path(__file__).resolve().parents[1]
@@ -1041,6 +1116,7 @@ def _base_record(task: EvalTask, *, provider: str, model: str, label: str, repea
         "skip_reason": None,
         "error": None,
         "checks": [],
+        "answer": "",
         "tokens": _tokens({}),
         "tool_calls": 0,
         "tool_errors": 0,
@@ -1060,10 +1136,13 @@ def run_task(
     model: str,
     label: str,
     repeat: int,
-    session_factory: Callable[[EvalTask], EngineSession] = IsolatedEngine.boot,
+    session_factory: Callable[[EvalTask], EngineSession] | None = None,
     capabilities: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """One graded run of one task. Never raises: a failure becomes ``status="error"``."""
+    """One graded run of one task. Never raises: a failure becomes ``status="error"``.
+
+    Without ``session_factory`` the run boots a real engine on ``provider``/``model``.
+    """
     record = _base_record(task, provider=provider, model=model, label=label, repeat=repeat)
     missing = [name for name in task.requires if name not in capabilities]
     if missing:
@@ -1071,10 +1150,11 @@ def run_task(
         record["skip_reason"] = f"missing capability: {', '.join(missing)}"
         return record
 
+    factory = session_factory or partial(IsolatedEngine.boot, provider=provider, model=model)
     started = time.monotonic()
     session: EngineSession | None = None
     try:
-        session = session_factory(task)
+        session = factory(task)
         _apply_setup(session.api, task)
         snapshot = take_snapshot(session.agent_root, session.api, _unchanged_paths(task))
         if task.entry["kind"] == "prompt":
@@ -1097,6 +1177,7 @@ def run_task(
         record.update(
             status="passed" if settled and all(r.ok for r in results) else "failed",
             checks=[asdict(r) for r in results],
+            answer=ctx.answer[-ANSWER_TAIL_CHARS:],
             tokens=_tokens(usage["tokens"]),
             tool_calls=_as_int(usage["tool_calls"]),
             tool_errors=_as_int(usage["tool_errors"]),
@@ -1127,7 +1208,7 @@ def run_suite(
     repeats: int = 3,
     jobs: int = 1,
     out: Path,
-    session_factory: Callable[[EvalTask], EngineSession] = IsolatedEngine.boot,
+    session_factory: Callable[[EvalTask], EngineSession] | None = None,
     capabilities: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Run every task ``repeats`` times, appending each record to ``out`` as it finishes."""

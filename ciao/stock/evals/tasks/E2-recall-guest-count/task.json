@@ -10,6 +10,6 @@
   "checks": [
     {"kind": "answer_contains", "any": ["23", "twenty-three"]},
     {"kind": "answer_excludes", "any": ["40"]},
-    {"kind": "new_files", "glob": "**/*.md", "max": 0}
+    {"kind": "new_files", "glob": "memory-vault/**/*.md", "max": 0}
   ]
 }
