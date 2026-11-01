@@ -610,9 +610,14 @@ The native coordinator lives in `ciao.native_installer`. It is started only by
 ```
 python -I -m ciao.native_installer run
   --run-id UUID --events-fd N --first-seq S --prior-events P
-  --version V --uv ABS --wheel ABS --manifest ABS --signature ABS --host-archive ABS
+  --version V --uv ABS --uv-sha256 HEX64 --wheel ABS --wheel-sha256 HEX64
+  --manifest ABS --signature ABS --host-archive ABS
   [--workspace ABS]
 ```
+
+Parsing rejects abbreviations and prints one fixed line, `invalid handover
+arguments`, that never echoes a value. A digest that is not 64 lowercase hex
+characters is refused the same way.
 
 `--workspace` is the classifier and wizard suggestion only; the wizard may save a
 different workspace. The public descriptor range is 3–9. Exit 0 means
@@ -622,13 +627,33 @@ request. Signals (SIGINT, SIGTERM, SIGHUP) only set the cancellation flag.
 
 `run_native_install` checks the artifacts first: each path is absolute, not a
 symlink, and a regular file (uv also executable), and `--version` must equal the
-running `ciao.__version__`. A failure there is a fixed `failed` event before any
-classification or mutation. The production steps are: the uv tool and bin
-directories (asked of the verified uv only), the canonical classification, the
+running `ciao.__version__`. The coordinator then creates a private `0700` run
+directory and copies `uv` and the wheel into it. Each source is opened once with
+no-follow, must be owned by the current user with no group or other write bit,
+and must hash to the digest the shell passed in. The copy is re-hashed against
+the same digest, and only the copies are used afterwards. A digest mismatch is
+`verification_failed`. A failure in any of these checks is a fixed `failed`
+event before any classification or mutation.
+
+Every uv call and the interpreter probe run with one allowlisted environment: a
+pinned `HOME` (the account home, which must equal `$HOME`), `PATH=/usr/bin:/bin:/usr/sbin:/sbin`,
+`LANG=C.UTF-8`, and nothing else. Each runs in its own session, in the private
+empty directory, with `--no-config` and the pinned default index; the variables
+that redirect tools, indexes, interpreters, loaders or TLS are never passed. The
+tool and bin directories must equal `<home>/.local/share/uv/tools` and
+`<home>/.local/bin`, or the run is `unknown_state`. The classifier gets the same
+environment. The wizard child keeps the caller's `PATH` and drops the same
+variables. Cancellation is polled while uv runs; cancel or timeout terminates
+and reaps the child's session. The probed interpreter is bound to the handoff's
+`engine_python` (same realpath and device and inode, else `wizard_failed`), and
+the `ciao` shim is re-checked before the wizard starts (else `install_failed`).
+
+The production steps are: the uv tool and bin
+directories (asked of the private uv copy only), the canonical classification, the
 private state and run lock (a held lock is reported on stderr with its pid and
 liveness, never removed), the bootstrap scratch, the second classification, the
 fresh host through `create_fresh_host`, a recheck of that host, the engine install
-(`uv tool install --python 3.13` on the verified wheel, with no `--force`, probed
+(`uv tool install --python 3.13` on the private wheel copy, with no `--force`, probed
 and recorded as the one existing install receipt), the hidden wizard command, the
 schema-2 handoff read, `native_handoff.activate`, and the readiness proof
 `prove_native_readiness` for the handoff port. The coordinator owns the run lock,
