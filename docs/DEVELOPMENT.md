@@ -716,6 +716,57 @@ uses for its run lock.
    classification read-only, including the recorded pid and whether it is alive.
    The coordinator does not print it yet.
 
+**Native install mode (`install.sh --native-install`)**
+
+Not present in engine 1.7.0; ships in the next engine release after 1.7.0 (exact semver assigned at release). The Mac client must pin the sha256 of that release's `install.sh` asset, which `.github/workflows/publish.yml` copies verbatim from `scripts/install-engine.sh`; uv's digest table does not authenticate `install.sh` itself.
+
+Invocation:
+
+```sh
+sh install.sh --version VERSION --native-install --events-fd N --run-id UUID [--workspace /abs] [--no-modify-path]
+```
+
+Arguments and descriptor:
+
+- `--events-fd N` takes exactly one digit from 3 to 9. The descriptor must be open, writable, and must not alias stdout or stderr. An unusable descriptor or run id produces diagnostics on stderr and exit 1, and no event, because there is no reliable channel.
+- `--run-id` is a canonical lowercase hyphenated UUID.
+- `--version` is required. `--workspace`, when given, is an absolute path with no `.` or `..` component and no control character; it is only the wizard's suggestion.
+- `--migrate`, `--as-host`, `--as-client` and `--no-start` are incompatible with `--native-install`. `--no-modify-path` is accepted and redundant: native mode never edits a shell profile.
+- Any other refusal after the descriptor is known is one `failed` event with `invalid_arguments`.
+- Without `--native-install`, `--events-fd` or `--run-id` is refused as a legacy usage error.
+
+Events:
+
+- Each line is one compact JSON object with the keys `schema` (1), `run_id`, `seq` and `type`, plus the keys its type allows. The five types are `phase`, `wizard_ready` (adds `origin`), `setup_saved`, `service_ready` (adds `origin`) and `failed` (adds `code`).
+- Bounds: a line is at most 1024 bytes including its newline, a run has at most 32 events, and `seq` strictly increases. Gaps are allowed.
+- The shell writes only `phase preflight`, `phase bootstrap` and `phase download` (seq 1 to 3), or one `failed`. The coordinator writes `phase install`, `phase wizard`, `wizard_ready`, `setup_saved`, `phase activation`, `phase readiness`, and then `service_ready` or `failed`.
+- After the handover the shell writes nothing.
+
+Failure codes:
+
+| Code | Emitted by | Meaning |
+| --- | --- | --- |
+| `invalid_arguments` | shell | A flag is missing, incompatible or malformed, or the release lacks the coordinator (`NATIVE_COORDINATOR_PROTOCOL` mismatch). |
+| `existing_install` | shell | This Mac already has a Ciaobot install. |
+| `partial_install` | shell | This Mac has leftovers of an earlier install. Native install never repairs them. |
+| `unknown_state` | shell | The state could not be proven fresh: a redirect variable, an unsafe state directory, an unreadable ancestor, or an indeterminate launchd answer. |
+| `install_in_progress` | shell | Another native run holds the lock, or it was left by a killed run. |
+| `download_failed` | shell | The verified uv, the manifest, the wheel or the host could not be downloaded or the uv archive does not match its reviewed digest. |
+| `verification_failed` | shell | The manifest signature, the wheel or host digest, or the server host entry does not match the signed release. |
+| `install_failed` | shell | A system tool is missing, the OS is not macOS 13 or newer, or the private coordinator environment could not be built. |
+| `cancelled` | shell | SIGINT, SIGTERM or SIGHUP arrived before the handover. |
+| `wizard_failed`, `activation_refused`, `service_not_ready`, `cancelled`, `event_channel_failed`, `internal_error` | coordinator | See `ciao.native_installer.FAILURE_CODES`. The shell never emits `event_channel_failed` or `internal_error`. |
+
+Exit semantics: exit 0 means `service_ready` was emitted, and any other exit is a failure. End of file on the events descriptor without a terminal event is a failure too; this is part of the client contract.
+
+Cancellation: SIGINT, SIGTERM or SIGHUP to the shell (or its process group) before the handover is reported as `failed(cancelled)`. After the handover the shell forwards SIGTERM to the coordinator, which stops the wizard. An activated service is never stopped by cancellation.
+
+Lock and partial state: the coordinator owns the run lock and both canonical classifications. The shell's system-only preflight refuses an existing, partial, unknown or locked Mac before any network work and changes nothing it found. The native installer never repairs, retries or reinstalls; see the recovery paragraph above.
+
+Trust chain: the pinned uv digest table authenticates the uv archive; the extracted uv executable's sha256 and the wheel's sha256 are passed to the coordinator, which re-hashes its private copies; the signed manifest authenticates the wheel and the server host, which are checked before the handover. The client pins the `install.sh` digest described above.
+
+Tests: `tests/test_native_install_sh.py` (shell, fake tools) and `tests/test_native_installer.py` (coordinator).
+
 The native bootstrap child side is now explicit but internal. When the native
 coordinator starts it with the private `--installer-native-fd` (hidden, and
 refused without `--installer-bootstrap`/`--installer-run-id`),
