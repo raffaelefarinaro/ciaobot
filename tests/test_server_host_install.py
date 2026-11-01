@@ -2464,6 +2464,7 @@ def test_require_absent_does_not_delete_a_bundle_replaced_during_cleanup(
     assert record.is_file()
 
 
+@requires_posix_uid
 def test_require_absent_rollback_renames_then_removes_only_its_own_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2531,6 +2532,7 @@ def test_require_absent_rollback_renames_then_removes_only_its_own_bundle(
     assert target not in removed
 
 
+@requires_posix_uid
 def test_require_absent_rollback_keeps_a_substitute_swapped_in_before_the_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2585,6 +2587,7 @@ def test_require_absent_rollback_keeps_a_substitute_swapped_in_before_the_move(
     assert not target.exists()
 
 
+@requires_posix_uid
 def test_require_absent_rollback_keeps_the_bundle_when_the_move_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2625,6 +2628,7 @@ def test_require_absent_rollback_keeps_the_bundle_when_the_move_fails(
     assert target.is_dir()
 
 
+@requires_posix_uid
 def test_require_absent_rollback_keeps_an_unexaminable_moved_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2673,6 +2677,7 @@ def test_require_absent_rollback_keeps_an_unexaminable_moved_bundle(
     assert kept[0].is_dir()
 
 
+@requires_posix_uid
 def test_require_absent_rollback_reports_a_partial_removal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2721,6 +2726,7 @@ def test_require_absent_rollback_reports_a_partial_removal(
     assert kept[0].is_dir()
 
 
+@requires_posix_uid
 def test_require_absent_fresh_surface_checks_run_three_times_in_order(
     home_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
