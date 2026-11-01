@@ -238,16 +238,16 @@ matching is case-insensitive.
 
 | Kind | Fields | Passes when |
 | --- | --- | --- |
-| `answer_contains` | `all`, `any` | the final answer contains every `all` needle and at least one `any` needle |
-| `answer_excludes` | `any` | the answer contains none of the needles |
+| `answer_contains` | `all`, `any`, `normalize` | the final answer contains every `all` needle and at least one `any` needle |
+| `answer_excludes` | `any`, `normalize` | the answer contains none of the needles |
 | `abstains` | | the answer matches a clean refusal (`don't know`, `not recorded`, `could not find`, ...) |
 | `new_tasks` | `count`, `title_contains`, `due`, `project_name_contains`, `titles_cover` | exactly `count` tasks are new; every new task has the needles in its title and the due date. `weekday:friday` means that weekday, 1 to 7 days after the run date. `project_name_contains` resolves each new task's `project_id` to a name through `GET /api/projects` (an id not in that list is used as its own name; no project is an empty name), and every needle must be in that name. `titles_cover` is a list of needle groups: exactly one new task matches each group, and every new task matches some group |
 | `new_schedules` | `count`, `frequency`, `days_of_week`, `time`, `prompt_contains`, `prompt_any` | exactly `count` new non-system schedules match; days compare as 3-letter sets; `time` is the wall-clock `daily_time_utc`. `prompt_contains` needs every needle in the prompt; `prompt_any` needs at least one |
 | `any_of` | `options` | at least one option passes. An option is a list of at least one check, and it passes when every check in it passes. Nested checks are validated like top-level ones, but `any_of` and `unchanged` cannot be nested. The detail reads `option 1 passed`, or on failure each option's checks as `kind=ok\|FAIL detail`. A nested check that raises is a failed check, as at top level |
 | `new_projects` | `count`, `name_contains` | exactly `count` new projects match the name needles |
-| `file_contains` | `path`, `all`, `any` | the file holds the needles |
-| `file_excludes` | `path`, `any` | the file holds none of the needles |
-| `occurrences` | `path`, `text`, `count` | the text appears exactly `count` times |
+| `file_contains` | `path`, `all`, `any`, `normalize` | the file holds the needles |
+| `file_excludes` | `path`, `any`, `normalize` | the file holds none of the needles |
+| `occurrences` | `path`, `text`, `count`, `normalize` | the text appears exactly `count` times |
 | `new_files` | `glob`, `count` or `max` | files matching the glob that were not in the snapshot number `count`, or at most `max` |
 | `frontmatter_valid` | `path` or `glob` | every matched file has a YAML frontmatter block with `type` and `updated`; a glob that matches nothing fails |
 | `links_resolve` | `path` | every relative Markdown link in the note resolves to an existing file |
@@ -256,6 +256,19 @@ matching is case-insensitive.
 | `command` | `argv`, `cwd`, `timeout_s` | the command exits 0; `{python}` in argv is `sys.executable` |
 | `gws_calls` | `must`, `must_not`, `min_calls` | over the fake gws call log (see [Capabilities](#capabilities)): every `must` regex matches at least one call summary, no `must_not` regex matches any, and there are at least `min_calls` calls. Fails with "no gws fake in this run" when the task has no fake |
 | `proposals` | `path`, `must`, `must_not`, `include_files`, `max_new` | the queue bullets added since the snapshot (default `memory-vault/Workspace/Memory-Proposals.md`) and the lines added to each `include_files` file are the items. An `include_files` entry ending in `/` is a directory: every file under it is diffed line by line against the snapshot, and a file that did not exist then counts as all new lines. Every `must` regex matches an item, no `must_not` regex matches one, and at most `max_new` queue bullets are new. Regexes are case-insensitive. Bullets are read with the grammar `list_proposals` uses. A missing queue is empty. At least one of `must`, `must_not` or `max_new` is required |
+
+`normalize: true` is accepted only by the five text checks above (`answer_contains`,
+`answer_excludes`, `file_contains`, `file_excludes`, `occurrences`), and it must be a
+boolean. It folds both the text and every needle the same way before matching:
+`*`, `_` and backticks are removed (so a bold amount `**1,100**` or an italic
+label `_Catering total:_` matches its plain form); no-break and thin spaces
+(U+00A0, U+202F, U+2009) become plain spaces; runs of spaces collapse to one;
+and the curly apostrophe (U+2019) becomes `'`. Matching stays case-insensitive.
+Without `normalize`, the text is compared as written.
+
+A `new_tasks` check with `titles_cover` must have `count` equal to the number of
+groups (one task per group is the intended shape). The catalog rejects any other
+pairing.
 
 A check that raises is a failed check with the exception in its detail. It does
 not stop grading of the other checks.

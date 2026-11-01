@@ -207,6 +207,11 @@ def _validate_check(task_id: str, spec: Any) -> dict[str, Any]:
     kind = spec.get("kind")
     if kind not in CHECKS:
         raise TaskCatalogError(f"{task_id}: unknown check kind {kind!r}")
+    if "normalize" in spec:
+        if kind not in NORMALIZABLE_KINDS:
+            raise TaskCatalogError(f"{task_id}: normalize applies only to {sorted(NORMALIZABLE_KINDS)}, not {kind!r}")
+        if not isinstance(spec["normalize"], bool):
+            raise TaskCatalogError(f"{task_id}: {kind} normalize must be true or false")
     if kind == "gws_calls":
         _validate_gws_calls(task_id, spec)
     elif kind == "proposals":
@@ -252,6 +257,10 @@ def _validate_new_tasks(task_id: str, spec: dict[str, Any]) -> None:
         )
         if not valid:
             raise TaskCatalogError(f"{task_id}: new_tasks titles_cover must be a list of non-empty string lists")
+        if spec.get("count", 1) != len(groups):
+            raise TaskCatalogError(
+                f"{task_id}: new_tasks count {spec.get('count', 1)!r} must equal the {len(groups)} titles_cover groups"
+            )
 
 
 def _validate_new_schedules(task_id: str, spec: dict[str, Any]) -> None:
@@ -442,9 +451,28 @@ def _fail(kind: str, detail: str) -> CheckResult:
     return CheckResult(kind=kind, ok=False, detail=detail)
 
 
-def _text_has(text: str, needles: list[str], *, all_of: bool) -> bool:
+# Checks that accept ``"normalize": true``, and the folding that option applies.
+NORMALIZABLE_KINDS: frozenset[str] = frozenset(
+    {"answer_contains", "answer_excludes", "file_contains", "file_excludes", "occurrences"}
+)
+_NORMALIZE_DROP_RE = re.compile(r"[*_`]")
+_NORMALIZE_TRANSLATE = str.maketrans({" ": " ", " ": " ", " ": " ", "’": "'"})
+_SPACE_RUN_RE = re.compile(r" {2,}")
+
+
+def _fold(text: str, normalize: bool) -> str:
+    """Lowercased text. With ``normalize``, markup (``*``, ``_``, backticks) is dropped, no-break and thin
+    spaces and curly apostrophes become plain ones, and runs of spaces collapse. Needles fold the same way."""
     lowered = text.lower()
-    hits = [needle.lower() in lowered for needle in needles]
+    if not normalize:
+        return lowered
+    folded = _NORMALIZE_DROP_RE.sub("", lowered).translate(_NORMALIZE_TRANSLATE)
+    return _SPACE_RUN_RE.sub(" ", folded)
+
+
+def _text_has(text: str, needles: list[str], *, all_of: bool, normalize: bool = False) -> bool:
+    lowered = _fold(text, normalize)
+    hits = [_fold(needle, normalize) in lowered for needle in needles]
     return all(hits) if all_of else any(hits)
 
 
@@ -454,11 +482,12 @@ def _contains_spec(text: str, spec: dict[str, Any]) -> tuple[bool, str]:
     any_needles = [str(n) for n in spec.get("any", [])]
     if not all_needles and not any_needles:
         return False, "check names no needles (all/any)"
+    normalize = bool(spec.get("normalize", False))
     ok = True
     if all_needles:
-        ok = ok and _text_has(text, all_needles, all_of=True)
+        ok = ok and _text_has(text, all_needles, all_of=True, normalize=normalize)
     if any_needles:
-        ok = ok and _text_has(text, any_needles, all_of=False)
+        ok = ok and _text_has(text, any_needles, all_of=False, normalize=normalize)
     return ok, f"all={all_needles} any={any_needles}"
 
 
@@ -481,7 +510,9 @@ def _check_answer_excludes(ctx: GradeContext, spec: dict[str, Any]) -> CheckResu
     needles = [str(n) for n in spec.get("any", [])]
     if not needles:
         return _fail("answer_excludes", "check names no needles (any)")
-    present = [n for n in needles if n.lower() in ctx.answer.lower()]
+    normalize = bool(spec.get("normalize", False))
+    haystack = _fold(ctx.answer, normalize)
+    present = [n for n in needles if _fold(n, normalize) in haystack]
     return CheckResult("answer_excludes", not present, f"present={present}")
 
 
@@ -616,7 +647,9 @@ def _check_file_excludes(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult
         text = _read_note(ctx, str(spec["path"]))
     except (OSError, ValueError) as exc:
         return _fail("file_excludes", f"cannot read {spec.get('path')!r}: {exc}")
-    present = [n for n in spec.get("any", []) if str(n).lower() in text.lower()]
+    normalize = bool(spec.get("normalize", False))
+    haystack = _fold(text, normalize)
+    present = [n for n in spec.get("any", []) if _fold(str(n), normalize) in haystack]
     return CheckResult("file_excludes", not present, f"present={present}")
 
 
@@ -625,8 +658,9 @@ def _check_occurrences(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
         text = _read_note(ctx, str(spec["path"]))
     except (OSError, ValueError) as exc:
         return _fail("occurrences", f"cannot read {spec.get('path')!r}: {exc}")
-    needle = str(spec["text"]).lower()
-    found = text.lower().count(needle)
+    normalize = bool(spec.get("normalize", False))
+    needle = _fold(str(spec["text"]), normalize)
+    found = _fold(text, normalize).count(needle)
     want = int(spec["count"])
     return CheckResult("occurrences", found == want, f"found {found}, want {want}")
 

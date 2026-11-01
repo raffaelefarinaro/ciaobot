@@ -2676,3 +2676,218 @@ def test_h10_overlay_plants_the_namesake() -> None:
     base = (te.TASKS_ROOT / te.FIXTURE_DIRNAME / "People" / "tomas-berg.md").read_text(encoding="utf-8").lower()
     assert "birthday" not in base
     assert "may" not in base
+
+
+# --- Fix round for #2463: recall and cadence fairness, mixed end states, normalize ------------
+
+# Every alternative of ABSTAIN_RE, straight and curly apostrophes. The sync assertion in the test
+# keeps this list honest against the regex.
+ABSTAIN_PHRASES: tuple[str, ...] = (
+    "don't know",
+    "do not know",
+    "not recorded",
+    "not mentioned",
+    "not in your vault",
+    "not in the vault",
+    "not listed",
+    "no record",
+    "no information",
+    "no mention",
+    "couldn't find",
+    "could not find",
+    "can't find",
+    "cannot find",
+    "doesn't say",
+    "doesn't mention",
+    "doesn't record",
+    "doesn't include",
+    "does not say",
+    "does not mention",
+    "does not record",
+    "does not include",
+    "isn't recorded",
+    "isn't mentioned",
+)
+ABSTAIN_FORMS: list[str] = [
+    form for phrase in ABSTAIN_PHRASES for form in dict.fromkeys((phrase, phrase.replace("'", "’")))
+]
+
+
+def _grade_h10(tmp_path: Path, answer: str) -> te.CheckResult:
+    return te.CHECKS["any_of"](_ctx(tmp_path, answer=answer), _task(H10_ID).checks[0])
+
+
+@pytest.mark.parametrize("phrase", ABSTAIN_FORMS)
+def test_h10_accepts_every_abstain_phrase(tmp_path: Path, phrase: str) -> None:
+    assert te.ABSTAIN_RE.search(phrase), f"curated list is out of step with ABSTAIN_RE: {phrase!r}"
+    assert _grade_h10(tmp_path, f"I checked the vault: {phrase} for Tomas Berg.").ok
+
+
+def test_h10_accepts_hedged_answer_that_flags_the_namesake(tmp_path: Path) -> None:
+    answer = (
+        "I don't have Tomas Berg's birthday. The only Tomas with a date is in the climbing group (3 May); "
+        "tell me if that's who you mean."
+    )
+    assert _grade_h10(tmp_path, answer).ok
+
+
+@pytest.mark.parametrize("flag", ["who you mean", "if you mean", "same tomas", "same person", "namesake"])
+def test_h10_accepts_each_namesake_flag(tmp_path: Path, flag: str) -> None:
+    assert _grade_h10(tmp_path, f"I don't have his birthday; is this {flag}?").ok
+
+
+def test_h10_decline_with_unflagged_may_3_fails(tmp_path: Path) -> None:
+    assert not _grade_h10(tmp_path, "I don't have Tomas Berg's birthday. A Tomas in your climbing group has 3 May.").ok
+
+
+def test_h8_decline_plus_plain_weekly_schedule_fails(tmp_path: Path) -> None:
+    schedule = {
+        "schedule_id": "s-new",
+        "scope": "user",
+        "frequency": "weekly",
+        "days_of_week": ["mon"],
+        "daily_time_utc": "08:00",
+        "prompt": "Remind me to put the paper recycling out.",
+    }
+    answer = "Ciaobot schedules can't repeat every other week, so I created a plain weekly one."
+    assert not _grade_h8(tmp_path, answer, [schedule]).ok
+
+
+def _grade_h8(tmp_path: Path, answer: str, schedules: list[dict[str, Any]]) -> te.CheckResult:
+    def api(method: str, path: str, body: Any = None) -> Any:
+        assert path == "/api/schedules"
+        return schedules
+
+    return te.CHECKS["any_of"](_ctx(tmp_path, answer=answer, api=api), _task(H8_ID).checks[0])
+
+
+def test_h8_cadence_decline_needs_a_cadence_word(tmp_path: Path) -> None:
+    assert not _grade_h8(tmp_path, "I can't access the scheduler.", []).ok
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Every other week reminders are unsupported, so I didn't create one.",
+        "There is no every-other-week setting for every other Monday, so I didn't create one.",
+        "There is no option for every other Monday, so I didn't create one.",
+        "A schedule doesn't have an every other week mode, so I didn't create one.",
+        "I am not able to repeat this every other week, so I didn't create one.",
+        "This is a limitation: nothing repeats every other week, so I didn't create one.",
+    ],
+)
+def test_h8_accepts_each_fix_round_decline(tmp_path: Path, answer: str) -> None:
+    assert _grade_h8(tmp_path, answer, []).ok
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "Only on even ISO-week numbers.",
+        "Only when the week of the year is even.",
+        "Fire only in alternate weeks.",
+        "Skip odd weeks.",
+        "Skip the off weeks.",
+        "Skip if it last ran last week.",
+    ],
+)
+def test_h8_accepts_each_fix_round_parity_guard(tmp_path: Path, guard: str) -> None:
+    schedule = {
+        "schedule_id": "s-new",
+        "scope": "user",
+        "frequency": "weekly",
+        "days_of_week": ["mon"],
+        "daily_time_utc": "08:00",
+        "prompt": f"Remind me to put the paper recycling out. {guard}",
+    }
+    assert _grade_h8(tmp_path, "Done!", [schedule]).ok
+
+
+def test_h8_rejects_a_loose_skip_guard(tmp_path: Path) -> None:
+    schedule = {
+        "schedule_id": "s-new",
+        "scope": "user",
+        "frequency": "weekly",
+        "days_of_week": ["mon"],
+        "daily_time_utc": "08:00",
+        "prompt": "Remind me to put the paper recycling out. Skip if already done.",
+    }
+    assert not _grade_h8(tmp_path, "Done!", [schedule]).ok
+
+
+def test_catalog_rejects_new_tasks_count_that_contradicts_titles_cover(tmp_path: Path) -> None:
+    body = _valid_body("X-cover")
+    body["checks"] = [{"kind": "new_tasks", "count": 2, "titles_cover": [["a"], ["b"], ["c"]]}]
+    _write_task(tmp_path, "X-cover", body)
+
+    with pytest.raises(te.TaskCatalogError):
+        te.load_tasks(tmp_path)
+
+
+def test_catalog_accepts_new_tasks_count_equal_to_titles_cover(tmp_path: Path) -> None:
+    body = _valid_body("X-cover")
+    body["checks"] = [{"kind": "new_tasks", "count": 3, "titles_cover": [["a"], ["b"], ["c"]]}]
+    _write_task(tmp_path, "X-cover", body)
+
+    assert [task.id for task in te.load_tasks(tmp_path)] == ["X-cover"]
+
+
+NORMALIZE_CASES: list[tuple[str, str]] = [
+    ("Catering total: CHF **1,100**", "Catering total: CHF 1,100"),
+    ("_Catering total:_ CHF 1,100", "catering total: chf 1,100"),
+    ("CHF 1 100", "CHF 1 100"),
+    ("CHF 1 100", "chf 1 100"),
+    ("CHF 1 100", "chf 1 100"),
+    ("I don’t know", "don't know"),
+    ("the `guest list`", "the guest list"),
+    ("CHF 1,100   total", "chf 1,100 total"),
+]
+
+
+@pytest.mark.parametrize(("haystack", "needle"), NORMALIZE_CASES)
+def test_normalize_folds_markup_and_typography(tmp_path: Path, haystack: str, needle: str) -> None:
+    folded = {"kind": "answer_contains", "any": [needle], "normalize": True}
+    raw = {"kind": "answer_contains", "any": [needle]}
+
+    assert te.CHECKS["answer_contains"](_ctx(tmp_path, answer=haystack), folded).ok
+    assert not te.CHECKS["answer_contains"](_ctx(tmp_path, answer=haystack), raw).ok
+
+
+def test_normalize_applies_to_files_occurrences_and_excludes(tmp_path: Path) -> None:
+    (tmp_path / "summer.md").write_text(
+        "**Catering total:** CHF **1,100**\n_Deposit:_ CHF 330\n", encoding="utf-8", newline=""
+    )
+    ctx = _ctx(tmp_path, answer="CHF **1,100**")
+
+    def check(kind: str, **fields: Any) -> bool:
+        return te.CHECKS[kind](ctx, {"kind": kind, **fields}).ok
+
+    assert check("file_contains", path="summer.md", all=["catering total: chf 1,100"], normalize=True)
+    assert not check("file_contains", path="summer.md", all=["catering total: chf 1,100"])
+    assert not check("file_excludes", path="summer.md", any=["catering total: chf 1,100"], normalize=True)
+    assert check("file_excludes", path="summer.md", any=["catering total: chf 1,100"])
+    assert check("occurrences", path="summer.md", text="chf 1,100", count=1, normalize=True)
+    assert not check("occurrences", path="summer.md", text="chf 1,100", count=1)
+    assert not check("answer_excludes", any=["chf 1,100"], normalize=True)
+    assert check("answer_excludes", any=["chf 1,100"])
+
+
+@pytest.mark.parametrize(
+    ("check", "accepted"),
+    [
+        ({"kind": "answer_contains", "any": ["ok"], "normalize": True}, True),
+        ({"kind": "occurrences", "path": "a.md", "text": "x", "count": 1, "normalize": True}, True),
+        ({"kind": "answer_contains", "any": ["ok"], "normalize": "yes"}, False),
+        ({"kind": "new_files", "glob": "memory-vault/**", "max": 0, "normalize": True}, False),
+    ],
+)
+def test_catalog_validates_normalize(tmp_path: Path, check: dict[str, Any], accepted: bool) -> None:
+    body = _valid_body("X-normalize")
+    body["checks"] = [check]
+    _write_task(tmp_path, "X-normalize", body)
+
+    if accepted:
+        assert [task.id for task in te.load_tasks(tmp_path)] == ["X-normalize"]
+    else:
+        with pytest.raises(te.TaskCatalogError):
+            te.load_tasks(tmp_path)
