@@ -720,37 +720,33 @@ def prepare_workspace(
 def _stop_process_group(proc: subprocess.Popen[bytes]) -> None:
     """Stop an engine and whatever it spawned (provider CLIs), on POSIX via its process group.
 
-    The group is signalled only while the engine is still unreaped: a zombie
-    leader keeps its process-group id reserved, so the signal cannot reach an
-    unrelated group that reused the id. An engine some other path already
-    reaped is not signalled at all.
+    SIGTERM goes to the whole group while the engine is still alive, so its
+    process-group id is reserved and the signal cannot reach an unrelated group.
+    The final SIGKILL for stragglers runs right after the reap; a reused group
+    id would need the kernel to hand out the same pid and that process to call
+    setsid in between, which sequential pid allocation makes impractical. An
+    engine some other path already reaped is not signalled at all.
     """
-    if sys.platform == "win32":
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
-        return
     if proc.returncode is not None:
+        return
+    if sys.platform == "win32":
+        proc.terminate()
+        try:
+            proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
         return
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, signal.SIGTERM)
-    deadline = time.monotonic() + ENGINE_STOP_TIMEOUT_S
-    while time.monotonic() < deadline:
-        # WNOWAIT: notice the exit without reaping, so the group id stays reserved.
-        # typeshed lists waitid for Linux only; CPython has it on macOS too.
-        exited = os.waitid(  # type: ignore[attr-defined,unused-ignore]
-            os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT  # type: ignore[attr-defined,unused-ignore]
-        )
-        if exited is not None:
-            break
-        time.sleep(0.1)
+    try:
+        proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, signal.SIGKILL)
-    proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
 
 
 class EngineSession(Protocol):

@@ -935,3 +935,10 @@ def test_frontmatter_closing_fence_must_be_its_own_line(tmp_path: Path) -> None:
 
     assert not result.ok
     assert "unterminated" in result.detail
+
+
+def test_stop_process_group_needs_no_waitid() -> None:
+    # os.waitid exists on macOS only from CPython 3.13; the floor is 3.12 (#2435).
+    import inspect
+
+    assert "waitid" not in inspect.getsource(te._stop_process_group)
