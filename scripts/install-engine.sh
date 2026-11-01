@@ -666,9 +666,13 @@ native_host_probe_candidate() {
     #      startup_id is the lock's - and the lock itself is a private regular file,
     #      opened no-follow, whose opened inode is the one listed;
     #   5. the listener's bounded ancestor chain (four hops) reaches the pid launchd
-    #      reports for the job, and that job process' executable text is the
-    #      installed `Ciaobot Server` - launchd runs the host, which posix_spawns
-    #      Python, so the job pid is never the socket holder.
+    #      reports for the job, and the kernel says that job process' executable is
+    #      the installed `Ciaobot Server` - launchd runs the host, which
+    #      posix_spawns Python, so the job pid is never the socket holder. The
+    #      answer comes from libproc `proc_pidpath` in the verified wheel's module,
+    #      not from argv[0], `ps`'s comm, or an `lsof -d txt` record: those name a
+    #      string the process chose or every mapped executable segment, and on
+    #      macOS `lsof` reports many such segments for one signed host.
     # `native_host_unproven` names the step that failed, so a timeout gives the
     # operator a direction instead of "it did not come up".
     native_host_probe_port=$1
@@ -767,27 +771,13 @@ native_host_probe_candidate() {
         native_host_unproven="an ancestry from the listener reaching launchd's pid $native_host_launchd_pid within four hops"
         return 1
     fi
-    native_host_txt_rc=0
-    native_host_txt=$(
-        "$LSOF" -a -p "$native_host_launchd_pid" -d txt -Fn 2>/dev/null
-    ) || native_host_txt_rc=$?
-    if [ "$native_host_txt_rc" -ne 0 ]; then
-        native_host_unproven="the executable text of launchd's pid $native_host_launchd_pid"
-        return 1
-    fi
-    native_host_txt_records=$(
-        printf '%s\n' "$native_host_txt" | grep -c '^n' || true
-    )
-    if [ "$native_host_txt_records" != 1 ]; then
-        native_host_unproven="exactly one executable text record for launchd's pid $native_host_launchd_pid"
-        return 1
-    fi
-    native_host_txt_path=$(
-        printf '%s\n' "$native_host_txt" | sed -n 's/^n//p' | head -1
-    )
     native_host_executable="$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
-    if [ "$native_host_txt_path" != "$native_host_executable" ]; then
-        native_host_unproven="the installed host executable at launchd's pid $native_host_launchd_pid (it runs ${native_host_txt_path:-nothing})"
+    native_host_identity_rc=0
+    native_host_run executable --pid "$native_host_launchd_pid" \
+        --expect "$native_host_executable" \
+        >/dev/null 2>/dev/null || native_host_identity_rc=$?
+    if [ "$native_host_identity_rc" -ne 0 ]; then
+        native_host_unproven="the kernel executable identity of launchd's pid $native_host_launchd_pid (it does not prove the installed Ciaobot Server)"
         return 1
     fi
     return 0
@@ -3108,8 +3098,9 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ] &&
                     # this install started: one listener before and the same one
                     # after the request, that pid in the runtime lock, the reported
                     # startup id in the same lock, and that listener's ancestry
-                    # reaching launchd's job - whose executable text is the installed
-                    # host. A version string says nothing about any of that.
+                    # reaching launchd's job - whose kernel-named executable is
+                    # the installed host. A version string says nothing about any
+                    # of that.
                     if native_host_probe_candidate "$port" "$version"; then
                         healthy=1
                         break

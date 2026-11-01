@@ -24,6 +24,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 from types import ModuleType
 from typing import Any
 
@@ -2147,3 +2148,87 @@ def test_real_build_killed_after_the_rename_is_verified_next_run(
     )
     assert again.bundle_path == os.path.realpath(bundle)
     assert bundle.stat().st_ino == inode
+
+
+def _spawn_with_spoofed_argv0(spoof: Path) -> subprocess.Popen[bytes]:
+    """A harmless child whose argv[0] names a different existing file.
+
+    It runs this interpreter, so the kernel executable must be the interpreter
+    even though every user-space string the process can choose says ``spoof``.
+    No service, signed host or real user file is involved.
+    """
+    return subprocess.Popen(
+        [str(spoof), "-c", "import time; time.sleep(60)"],
+        executable=sys.executable,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="proc_pidpath is a macOS libproc call"
+)
+def test_kernel_executable_identity_ignores_a_spoofed_argv0(tmp_path: Path) -> None:
+    # The process is really this interpreter, but its argv[0] is a different file
+    # that exists. `proc_pidpath` must name the interpreter; the expected host is
+    # compared as the same regular file object, and the spoofed name is refused.
+    expected = Path(sys.executable)
+    spoof = tmp_path / "Ciaobot Server"
+    spoof.write_text("", encoding="utf-8")
+    child = _spawn_with_spoofed_argv0(spoof)
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                proven = server_host_install.verify_process_executable(
+                    child.pid, expected
+                )
+                break
+            except server_host_install.ServerHostInstallError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+        assert Path(proven) == Path(os.path.realpath(expected, strict=True))
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.verify_process_executable(child.pid, spoof)
+        assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="proc_pidpath is a macOS libproc call"
+)
+def test_kernel_executable_identity_fails_closed_for_a_missing_pid() -> None:
+    # A pid the kernel cannot name is not a pass: a pid outside the kernel's
+    # range and a non-positive id may not authorize the host replacement.
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(2**31 - 1, Path(sys.executable))
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(0, Path(sys.executable))
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_executable_cli_prints_nothing_on_stdout_when_it_refuses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The shell treats a zero exit as the proof and a nonzero as "not proven", so
+    # a refusal must not put a path on stdout that another parser could mistake
+    # for an answer. stderr stays one bounded line.
+    status = server_host_install.main(
+        [
+            "executable",
+            "--pid",
+            "0",
+            "--expect",
+            str(tmp_path / "Ciaobot Server"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("Error: ")

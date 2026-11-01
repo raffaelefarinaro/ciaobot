@@ -589,10 +589,19 @@ process instance this run started, bound to objects rather than strings:
    with mode `0600`, opened without following a link, whose opened inode is the one
    the directory listed - readable lock metadata alone proves nothing;
 3. the listener's bounded ancestor chain (`ps -o ppid=`, four hops) reaches the pid
-   `launchctl print` reports for the job, and that job's executable text
-   (`lsof -a -p <pid> -d txt -Fn`, exactly one `n` record - `ps -o comm=` only ever
-   prints the name) is the installed `Ciaobot Server`, because launchd runs the host
-   and the host `posix_spawn`s Python.
+   `launchctl print` reports for the job, and the kernel says that job process'
+   executable is the installed `Ciaobot Server` (`libproc`'s `proc_pidpath`,
+   through the verified wheel's `server_host_install executable` subcommand).
+   `ps -o comm=` only prints a name and `lsof -d txt` lists every mapped
+   executable segment (a signed host has many), so neither is executable
+    identity. Both the kernel path and the expected host are canonicalised and
+    must currently resolve to the same regular file; this does not prove the
+    running executable's inode or bytes after an on-disk replacement. An
+    unreadable pid, a truncated path or any other executable is a refusal. A pid can be recycled
+   after the listener/lock captures and before this probe; if the replacement is
+   the same installed host the check still passes, so this narrows the window
+   rather than eliminating it, and no PID-reuse proof is claimed beyond the
+   kernel's current answer.
 
 A missing, ambiguous, over-deep or unreadable answer is a failure, not a pass, and
 the timeout message names the step that could not be proven (version, lock,

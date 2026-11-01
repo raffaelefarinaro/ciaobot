@@ -464,6 +464,29 @@ case "${1:-}" in
                 fi
                 exit 0
                 ;;
+            "-I -m ciao.server_host_install executable "*)
+                # The kernel executable identity is libproc on a real Mac. The
+                # shell contract runs on every platform, so this records the
+                # question and answers as the kernel would. The expected path is
+                # echoed only on a match, exactly like the module.
+                printf '%s\\n' "$*" >> "$HOME/native-host-executable.log"
+                if [ -f "$HOME/host-executable-indeterminate" ]; then
+                    printf 'Error: the kernel cannot name the executable of the launched host\\n' >&2
+                    exit 1
+                fi
+                if [ -f "$HOME/host-executable-wrong" ]; then
+                    printf 'Error: the launched host runs /usr/bin/python3\\n' >&2
+                    exit 1
+                fi
+                expected=
+                previous=
+                for argument in "$@"; do
+                    if [ "$previous" = "--expect" ]; then expected=$argument; fi
+                    previous=$argument
+                done
+                printf '%s\\n' "$expected"
+                exit 0
+                ;;
             "-I -m ciao.server_host_install commit-upgrade "*)
                 printf '%s\\n' "$*" >> "$HOME/native-host-transaction.log"
                 printf 'native-host-commit\\n' >> "$HOME/trace.log"
@@ -1042,11 +1065,13 @@ def _harness(
         'fi\n'
         'exit 0\n',
     )
-    # `lsof` answers the two questions the health gate asks: which single pid holds
+    # `lsof` answers one question the health gate asks: which single pid holds
     # the listening socket (plain `-t`, one pid per line, nonzero when nothing
-    # matches), and which executable text a pid runs (`-d txt -Fn`, one `n` record).
-    # The listener can be replaced while a request is in flight, and the launchd
-    # job's executable can be something else entirely; both are knobs.
+    # matches). The listener can be replaced while a request is in flight, so
+    # that is a knob. The executable identity is *not* asked here any more: on
+    # Darwin `lsof -d txt` lists every mapped executable segment, not the binary
+    # the process was launched from, so this fake emits the real many-record
+    # shape for that query and a test asserts the installer never sends it.
     _write_exec(
         fakebin / "lsof",
         "#!/bin/sh\n"
@@ -1059,25 +1084,16 @@ def _harness(
         '    esac\n'
         'done\n'
         'if [ -n "$executable" ]; then\n'
-        '    if [ -f "$HOME/host-executable-indeterminate" ]; then exit 1; fi\n'
-        '    if [ -f "$HOME/host-executable-wrong" ]; then\n'
-        '        printf \'n/usr/bin/python3\\n\'\n'
-        '        exit 0\n'
-        '    fi\n'
-        '    if [ -f "$HOME/host-executable-two" ]; then\n'
-        '        printf \'n/usr/bin/python3\\n\'\n'
-        '        printf \'n/usr/bin/python3\\n\'\n'
-        '        exit 0\n'
-        '    fi\n'
-        '    if [ -f "$HOME/host-executable-mixed" ]; then\n'
-        '        printf \'n/usr/bin/python3\\n\'\n'
-        '        printf \'n%s\\n\' \\\n'
-        '            "$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n'
-        '        exit 0\n'
-        '    fi\n'
+        '    # A signed universal host maps dyld, the system libraries and its own\n'
+        '    # two slices; the old "exactly one n record" rule can never match.\n'
         '    printf \'p%s\\n\' "$(cat "$HOME/host-pid" 2>/dev/null || echo 4343)"\n'
+        '    printf \'fcwd\\n\'\n'
+        '    printf \'n/usr/lib/dyld\\n\'\n'
+        '    printf \'n/usr/lib/libSystem.B.dylib\\n\'\n'
+        '    printf \'n/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation\\n\'\n'
         '    printf \'n%s\\n\' \\\n'
         '        "$HOME/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n'
+        '    printf \'n/usr/lib/libobjc.A.dylib\\n\'\n'
         '    exit 0\n'
         'fi\n'
         'if [ -f "$HOME/listener-replaced" ]; then\n'
@@ -3263,10 +3279,9 @@ def _assert_no_commit_and_legacy_pair(
 @runs_the_sh_installer
 @needs_local_tools
 def test_a_wrong_boundary_executable_does_not_commit(tmp_path: Path) -> None:
-    # The ancestry reaches launchd's pid, but that process is not running the
-    # installed host executable. On a real Mac `ps -o comm=` cannot answer this at
-    # all, which is why the executable text is read from lsof; either way, a job
-    # that is not the host is not the candidate.
+    # The ancestry reaches launchd's pid, but the kernel says that process runs a
+    # different executable. argv[0], `ps -o comm=` and a mapped `lsof` record could
+    # all be made to agree with the installed host; the kernel executable cannot.
     harness = _signed_host_harness(tmp_path)
     _defer(harness)
     _existing_install(harness)
@@ -3276,6 +3291,26 @@ def test_a_wrong_boundary_executable_does_not_commit(tmp_path: Path) -> None:
     result = _run_installer(harness, "--version", VERSION)
 
     _assert_no_commit_and_legacy_pair(harness, result, step="executable")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_unreadable_kernel_executable_probe_does_not_commit(
+    tmp_path: Path,
+) -> None:
+    # The kernel could not name the job's executable at all. An unknown identity
+    # is not the installed host, so the before-images and the journal stay.
+    harness = _signed_host_harness(tmp_path)
+    _defer(harness)
+    _existing_install(harness)
+    _engine_definition(harness)
+    (harness["home"] / "host-executable-indeterminate").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    _assert_no_commit_and_legacy_pair(
+        harness, result, step="kernel executable identity"
+    )
 
 
 def test_the_engine_runtime_lock_is_created_private_under_a_typical_umask(
@@ -3316,21 +3351,39 @@ def test_the_engine_runtime_lock_is_created_private_under_a_typical_umask(
 
 @runs_the_sh_installer
 @needs_local_tools
-def test_an_ambiguous_executable_lookup_does_not_commit(tmp_path: Path) -> None:
-    # `lsof -d txt` reports two `n` records and one of them *is* the installed host.
-    # A parser that accepted any matching record would pass this; the contract is
-    # exactly one record, so an ambiguous answer proves nothing.
+def test_many_mapped_executable_segments_do_not_hide_a_correct_host(
+    tmp_path: Path,
+) -> None:
+    # The macOS defect: `lsof -a -p <pid> -d txt -Fn` reports every mapped
+    # executable segment (dyld, system libraries, both universal slices), not the
+    # one binary the process was launched from. Requiring exactly one `n` record
+    # therefore refused every real signed host. The identity now comes from the
+    # kernel through libproc, so this run commits even though the fake `lsof`
+    # answers in the real many-record shape - and the installer never asks it.
     harness = _signed_host_harness(tmp_path)
     _defer(harness)
     _existing_install(harness)
     _engine_definition(harness)
-    (harness["home"] / "host-executable-mixed").write_text("")
 
     result = _run_installer(harness, "--version", VERSION)
 
-    _assert_no_commit_and_legacy_pair(
-        harness, result, step="exactly one executable text record"
-    )
+    assert result.returncode == 0, result.stderr
+    assert "commit-upgrade" in _log(harness, "native-host-transaction.log")
+    assert "rollback-upgrade" not in _log(harness, "native-host-transaction.log")
+    assert not (harness["home"] / "native-host-pending").exists()
+    lsof_calls = [
+        line for line in _log(harness, "trace.log").splitlines()
+        if line.startswith("lsof ")
+    ]
+    assert lsof_calls
+    assert not any("-d txt" in line for line in lsof_calls)
+    identity_calls = _log(harness, "native-host-executable.log").splitlines()
+    assert len(identity_calls) == 1
+    assert "--pid 4343" in identity_calls[0]
+    assert (
+        f"--expect {harness['home']}/Applications/Ciaobot Server.app"
+        "/Contents/MacOS/Ciaobot Server"
+    ) in identity_calls[0]
 
 
 @runs_the_sh_installer
