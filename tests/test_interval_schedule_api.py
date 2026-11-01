@@ -481,3 +481,57 @@ def test_retargeting_onto_a_fixed_chat_drops_auto_archive(client: TestClient) ->
         if e.schedule_id == schedule_id
     )
     assert stored.archive_policy == "manual"
+
+
+# ── days_of_week on the REST create and update doors ──────────────────────
+
+
+def _create_weekly(client: TestClient, days: list[str]):
+    return client.post("/api/schedules", json={
+        "prompt": "digest",
+        "frequency": "weekly",
+        "time": "09:00",
+        "days_of_week": days,
+        "web_chat_id": "chat-idle",
+    })
+
+
+def test_create_refuses_an_unknown_day_naming_the_accepted_ones(client: TestClient) -> None:
+    resp = _create_weekly(client, ["Funday"])
+
+    assert resp.status_code == 400
+    assert "mon,tue,wed,thu,fri,sat,sun" in resp.json()["error"]
+
+
+def test_create_stores_a_full_day_name_as_three_letters(client: TestClient) -> None:
+    resp = _create_weekly(client, ["Monday"])
+
+    assert resp.status_code == 201, resp.text
+    stored = client.app.state.schedule_manager._store.get(resp.json()["schedule_id"])
+    assert stored is not None
+    assert stored.days_of_week == ["mon"]
+
+
+def test_patch_refuses_an_unknown_day_and_keeps_the_stored_days(client: TestClient) -> None:
+    created = _create_weekly(client, ["Monday"]).json()
+
+    resp = client.patch(f"/api/schedules/{created['schedule_id']}", json={"days_of_week": ["6"]})
+
+    assert resp.status_code == 400
+    assert "mon,tue,wed,thu,fri,sat,sun" in resp.json()["error"]
+    stored = client.app.state.schedule_manager._store.get(created["schedule_id"])
+    assert stored is not None
+    assert stored.days_of_week == ["mon"]
+
+
+def test_patch_stores_a_full_day_name_as_three_letters(client: TestClient) -> None:
+    created = _create_weekly(client, ["Monday"]).json()
+
+    resp = client.patch(
+        f"/api/schedules/{created['schedule_id']}", json={"days_of_week": ["Saturday", "SUN"]}
+    )
+
+    assert resp.status_code == 200, resp.text
+    stored = client.app.state.schedule_manager._store.get(created["schedule_id"])
+    assert stored is not None
+    assert stored.days_of_week == ["sat", "sun"]

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from ciao.schedules import ScheduleManager, ScheduleStore
+from ciao.schedules import ScheduleManager, ScheduleStore, normalize_days_of_week
 
 
 def _zurich(dt_utc: datetime) -> datetime:
@@ -2132,3 +2132,35 @@ async def test_tick_stamps_first_seen_for_system_routines(tmp_path: Path) -> Non
     )
     row = state["schedules"]["system-memory-curation@personal"]
     assert row["first_seen_at"] == "2026-01-19T14:00:00Z"
+
+
+# --- day-of-week normalisation ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ([], None),
+        ("Saturday", ["sat"]),
+        ("SAT, mon", ["mon", "sat"]),
+        (["sun", "Sunday"], ["sun"]),
+        (["Friday", "MONDAY"], ["mon", "fri"]),
+        ("tue,tue,Tuesday", ["tue"]),
+    ],
+)
+def test_days_normalise_to_lowercase_three_letter_names_in_week_order(value, expected) -> None:
+    assert normalize_days_of_week(value) == expected
+
+
+@pytest.mark.parametrize("bad", ["6", "Funday", "thur", ["mon", "Funday"], ["6"]])
+def test_an_unknown_day_is_refused_naming_the_accepted_ones(bad) -> None:
+    with pytest.raises(ValueError, match="mon,tue,wed,thu,fri,sat,sun"):
+        normalize_days_of_week(bad)
+
+
+@pytest.mark.parametrize("bad", [6, ["mon", 5], {"mon": True}])
+def test_a_non_text_day_is_refused(bad) -> None:
+    with pytest.raises(ValueError):
+        normalize_days_of_week(bad)
