@@ -1797,14 +1797,15 @@ def test_a_replaced_record_is_not_removed(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
     lock = NativeRunLock.acquire(state, run_id=RUN_ID)
     original_inode = os.lstat(lock.record_path).st_ino
-    os.unlink(lock.record_path)
-    descriptor = os.open(
-        lock.record_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-    )
+    # Create the substitute while the original still exists, then rename it over
+    # the record: unlink-then-create lets Linux hand back the freed inode number.
+    substitute = tmp_path / "substitute-record"
+    descriptor = os.open(substitute, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         os.write(descriptor, _record_bytes(RUN_ID))
     finally:
         os.close(descriptor)
+    os.rename(substitute, lock.record_path)
     assert os.lstat(lock.record_path).st_ino != original_inode
     assert _lock_reason(lock.release) == "lock_cleanup_refused"
     assert lock.record_path.exists()
