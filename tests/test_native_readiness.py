@@ -1724,3 +1724,64 @@ def test_ipv4_mapped_loopback_is_accepted() -> None:
     assert readiness._is_loopback_address("not-an-address") is False
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path(readiness.LSOF).exists(),
+    reason="the real lsof listener adapter is macOS-only",
+)
+def test_a_real_foreign_listener_on_the_port_is_never_ready(tmp_path: Path) -> None:
+    """An unrelated process holds the loopback port, and the real adapter never says ready.
+
+    The child is a real same-UID process this test starts, so the real ``lsof``
+    adapter does name it. Without root, ``lsof`` lists only this user's sockets:
+    a listener held by another account reads as ``listener_missing``, never as
+    this run's engine, and identity rests on the startup_id and the server.lock
+    binding. The runner only ever sees ``/usr/sbin/lsof``: no launchctl, ps or
+    shell is reachable from this proof.
+    """
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import socket,sys,time\ns=socket.socket(); s.bind(('127.0.0.1',0)); "
+            "s.listen(); print(s.getsockname()[1], flush=True); time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        port = int(child.stdout.readline())
+        request = _request(tmp_path, port=port)
+
+        def only_lsof(
+            argv: tuple[str, ...], timeout: float
+        ) -> subprocess.CompletedProcess[str] | None:
+            assert argv[0] == readiness.LSOF
+            return readiness._bounded_run(argv, timeout)
+
+        policy = readiness.NativeReadinessPolicy(timeout=10.0, listener_interval=0.0)
+
+        # The startup answer claims this test process, not the listener's pid.
+        deps = readiness.make_native_readiness_deps(
+            runner=only_lsof,
+            http=lambda _port, _timeout: _startup_bytes(request, pid=os.getpid()),
+        )
+        proof = _prove(request, deps=deps, policy=policy)
+        assert proof.ready is False
+        assert proof.failure == "startup_pid_mismatch"
+        assert proof.listener_pid in (None, child.pid)
+
+        # The startup answer claims the foreign pid itself. No server.lock binds
+        # it, so the proof still refuses.
+        deps = readiness.make_native_readiness_deps(
+            runner=only_lsof,
+            http=lambda _port, _timeout: _startup_bytes(request, pid=child.pid),
+        )
+        proof = _prove(request, deps=deps, policy=policy)
+        assert proof.ready is False
+        assert proof.failure == "lock_missing"
+    finally:
+        child.kill()
+        child.wait()
+
+

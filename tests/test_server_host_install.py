@@ -2464,6 +2464,152 @@ def test_require_absent_does_not_delete_a_bundle_replaced_during_cleanup(
     assert record.is_file()
 
 
+def test_require_absent_rollback_renames_then_removes_only_its_own_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A failed fresh install never hands the canonical path to rmtree. It renames
+    # the bundle it placed into a private name inside its staging directory, then
+    # removes that entry.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    renames: list[tuple[Path, Path]] = []
+    real_rename = os.rename
+
+    def spy(src: str, dst: str) -> None:
+        renames.append((Path(src), Path(dst)))
+        real_rename(src, dst)
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise server_host.ServerHostError(
+            "the host is not proven ours", code=server_host.NOT_OWNED
+        )
+
+    monkeypatch.setattr(server_host_install.os, "rename", spy)
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse)
+
+    # A clean rollback re-raises the original failure unchanged; only a leftover
+    # problem is wrapped as INSTALL_FAILED.
+    with pytest.raises(server_host.ServerHostError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host.NOT_OWNED
+    assert not target.exists()
+    assert not record.exists()
+    assert not list(target.parent.glob(f"{server_host_install.STAGING_PREFIX}*"))
+    moved = [
+        dst
+        for src, dst in renames
+        if src == target
+        and dst.name.startswith(server_host_install._FRESH_ROLLBACK_PREFIX)
+    ]
+    assert len(moved) == 1
+    assert moved[0].parent.name.startswith(server_host_install.STAGING_PREFIX)
+
+
+def test_require_absent_rollback_keeps_a_substitute_swapped_in_before_the_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A same-UID writer swaps the canonical path between the install's rename and
+    # the rollback's move-aside. The object the rollback moved is not ours: it is
+    # kept in the staging directory and named in the error, and our own bundle
+    # is never deleted.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    ours = tmp_path / "our-installed-host"
+    real_rename = os.rename
+
+    def swap_before_move(src: str, dst: str) -> None:
+        if Path(dst).name.startswith(server_host_install._FRESH_ROLLBACK_PREFIX):
+            real_rename(target, ours)
+            target.mkdir()
+            (target / "marker").write_text("substitute")
+        real_rename(src, dst)
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise server_host.ServerHostError(
+            "the host is not proven ours", code=server_host.NOT_OWNED
+        )
+
+    monkeypatch.setattr(server_host_install.os, "rename", swap_before_move)
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert "it is kept at" in str(caught.value)
+    assert ours.is_dir()
+    kept = list(
+        target.parent.glob(
+            f"{server_host_install.STAGING_PREFIX}*/"
+            f"{server_host_install._FRESH_ROLLBACK_PREFIX}*/marker"
+        )
+    )
+    assert [path.read_text() for path in kept] == ["substitute"]
+    assert not target.exists()
+
+
+def test_require_absent_fresh_surface_checks_run_three_times_in_order(
+    home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fresh-surface check is one helper, called before the directories are
+    # prepared, after they are prepared, and again before the first write.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(home_dir)
+    real_check = server_host_install._require_fresh_surface
+    moments: list[str] = []
+
+    def spy(
+        bundle: Path, record_path: Path, trusted_root: Path, *, moment: str
+    ) -> None:
+        moments.append(moment)
+        real_check(bundle, record_path, trusted_root, moment=moment)
+
+    monkeypatch.setattr(server_host_install, "_require_fresh_surface", spy)
+
+    server_host_install.install_server_host(
+        archive,
+        entry,
+        bundle_path=server_host.default_bundle_path(),
+        ownership_path=server_host.default_ownership_path(),
+        runner=_FakeRunner(),
+        require_absent=True,
+        trusted_root=home_dir,
+    )
+
+    assert moments == ["before", "preparing", "staging"]
+
+
+def test_fresh_surface_rejects_an_unknown_moment(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown fresh-surface moment"):
+        server_host_install._require_fresh_surface(
+            _target(tmp_path),
+            tmp_path / "records" / "server-host.json",
+            tmp_path,
+            moment="later",
+        )
+
+
 @requires_posix_uid
 def test_require_absent_rejects_dotdot_dot_and_relative_paths_before_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
