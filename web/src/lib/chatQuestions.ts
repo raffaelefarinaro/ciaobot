@@ -233,6 +233,27 @@ export function questionAnswerIsValid(
   return questionAnswerError(question, state) === null
 }
 
+// The engine's persisted `pending_question` shape: the tool_input JSON, plus
+// the native request and session ids when the event carries them.
+export function mirroredPendingQuestion(
+  toolInput: string,
+  requestId: string,
+  sessionId: string,
+): string {
+  if (!requestId && !sessionId) return toolInput
+  try {
+    const parsed = JSON.parse(toolInput)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return toolInput
+    return JSON.stringify({
+      ...parsed,
+      ...(requestId ? { request_id: requestId } : {}),
+      ...(sessionId ? { session_id: sessionId } : {}),
+    })
+  } catch {
+    return toolInput
+  }
+}
+
 export function parseQuestions(
   toolInput: string | null | undefined,
   requestId = '',
