@@ -9,6 +9,7 @@ exercised once, against that isolated home.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import dataclasses
 import json
 import os
@@ -1657,3 +1658,116 @@ def test_an_unexpected_pre_write_exception_fails_closed(
     assert not native_handoff.result_path().exists()
     assert not (launch / "com.ciao.server.plist").exists()
     assert restarts == [1]
+
+
+# ── cancellation and failing restart hooks (#2340 round 3) ───────────────────
+
+
+def test_a_cancelled_native_finish_fails_closed(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+
+    from ciao.web import routes_api
+
+    async def cancelled_write(*args, **kwargs):
+        # The awaited write is cancelled on the event loop itself, which is how
+        # a disconnect or shutdown reaches the handler. A CancelledError raised
+        # inside the worker thread would come back as a different class.
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(routes_api, "_native_finish_write", cancelled_write)
+    # AuthMiddleware (a BaseHTTPMiddleware) rewrites a cancellation raised below
+    # it into "No response returned", so the endpoint is driven on a bare app
+    # that carries the same state and no middleware.
+    bare = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])]
+    )
+    for name in (
+        "config",
+        "installer_bootstrap",
+        "installer_run_id",
+        "native_bootstrap",
+        "request_restart",
+        "startup_tracker",
+    ):
+        setattr(bare.state, name, getattr(client.app.state, name))
+    bare_client = TestClient(bare, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
+    # A client disconnect or shutdown cancels the awaited write. The child must
+    # still leave nonzero, and the cancellation must propagate, not become a
+    # response. TestClient's portal reports the cancelled task as a
+    # concurrent.futures.CancelledError; a 409 response would not raise at all.
+    with pytest.raises(concurrent.futures.CancelledError):
+        _post(bare_client, isolated_home / "workspace")
+    assert restarts == [1]
+
+
+def test_a_raising_restart_hook_still_exits(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.web import routes_api
+
+    exits: list[int] = []
+
+    def recording_exit(code: int) -> None:
+        exits.append(code)
+        raise _Exited
+
+    monkeypatch.setattr(os, "_exit", recording_exit)
+    hook_calls: list[int] = []
+
+    def raising_hook(code: int) -> None:
+        hook_calls.append(code)
+        raise RuntimeError("the restart hook broke")
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(request_restart=raising_hook))
+    )
+    with pytest.raises(_Exited):
+        routes_api._request_native_failure_exit(request)
+    assert hook_calls == [1]
+    assert exits == [1]
+
+
+def test_a_raising_final_native_restart_exits(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, _restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+
+    def raising_restart(code: int) -> None:
+        raise RuntimeError("the final restart broke")
+
+    client.app.state.request_restart = raising_restart
+    exits: list[int] = []
+
+    def recording_exit(code: int) -> None:
+        exits.append(code)
+        raise _Exited
+
+    monkeypatch.setattr(os, "_exit", recording_exit)
+    # The setup itself succeeded and was recorded; a dead restart must not
+    # leave that child serving.
+    with pytest.raises(_Exited):
+        _post(client, isolated_home / "workspace")
+    assert exits == [1]
+
+
+def test_a_missing_final_native_restart_exits(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, _restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    monkeypatch.delattr(client.app.state, "request_restart")
+    exits: list[int] = []
+
+    def recording_exit(code: int) -> None:
+        exits.append(code)
+        raise _Exited
+
+    monkeypatch.setattr(os, "_exit", recording_exit)
+    with pytest.raises(_Exited):
+        _post(client, isolated_home / "workspace")
+    assert exits == [1]

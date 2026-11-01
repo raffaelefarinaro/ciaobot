@@ -6385,6 +6385,9 @@ _NATIVE_SETUP_STRING_FIELDS: tuple[str, ...] = (
 _NATIVE_SETUP_STATE_CHANGED = (
     "the installer state changed while setup was open; nothing was written"
 )
+_NATIVE_SETUP_RESTART_REFUSED = (
+    "setup was recorded but the server could not be restarted; nothing was started"
+)
 _NATIVE_SETUP_ALREADY_CLAIMED = (
     "setup already ran for this native bootstrap; nothing else was written"
 )
@@ -6410,8 +6413,13 @@ def _request_native_failure_exit(request: Request) -> None:
     """
     restart_fn = getattr(request.app.state, "request_restart", None)
     if callable(restart_fn):
-        restart_fn(1)
-        return
+        try:
+            restart_fn(1)
+            return
+        except Exception:
+            # A broken hook must not turn the failure into a 500 with the child
+            # still serving: fall through to the hard exit.
+            pass
     os._exit(1)
 
 
@@ -6718,6 +6726,12 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             # child leaves nonzero, the installer parent never activates.
             _request_native_failure_exit(request)
             return JSONResponse({"error": finish_refusal.message}, status_code=409)
+        except asyncio.CancelledError:
+            # A client disconnect or shutdown cancelled the awaited write. It is
+            # a BaseException, so it needs its own clause: exit closed, then let
+            # the cancellation propagate instead of answering the request.
+            _request_native_failure_exit(request)
+            raise
         except Exception:
             # Any other failure after the claim, including one raised before the
             # write, ends the same way: a nonzero exit, never a served wizard.
@@ -6775,7 +6789,20 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     )
     if restart:
         restart_fn = getattr(request.app.state, "request_restart", None)
-        if callable(restart_fn):
+        if native_context is not None:
+            # The setup is recorded, so a dead or missing restart must not leave
+            # this child serving; the parent never activates a run that ends
+            # this way. The fixed refusal is returned only if the exit returns.
+            try:
+                if not callable(restart_fn):
+                    raise RuntimeError("the native bootstrap has no restart hook")
+                restart_fn(0)
+            except Exception:
+                os._exit(1)
+                return JSONResponse(
+                    {"error": _NATIVE_SETUP_RESTART_REFUSED}, status_code=409
+                )
+        elif callable(restart_fn):
             restart_fn(0 if (handoff or installer_mode) else RESTART_EXIT_CODE)
 
     return JSONResponse({
