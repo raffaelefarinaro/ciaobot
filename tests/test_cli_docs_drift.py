@@ -207,6 +207,13 @@ def test_core_prompt_synopsis_matches_the_parsers() -> None:
         assert command in text, command
 
 
+def test_prompt_reference_names_promoted_dismissal() -> None:
+    section = re.search(r"<ciaobot_cli_reference>(.*?)</ciaobot_cli_reference>", PROMPT, re.S)
+    assert section, "the core prompt lost its <ciaobot_cli_reference> section"
+    assert "--promoted" in section.group(1)
+    assert "--days-of-week" in section.group(1)
+
+
 def test_prompt_synopsis_rejects_an_unknown_flag_or_verb() -> None:
     agent, operator = _all_leaves()
     surface = {**agent, **operator}
