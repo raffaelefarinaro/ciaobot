@@ -718,6 +718,12 @@ def _plan_update(
     version of the fact that is no longer there is a :data:`CONFLICT` with nothing
     written and no check recorded — the caller re-reads the entry and decides
     again, rather than having a verdict about old words pinned to new ones.
+
+    Checked in this order: the conflict comes first; a replacement equal to the
+    entry's current text is ``unverified`` (nothing to change); evidence was given
+    but no row names the note is ``unverified`` (nothing for a person to decide
+    about this entry from it); only then does an uncited replacement go to review.
+    No evidence at all falls through to review, as an uncited replacement always has.
     """
     edit = request.edit
     if edit is None or not edit.after.strip():
@@ -734,10 +740,6 @@ def _plan_update(
                 "which this service never performs"
             ),
         )
-    if not _entry_evidence(request) or not _all_citations(request):
-        return EntryVerificationPlan(
-            PROPOSE, NEEDS_REVIEW, UPDATE, "", "", _missing_evidence_reason(request)
-        )
     if edit.before and edit.before != entry.text:
         return EntryVerificationPlan(
             RECORD_ONLY,
@@ -749,6 +751,23 @@ def _plan_update(
                 "the entry no longer holds the text this edit was planned against; "
                 "nothing was written and no check was recorded"
             ),
+        )
+    if edit.after == entry.text:
+        return EntryVerificationPlan(
+            RECORD_ONLY, UNVERIFIED, UNVERIFIED, "", "", nv._NO_CHANGE_REASON
+        )
+    if request.evidence and not nv._evidence_names_note(_as_note_request(request)):
+        return EntryVerificationPlan(
+            RECORD_ONLY,
+            UNVERIFIED,
+            UNVERIFIED,
+            "",
+            "",
+            _missing_evidence_reason(request),
+        )
+    if not _entry_evidence(request) or not _all_citations(request):
+        return EntryVerificationPlan(
+            PROPOSE, NEEDS_REVIEW, UPDATE, "", "", _missing_evidence_reason(request)
         )
     return EntryVerificationPlan(AUTO_APPLY, APPLIED, UPDATE, edit.after, "", "")
 
