@@ -114,36 +114,51 @@ def _env_names(dump: Path) -> set[str]:
     return {line.split("=", 1)[0] for line in dump.read_text().splitlines()}
 
 
+def _place(target: Path, source: Path) -> list[str]:
+    """Shell lines that copy ``source`` to ``target``, executable."""
+    return [
+        f'mkdir -p "{target.parent}"',
+        f'cp "{source}" "{target}"',
+        f'chmod 755 "{target}"',
+    ]
+
+
+def _link(link: Path, target: Path) -> list[str]:
+    """Shell lines that make ``link`` a symlink to ``target``, as uv does."""
+    return [f'mkdir -p "{link.parent}"', f'ln -sf "{target}" "{link}"']
+
+
 def _fake_uv(
     root: Path,
     home: Path,
     *,
     rc: int = 0,
-    shim: bool = True,
-    python: bool = True,
+    shim: str | None = "link",
+    python: str | None = "copy",
     python_version: str | None = None,
     probe: tuple[Path, int] | None = None,
 ) -> Path:
     """A uv stub for ``tool install`` that records its argv, env and cwd.
 
-    The stub writes the tool interpreter and the ``ciao`` shim into the pinned
-    directories under ``home``. Its argv goes to ``root/uv.log``, one argument
-    per line, and its environment to ``root/uv.env``. The interpreter stub
-    records its own environment to ``root/stub.env``. With ``probe``, both
-    record whether the given descriptor is open.
+    ``shim`` is how the ``ciao`` shim lands: ``"link"`` (what real uv does: a
+    symlink in ``bin`` to a real file in ``tools/ciaobot/bin``), ``"file"`` (a
+    regular file in ``bin``), ``"outside"`` (a link to a file outside the tool
+    environment) or ``None``. ``python`` is ``"copy"`` (a regular interpreter in
+    the tool environment), ``"managed"`` (a link into uv's managed Python root),
+    ``"elsewhere"`` (a link to a file outside both) or ``None``. The stub logs its
+    argv to ``root/uv.log`` and its environment to ``root/uv.env``, and the
+    interpreter stub records its own environment to ``root/stub.env``. With
+    ``probe``, both record whether the given descriptor is open.
     """
     tools, bin_dir = _tool_dirs_under(home)
     stub = root / "stub"
     probe_line = ""
-    uv_probe = ""
     if probe is not None:
         probe_path, fd = probe
-        check = (
+        probe_line = (
             f'[ -e "/dev/fd/{fd}" ] && echo open >> "{probe_path}" '
             f'|| echo closed >> "{probe_path}"\n'
         )
-        probe_line = check
-        uv_probe = check
     _script(
         stub,
         probe_line
@@ -151,24 +166,30 @@ def _fake_uv(
         + f'printf "%s" "{python_version or _version()}"\n',
     )
     lines = [
-        uv_probe.rstrip("\n"),
+        probe_line.rstrip("\n") if probe is not None else "",
         f'for a in "$@"; do printf "%s\\n" "$a"; done >> "{root / "uv.log"}"',
         f'env > "{root / "uv.env"}"',
         f'pwd -P > "{root / "uv.cwd"}"',
         f"[ {rc} -eq 0 ] || exit {rc}",
     ]
-    if python:
-        lines += [
-            f'mkdir -p "{tools / "ciaobot" / "bin"}" "{bin_dir}"',
-            f'cp "{stub}" "{tools / "ciaobot" / "bin" / "python"}"',
-            f'chmod 755 "{tools / "ciaobot" / "bin" / "python"}"',
-        ]
-    if shim:
-        lines += [
-            f'mkdir -p "{bin_dir}"',
-            f'cp "{stub}" "{bin_dir / "ciao"}"',
-            f'chmod 755 "{bin_dir / "ciao"}"',
-        ]
+    if python == "copy":
+        lines += _place(tools / "ciaobot" / "bin" / "python", stub)
+    elif python in {"managed", "elsewhere"}:
+        if python == "managed":
+            interpreter = home / ".local" / "share" / "uv" / "python" / "cpython-3.13-test" / "bin" / "python3.13"
+        else:
+            interpreter = root / "elsewhere" / "python3.13"
+        lines += _place(interpreter, stub)
+        lines += _link(tools / "ciaobot" / "bin" / "python", interpreter)
+    if shim == "link":
+        lines += _place(tools / "ciaobot" / "bin" / "ciao", stub)
+        lines += _link(bin_dir / "ciao", tools / "ciaobot" / "bin" / "ciao")
+    elif shim == "file":
+        lines += _place(bin_dir / "ciao", stub)
+    elif shim == "outside":
+        outside = root / "outside" / "ciao"
+        lines += _place(outside, stub)
+        lines += _link(bin_dir / "ciao", outside)
     return _script(root / "uv", "\n".join(line for line in lines if line) + "\n")
 
 
@@ -800,8 +821,8 @@ def test_engine_install_runs_uv_without_force_and_writes_the_one_receipt(
     "kwargs",
     [
         {"rc": 1},
-        {"shim": False},
-        {"python": False},
+        {"shim": None},
+        {"python": None},
         {"python_version": "0.0.1"},
     ],
     ids=["uv-rc", "no-shim", "no-python", "wrong-version"],
@@ -966,6 +987,259 @@ def test_the_handoff_engine_python_must_be_the_probed_interpreter(
         production.close()
 
 
+def test_the_symlinked_shim_install_succeeds(
+    tmp_path: Path, pinned_home: Path
+) -> None:
+    """Real uv links bin/ciao into the tool env; the install must accept that layout."""
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    artifacts = rehash(
+        dataclasses.replace(make_artifacts(tmp_path), uv=_fake_uv(tmp_path, pinned_home))
+    )
+    installed = native._install_engine(
+        artifacts,
+        tools,
+        bin_dir,
+        30.0,
+        cancellation=native.NativeCancellation(),
+        env=_install_env(),
+        cwd=tmp_path,
+    )
+    assert isinstance(installed.shim, native._ShimIdentity)
+    assert installed.shim.link_target == str(tools / "ciaobot" / "bin" / "ciao")
+
+
+def _installed_with_shim(
+    tmp_path: Path,
+    pinned_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    **uv_options: object,
+) -> tuple[native._ProductionDeps, Path, Path]:
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    monkeypatch.setattr(native, "_tool_dirs", lambda *a, **k: (tools, bin_dir))
+    uv = _fake_uv(tmp_path, pinned_home, **uv_options)  # type: ignore[arg-type]
+    production = native._production_deps(
+        _request(), rehash(dataclasses.replace(make_artifacts(tmp_path), uv=uv)),
+        native.NativeCancellation(),
+    )
+    production.deps.validate_inputs()
+    production.deps.install_engine(30.0)
+    return production, tools, bin_dir
+
+
+def test_a_retargeted_link_before_the_spawn_is_install_failed(
+    tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    production, tools, bin_dir = _installed_with_shim(
+        tmp_path, pinned_home, monkeypatch
+    )
+    try:
+        other = tools / "ciaobot" / "bin" / "other"
+        other.write_bytes(b"#!/bin/sh\n")
+        os.chmod(other, 0o755)
+        (bin_dir / "ciao").unlink()
+        (bin_dir / "ciao").symlink_to(other)
+        with pytest.raises(NativeCoordinatorError) as caught:
+            production.deps.wizard_command(5)
+        assert caught.value.failure_code == "install_failed"
+        assert caught.value.reason == "shim_changed"
+    finally:
+        production.close()
+
+
+def test_a_replaced_target_before_the_spawn_is_install_failed(
+    tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    production, tools, _bin = _installed_with_shim(
+        tmp_path, pinned_home, monkeypatch
+    )
+    try:
+        target = tools / "ciaobot" / "bin" / "ciao"
+        target.write_bytes(b"#!/bin/sh\necho replaced\n")
+        with pytest.raises(NativeCoordinatorError) as caught:
+            production.deps.wizard_command(5)
+        assert caught.value.failure_code == "install_failed"
+        assert caught.value.reason == "shim_changed"
+    finally:
+        production.close()
+
+
+def test_a_regular_file_shim_is_install_failed(
+    tmp_path: Path, pinned_home: Path
+) -> None:
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    artifacts = rehash(
+        dataclasses.replace(
+            make_artifacts(tmp_path), uv=_fake_uv(tmp_path, pinned_home, shim="file")
+        )
+    )
+    with pytest.raises(NativeCoordinatorError) as caught:
+        native._install_engine(
+            artifacts,
+            tools,
+            bin_dir,
+            30.0,
+            cancellation=native.NativeCancellation(),
+            env=_install_env(),
+            cwd=tmp_path,
+        )
+    assert caught.value.failure_code == "install_failed"
+    assert caught.value.reason == "shim_invalid"
+
+
+def test_a_link_outside_the_tool_dir_is_install_failed(
+    tmp_path: Path, pinned_home: Path
+) -> None:
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    artifacts = rehash(
+        dataclasses.replace(
+            make_artifacts(tmp_path), uv=_fake_uv(tmp_path, pinned_home, shim="outside")
+        )
+    )
+    with pytest.raises(NativeCoordinatorError) as caught:
+        native._install_engine(
+            artifacts,
+            tools,
+            bin_dir,
+            30.0,
+            cancellation=native.NativeCancellation(),
+            env=_install_env(),
+            cwd=tmp_path,
+        )
+    assert caught.value.failure_code == "install_failed"
+    assert caught.value.reason == "shim_invalid"
+
+
+def test_a_managed_python_link_is_accepted(
+    tmp_path: Path, pinned_home: Path
+) -> None:
+    """Real uv links tool python into uv's managed Python root; that layout is valid."""
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    artifacts = rehash(
+        dataclasses.replace(
+            make_artifacts(tmp_path),
+            uv=_fake_uv(tmp_path, pinned_home, python="managed"),
+        )
+    )
+    installed = native._install_engine(
+        artifacts,
+        tools,
+        bin_dir,
+        30.0,
+        cancellation=native.NativeCancellation(),
+        env=_install_env(),
+        cwd=tmp_path,
+    )
+    assert installed.tool_python == tools / "ciaobot" / "bin" / "python"
+
+
+def test_a_tool_python_outside_the_tool_and_managed_roots_is_install_failed(
+    tmp_path: Path, pinned_home: Path
+) -> None:
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    artifacts = rehash(
+        dataclasses.replace(
+            make_artifacts(tmp_path),
+            uv=_fake_uv(tmp_path, pinned_home, python="elsewhere"),
+        )
+    )
+    with pytest.raises(NativeCoordinatorError) as caught:
+        native._install_engine(
+            artifacts,
+            tools,
+            bin_dir,
+            30.0,
+            cancellation=native.NativeCancellation(),
+            env=_install_env(),
+            cwd=tmp_path,
+        )
+    assert caught.value.failure_code == "install_failed"
+    assert caught.value.reason == "interpreter_outside"
+
+
+def test_the_classifier_runs_in_the_private_cwd(
+    tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    seen: dict[str, Path] = {}
+
+    def fake_classify(**kwargs: object) -> NativeInstallState:
+        seen["cwd"] = kwargs["cwd"]  # type: ignore[assignment]
+        return NativeInstallState.fresh
+
+    monkeypatch.setattr(native, "_tool_dirs", lambda *a, **k: (tools, bin_dir))
+    monkeypatch.setattr(native, "classify_native_install", fake_classify)
+    production = native._production_deps(
+        _request(), make_artifacts(tmp_path), native.NativeCancellation()
+    )
+    try:
+        production.deps.validate_inputs()
+        production.deps.classify(None)
+        assert production.private.cwd is not None
+        assert seen["cwd"] == production.private.cwd
+        assert seen["cwd"] != Path.cwd()
+    finally:
+        production.close()
+
+
+def test_the_symlinked_shim_path_reaches_service_ready(
+    tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end with the symlinked stub: production install, shim check and spawn."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    monkeypatch.setattr(native, "_tool_dirs", lambda *a, **k: (tools, bin_dir))
+    artifacts = rehash(
+        dataclasses.replace(make_artifacts(tmp_path), uv=_fake_uv(tmp_path, pinned_home))
+    )
+    production = native._production_deps(_request(), artifacts, native.NativeCancellation())
+    real_wizard = production.deps.wizard_command
+    tool_python = tools / "ciaobot" / "bin" / "python"
+    handoff = dataclasses.replace(
+        _handoff(RUN_ID), engine_python=str(tool_python), port=54321
+    )
+    bind = (
+        "import os, sys\n"
+        "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(int(sys.argv[1]))\n"
+    )
+
+    def wizard(fd: int) -> tuple[str, ...]:
+        real_wizard(fd)  # the shim re-check; its own argv is not spawned here
+        return (sys.executable, "-c", bind, str(fd))
+
+    monkeypatch.setattr(
+        native_handoff, "read_result", lambda *, expected_run_id: handoff
+    )
+    monkeypatch.setattr(
+        native_handoff, "activate", lambda *, run_id, is_set_up=None: handoff
+    )
+    deps = dataclasses.replace(
+        production.deps,
+        prepare_state_dir=lambda: native_lock.prepare_native_state_dir(
+            tmp_path / "state", trusted_root=tmp_path
+        ),
+        classify=lambda workspace: NativeInstallState.fresh,
+        create_host=lambda lock, run_id, remaining: _fresh_host_value(tmp_path),
+        recheck_host=lambda host: None,
+        prepare_scratch=lambda: tmp_path / "scratch",
+        wizard_command=wizard,
+        wizard_listener=lambda port, child_pid: frozenset({child_pid}),
+        prove_ready=lambda host, handoff_, remaining: NativeReadinessProof(
+            ready=True, failure=None, port=54321, version=artifacts.version
+        ),
+    )
+    try:
+        with _public_event_pipe() as (read_fd, write_fd):
+            outcome = native._run_native_install(
+                _coordinator_request(write_fd), deps=deps
+            )
+            events = _events_of(_drain(read_fd))
+    finally:
+        production.close()
+    assert outcome.terminal == "service_ready"
+    assert events[-1]["type"] == "service_ready"
+
+
 # ── production dependency closures ───────────────────────────────────────────
 
 
@@ -1003,11 +1277,14 @@ def test_production_deps_delegate_to_the_real_steps(
     tool_python.parent.mkdir(parents=True, exist_ok=True)
     tool_python.write_bytes(b"#!/bin/sh\n")
     os.chmod(tool_python, 0o755)
+    shim_target = tools / "ciaobot" / "bin" / "ciao"
+    shim_target.parent.mkdir(parents=True, exist_ok=True)
+    shim_target.write_bytes(b"#!/bin/sh\n")
+    os.chmod(shim_target, 0o755)
     bin_dir.mkdir(parents=True, exist_ok=True)
-    (bin_dir / "ciao").write_bytes(b"#!/bin/sh\n")
-    os.chmod(bin_dir / "ciao", 0o755)
+    (bin_dir / "ciao").symlink_to(shim_target)
     engine_value = native._EngineInstall(
-        tool_python=tool_python, shim=native._file_identity(bin_dir / "ciao")
+        tool_python=tool_python, shim=native._shim_identity(bin_dir, tools)
     )
     monkeypatch.setattr(native, "_install_engine", record("engine", engine_value))
     handoff = dataclasses.replace(_handoff(RUN_ID), engine_python=str(tool_python))

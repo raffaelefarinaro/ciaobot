@@ -2271,11 +2271,97 @@ def _file_identity(path: Path) -> _FileIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class _ShimIdentity:
+    """The ``ciao`` link uv created and the tool-env file it resolves to.
+
+    Real uv links ``<bin>/ciao`` into ``<tool>/ciaobot/bin``, so the link and the
+    target are both recorded and both are re-checked before the wizard starts.
+    """
+
+    link_device: int
+    link_inode: int
+    link_target: str
+    target_device: int
+    target_inode: int
+    target_sha256: str
+
+
+def _shim_identity(bin_dir: Path, tool_dir: Path) -> _ShimIdentity:
+    """Identify the shim: a symlink whose realpath is a regular file in the tool env.
+
+    The link is read with ``lstat``/``readlink``. Its target is resolved with
+    ``realpath(strict=True)``, must lie inside ``<tool>/ciaobot/bin`` once both
+    sides are resolved, and is opened without a no-follow flag, since the link is
+    already resolved. Any other shape is a fixed refusal.
+    """
+    refusal = NativeCoordinatorError("shim_invalid", "install_failed")
+    link = bin_dir / "ciao"
+    try:
+        info = os.lstat(link)
+        if not stat.S_ISLNK(info.st_mode):
+            raise refusal
+        link_target = os.readlink(link)
+        target = Path(os.path.realpath(link, strict=True))
+    except OSError:
+        raise refusal from None
+    allowed = Path(os.path.realpath(tool_dir / "ciaobot" / "bin"))
+    if not target.is_relative_to(allowed):
+        raise refusal
+    try:
+        fd = os.open(target, os.O_RDONLY)
+    except OSError:
+        raise refusal from None
+    try:
+        target_info = _fstat(fd)
+        if not stat.S_ISREG(target_info.st_mode):
+            raise refusal
+        hasher = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            hasher.update(chunk)
+    except OSError:
+        raise refusal from None
+    finally:
+        os.close(fd)
+    return _ShimIdentity(
+        link_device=info.st_dev,
+        link_inode=info.st_ino,
+        link_target=link_target,
+        target_device=target_info.st_dev,
+        target_inode=target_info.st_ino,
+        target_sha256=hasher.hexdigest(),
+    )
+
+
+def _managed_python_root() -> Path:
+    """uv's managed Python root under the pinned home: where a tool python may link."""
+    return _pinned_home() / ".local" / "share" / "uv" / "python"
+
+
+def _interpreter_inside(tool_python: Path, tool_dir: Path) -> None:
+    """The tool python must resolve inside the tool env or uv's managed Python root.
+
+    Real uv links ``tools/ciaobot/bin/python`` to an interpreter under the managed
+    Python root, so requiring the tool directory alone would refuse every real
+    install. Anything else, including an arbitrary interpreter, is refused.
+    """
+    try:
+        real = Path(os.path.realpath(tool_python, strict=True))
+    except OSError:
+        raise NativeCoordinatorError("interpreter_missing", "install_failed") from None
+    roots = (
+        Path(os.path.realpath(tool_dir)),
+        Path(os.path.realpath(_managed_python_root())),
+    )
+    if not any(real.is_relative_to(root) for root in roots):
+        raise NativeCoordinatorError("interpreter_outside", "install_failed")
+
+
+@dataclass(frozen=True, slots=True)
 class _EngineInstall:
     """What this run installed and probed: the interpreter, and the shim it must stay."""
 
     tool_python: Path
-    shim: _FileIdentity
+    shim: _ShimIdentity
 
 
 def _verified_copy(
@@ -2620,6 +2706,7 @@ def _install_engine(
     for path in (ciao_path, tool_python):
         if not os.path.isfile(path) or not os.access(path, os.X_OK):
             raise _engine_failed()
+    _interpreter_inside(tool_python, tool_dir)
     try:
         code, output = _run_bounded(
             (
@@ -2659,10 +2746,7 @@ def _install_engine(
         or Path(written.python) != tool_python
     ):
         raise _engine_failed()
-    try:
-        shim = _file_identity(ciao_path)
-    except NativeCoordinatorError:
-        raise _engine_failed() from None
+    shim = _shim_identity(bin_dir, tool_dir)
     return _EngineInstall(tool_python=tool_python, shim=shim)
 
 
@@ -2745,7 +2829,7 @@ def _production_deps(
         tool_dir, bin_dir = dirs()
         return classify_native_install(
             environ=_scrubbed_env(keep_user_path=False),
-            cwd=Path.cwd(),
+            cwd=_required(private.cwd),
             suggestion=workspace,
             tool_dir=tool_dir,
             bin_dir=bin_dir,
@@ -2805,10 +2889,10 @@ def _production_deps(
             raise
 
     def wizard_command(fd: int) -> tuple[str, ...]:
-        _, bin_dir = dirs()
+        tool_dir, bin_dir = dirs()
         engine = _required(private.engine)
         try:
-            shim = _file_identity(bin_dir / "ciao")
+            shim = _shim_identity(bin_dir, tool_dir)
         except NativeCoordinatorError:
             raise NativeCoordinatorError("shim_changed", "install_failed") from None
         if shim != engine.shim:

@@ -646,7 +646,7 @@ environment. The wizard child keeps the caller's `PATH` and drops the same
 variables. Cancellation is polled while uv runs; cancel or timeout terminates
 and reaps the child's session. The probed interpreter is bound to the handoff's
 `engine_python` (same realpath and device and inode, else `wizard_failed`), and
-the `ciao` shim is re-checked before the wizard starts (else `install_failed`).
+the `ciao` shim is re-checked before the wizard starts (else `install_failed`). uv links `<bin>/ciao` into `<tool>/ciaobot/bin`, so the shim is a symlink: its link identity and its resolved target (inside the tool env; device, inode and sha256) are both recorded and both re-checked. The tool interpreter may link into uv's managed Python root under the pinned home, which is where real uv installs point it; anywhere else is `install_failed`.
 
 The production steps are: the uv tool and bin
 directories (asked of the private uv copy only), the canonical classification, the
