@@ -567,7 +567,10 @@ else:
                 for name in (".zshenv", ".zprofile", ".zshrc", ".zlogin")
             )
         # /etc/paths.d/* is a directory of fragments; each one contributes.
-        paths.extend(sorted(Path("/etc/paths.d").glob("*")) if Path("/etc/paths.d").is_dir() else [])
+        try:
+            paths.extend(sorted(Path("/etc/paths.d").glob("*")) if Path("/etc/paths.d").is_dir() else [])
+        except OSError:
+            marks.append(("/etc/paths.d", None))
         for path in paths:
             try:
                 marks.append((str(path), path.stat().st_mtime_ns))

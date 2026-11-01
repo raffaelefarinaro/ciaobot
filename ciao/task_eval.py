@@ -2155,13 +2155,15 @@ def _trace_entry(chat_id: str, event: Mapping[str, Any]) -> dict[str, Any]:
 def _record_trace(
     transcript: Sequence[Mapping[str, Any]], session_calls: Sequence[Mapping[str, Any]]
 ) -> tuple[list[dict[str, Any]], bool]:
-    """The record's ``trace``: the transcript's tool calls in order, each input replaced by the
-    Claude session log's real input for the same tool_use id, cut to ``TRACE_MAX_ENTRIES``.
+    """The record's ``trace``, cut to ``TRACE_MAX_ENTRIES``.
 
-    A session call with no transcript entry is not added: a memory pass's own calls
-    appear only when its transcript was read.
+    The transcript's tool calls come first, in order, each input replaced by the
+    Claude session log's real input for the same tool_use id. Session calls with no
+    transcript entry follow in log order, with no chat and no error flag: a memory
+    pass's own calls land here once its transcript is gone.
     """
     real_inputs = {str(call["id"]): str(call["input"]) for call in session_calls if call["id"]}
+    matched = {str(call["id"]) for call in transcript if call["id"]}
     entries = [
         {
             "chat_id": call["chat_id"],
@@ -2171,7 +2173,29 @@ def _record_trace(
         }
         for call in transcript
     ]
+    entries += [
+        {"chat_id": "", "name": call["name"], "input": call["input"], "error": False}
+        for call in session_calls
+        if str(call["id"]) not in matched
+    ]
     return entries[:TRACE_MAX_ENTRIES], len(entries) > TRACE_MAX_ENTRIES
+
+
+def _trace_fields(session: EngineSession, usage: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The record's trace fields, read from the session before it is closed.
+
+    ``usage`` is a transcript read the caller already has; without it the session is
+    read again. Never raises: a trace that cannot be read is reported on stderr and the
+    fields stay at the record's defaults, so it can never change a run's status.
+    """
+    try:
+        transcript = (session.usage() if usage is None else usage)["trace"]
+        session_calls, model_calls = session.session_trace()
+        trace, truncated = _record_trace(transcript, session_calls)
+    except Exception as exc:  # noqa: BLE001 - the trace is evidence, never a reason to fail a run
+        print(f"task eval: trace not recorded: {exc!r}", file=sys.stderr)
+        return {}
+    return {"trace": trace, "trace_truncated": truncated, "model_calls": model_calls}
 
 
 def collect_usage(runtime: Path) -> dict[str, Any]:
@@ -2585,6 +2609,7 @@ def run_task(
     )
     started = time.monotonic()
     session: EngineSession | None = None
+    trace_read = False
     try:
         # Validated before any engine boots: an unknown mode is an error record.
         resolve_mode(provider, mode)
@@ -2626,8 +2651,8 @@ def run_task(
         results = grade(task, ctx)
         usage = session.usage()
         # Read before close(), which deletes the Claude session log.
-        session_calls, model_calls = session.session_trace()
-        trace, trace_truncated = _record_trace(usage["trace"], session_calls)
+        record.update(_trace_fields(session, usage))
+        trace_read = True
         all_ok = all(r.ok for r in results)
         # The synthetic chat read before the archive can add nothing (it carries no
         # errors), but its counts are summed in so none can be lost to the archive.
@@ -2673,9 +2698,6 @@ def run_task(
             tool_calls=_as_int(usage["tool_calls"]),
             tool_errors=_as_int(usage["tool_errors"]),
             provider_errors=provider_errors,
-            trace=trace,
-            trace_truncated=trace_truncated,
-            model_calls=model_calls,
             ciao_calls=_as_int(usage["ciao_calls"]),
             ciao_errors=_as_int(usage["ciao_errors"]),
             cost_usd=usage["cost_usd"],
@@ -2687,6 +2709,9 @@ def run_task(
         record.update(status="error", error=repr(exc)[:500])
     finally:
         if session is not None:
+            if not trace_read:
+                # The run ended before the grader read the session; the log lasts until close().
+                record.update(_trace_fields(session))
             try:
                 session.close()
             except Exception as exc:  # noqa: BLE001 - cleanup failure is noted, not raised
