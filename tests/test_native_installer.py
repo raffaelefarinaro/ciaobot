@@ -37,6 +37,7 @@ from ciao.install_discovery import NativeInstallState
 from ciao.native_installer import EventError, EventWriter
 from ciao.native_lock import NativeLockError, NativeRunLock
 from ciao.native_readiness import NativeReadinessProof
+from tests.native_artifacts import make_artifacts
 from tests.test_server_host_install import APP_NAME, _FakeRunner, _fixture
 
 #: A canonical run id: lowercase, hyphenated, exactly what ``--run-id`` accepts.
@@ -2768,6 +2769,7 @@ def _release_wizard_after_listener_check(
 def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
     state = tmp_path / "state"
     values: dict[str, object] = {
+        "validate_inputs": lambda: None,
         "classify": lambda workspace: NativeInstallState.fresh,
         "prepare_state_dir": lambda: _prepared(_state_dir(tmp_path)),
         "acquire_lock": lambda directory, run_id: NativeRunLock.acquire(
@@ -2783,6 +2785,10 @@ def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
             _bind_script(),
             str(fd),
             str(tmp_path / WIZARD_RELEASE_NAME),
+        ),
+        "wizard_environment": lambda: (
+            {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            tmp_path,
         ),
         "read_handoff": lambda run_id: _handoff(run_id),
         "activate": lambda run_id, remaining: _handoff(run_id),
@@ -3347,26 +3353,44 @@ def test_invalid_requests_are_refused_before_the_descriptor_is_used(
         assert _available(read_fd) == b""
 
 
-def test_the_public_entry_refuses_before_touching_the_descriptor() -> None:
+def test_the_public_entry_builds_production_deps_and_runs_the_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    artifacts = make_artifacts(tmp_path)
+    ready = NativeReadinessProof(
+        ready=True, failure=None, port=54321, version=artifacts.version
+    )
+    monkeypatch.setattr(
+        native,
+        "_production_deps",
+        lambda request, artifacts, cancellation: native._ProductionDeps(
+            deps=_coordinator_deps(
+                tmp_path, prove_ready=lambda host, handoff, remaining: ready
+            ),
+            private=native._PrivateRun(),
+        ),
+    )
     with _public_event_pipe() as (read_fd, write_fd):
-        with pytest.raises(native.NativeCoordinatorError) as caught:
-            native.run_native_install(_coordinator_request(write_fd))
-        assert caught.value.reason == "coordinator_unavailable"
-        assert caught.value.failure_code == "internal_error"
-        os.fstat(write_fd)  # the public entry did not take ownership
-        assert _available(read_fd) == b""
+        outcome = native.run_native_install(
+            _coordinator_request(write_fd), artifacts
+        )
+        events = [json.loads(line) for line in _drain(read_fd).splitlines()]
+    assert outcome.terminal == "service_ready"
+    assert outcome.exit_code == 0
+    assert events[-1]["type"] == "service_ready"
 
 
-def test_the_public_entry_validates_the_public_fd_range() -> None:
+def test_the_public_entry_validates_the_public_fd_range(tmp_path: Path) -> None:
     with _public_event_pipe() as (_read_fd, _write_fd):
         request = native.NativeInstallRequest(
             run_id=RUN_ID,
-            events_fd=10,
+            events_fd=native.MAX_EVENT_FD + 1,
             first_seq=1,
             prior_events=0,
         )
         with pytest.raises(native.NativeCoordinatorError) as caught:
-            native.run_native_install(request)
+            native.run_native_install(request, make_artifacts(tmp_path))
         assert caught.value.reason == "invalid_events_fd"
         assert caught.value.failure_code == "invalid_arguments"
 
@@ -3540,7 +3564,7 @@ def test_an_expired_run_deadline_refuses_before_any_mutation(
 
 def test_the_public_coordinator_exposes_no_injection_seams() -> None:
     parameters = inspect.signature(native.run_native_install).parameters
-    assert list(parameters) == ["request"]
+    assert list(parameters) == ["request", "artifacts", "cancellation"]
     assert not {
         "deps",
         "classify",
@@ -4412,7 +4436,7 @@ def test_an_invalid_request_leaves_the_public_fd_to_the_caller(
         os.fstat(event_fd)  # the caller still owns the descriptor
         assert _available(read_fd) == b""
         with pytest.raises(native.NativeCoordinatorError):
-            native.run_native_install(bad)
+            native.run_native_install(bad, make_artifacts(tmp_path))
         os.fstat(event_fd)
 
 

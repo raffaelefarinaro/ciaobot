@@ -12,8 +12,8 @@ The same module owns the run-bound native-install lock and, since #2340, the
 native-only :func:`create_fresh_host` helper. That helper authenticates the
 signed manifest and archive through the existing release and host APIs, requires
 the caller's held :class:`NativeRunLock`, and writes only the existing
-owner-only host ownership record. It starts no service, writes no onboarding
-receipt, and still has no production caller.
+owner-only host ownership record. It starts no service and writes no onboarding
+receipt. The native coordinator is its production caller.
 
 An event has exactly four common keys — ``schema``, ``run_id``, ``seq`` and
 ``type`` — plus the keys its type allows:
@@ -103,18 +103,22 @@ implement.
 
 The run-bound lock lives in :mod:`ciao.native_lock`.
 
-The module also contains the first, deliberately partial native coordinator
-lifecycle (#2340). ``_run_native_install`` is the private test seam: callers
-inject the classifier, state/lock preparation, the real ``create_fresh_host``
-step, the engine install, the wizard command, the handoff reader and activation,
-so the order and the cleanup rules can be driven with fakes and real short-lived
-child processes. The public ``run_native_install`` exposes none of those seams
-and still refuses before it touches the descriptor: the setup child now has an
-explicit :class:`NativeBootstrapContext` and can record schema 2 through it, but
-the parent side is not wired to start that child. The coordinator reaches
-``service_ready`` only through its injected readiness proof: a ``ready`` answer
-for the handoff port, reached after clean child and lock cleanup, and the
-production proof in ``ciao.native_readiness`` is supplied by the next slice. The
+The module also contains the native coordinator lifecycle (#2340).
+``python -I -m ciao.native_installer run`` (:func:`main`) is its only entry
+point, started by ``install.sh --native-install``. The coordinator owns the run
+lock, both canonical classifications, the host install and the engine install
+(``uv tool install`` plus the one install receipt). It runs before any of those
+mutations, from a private venv the shell builds out of the wheel it digest-pinned; the coordinator re-hashes its private copies.
+:func:`run_native_install` validates the request and the shell's verified
+artifacts, then builds the real steps with :func:`_production_deps` and runs
+``_run_native_install``. That private seam takes every step as a dependency, so
+the order and the cleanup rules can also be driven with fakes and real
+short-lived child processes. The setup child records schema 2 through its
+explicit :class:`NativeBootstrapContext`, and the coordinator starts it with the
+hidden ``--installer-native-fd`` command from :func:`_wizard_argv`. The
+coordinator reaches ``service_ready`` only through the production readiness
+proof :func:`ciao.native_readiness.prove_native_readiness`: a ``ready`` answer
+for the handoff port, reached after clean child and lock cleanup. The
 lifecycle enforces the fresh-only preflight and the run lock before the engine
 install, creates the host through the real fresh-host helper, rechecks the lock
 and host immediately before each mutation, never passes the public event descriptor to a child, and terminates
@@ -143,28 +147,42 @@ the same-UID check-to-write races remain evidence checks, not proof.
 
 from __future__ import annotations
 
+import argparse
 import errno
+import hashlib
 import json
 import math
 import os
+import re
+import selectors
 import select
+import shutil
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, NoReturn
+from typing import IO, Any, Final, NoReturn, TypeVar
 
-from ciao import native_handoff
-from ciao.install_discovery import NativeInstallState
+from ciao import __version__ as _PACKAGE_VERSION
+from ciao import install_receipt, native_handoff, native_lock, native_readiness
+from ciao.install_discovery import NativeInstallState, classify_native_install
 from ciao.native_handoff import NativeHandoffError, NativeHandoffResult
 from ciao.native_lock import NativeLockError, NativeRunLock, NativeStateDir
-from ciao.native_readiness import NativeReadinessProof
+from ciao.native_readiness import (
+    NativeReadinessPolicy,
+    NativeReadinessProof,
+    NativeReadinessRequest,
+    make_native_readiness_deps,
+    prove_native_readiness,
+)
 from ciao.release_manifest import (
     RELEASE_PUBLIC_KEY,
     select_server_host_artifact,
@@ -694,8 +712,8 @@ def create_fresh_host(
 ) -> FreshHostInstall:
     """Create and prove one brand-new native server host, or refuse.
 
-    This is the native-only fresh path. It has no production caller yet and does
-    not start, stop, reload, bootstrap or quiesce a service; it never writes a
+    This is the native-only fresh path. The native coordinator is its only
+    production caller. It does not start, stop, reload, bootstrap or quiesce a service; it never writes a
     receipt and never calls the legacy ``main`` warning/skip path. The trust
     boundary is the caller's *manifest bytes and signature*, not an
     already-selected ``entry``: this function calls
@@ -1021,6 +1039,40 @@ class NativeInstallOutcome:
         return 0 if self.terminal == "service_ready" else 1
 
 
+#: The coordinator protocol the shell probes before it hands over the descriptor.
+NATIVE_COORDINATOR_PROTOCOL: Final[int] = 1
+#: The engine Python the tool environment is built with. It must equal
+#: ``PYTHON_VERSION`` in ``scripts/install-engine.sh``; a test pins that.
+ENGINE_PYTHON_VERSION: Final[str] = "3.13"
+#: The longest the tool install may run, clamped to the remaining run budget.
+ENGINE_INSTALL_TIMEOUT_SECONDS: Final[float] = 900.0
+#: The longest a ``uv tool dir`` answer may take.
+TOOL_DIR_TIMEOUT_SECONDS: Final[float] = 30.0
+#: The longest the installed interpreter may take to report its version.
+ENGINE_PROBE_TIMEOUT_SECONDS: Final[float] = 60.0
+_VERSION_TEXT_RE: Final[re.Pattern[str]] = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]*")
+
+
+@dataclass(frozen=True, slots=True)
+class NativeInstallArtifacts:
+    """The shell's verified artifacts for one run, by absolute path.
+
+    ``uv`` is the shell's digest-pinned uv, never a PATH uv. ``version`` must
+    equal the running package's version; the coordinator refuses any other
+    value before it classifies or mutates anything.
+    """
+
+    version: str
+    uv: Path
+    wheel: Path
+    manifest: Path
+    signature: Path
+    host_archive: Path
+    #: The SHA-256 the shell verified for ``uv`` and ``wheel``: 64 lowercase hex.
+    uv_sha256: str
+    wheel_sha256: str
+
+
 class _Refusal(Exception):
     def __init__(self, code: str) -> None:
         if code not in FAILURE_CODES:
@@ -1109,16 +1161,18 @@ class _CoordinatorPolicy:
 
 @dataclass(frozen=True, slots=True)
 class _CoordinatorDeps:
-    """Every external effect, injected only by tests and the next slice.
+    """Every external effect, injected by tests and bound to the real steps by
+    :func:`_production_deps` for the public entry point.
 
-    The public entry point exposes none of this. The production wiring must
-    supply the real classifier, the private state/lock helpers, the real
-    :func:`create_fresh_host` step, the verified-wheel engine install, the
-    native bootstrap command, :func:`ciao.native_handoff.activate`, the listener
-    lookup that proves the wizard child holds the reported port, and the
-    readiness proof :func:`ciao.native_readiness.prove_native_readiness`.
+    The public entry point exposes none of this. Production binds the artifact
+    check, the real classifier, the private state/lock helpers, the real
+    :func:`create_fresh_host` step, the verified-uv engine install, the native
+    bootstrap command, :func:`ciao.native_handoff.activate`, the listener lookup
+    that proves the wizard child holds the reported port, and the readiness
+    proof :func:`ciao.native_readiness.prove_native_readiness`.
     """
 
+    validate_inputs: Callable[[], None]
     classify: Callable[[Path | None], NativeInstallState]
     prepare_state_dir: Callable[[], NativeStateDir]
     acquire_lock: Callable[[NativeStateDir, str], NativeRunLock]
@@ -1127,6 +1181,9 @@ class _CoordinatorDeps:
     recheck_host: Callable[[FreshHostInstall], None]
     install_engine: Callable[[float], None]
     wizard_command: Callable[[int], tuple[str, ...]]
+    #: ``() -> (environment, cwd)`` for the wizard child. Production keeps the
+    #: caller's PATH and drops the host variables; tests supply a fixed one.
+    wizard_environment: Callable[[], tuple[Mapping[str, str], Path]]
     read_handoff: Callable[[str], NativeHandoffResult]
     activate: Callable[[str, float], NativeHandoffResult]
     #: ``(port, child_pid) -> frozenset`` of every pid holding a listening socket
@@ -1171,7 +1228,7 @@ class _OwnedChild:
         return self._process.poll()
 
     def owns_process(self, pid: int) -> bool:
-        """Whether ``pid`` is this child or in the session group it leads."""
+        """Whether ``pid`` is this child or in the process group it leads."""
         if type(pid) is not int or pid <= 0 or self._process.poll() is not None:
             return False
         if pid == self._process.pid:
@@ -1272,6 +1329,8 @@ def _spawn_owned_child(
     notification_fd: int,
     public_fd: int,
     policy: _CoordinatorPolicy,
+    env: Mapping[str, str],
+    cwd: Path,
 ) -> _OwnedChild:
     """Start the wizard with only the private notification descriptor.
 
@@ -1306,6 +1365,8 @@ def _spawn_owned_child(
             pass_fds=(notification_fd,),
             close_fds=True,
             start_new_session=True,
+            env=dict(env),
+            cwd=cwd,
         )
     except (OSError, ValueError):
         raise NativeCoordinatorError(
@@ -2049,21 +2110,1005 @@ def _map_classification(state: NativeInstallState) -> None:
     raise _Refusal(code)
 
 
-def run_native_install(request: NativeInstallRequest) -> NativeInstallOutcome:
-    """Refuse the public native coordinator until its proof path exists.
+#: The fixed PATH every uv call and the version probe run with.
+FIXED_PATH: Final[str] = "/usr/bin:/bin:/usr/sbin:/sbin"
+#: The fixed locale for every uv call and the version probe.
+FIXED_LANG: Final[str] = "C.UTF-8"
+#: The only package index an engine install resolves from.
+DEFAULT_INDEX_URL: Final[str] = "https://pypi.org/simple"
+#: Output caps for the bounded child calls.
+TOOL_DIR_OUTPUT_BYTES: Final[int] = 4096
+ENGINE_OUTPUT_BYTES: Final[int] = 1048576
+PROBE_OUTPUT_BYTES: Final[int] = 4096
+#: The one fixed line a refused handover prints; argparse would echo the value.
+_HANDOVER_REFUSAL: Final[str] = "invalid handover arguments\n"
+_DIGEST_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
+#: Host variables that redirect tools, indexes, interpreters, loaders or TLS.
+_DROPPED_PREFIXES: Final[tuple[str, ...]] = (
+    "UV_",
+    "XDG_",
+    "PYTHON",
+    "DYLD_",
+    "PIP_",
+    "SSL_CERT_",
+)
+_DROPPED_NAMES: Final[frozenset[str]] = frozenset(
+    {"VIRTUAL_ENV", "REQUESTS_CA_BUNDLE"}
+)
+_O_NOFOLLOW: Final[int] = getattr(os, "O_NOFOLLOW", 0)
+#: The descriptor stat the artifact copy uses; a seam for the owner check test.
+_fstat: Callable[[int], os.stat_result] = os.fstat
+_T = TypeVar("_T")
 
-    This is the production entry point. It deliberately exposes no injection
-    seams: the next slice must supply the native bootstrap context and schema-2
-    handoff recording in the setup child, and the production readiness and
-    listener deps before this can start a run. Invalid
-    inputs are refused first with ``invalid_arguments``; a valid request then
-    fails with ``coordinator_unavailable`` before reading the descriptor,
-    acquiring the lock, touching the host or starting a child.
-    :func:`_run_native_install` is the testable lifecycle seam and is not public
-    API.
+
+def _require_regular_file(path: object, *, executable: bool) -> None:
+    """An absolute, non-symlink regular file the shell verified; else a fixed refusal."""
+    invalid = NativeCoordinatorError("invalid_artifacts", "invalid_arguments")
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise invalid
+    if any(part in {".", ".."} for part in path.parts):
+        raise invalid
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise invalid from None
+    if not stat.S_ISREG(info.st_mode):
+        raise invalid
+    if executable and not os.access(path, os.X_OK):
+        raise invalid
+
+
+def _validate_artifacts(artifacts: NativeInstallArtifacts) -> None:
+    """Check the shell's paths and version before anything is copied or classified.
+
+    Paths are checked first, so a bad path is never reported as a version
+    mismatch. The version must be a plain token and must equal the version of
+    the package that is running.
+    """
+    _require_regular_file(artifacts.uv, executable=True)
+    _require_regular_file(artifacts.wheel, executable=False)
+    _require_regular_file(artifacts.manifest, executable=False)
+    _require_regular_file(artifacts.signature, executable=False)
+    _require_regular_file(artifacts.host_archive, executable=False)
+    version = artifacts.version
+    if type(version) is not str or not _VERSION_TEXT_RE.fullmatch(version):
+        raise NativeCoordinatorError("invalid_artifacts", "invalid_arguments")
+    if version != _PACKAGE_VERSION:
+        raise NativeCoordinatorError("version_mismatch", "verification_failed")
+
+
+def _validate_digests(artifacts: NativeInstallArtifacts) -> None:
+    for digest in (artifacts.uv_sha256, artifacts.wheel_sha256):
+        if type(digest) is not str or not _DIGEST_RE.fullmatch(digest):
+            raise NativeCoordinatorError("invalid_artifacts", "invalid_arguments")
+
+
+def _is_dropped(name: str) -> bool:
+    upper = name.upper()
+    return (
+        upper.startswith(_DROPPED_PREFIXES)
+        or upper in _DROPPED_NAMES
+        or upper.endswith("_PROXY")
+    )
+
+
+def _uid() -> int:
+    if sys.platform == "win32":
+        raise NativeCoordinatorError("unsupported_platform", "unknown_state")
+    return os.getuid()
+
+
+def _passwd_home() -> Path:
+    """The account home from the passwd database, never from ``$HOME``."""
+    if sys.platform == "win32":
+        raise NativeCoordinatorError("unsupported_platform", "unknown_state")
+    import pwd
+
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError):
+        raise NativeCoordinatorError("home_unknown", "unknown_state") from None
+
+
+def _pinned_home() -> Path:
+    """The home the coordinator pins. ``$HOME`` must name the same directory."""
+    account = _passwd_home()
+    env_home = os.environ.get("HOME")
+    if not env_home or os.path.realpath(env_home) != os.path.realpath(account):
+        raise NativeCoordinatorError("home_mismatch", "unknown_state")
+    return account
+
+
+def _scrubbed_env(*, keep_user_path: bool) -> dict[str, str]:
+    """The environment a coordinator child runs in, with the host variables dropped.
+
+    ``keep_user_path=False`` is the allowlist for the uv calls, the version probe
+    and the classifier: a fixed PATH, a fixed locale and the pinned HOME, nothing
+    else. ``keep_user_path=True`` is the wizard child: the caller's PATH, the rest
+    of the environment minus the dropped variables, and the pinned HOME.
+    """
+    home = _pinned_home()
+    env: dict[str, str] = {}
+    if keep_user_path:
+        for name, value in os.environ.items():
+            if name in {"HOME", "PATH"} or _is_dropped(name):
+                continue
+            env[name] = value
+        env["PATH"] = os.environ.get("PATH", FIXED_PATH)
+    else:
+        env["PATH"] = FIXED_PATH
+        env["LANG"] = FIXED_LANG
+    env["HOME"] = str(home)
+    return env
+
+
+@dataclass(frozen=True, slots=True)
+class _FileIdentity:
+    """(device, inode, sha256) of one regular file, read through no symlink."""
+
+    device: int
+    inode: int
+    sha256: str
+
+
+def _file_identity(path: Path) -> _FileIdentity:
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
+    except OSError:
+        raise NativeCoordinatorError("file_identity_failed", "install_failed") from None
+    try:
+        info = _fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise NativeCoordinatorError("file_identity_failed", "install_failed")
+        hasher = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            hasher.update(chunk)
+        return _FileIdentity(info.st_dev, info.st_ino, hasher.hexdigest())
+    except OSError:
+        raise NativeCoordinatorError("file_identity_failed", "install_failed") from None
+    finally:
+        os.close(fd)
+
+
+@dataclass(frozen=True, slots=True)
+class _ShimIdentity:
+    """The ``ciao`` link uv created and the tool-env file it resolves to.
+
+    Real uv links ``<bin>/ciao`` into ``<tool>/ciaobot/bin``, so the link and the
+    target are both recorded and both are re-checked before the wizard starts.
+    """
+
+    link_device: int
+    link_inode: int
+    link_target: str
+    target_device: int
+    target_inode: int
+    target_sha256: str
+
+
+def _shim_identity(bin_dir: Path, tool_dir: Path) -> tuple[_ShimIdentity, Path]:
+    """Identify the shim and return the verified target path it resolves to.
+
+    The link is read with ``lstat``/``readlink``. Its target is resolved with
+    ``realpath(strict=True)``, must lie inside ``<tool>/ciaobot/bin``, and is
+    opened without a no-follow flag, since the link is already resolved. Any other
+    shape is a fixed refusal. The wizard is spawned through the returned target,
+    never through the link.
+    """
+    refusal = NativeCoordinatorError("shim_invalid", "install_failed")
+    link = bin_dir / "ciao"
+    try:
+        info = os.lstat(link)
+        if not stat.S_ISLNK(info.st_mode):
+            raise refusal
+        link_target = os.readlink(link)
+        target = Path(os.path.realpath(link, strict=True))
+    except OSError:
+        raise refusal from None
+    # Both sides are already realpath-resolved, so this is a containment check
+    # on real paths, not on the link's spelling.
+    allowed = Path(os.path.realpath(tool_dir / "ciaobot" / "bin"))
+    if not target.is_relative_to(allowed):
+        raise refusal
+    try:
+        fd = os.open(target, os.O_RDONLY)
+    except OSError:
+        raise refusal from None
+    try:
+        target_info = _fstat(fd)
+        if not stat.S_ISREG(target_info.st_mode):
+            raise refusal
+        hasher = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            hasher.update(chunk)
+    except OSError:
+        raise refusal from None
+    finally:
+        os.close(fd)
+    identity = _ShimIdentity(
+        link_device=info.st_dev,
+        link_inode=info.st_ino,
+        link_target=link_target,
+        target_device=target_info.st_dev,
+        target_inode=target_info.st_ino,
+        target_sha256=hasher.hexdigest(),
+    )
+    return identity, target
+
+
+def _managed_python_root() -> Path:
+    """uv's managed Python root under the pinned home: where a tool python may link."""
+    return _pinned_home() / ".local" / "share" / "uv" / "python"
+
+
+def _python_identity(tool_python: Path) -> tuple[int, int]:
+    """(device, inode) of the interpreter the tool python resolves to."""
+    try:
+        info = os.stat(os.path.realpath(tool_python, strict=True))
+    except OSError:
+        raise NativeCoordinatorError("python_changed", "install_failed") from None
+    return info.st_dev, info.st_ino
+
+
+def _interpreter_inside(tool_python: Path, tool_dir: Path) -> None:
+    """The tool python must resolve inside the tool env or uv's managed Python root.
+
+    Real uv links ``tools/ciaobot/bin/python`` to an interpreter under the managed
+    Python root, so requiring the tool directory alone would refuse every real
+    install. Anything else, including an arbitrary interpreter, is refused.
+    """
+    try:
+        real = Path(os.path.realpath(tool_python, strict=True))
+    except OSError:
+        raise NativeCoordinatorError("interpreter_missing", "install_failed") from None
+    roots = (
+        Path(os.path.realpath(tool_dir)),
+        Path(os.path.realpath(_managed_python_root())),
+    )
+    if not any(real.is_relative_to(root) for root in roots):
+        raise NativeCoordinatorError("interpreter_outside", "install_failed")
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineInstall:
+    """What this run installed and probed: the interpreter, and the shim it must stay."""
+
+    tool_python: Path
+    shim: _ShimIdentity
+    #: The probed interpreter's resolved (device, inode), re-checked before the spawn.
+    python_identity: tuple[int, int]
+
+
+def _verified_copy(
+    source: Path, dest: Path, digest: str, *, mode: int, expected_uid: int
+) -> None:
+    """Copy one shell artifact into the private directory, hashing as it goes.
+
+    The source is opened once with no-follow, must be a regular file owned by
+    ``expected_uid`` with no group or other write bit, and its bytes must hash to
+    ``digest``. The copy is then re-hashed against the same digest. Only the copy
+    is used after this.
+    """
+    if sys.platform == "win32":
+        raise NativeCoordinatorError("unsupported_platform", "unknown_state")
+    invalid = NativeCoordinatorError("invalid_artifacts", "invalid_arguments")
+    try:
+        fd = os.open(source, os.O_RDONLY | _O_NOFOLLOW)
+    except OSError:
+        raise invalid from None
+    hasher = hashlib.sha256()
+    try:
+        info = _fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != expected_uid
+            or info.st_mode & 0o022
+        ):
+            raise invalid
+        out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(out, mode)
+            while chunk := os.read(fd, 1 << 20):
+                hasher.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    view = view[os.write(out, view) :]
+        finally:
+            os.close(out)
+    except OSError:
+        raise invalid from None
+    finally:
+        os.close(fd)
+    if hasher.hexdigest() != digest:
+        raise NativeCoordinatorError("artifact_digest_mismatch", "verification_failed")
+    if _file_identity(dest).sha256 != digest:
+        raise NativeCoordinatorError("artifact_digest_mismatch", "verification_failed")
+
+
+def _same_file(path: Path, expected: Path) -> bool:
+    try:
+        seen = os.stat(path)
+        want = os.stat(expected)
+    except OSError:
+        return False
+    return os.path.realpath(path) == os.path.realpath(expected) and (
+        seen.st_dev,
+        seen.st_ino,
+    ) == (want.st_dev, want.st_ino)
+
+
+def _required(value: _T | None) -> _T:
+    if value is None:
+        raise NativeCoordinatorError("not_staged", "internal_error")
+    return value
+
+
+class _PrivateRun:
+    """The run's private 0700 directory: verified copies, a private cwd, what was probed.
+
+    ``stage`` runs from ``validate_inputs`` before any classification. Every later
+    step reads the copies recorded here. ``remove`` deletes the directory when the
+    run ends, after every child has been reaped.
+    """
+
+    def __init__(self) -> None:
+        self.root: Path | None = None
+        self.cwd: Path | None = None
+        self.uv: Path | None = None
+        self.wheel: Path | None = None
+        self.engine: _EngineInstall | None = None
+        #: Set when a child the run started may still be running. Its directory
+        #: is then kept, because that child may still be writing into it.
+        self.retained = False
+
+    def stage(self, artifacts: NativeInstallArtifacts) -> None:
+        _validate_artifacts(artifacts)
+        uid = _uid()
+        root = Path(tempfile.mkdtemp(prefix="ciao-native-"))
+        self.root = root
+        info = os.lstat(root)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != uid
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise NativeCoordinatorError("private_dir_unsafe", "unknown_state")
+        cwd = root / "cwd"
+        cwd.mkdir(mode=0o700)
+        self.cwd = cwd
+        uv = root / "uv"
+        _verified_copy(
+            artifacts.uv, uv, artifacts.uv_sha256, mode=0o700, expected_uid=uid
+        )
+        self.uv = uv
+        wheel_dir = root / "wheel"
+        wheel_dir.mkdir(mode=0o700)
+        wheel = wheel_dir / artifacts.wheel.name
+        _verified_copy(
+            artifacts.wheel,
+            wheel,
+            artifacts.wheel_sha256,
+            mode=0o600,
+            expected_uid=uid,
+        )
+        self.wheel = wheel
+
+    def remove(self) -> None:
+        if self.root is not None and not self.retained:
+            shutil.rmtree(self.root, ignore_errors=True)
+            self.root = None
+
+
+@dataclass(slots=True)
+class _ProductionDeps:
+    """The bound seams and the private run they write to. Close it when the run ends."""
+
+    deps: _CoordinatorDeps
+    private: _PrivateRun
+
+    def close(self) -> None:
+        self.private.remove()
+
+
+class _ToolCallFailed(Exception):
+    """A bounded child call did not finish cleanly; the caller names the failure."""
+
+
+def _read_capped(
+    stream: IO[bytes],
+    deadline: _Deadline,
+    cancellation: NativeCancellation,
+    limit: int,
+) -> bytes:
+    """Read stdout up to ``limit`` bytes, polling the cancellation flag between reads."""
+    fd = stream.fileno()
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        selector = selectors.DefaultSelector()
+    except (OSError, ValueError):
+        raise _ToolCallFailed from None
+    try:
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            if cancellation.cancelled:
+                raise _Cancelled
+            remaining = deadline.remaining()
+            if remaining <= 0:
+                raise _TimedOut
+            if not selector.select(min(COORDINATOR_POLL_INTERVAL_SECONDS, remaining)):
+                continue
+            chunk = os.read(fd, min(65536, limit + 1 - total))
+            if not chunk:
+                return b"".join(chunks)
+            total += len(chunk)
+            if total > limit:
+                raise _ToolCallFailed
+            chunks.append(chunk)
+    except (OSError, ValueError, KeyError):
+        raise _ToolCallFailed from None
+    finally:
+        selector.close()
+
+
+def _run_bounded(
+    argv: tuple[str, ...],
+    *,
+    env: Mapping[str, str],
+    cwd: Path,
+    timeout: float,
+    limit: int,
+    cancellation: NativeCancellation,
+) -> tuple[int, bytes]:
+    """One session-owned child with capped stdout, polled for cancellation, always reaped.
+
+    The child leads its own session, so the owned-child cleanup signals its whole
+    process group. Cancellation raises ``_Cancelled``; a timeout, an oversized
+    answer or a spawn failure raises ``_ToolCallFailed``. Either way the child is
+    terminated and reaped before the exception leaves this function.
+    """
+    deadline = _Deadline.after(timeout)
+    try:
+        process = subprocess.Popen(
+            list(argv),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+            env=dict(env),
+            cwd=cwd,
+        )
+    except (OSError, ValueError):
+        raise _ToolCallFailed from None
+    child = _OwnedChild(
+        process,
+        term_grace=COORDINATOR_TERM_GRACE_SECONDS,
+        reap_timeout=COORDINATOR_REAP_TIMEOUT_SECONDS,
+        poll_interval=COORDINATOR_POLL_INTERVAL_SECONDS,
+    )
+    stream = process.stdout
+    if stream is None:
+        child.terminate_and_reap()
+        raise _ToolCallFailed
+    try:
+        try:
+            output = _read_capped(stream, deadline, cancellation, limit)
+            code = child.wait_for_exit(deadline, cancellation)
+        except _Cancelled:
+            child.terminate_and_reap()
+            raise
+        except (_TimedOut, _ToolCallFailed):
+            child.terminate_and_reap()
+            raise _ToolCallFailed from None
+    finally:
+        stream.close()
+    return code, output
+
+
+def _tool_unknown() -> NativeCoordinatorError:
+    return NativeCoordinatorError("tool_dir_unknown", "unknown_state")
+
+
+def _tool_dir_answer(
+    uv: Path,
+    extra: tuple[str, ...],
+    *,
+    env: Mapping[str, str],
+    cwd: Path,
+    cancellation: NativeCancellation,
+) -> Path:
+    """One answer from ``uv tool dir``: a single absolute line, nothing else."""
+    try:
+        code, output = _run_bounded(
+            (str(uv), "tool", "dir", "--no-config", *extra),
+            env=env,
+            cwd=cwd,
+            timeout=TOOL_DIR_TIMEOUT_SECONDS,
+            limit=TOOL_DIR_OUTPUT_BYTES,
+            cancellation=cancellation,
+        )
+    except _ToolCallFailed:
+        raise _tool_unknown() from None
+    if code != 0:
+        raise _tool_unknown()
+    try:
+        raw = output.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _tool_unknown() from None
+    if raw.count("\n") != 1 or not raw.endswith("\n") or "\r" in raw or "\0" in raw:
+        raise _tool_unknown()
+    text = raw[:-1]
+    path = Path(text)
+    if not text or not path.is_absolute() or any(
+        part in {".", ".."} for part in path.parts
+    ):
+        raise _tool_unknown()
+    return path
+
+
+def _tool_dirs(
+    uv: Path,
+    *,
+    env: Mapping[str, str],
+    cwd: Path,
+    cancellation: NativeCancellation,
+) -> tuple[Path, Path]:
+    """The pinned tool and bin directories. uv must report exactly those, or refuse."""
+    home = _pinned_home()
+    expected_tool = home / ".local" / "share" / "uv" / "tools"
+    expected_bin = home / ".local" / "bin"
+    reported_tool = _tool_dir_answer(
+        uv, (), env=env, cwd=cwd, cancellation=cancellation
+    )
+    reported_bin = _tool_dir_answer(
+        uv, ("--bin",), env=env, cwd=cwd, cancellation=cancellation
+    )
+    if reported_tool != expected_tool or reported_bin != expected_bin:
+        raise _tool_unknown()
+    return expected_tool, expected_bin
+
+
+def _engine_failed() -> NativeCoordinatorError:
+    return NativeCoordinatorError("engine_install_failed", "install_failed")
+
+
+def _install_engine(
+    artifacts: NativeInstallArtifacts,
+    tool_dir: Path,
+    bin_dir: Path,
+    remaining: float,
+    *,
+    cancellation: NativeCancellation,
+    env: Mapping[str, str],
+    cwd: Path,
+) -> _EngineInstall:
+    """Install the staged wheel with the staged uv, probe it, then write the one receipt.
+
+    There is no ``--force``: the classifications proved there is no tool
+    environment and no shim. The index is pinned, and the call runs with the
+    scrubbed environment in its own session. The probed interpreter and the shim
+    identity are returned so later steps can be bound to them.
+    """
+    from ciao import macos_service
+
+    try:
+        code, _ = _run_bounded(
+            (
+                str(artifacts.uv),
+                "tool",
+                "install",
+                "--no-config",
+                "--default-index",
+                DEFAULT_INDEX_URL,
+                "--python",
+                ENGINE_PYTHON_VERSION,
+                str(artifacts.wheel),
+            ),
+            env=env,
+            cwd=cwd,
+            timeout=min(remaining, ENGINE_INSTALL_TIMEOUT_SECONDS),
+            limit=ENGINE_OUTPUT_BYTES,
+            cancellation=cancellation,
+        )
+    except _ToolCallFailed:
+        raise _engine_failed() from None
+    if code != 0:
+        raise _engine_failed()
+
+    ciao_path = bin_dir / "ciao"
+    tool_python = tool_dir / "ciaobot" / "bin" / "python"
+    for path in (ciao_path, tool_python):
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            raise _engine_failed()
+    _interpreter_inside(tool_python, tool_dir)
+    try:
+        code, output = _run_bounded(
+            (
+                str(tool_python),
+                "-I",
+                "-c",
+                "import ciao, sys; sys.stdout.write(ciao.__version__)",
+            ),
+            env=env,
+            cwd=cwd,
+            timeout=ENGINE_PROBE_TIMEOUT_SECONDS,
+            limit=PROBE_OUTPUT_BYTES,
+            cancellation=cancellation,
+        )
+    except _ToolCallFailed:
+        raise _engine_failed() from None
+    if code != 0 or output.decode("utf-8", errors="replace") != artifacts.version:
+        raise _engine_failed()
+    try:
+        python_identity = _python_identity(tool_python)
+    except NativeCoordinatorError:
+        raise _engine_failed() from None
+
+    receipt = install_receipt.InstallReceipt(
+        version=artifacts.version,
+        executable=str(ciao_path),
+        python=str(tool_python),
+        service_backend="launchd",
+        service_label=macos_service.SERVER_LABEL,
+        installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
+    )
+    try:
+        install_receipt.write_receipt(receipt)
+        written = install_receipt.read_receipt()
+    except (OSError, ValueError):
+        raise _engine_failed() from None
+    if (
+        written is None
+        or written.version != artifacts.version
+        or Path(written.executable) != ciao_path
+        or Path(written.python) != tool_python
+    ):
+        raise _engine_failed()
+    shim, _target = _shim_identity(bin_dir, tool_dir)
+    return _EngineInstall(
+        tool_python=tool_python, shim=shim, python_identity=python_identity
+    )
+
+
+def _wizard_argv(
+    tool_python: Path,
+    target: Path,
+    run_id: str,
+    fd: int,
+    workspace: Path | None,
+    expected: Path | None,
+) -> tuple[str, ...]:
+    """The hidden native bootstrap command: the verified interpreter runs the verified target.
+
+    The target is the console script's resolved path, never the ``bin`` link, so
+    nothing is resolved again at exec. The interpreter is spawned by its tool-env
+    path, which is what lets uv's ``pyvenv.cfg`` be found.
+    """
+    argv: tuple[str, ...] = (
+        str(tool_python),
+        str(target),
+        "run",
+        "--installer-bootstrap",
+        "--installer-run-id",
+        run_id,
+        f"--installer-native-fd={fd}",
+    )
+    if workspace is not None:
+        argv += (f"--installer-suggest-workspace={workspace}",)
+    if expected is not None:
+        argv += (f"--installer-native-workspace={expected}",)
+    return argv
+
+
+def _report_lock_holder(state_path: Path) -> None:
+    """Say on stderr who holds the run lock: a pid and its liveness, never a path."""
+    try:
+        status = native_lock.inspect_native_lock(state_path)
+    except Exception:
+        return
+    if status.pid is None:
+        print(
+            "Ciaobot native installer: a native-install lock with no readable "
+            "owner is present. It is never removed automatically; see "
+            "'Recovering a native-install lock' in docs/DEVELOPMENT.md.",
+            file=sys.stderr,
+        )
+        return
+    liveness = {True: "running", False: "not running", None: "unknown"}[
+        status.pid_alive
+    ]
+    print(
+        "Ciaobot native installer: another native install holds the run lock "
+        f"(pid {status.pid}, {liveness}). It is never removed automatically; "
+        "see 'Recovering a native-install lock' in docs/DEVELOPMENT.md.",
+        file=sys.stderr,
+    )
+
+
+def _production_deps(
+    request: NativeInstallRequest,
+    artifacts: NativeInstallArtifacts,
+    cancellation: NativeCancellation,
+) -> _ProductionDeps:
+    """Bind every seam to its real step for one validated request and its artifacts."""
+    private = _PrivateRun()
+    tool_dirs: list[tuple[Path, Path]] = []
+
+    def dirs() -> tuple[Path, Path]:
+        # Resolved once per run, by the first step that needs them. A refusal
+        # there is an unknown classification through the seam's classify handler.
+        if not tool_dirs:
+            try:
+                tool_dirs.append(
+                    _tool_dirs(
+                        _required(private.uv),
+                        env=_scrubbed_env(keep_user_path=False),
+                        cwd=_required(private.cwd),
+                        cancellation=cancellation,
+                    )
+                )
+            except _ChildCleanupFailed:
+                private.retained = True
+                raise
+        return tool_dirs[0]
+
+    def classify(workspace: Path | None) -> NativeInstallState:
+        tool_dir, bin_dir = dirs()
+        return classify_native_install(
+            environ=_scrubbed_env(keep_user_path=False),
+            cwd=_required(private.cwd),
+            suggestion=workspace,
+            tool_dir=tool_dir,
+            bin_dir=bin_dir,
+        )
+
+    def prepare_state_dir() -> NativeStateDir:
+        return native_lock.prepare_native_state_dir(
+            install_receipt.default_receipt_path().parent
+        )
+
+    def acquire_lock(state: NativeStateDir, run_id: str) -> NativeRunLock:
+        try:
+            return NativeRunLock.acquire(state, run_id=run_id)
+        except NativeLockError as exc:
+            if exc.reason in {"lock_busy", "lock_unknown"}:
+                _report_lock_holder(state.path)
+            raise
+
+    def create_host(
+        lock: NativeRunLock, run_id: str, remaining: float
+    ) -> FreshHostInstall:
+        return create_fresh_host(
+            run_lock=lock,
+            run_id=run_id,
+            manifest_bytes=artifacts.manifest.read_bytes(),
+            signature_text=artifacts.signature.read_text(encoding="utf-8"),
+            archive_path=artifacts.host_archive,
+        )
+
+    def recheck_host(host: FreshHostInstall) -> None:
+        current = verify_owned_host(
+            default_bundle_path(), ownership_path=host.ownership_path
+        )
+        if current != host.ownership:
+            raise ServerHostInstallError(
+                "the installed host changed before the engine install",
+                code=NOT_OWNED,
+            )
+
+    def install_engine(remaining: float) -> None:
+        tool_dir, bin_dir = dirs()
+        staged = replace(
+            artifacts, uv=_required(private.uv), wheel=_required(private.wheel)
+        )
+        try:
+            private.engine = _install_engine(
+                staged,
+                tool_dir,
+                bin_dir,
+                remaining,
+                cancellation=cancellation,
+                env=_scrubbed_env(keep_user_path=False),
+                cwd=_required(private.cwd),
+            )
+        except _ChildCleanupFailed:
+            private.retained = True
+            raise
+
+    def wizard_command(fd: int) -> tuple[str, ...]:
+        tool_dir, _bin_dir = dirs()
+        engine = _required(private.engine)
+        # Both checks run immediately before the spawn that uses their results.
+        try:
+            shim, target = _shim_identity(_bin_dir, tool_dir)
+        except NativeCoordinatorError:
+            raise NativeCoordinatorError("shim_changed", "install_failed") from None
+        if shim != engine.shim:
+            raise NativeCoordinatorError("shim_changed", "install_failed")
+        if _python_identity(engine.tool_python) != engine.python_identity:
+            raise NativeCoordinatorError("python_changed", "install_failed")
+        return _wizard_argv(
+            engine.tool_python,
+            target,
+            request.run_id,
+            fd,
+            request.workspace,
+            request.expected_workspace,
+        )
+
+    def wizard_environment() -> tuple[Mapping[str, str], Path]:
+        return _scrubbed_env(keep_user_path=True), _required(private.cwd)
+
+    def read_handoff(run_id: str) -> NativeHandoffResult:
+        handoff = native_handoff.read_result(expected_run_id=run_id)
+        engine = private.engine
+        if engine is None or not _same_file(
+            Path(handoff.engine_python), engine.tool_python
+        ):
+            raise NativeCoordinatorError("engine_python_mismatch", "wizard_failed")
+        return handoff
+
+    def activate(run_id: str, remaining: float) -> NativeHandoffResult:
+        # The launchctl calls inside are self-bounded; the budget is not passed on.
+        return native_handoff.activate(run_id=run_id)
+
+    def wizard_listener(port: int, child_pid: int) -> frozenset[int]:
+        # Every listening pid on the port, IPv4 and IPv6. The coordinator
+        # decides ownership; the child pid is not needed here.
+        return native_readiness.wizard_listener_pids(port)
+
+    def prove_ready(
+        host: FreshHostInstall, handoff: NativeHandoffResult, remaining: float
+    ) -> NativeReadinessProof:
+        return prove_native_readiness(
+            NativeReadinessRequest(
+                version=artifacts.version,
+                port=handoff.port,
+                workspace=handoff.workspace,
+                host_bundle=host.bundle_path,
+                ownership_path=host.ownership_path,
+                engine_python=Path(handoff.engine_python),
+                fresh_install_service_absent=True,
+            ),
+            deps=make_native_readiness_deps(),
+            policy=NativeReadinessPolicy(
+                timeout=min(remaining, native_readiness.MAX_TIMEOUT_SECONDS)
+            ),
+            cancelled=lambda: cancellation.cancelled,
+        )
+
+    deps = _CoordinatorDeps(
+        validate_inputs=lambda: private.stage(artifacts),
+        classify=classify,
+        prepare_state_dir=prepare_state_dir,
+        acquire_lock=acquire_lock,
+        prepare_scratch=native_handoff.prepare_bootstrap_scratch,
+        create_host=create_host,
+        recheck_host=recheck_host,
+        install_engine=install_engine,
+        wizard_command=wizard_command,
+        wizard_environment=wizard_environment,
+        read_handoff=read_handoff,
+        activate=activate,
+        wizard_listener=wizard_listener,
+        prove_ready=prove_ready,
+    )
+    return _ProductionDeps(deps=deps, private=private)
+
+
+def run_native_install(
+    request: NativeInstallRequest,
+    artifacts: NativeInstallArtifacts,
+    *,
+    cancellation: NativeCancellation | None = None,
+) -> NativeInstallOutcome:
+    """Run one native install end to end with the real steps.
+
+    This is the production entry point. Its only caller is :func:`main`, which
+    the shell reaches through ``install.sh --native-install``. A request that
+    fails :func:`_validate_request`, or an artifact digest that is not 64 lowercase
+    hex characters, raises :class:`NativeCoordinatorError` before the descriptor
+    is used. Every other outcome, including an invalid artifact, is a fixed
+    ``failed`` event on the descriptor and is returned. The private run directory
+    is removed when the run ends. :func:`_run_native_install` is the testable
+    lifecycle seam and is not public API.
     """
     _validate_request(request)
-    raise NativeCoordinatorError("coordinator_unavailable", "internal_error")
+    _validate_digests(artifacts)
+    cancellation = NativeCancellation() if cancellation is None else cancellation
+    production = _production_deps(request, artifacts, cancellation)
+    try:
+        return _run_native_install(
+            request, deps=production.deps, cancellation=cancellation
+        )
+    finally:
+        production.close()
+
+
+class _HandoverArgumentParser(argparse.ArgumentParser):
+    """Refuses with one fixed line. argparse's own message would echo the value."""
+
+    def error(self, message: str) -> NoReturn:
+        sys.stderr.write(_HANDOVER_REFUSAL)
+        raise SystemExit(2)
+
+
+def _cancel_signal_numbers() -> tuple[int, ...]:
+    numbers = [signal.SIGINT, signal.SIGTERM]
+    if sys.platform != "win32":
+        numbers.append(signal.SIGHUP)
+    return tuple(numbers)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """The internal CLI the shell runs: ``python -I -m ciao.native_installer run ...``.
+
+    Exit 0 means ``service_ready`` was emitted; 1 means any other end; 2 means
+    the handover arguments were refused before the descriptor was used. A
+    signal only sets the cancellation flag, and the previous handlers are
+    restored before returning.
+    """
+    parser = _HandoverArgumentParser(
+        prog="python -m ciao.native_installer", allow_abbrev=False
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run", allow_abbrev=False, help="run the native install")
+    run.add_argument("--run-id", required=True)
+    run.add_argument("--events-fd", type=int, required=True)
+    run.add_argument("--first-seq", type=int, required=True)
+    run.add_argument("--prior-events", type=int, required=True)
+    run.add_argument("--version", required=True)
+    run.add_argument("--uv", type=Path, required=True)
+    run.add_argument("--uv-sha256", required=True)
+    run.add_argument("--wheel", type=Path, required=True)
+    run.add_argument("--wheel-sha256", required=True)
+    run.add_argument("--manifest", type=Path, required=True)
+    run.add_argument("--signature", type=Path, required=True)
+    run.add_argument("--host-archive", type=Path, required=True)
+    run.add_argument("--workspace", type=Path, default=None)
+    args = parser.parse_args(argv)
+
+    request = NativeInstallRequest(
+        run_id=args.run_id,
+        events_fd=args.events_fd,
+        first_seq=args.first_seq,
+        prior_events=args.prior_events,
+        workspace=args.workspace,
+    )
+    artifacts = NativeInstallArtifacts(
+        version=args.version,
+        uv=args.uv,
+        wheel=args.wheel,
+        manifest=args.manifest,
+        signature=args.signature,
+        host_archive=args.host_archive,
+        uv_sha256=args.uv_sha256,
+        wheel_sha256=args.wheel_sha256,
+    )
+    cancellation = NativeCancellation()
+
+    def on_signal(_signum: int, _frame: object) -> None:
+        cancellation.cancel()
+
+    previous: list[tuple[int, Any]] = []
+    try:
+        for signum in _cancel_signal_numbers():
+            previous.append((signum, signal.getsignal(signum)))
+            signal.signal(signum, on_signal)
+        try:
+            outcome = run_native_install(
+                request, artifacts, cancellation=cancellation
+            )
+        except NativeCoordinatorError:
+            sys.stderr.write(_HANDOVER_REFUSAL)
+            return 2
+        return outcome.exit_code
+    finally:
+        for signum, handler in previous:
+            signal.signal(signum, handler)
+
+
 
 
 def _run_native_install(
@@ -2073,7 +3118,7 @@ def _run_native_install(
     cancellation: NativeCancellation | None = None,
     policy: _CoordinatorPolicy | None = None,
 ) -> NativeInstallOutcome:
-    """Drive the first coordinator lifecycle slice; tests inject every effect.
+    """Drive the coordinator lifecycle; tests inject every effect.
 
     The order is deliberate: classify fresh, then prepare the private state and
     take the run lock, then prepare the bootstrap scratch chain, then create the
@@ -2137,9 +3182,18 @@ def _run_native_install(
                     raise _Refusal("unknown_state")
                 deadline = _Deadline.after(policy.run_timeout)
                 _check_stage(deadline, cancellation)
+                try:
+                    deps.validate_inputs()
+                except NativeCoordinatorError:
+                    raise
+                except Exception:
+                    raise _Refusal("internal_error") from None
+                _check_stage(deadline, cancellation)
 
                 try:
                     classification = deps.classify(request.workspace)
+                except (_Cancelled, _TimedOut):
+                    raise
                 except Exception:
                     # An unreadable surface is never fresh.
                     raise _Refusal("unknown_state") from None
@@ -2165,6 +3219,8 @@ def _run_native_install(
                 lock.assert_held(run_id=request.run_id)
                 try:
                     confirmation = deps.classify(request.workspace)
+                except (_Cancelled, _TimedOut):
+                    raise
                 except Exception:
                     raise _Refusal("unknown_state") from None
                 _map_classification(confirmation)
@@ -2207,6 +3263,12 @@ def _run_native_install(
                     raise
                 except NativeCoordinatorError:
                     raise
+                except _ChildCleanupFailed:
+                    # A uv or probe child may still be running and writing the
+                    # tool directory. The lock is kept as evidence, as for the
+                    # wizard child; the terminal stays install_failed.
+                    lock_retained = True
+                    raise _Refusal("install_failed") from None
                 except Exception:
                     raise _Refusal("install_failed") from None
                 lock.assert_held(run_id=request.run_id)
@@ -2217,6 +3279,7 @@ def _run_native_install(
                 try:
                     try:
                         argv = deps.wizard_command(write_fd)
+                        wizard_env, wizard_cwd = deps.wizard_environment()
                     except NativeCoordinatorError:
                         raise
                     except Exception:
@@ -2226,6 +3289,8 @@ def _run_native_install(
                         notification_fd=write_fd,
                         public_fd=request.events_fd,
                         policy=policy,
+                        env=dict(wizard_env),
+                        cwd=wizard_cwd,
                     )
                     _close_fd(write_fd)
                     write_fd = -1
@@ -2242,7 +3307,7 @@ def _run_native_install(
                     _close_fd(write_fd)
                     _close_fd(read_fd)
                 # The child's self-reported port is only a claim. The port must
-                # have a listener owned by this child or its session group.
+                # have a listener owned by this child or its process group.
                 try:
                     listeners = deps.wizard_listener(port, child.pid)
                 except (_Cancelled, _TimedOut):
@@ -2432,3 +3497,7 @@ def _run_native_install(
         selected_workspace=selected_workspace,
         lock_retained=lock_retained,
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
