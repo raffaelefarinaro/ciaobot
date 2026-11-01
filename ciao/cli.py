@@ -5684,6 +5684,7 @@ def _eval_tasks_command(args: argparse.Namespace) -> int:
                 model=args.model,
                 keep_workdir=args.keep_workdir,
             ),
+            capabilities=task_eval.available_capabilities(),
         )
         print(task_eval.render_summary(task_eval.summarize(rows)))
         print(f"wrote {len(rows)} run(s) to {out}")

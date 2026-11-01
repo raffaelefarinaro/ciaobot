@@ -12,12 +12,14 @@ Catalog: ``ciao/stock/evals/tasks/<task_id>/task.json`` (plus an optional
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import json
 import os
 import re
 import secrets
+import shlex
 import signal
 import shutil
 import socket
@@ -31,16 +33,22 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from email.parser import BytesParser
+from email.utils import getaddresses, parsedate_to_datetime
 from functools import partial
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from http.cookiejar import CookieJar
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 import yaml
 
-from ciao import behavioral_eval
+import ciao
+from ciao import behavioral_eval, gws_auth
+from ciao.os_support.tool_path import dedupe_path
+from ciao.tool_path import common_tool_dirs
 
 TASKS_ROOT: Path = Path(__file__).resolve().parent / "stock" / "evals" / "tasks"
 FIXTURE_DIRNAME = "_fixture"
@@ -69,6 +77,32 @@ class TaskCatalogError(ValueError):
     """A task catalog entry is malformed or violates the catalog contract."""
 
 
+GWS_FAKE_CAPABILITY = "gws_fake"
+GWS_FAKE_VERSION = "0.22.5"
+GWS_FAKE_DIRNAME = "eval-gws"
+GWS_FAKE_MAILBOX_NAME = "mailbox.json"
+GWS_FAKE_LOG_NAME = "calls.jsonl"
+_GWS_MESSAGE_STR_KEYS: tuple[str, ...] = ("id", "threadId", "from", "to", "subject", "date", "rfc822_id", "body")
+
+
+@dataclass(frozen=True)
+class GwsFakeSpec:
+    """The mailbox a task's fake gws serves, and the profile it links."""
+
+    profile: str
+    account: str
+    messages: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class GwsFakeInstall:
+    profile: str
+    bin_dir: Path
+    launcher: Path
+    log: Path
+    env: dict[str, str]
+
+
 @dataclass(frozen=True)
 class EvalTask:
     id: str
@@ -81,6 +115,7 @@ class EvalTask:
     timeout_s: float
     checks: list[dict[str, Any]]
     overlay: Path | None = None
+    gws_fake: GwsFakeSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +143,7 @@ class GradeContext:
     api: Callable[..., Any]
     snapshot: Snapshot
     run_date: date
+    gws_call_log: Path | None = None
 
 
 CheckFn = Callable[[GradeContext, dict[str, Any]], CheckResult]
@@ -138,7 +174,62 @@ def _validate_check(task_id: str, spec: Any) -> dict[str, Any]:
     kind = spec.get("kind")
     if kind not in CHECKS:
         raise TaskCatalogError(f"{task_id}: unknown check kind {kind!r}")
+    if kind == "gws_calls":
+        _validate_gws_calls(task_id, spec)
     return spec
+
+
+def _validate_gws_calls(task_id: str, spec: dict[str, Any]) -> None:
+    for key in ("must", "must_not"):
+        patterns = spec.get(key, [])
+        if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+            raise TaskCatalogError(f"{task_id}: gws_calls {key} must be a list of regex strings")
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise TaskCatalogError(f"{task_id}: gws_calls {key} regex {pattern!r}: {exc}") from exc
+    minimum = spec.get("min_calls", 0)
+    if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 0:
+        raise TaskCatalogError(f"{task_id}: gws_calls min_calls must be a non-negative integer")
+
+
+def _load_gws_fake(task_id: str, body: dict[str, Any], requires: list[str]) -> GwsFakeSpec | None:
+    raw = body.get("gws_fake")
+    wanted = GWS_FAKE_CAPABILITY in requires
+    if raw is None:
+        if wanted:
+            raise TaskCatalogError(f"{task_id}: requires gws_fake but has no gws_fake block")
+        return None
+    if not wanted:
+        raise TaskCatalogError(f"{task_id}: a gws_fake block needs \"requires\": [\"gws_fake\"]")
+    if not isinstance(raw, dict):
+        raise TaskCatalogError(f"{task_id}: gws_fake must be an object")
+    profile = _require_text(raw.get("profile"), f"{task_id}: gws_fake.profile")
+    if profile != gws_auth.slugify_profile(profile):
+        raise TaskCatalogError(f"{task_id}: gws_fake.profile must be a profile slug, got {profile!r}")
+    account = _require_text(raw.get("account"), f"{task_id}: gws_fake.account")
+    messages = raw.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise TaskCatalogError(f"{task_id}: gws_fake.messages must be a non-empty list")
+    seen: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            raise TaskCatalogError(f"{task_id}: each gws_fake message must be an object")
+        for key in _GWS_MESSAGE_STR_KEYS:
+            if not isinstance(message.get(key), str):
+                raise TaskCatalogError(f"{task_id}: gws_fake message {key} must be a string")
+        label_ids = message.get("labelIds")
+        if not isinstance(label_ids, list) or not all(isinstance(label, str) for label in label_ids):
+            raise TaskCatalogError(f"{task_id}: gws_fake message labelIds must be a list of strings")
+        try:
+            parsedate_to_datetime(message["date"])
+        except (TypeError, ValueError) as exc:
+            raise TaskCatalogError(f"{task_id}: gws_fake message date is not RFC 2822: {exc}") from exc
+        if message["id"] in seen:
+            raise TaskCatalogError(f"{task_id}: duplicate gws_fake message id {message['id']!r}")
+        seen.add(message["id"])
+    return GwsFakeSpec(profile=profile, account=account, messages=[dict(m) for m in messages])
 
 
 def _validate_setup(task_id: str, steps: Any) -> list[dict[str, Any]]:
@@ -188,6 +279,7 @@ def _load_one(folder: Path) -> EvalTask:
         timeout_s=float(body.get("timeout_s", DEFAULT_TIMEOUT_S)),
         checks=[_validate_check(task_id, c) for c in checks],
         overlay=overlay if overlay.is_dir() else None,
+        gws_fake=_load_gws_fake(task_id, body, requires),
     )
 
 
@@ -550,6 +642,25 @@ def _check_new_projects(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     return CheckResult("new_projects", not problems, "; ".join(problems) or f"{len(new)} new project(s) ok")
 
 
+def _check_gws_calls(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    if ctx.gws_call_log is None:
+        return _fail("gws_calls", "no gws fake in this run")
+    summaries = [str(row.get("summary") or "") for row in read_gws_calls(ctx.gws_call_log)]
+    problems: list[str] = []
+    for pattern in spec.get("must", []):
+        if not any(re.search(pattern, s, re.IGNORECASE) for s in summaries):
+            problems.append(f"no call matches {pattern!r}")
+    for pattern in spec.get("must_not", []):
+        if any(re.search(pattern, s, re.IGNORECASE) for s in summaries):
+            problems.append(f"a call matches {pattern!r}")
+    minimum = int(spec.get("min_calls", 0))
+    if len(summaries) < minimum:
+        problems.append(f"{len(summaries)} call(s), want at least {minimum}")
+    if problems:
+        return CheckResult("gws_calls", False, "; ".join(problems) + " | " + "; ".join(summaries)[-400:])
+    return CheckResult("gws_calls", True, f"{len(summaries)} call(s) ok")
+
+
 CHECKS: dict[str, CheckFn] = {
     "answer_contains": _check_answer_contains,
     "answer_excludes": _check_answer_excludes,
@@ -566,6 +677,7 @@ CHECKS: dict[str, CheckFn] = {
     "unchanged": _check_unchanged,
     "task_attempt": _check_task_attempt,
     "command": _check_command,
+    "gws_calls": _check_gws_calls,
 }
 
 
@@ -714,6 +826,9 @@ def prepare_workspace(
     shutil.copytree(TASKS_ROOT / FIXTURE_DIRNAME, personal / "memory-vault", dirs_exist_ok=True)
     if task.overlay is not None:
         shutil.copytree(task.overlay, personal, dirs_exist_ok=True)
+    if task.gws_fake is not None:
+        # The files only. IsolatedEngine._start builds the environment that points at them.
+        install_gws_fake(ws, task.gws_fake, base_path=_BASE_ENV.get("PATH", ""))
     return ws
 
 
@@ -753,6 +868,7 @@ class EngineSession(Protocol):
     """What a task run needs from an engine: API access, a chat, and its usage."""
 
     agent_root: Path
+    gws_call_log: Path | None
 
     def api(self, method: str, path: str, body: Any = None) -> Any: ...
 
@@ -783,6 +899,7 @@ class IsolatedEngine(EngineSession):
         self.workdir = workdir
         self.ws = workdir / "ws"
         self.agent_root = self.ws / WORKSPACE
+        self.gws_call_log: Path | None = None
         self.port = _free_port()
         self.base = f"http://127.0.0.1:{self.port}"
         self.token = secrets.token_urlsafe(32)
@@ -818,16 +935,25 @@ class IsolatedEngine(EngineSession):
         script = Path(sys.executable).with_name("ciao")
         command = [str(script), "run"] if script.exists() else [sys.executable, "-m", "ciao", "run"]
         group: dict[str, Any] = {"start_new_session": True} if sys.platform != "win32" else {}
+        # engine_env drops every CIAO_* variable first; the fake's variables go in after it.
+        env = engine_env(_BASE_ENV, self.workdir, self.ws)
+        if task.gws_fake is not None:
+            bin_dir = gws_fake_bin_dir(self.ws, task.gws_fake.profile)
+            env.update(gws_fake_environment(bin_dir, base_path=env.get("PATH", "")))
+            self.gws_call_log = bin_dir / GWS_FAKE_LOG_NAME
         self._proc = subprocess.Popen(
             command,
             cwd=self.ws,
-            env=engine_env(_BASE_ENV, self.workdir, self.ws),
+            env=env,
             stdout=self._log,
             stderr=subprocess.STDOUT,
             **group,
         )
         self._wait_ready()
         self.api("POST", "/api/auth", {"token": self.token})
+        if task.gws_fake is not None:
+            # Also resyncs the gws skills before it returns.
+            self.api("PATCH", f"/api/workspaces/{WORKSPACE}", {"gws_profile": task.gws_fake.profile})
         project = self.api(
             "POST",
             "/api/projects",
@@ -931,6 +1057,562 @@ class IsolatedEngine(EngineSession):
                 print(f"kept task eval workdir: {self.workdir}", file=sys.stderr)
             else:
                 shutil.rmtree(self.workdir, ignore_errors=True)
+
+
+# --- gws fake: a stand-in ``gws`` that logs every call and never reaches Google -----
+
+
+def available_capabilities() -> frozenset[str]:
+    """Capabilities this platform's harness can provide. The fake is a POSIX shell launcher."""
+    return frozenset({GWS_FAKE_CAPABILITY}) if sys.platform != "win32" else frozenset()
+
+
+def gws_fake_bin_dir(ws: Path, profile: str) -> Path:
+    """The fake's folder, inside the profile's credential directory (the sandbox grants it)."""
+    return ws / "secrets" / f"gws-{profile}" / GWS_FAKE_DIRNAME
+
+
+def gws_fake_environment(bin_dir: Path, *, base_path: str) -> dict[str, str]:
+    """The variables that make ``ciao gws`` and bare ``gws`` reach the fake first."""
+    path = dedupe_path(os.pathsep.join([str(bin_dir), base_path, *common_tool_dirs()]))
+    return {gws_auth.GWS_BIN_ENV: str(bin_dir / "gws"), "PATH": path}
+
+
+def _write_json_file(path: Path, payload: Any) -> None:
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
+
+
+def _launcher_script(mailbox: Path, log: Path) -> str:
+    """``/bin/sh`` launcher: runs ``gws_fake_main`` under the package this harness imports."""
+    package_parent = Path(ciao.__file__).resolve().parent.parent
+    code = "import sys; from ciao.task_eval import gws_fake_main; raise SystemExit(gws_fake_main(sys.argv[1:]))"
+    return (
+        "#!/bin/sh\n"
+        f"PYTHONPATH={shlex.quote(str(package_parent))}${{PYTHONPATH:+:$PYTHONPATH}}\n"
+        "export PYTHONPATH\n"
+        f"exec {shlex.quote(sys.executable)} -c {shlex.quote(code)} "
+        f"{shlex.quote(str(mailbox))} {shlex.quote(str(log))} \"$@\"\n"
+    )
+
+
+def install_gws_fake(ws: Path, spec: GwsFakeSpec, *, base_path: str) -> GwsFakeInstall:
+    """Write the fake gws and the state that links ``ws`` to ``spec.profile``. POSIX only.
+
+    The credential files are dummies. The profile registry and a fresh health
+    reading make the profile look connected; the mailbox and an empty call log
+    sit beside the launcher.
+    """
+    cred = ws / "secrets" / f"gws-{spec.profile}"
+    cred.mkdir(parents=True, exist_ok=True)
+    client_id = f"{spec.profile}.apps.googleusercontent.com"
+    _write_json_file(
+        cred / "client_secret.json",
+        {
+            "installed": {
+                "client_id": client_id,
+                "client_secret": "eval-not-a-secret",
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": ["http://localhost"],
+            }
+        },
+    )
+    _write_json_file(
+        cred / "credentials.json",
+        {
+            "type": "authorized_user",
+            "client_id": client_id,
+            "client_secret": "eval-not-a-secret",
+            "refresh_token": "eval-not-a-token",
+        },
+    )
+    runtime = ws / ".runtime"
+    runtime.mkdir(exist_ok=True)
+    gws_auth.save_profile_registry(
+        SimpleNamespace(state_path=runtime / "state.json"),
+        [{"name": spec.profile, "label": "Eval sandbox"}],
+    )
+    _write_json_file(
+        runtime / gws_auth.HEALTH_CACHE_NAME,
+        {
+            "profiles": {
+                spec.profile: {
+                    "token_valid": True,
+                    "token_error": "",
+                    "has_refresh_token": True,
+                    "checked_at": time.time(),
+                    "notified_invalid": False,
+                    "consecutive_invalid": 0,
+                }
+            }
+        },
+    )
+    bin_dir = gws_fake_bin_dir(ws, spec.profile)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    mailbox = bin_dir / GWS_FAKE_MAILBOX_NAME
+    _write_json_file(mailbox, {"account": spec.account, "messages": spec.messages})
+    log = bin_dir / GWS_FAKE_LOG_NAME
+    log.write_text("", encoding="utf-8", newline="")
+    launcher = bin_dir / "gws"
+    launcher.write_text(_launcher_script(mailbox, log), encoding="utf-8", newline="")
+    launcher.chmod(0o755)
+    return GwsFakeInstall(
+        profile=spec.profile,
+        bin_dir=bin_dir,
+        launcher=launcher,
+        log=log,
+        env=gws_fake_environment(bin_dir, base_path=base_path),
+    )
+
+
+def read_gws_calls(log: Path) -> list[dict[str, Any]]:
+    """Every row of a fake's call log. Blank and unparseable lines are skipped."""
+    try:
+        text = log.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row: Any = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+# The fake's own code. Each call runs gws_fake_main inside the agent's sandbox.
+# The launcher imports ciao.task_eval to reach it, which loads this module's
+# top-level imports (yaml and the ciao helpers above) before gws_fake_main runs.
+# gws_fake_main itself uses only the standard library and never imports ciao.cli.
+
+_FAKE_BOOL_FLAGS: frozenset[str] = frozenset(
+    {"draft", "dry-run", "html", "headers", "labels", "page-all", "help", "version"}
+)
+# Flags that always take the next token, even one that starts with "-" (a body can).
+# Any other flag takes the next token only when that token is not itself a flag.
+_FAKE_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "query", "max", "format", "id", "message-id", "body", "to", "cc", "bcc",
+        "params", "json", "attach", "subject", "page-token",
+    }
+)
+_QUERY_TOKEN_RE = re.compile(r'(?:(\w+):\(([^)]*)\))|(?:(\w+):"([^"]*)")|"([^"]*)"|(\S+)')
+_FAKE_HELP = "gws 0.22.5 (ciaobot eval fake)\nusage: gws <service> <resource> <method> [flags]\n"
+_FAKE_MODIFY_METHODS: frozenset[str] = frozenset(
+    {"trash", "untrash", "delete", "modify", "batchModify", "insert", "import"}
+)
+_FAKE_LABELS: tuple[str, ...] = ("INBOX", "UNREAD", "SENT", "DRAFT")
+_FAKE_SUMMARY_BODY_CHARS = 2000
+
+
+@dataclass(frozen=True)
+class _FakeReply:
+    effect: str
+    stdout: str = ""
+    stderr: str = ""
+    code: int = 0
+    thread_id: str | None = None
+    message_id: str | None = None
+    to: str | None = None
+    body: str | None = None
+
+
+def gws_fake_main(argv: list[str]) -> int:
+    """The fake gws. ``argv`` is ``[mailbox_json, log_jsonl, *gws_args]``. Never raises.
+
+    Every call appends one JSON row to the log before it is answered.
+    """
+    if len(argv) < 2:
+        sys.stderr.write(json.dumps({"error": {"code": 2, "message": "gws fake needs MAILBOX LOG first"}}) + "\n")
+        return 2
+    mailbox, log = Path(argv[0]), Path(argv[1])
+    args = argv[2:]
+    flags, words = _fake_parse(args)
+    try:
+        prior = read_gws_calls(log)
+        reply = _fake_run(words, flags, len(prior) + 1, prior, mailbox)
+        row = {
+            "ts": time.time(),
+            "argv": args,
+            "op": " ".join(words) or "-",
+            "effect": reply.effect,
+            "thread_id": reply.thread_id,
+            "message_id": reply.message_id,
+            "to": reply.to,
+            "body": reply.body,
+            "summary": (
+                f"op={' '.join(words) or '-'} effect={reply.effect} thread={reply.thread_id or '-'} "
+                f"message={reply.message_id or '-'} to={reply.to or '-'} "
+                f"body={_fake_one_line(reply.body)[:_FAKE_SUMMARY_BODY_CHARS] or '-'}"
+            ),
+        }
+        with log.open("a", encoding="utf-8", newline="") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        sys.stderr.write(json.dumps({"error": {"code": 2, "message": f"gws fake cannot log: {exc}"}}) + "\n")
+        return 2
+    sys.stdout.write(reply.stdout)
+    sys.stderr.write(reply.stderr)
+    return reply.code
+
+
+def _fake_one_line(text: str | None) -> str:
+    return " ".join(text.split()) if text else ""
+
+
+def _fake_parse(args: list[str]) -> tuple[dict[str, str], list[str]]:
+    """Flags (``--x v``, ``--x=v``, boolean ``--x``, ``-a v``, ``-h``) and the positional words."""
+    flags: dict[str, str] = {}
+    words: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        next_token = args[index + 1] if index + 1 < len(args) else None
+        if token in ("-h", "--help"):
+            flags["help"] = "true"
+        elif token.startswith("--"):
+            name, sep, value = token[2:].partition("=")
+            if sep:
+                flags[name] = value
+            elif name in _FAKE_BOOL_FLAGS:
+                flags[name] = "true"
+            elif name in _FAKE_VALUE_FLAGS or (next_token is not None and not next_token.startswith("-")):
+                flags[name] = next_token or ""
+                index += 1
+            else:
+                flags[name] = ""
+        elif token == "-a":
+            flags["attach"] = next_token or ""
+            index += 1
+        else:
+            words.append(token)
+        index += 1
+    return flags, words
+
+
+def _fake_run(
+    words: list[str], flags: dict[str, str], n: int, prior: list[dict[str, Any]], mailbox: Path
+) -> _FakeReply:
+    try:
+        account, messages = _fake_load_mailbox(mailbox)
+        return _fake_dispatch(words, flags, n, prior, account, messages)
+    except Exception as exc:  # noqa: BLE001 - the fake answers every call; it never raises
+        return _fake_error(2, 2, f"gws fake failed: {exc}"[:300], "unknown")
+
+
+def _fake_error(exit_code: int, error_code: int, message: str, effect: str) -> _FakeReply:
+    payload = {"error": {"code": error_code, "message": message}}
+    return _FakeReply(effect=effect, stderr=json.dumps(payload) + "\n", code=exit_code)
+
+
+def _fake_load_mailbox(path: Path) -> tuple[str, list[dict[str, Any]]]:
+    raw: Any = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not isinstance(raw.get("messages"), list):
+        raise ValueError("mailbox must be an object with a messages list")
+    messages = [dict(m) for m in raw["messages"] if isinstance(m, dict)]
+    return str(raw.get("account", "")), messages
+
+
+def _fake_json_flag(flags: dict[str, str], name: str) -> dict[str, Any]:
+    raw = flags.get(name, "")
+    if not raw:
+        return {}
+    value: Any = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError(f"--{name} must be a JSON object")
+    return value
+
+
+def _fake_dispatch(
+    words: list[str],
+    flags: dict[str, str],
+    n: int,
+    prior: list[dict[str, Any]],
+    account: str,
+    messages: list[dict[str, Any]],
+) -> _FakeReply:
+    if "version" in flags:
+        return _FakeReply(effect="read", stdout=f"gws {GWS_FAKE_VERSION}\n")
+    if "help" in flags:
+        return _FakeReply(effect="read", stdout=_FAKE_HELP)
+    if words[:2] == ["auth", "status"]:
+        status = {"token_valid": True, "has_refresh_token": True, "token_error": ""}
+        return _FakeReply(effect="read", stdout=json.dumps(status) + "\n")
+    if words[:1] == ["schema"]:
+        method = words[1] if len(words) > 1 else ""
+        schema = {
+            "method": method,
+            "parameters": {"userId": {"type": "string", "default": "me"}},
+            "note": "eval fake",
+        }
+        return _FakeReply(effect="read", stdout=json.dumps(schema) + "\n")
+    if words[:2] == ["gmail", "+triage"]:
+        return _fake_triage(flags, messages)
+    if words[:2] == ["gmail", "+read"]:
+        return _fake_read(flags, messages)
+    if words[:2] in (["gmail", "+reply"], ["gmail", "+reply-all"], ["gmail", "+forward"]):
+        return _fake_message_reply(words[1], flags, n, messages)
+    if words[:2] == ["gmail", "+send"]:
+        return _fake_send(flags, n, thread=None, to=_fake_recipients(flags.get("to"), flags.get("cc"), flags.get("bcc")))
+    if words[:2] == ["gmail", "users"]:
+        return _fake_api(words[2:], flags, n, prior, account, messages)
+    return _fake_error(2, 2, f"unknown command: {' '.join(words) or '(none)'}", "unknown")
+
+
+def _fake_query_terms(query: str) -> list[tuple[str | None, str]]:
+    terms: list[tuple[str | None, str]] = []
+    for match in _QUERY_TOKEN_RE.finditer(query):
+        group_key, group, quoted_key, quoted, phrase, word = match.groups()
+        if group_key:
+            terms.extend((group_key, part) for part in (group or "").split())
+        elif quoted_key:
+            terms.append((quoted_key, quoted or ""))
+        elif phrase is not None:
+            terms.append((None, phrase))
+        elif word and word != "OR":
+            key, sep, value = word.partition(":")
+            terms.append((key if sep else None, value if sep else word))
+    return terms
+
+
+def _fake_term_matches(message: dict[str, Any], key: str | None, value: str) -> bool:
+    value = value.strip().lower()
+    if not value:
+        return True
+    if key == "from":
+        return value in str(message["from"]).lower()
+    if key == "subject":
+        return value in str(message["subject"]).lower()
+    if key == "is":
+        return value != "unread" or "UNREAD" in message["labelIds"]
+    if key is None:
+        return any(value in str(message[field]).lower() for field in ("from", "subject", "body"))
+    return True  # in:, label:, after:, before: and the rest are not modelled
+
+
+def _fake_select(messages: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    """Messages matching every query term, newest first."""
+    terms = _fake_query_terms(query)
+    matching = [m for m in messages if all(_fake_term_matches(m, key, value) for key, value in terms)]
+    return sorted(matching, key=_fake_date_key, reverse=True)
+
+
+def _fake_date_key(message: dict[str, Any]) -> float:
+    try:
+        return parsedate_to_datetime(str(message["date"])).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fake_find(messages: list[dict[str, Any]], message_id: str | None) -> dict[str, Any] | None:
+    return next((m for m in messages if m["id"] == message_id), None)
+
+
+def _fake_triage(flags: dict[str, str], messages: list[dict[str, Any]]) -> _FakeReply:
+    """JSON by default, as the real ``gws gmail +triage``; ``--format table`` prints one line per message."""
+    rows = _fake_select(messages, flags.get("query", "is:unread"))[: int(flags.get("max", "20"))]
+    if flags.get("format") == "table":
+        lines = "".join(f"{m['date']} | {m['from']} | {m['subject']} | {m['id']}\n" for m in rows)
+        return _FakeReply(effect="read", stdout=lines)
+    picked = [
+        {"id": m["id"], "threadId": m["threadId"], "from": m["from"], "subject": m["subject"], "date": m["date"]}
+        for m in rows
+    ]
+    return _FakeReply(effect="read", stdout=json.dumps(picked, indent=2) + "\n")
+
+
+def _fake_read(flags: dict[str, str], messages: list[dict[str, Any]]) -> _FakeReply:
+    found = _fake_find(messages, flags.get("id"))
+    if found is None:
+        return _fake_error(1, 404, f"no message {flags.get('id', '')!r}", "read")
+    thread = str(found["threadId"])
+    if flags.get("format") == "json":
+        picked = {key: found[key] for key in ("id", "threadId", "from", "to", "subject", "date", "body")}
+        stdout = json.dumps(picked, indent=2) + "\n"
+    else:
+        head = ""
+        if "headers" in flags:
+            head = f"From: {found['from']}\nTo: {found['to']}\nSubject: {found['subject']}\nDate: {found['date']}\n\n"
+        stdout = head + str(found["body"]) + "\n"
+    return _FakeReply(effect="read", stdout=stdout, thread_id=thread, message_id=str(found["id"]))
+
+
+def _fake_send_effect(flags: dict[str, str]) -> str:
+    if "dry-run" in flags:
+        return "dry_run"
+    if "draft" in flags:
+        return "draft_created"
+    return "sent"
+
+
+def _fake_recipients(*values: str | None) -> str | None:
+    """Every address in the given header or flag values, comma-joined, or None when there are none."""
+    addresses = [addr for _, addr in getaddresses([v for v in values if v]) if addr]
+    return ",".join(addresses) or None
+
+
+def _fake_message_reply(kind: str, flags: dict[str, str], n: int, messages: list[dict[str, Any]]) -> _FakeReply:
+    found = _fake_find(messages, flags.get("message-id"))
+    if found is None:
+        return _fake_error(1, 404, f"no message {flags.get('message-id', '')!r}", "unknown")
+    addressee = flags.get("to") if kind == "+forward" else str(found["from"])
+    to = _fake_recipients(addressee, flags.get("cc"), flags.get("bcc"))
+    return _fake_send(flags, n, thread=str(found["threadId"]), to=to)
+
+
+def _fake_send(flags: dict[str, str], n: int, *, thread: str | None, to: str | None) -> _FakeReply:
+    effect = _fake_send_effect(flags)
+    body = flags.get("body", "")
+    if effect == "dry_run":
+        stdout = json.dumps({"dry_run": True, "threadId": thread, "to": to}) + "\n"
+        return _FakeReply(effect, stdout, thread_id=thread, to=to, body=body)
+    if effect == "draft_created":
+        return _fake_draft_reply(n, thread, to=to, body=body)
+    return _FakeReply(
+        effect="sent",
+        stdout=json.dumps({"id": f"eval-sent-{n}", "threadId": thread, "labelIds": ["SENT"]}) + "\n",
+        thread_id=thread,
+        message_id=f"eval-sent-{n}",
+        to=to,
+        body=body,
+    )
+
+
+def _fake_draft_reply(n: int, thread: str | None, *, to: str | None, body: str | None) -> _FakeReply:
+    message_id = f"eval-draft-msg-{n}"
+    payload = {
+        "id": f"r-eval-draft-{n}",
+        "message": {"id": message_id, "threadId": thread, "labelIds": ["DRAFT"]},
+    }
+    return _FakeReply(
+        effect="draft_created",
+        stdout=json.dumps(payload) + "\n",
+        thread_id=thread,
+        message_id=message_id,
+        to=to,
+        body=body,
+    )
+
+
+def _fake_decode_raw(raw: str) -> tuple[str | None, str, str]:
+    """(every To, Cc and Bcc address, body, In-Reply-To) of a base64url RFC 822 message."""
+    padded = raw + "=" * (-len(raw) % 4)
+    message = BytesParser().parsebytes(base64.urlsafe_b64decode(padded))
+    payload: Any = message.get_payload(decode=True)
+    body = payload.decode("utf-8", "replace") if isinstance(payload, bytes) else ""
+    headers = [str(value) for name in ("To", "Cc", "Bcc") for value in (message.get_all(name) or [])]
+    return _fake_recipients(*headers), body, str(message.get("In-Reply-To", "")).strip()
+
+
+def _fake_compose(payload: dict[str, Any], messages: list[dict[str, Any]]) -> tuple[str | None, str | None, str | None]:
+    """(thread, to, body) of an API draft or send: its threadId, else the message its raw In-Reply-To names."""
+    part: dict[str, Any] = payload["message"] if isinstance(payload.get("message"), dict) else {}
+    raw = str(part.get("raw") or payload.get("raw") or "")
+    to: str | None = None
+    body: str | None = None
+    in_reply_to = ""
+    if raw:
+        to, body, in_reply_to = _fake_decode_raw(raw)
+    inline = payload.get("threadId") or part.get("threadId")
+    thread = str(inline) if inline else None
+    if thread is None and in_reply_to:
+        thread = next((str(m["threadId"]) for m in messages if m["rfc822_id"] == in_reply_to), None)
+    return thread, to, body
+
+
+def _fake_resource(message: dict[str, Any]) -> dict[str, Any]:
+    headers = [
+        {"name": "From", "value": message["from"]},
+        {"name": "To", "value": message["to"]},
+        {"name": "Subject", "value": message["subject"]},
+        {"name": "Date", "value": message["date"]},
+        {"name": "Message-ID", "value": message["rfc822_id"]},
+    ]
+    data = base64.urlsafe_b64encode(str(message["body"]).encode("utf-8")).decode("ascii")
+    return {
+        "id": message["id"],
+        "threadId": message["threadId"],
+        "labelIds": message["labelIds"],
+        "snippet": _fake_one_line(str(message["body"]))[:100],
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": headers,
+            "body": {"size": len(str(message["body"]).encode("utf-8")), "data": data},
+        },
+    }
+
+
+def _fake_api(
+    rest: list[str],
+    flags: dict[str, str],
+    n: int,
+    prior: list[dict[str, Any]],
+    account: str,
+    messages: list[dict[str, Any]],
+) -> _FakeReply:
+    params = _fake_json_flag(flags, "params")
+    key = tuple(rest[:2])
+    query = str(params.get("q", ""))
+    if rest[:1] == ["getProfile"]:
+        threads = {m["threadId"] for m in messages}
+        profile = {"emailAddress": account, "messagesTotal": len(messages), "threadsTotal": len(threads)}
+        return _FakeReply(effect="read", stdout=json.dumps(profile) + "\n")
+    if key == ("messages", "list"):
+        matched = _fake_select(messages, query)
+        limit = int(params.get("maxResults", 20))
+        rows = [{"id": m["id"], "threadId": m["threadId"]} for m in matched[:limit]]
+        listing = {"messages": rows, "resultSizeEstimate": len(matched)}
+        return _FakeReply(effect="read", stdout=json.dumps(listing) + "\n")
+    if key == ("messages", "get"):
+        found = _fake_find(messages, str(params.get("id", "")))
+        if found is None:
+            return _fake_error(1, 404, "Requested entity was not found.", "read")
+        return _FakeReply(effect="read", stdout=json.dumps(_fake_resource(found)) + "\n")
+    if key == ("threads", "list"):
+        seen = list(dict.fromkeys(str(m["threadId"]) for m in _fake_select(messages, query)))
+        return _FakeReply(
+            effect="read",
+            stdout=json.dumps({"threads": [{"id": t} for t in seen], "resultSizeEstimate": len(seen)}) + "\n",
+        )
+    if key == ("threads", "get"):
+        thread_id = str(params.get("id", ""))
+        in_thread = [m for m in messages if m["threadId"] == thread_id]
+        if not in_thread:
+            return _fake_error(1, 404, "Requested entity was not found.", "read")
+        resource = {"id": thread_id, "messages": [_fake_resource(m) for m in in_thread]}
+        return _FakeReply(effect="read", stdout=json.dumps(resource) + "\n", thread_id=thread_id)
+    if key == ("drafts", "list"):
+        drafts = [
+            {"id": row["message_id"], "message": {"id": row["message_id"], "threadId": row["thread_id"]}}
+            for row in prior
+            if row.get("effect") == "draft_created"
+        ]
+        return _FakeReply(effect="read", stdout=json.dumps({"drafts": drafts}) + "\n")
+    if key == ("labels", "list"):
+        labels = [{"id": label, "name": label} for label in _FAKE_LABELS]
+        return _FakeReply(effect="read", stdout=json.dumps({"labels": labels}) + "\n")
+    if key in (("drafts", "create"), ("drafts", "update")):
+        payload = _fake_json_flag(flags, "json")
+        thread, to, body = _fake_compose(payload, messages)
+        return _fake_draft_reply(n, thread, to=to, body=body)
+    if key in (("messages", "send"), ("drafts", "send")):
+        payload = _fake_json_flag(flags, "json")
+        thread, to, body = _fake_compose(payload, messages)
+        return _FakeReply(
+            effect="sent",
+            stdout=json.dumps({"id": f"eval-sent-{n}", "threadId": thread, "labelIds": ["SENT"]}) + "\n",
+            thread_id=thread,
+            message_id=f"eval-sent-{n}",
+            to=to,
+            body=body,
+        )
+    if rest[:1] == ["messages"] and len(rest) > 1 and rest[1] in _FAKE_MODIFY_METHODS:
+        return _FakeReply(effect="modified", stdout="{}\n")
+    return _fake_error(2, 2, f"unknown API method: {' '.join(rest) or '(none)'}", "unknown")
 
 
 # --- usage and transcripts --------------------------------------------------------
@@ -1229,12 +1911,15 @@ def run_task(
         settled = session.wait_settled(task.timeout_s)
         if not settled:
             session.stop_chat(chat_id)
+        # Only a task that needs the fake reads the session's call log, so sessions
+        # for other tasks never have to carry the attribute.
         ctx = GradeContext(
             agent_root=session.agent_root,
             answer=session.answer_text(),
             api=session.api,
             snapshot=snapshot,
             run_date=date.today(),
+            gws_call_log=session.gws_call_log if task.gws_fake is not None else None,
         )
         results = grade(task, ctx)
         usage = session.usage()
