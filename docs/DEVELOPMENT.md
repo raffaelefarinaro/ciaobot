@@ -127,7 +127,7 @@ service query cannot verify absence. Export-directory overrides do not affect
 the live service paths checked by this guard.
 
 #2339 adds a native classifier (`install_discovery.classify_native_install`)
-beside that guard, but **nothing calls it in production in this issue**. It
+beside that guard. The native coordinator (`ciao.native_installer`, #2340) calls it twice, before its first mutation. It
 separates `fresh` from `configured` (a live definition or job, a completed
 workspace, or an explicit disabled launchd override), `partial` (a receipt, uv
 tool directory, `ciao` shim, setup marker, server host, the migration transaction
@@ -280,8 +280,7 @@ file but **schema 2 only**. The legacy CLI, routes and installer paths never
 import it; the setup child's native branch and the existing loopback-only,
 bootstrap-mode-only `/api/setup/finish` (no session cookie; see
 docs/REMOTE_BOUNDARY.md) do, through the explicit `NativeBootstrapContext` described
-below, while the installer parent's activation wiring still waits for the
-shell/readiness integration. Its result additionally records the
+below. The native coordinator's `read_result` and `activate` consume the handoff. Its result additionally records the
 definition's sha256, the program the definition actually executes and the
 interpreter it runs with both device/inode/size/mtime identities, and the
 definition's environment. The native path implements macOS only: a Windows
@@ -333,8 +332,8 @@ foreign-owned, group/other-writable `~/.ciao` or a scratch directory that is not
 exactly `0700`, leaving it unchanged. **#2340 must call it after the read-only
 fresh-install preflight and before spawning the bootstrap child** — never
 before the preflight, and never as a repair for an existing installation. The
-legacy config is not changed and no production caller runs the preparation in
-this issue. Creating the directory privately is not current-run ownership: a
+legacy config is not changed, and the native coordinator is the only production
+caller of the preparation. Creating the directory privately is not current-run ownership: a
 same-UID writer can create an owner-only name first, so #2340 still has to bind
 it to run-bound evidence. The legacy
 `is_set_up_workspace` keeps its `read_text` for every existing caller. Native activation still parses the same
@@ -570,8 +569,8 @@ run placed. The host install is inert: it writes no launchd job itself;
 activation is `ciao setup` registering the hosted plist when a verified host
 is installed. No step requests a permission prompt.
 
-The native fresh-install path (#2340) is a separate, opt-in entry point and has no
-production caller yet. `ciao.native_installer.create_fresh_host` takes the
+The native fresh-install path (#2340) is a separate, opt-in entry point. The native
+coordinator (`ciao.native_installer`, #2340) is its production caller. `ciao.native_installer.create_fresh_host` takes the
 authenticated manifest bytes and signature, not a caller-selected entry, and calls
 `verify_manifest`, `select_server_host_artifact` and `verify_host_archive` itself.
 It fixes the host bundle and ownership record to the canonical home paths and the
@@ -611,12 +610,64 @@ named in the error, never deleted. The race is moved onto a name no other writer
 knows in advance and narrowed, not closed: a same-UID writer can still swap the
 stage directory or the scratch entry between the checks and the removal.
 
-The coordinator lifecycle is in `ciao.native_installer`, but it has **no
-production caller and no public run path**: `run_native_install` still refuses
-with `coordinator_unavailable` until the setup child can write its schema-2
-handoff from a native context and the production readiness and listener deps are
-supplied. The testable private seam, `_run_native_install`, takes injected
-callables for every external effect. Its `NativeInstallOutcome` records attempted
+The native coordinator lives in `ciao.native_installer`. It is started only by
+`install.sh --native-install`, through this CLI contract:
+
+```
+python -I -m ciao.native_installer run
+  --run-id UUID --events-fd N --first-seq S --prior-events P
+  --version V --uv ABS --uv-sha256 HEX64 --wheel ABS --wheel-sha256 HEX64
+  --manifest ABS --signature ABS --host-archive ABS
+  [--workspace ABS]
+```
+
+Parsing rejects abbreviations and prints one fixed line, `invalid handover
+arguments`, that never echoes a value. A digest that is not 64 lowercase hex
+characters is refused the same way.
+
+`--workspace` is the classifier and wizard suggestion only; the wizard may save a
+different workspace. The public descriptor range is 3–9. Exit 0 means
+`service_ready` was emitted; 1 means any other end; 2 means the handover arguments
+were refused before the descriptor was used, and the shell never sends such a
+request. Signals (SIGINT, SIGTERM, SIGHUP) only set the cancellation flag.
+
+`run_native_install` checks the artifacts first: each path is absolute, not a
+symlink, and a regular file (uv also executable), and `--version` must equal the
+running `ciao.__version__`. The coordinator then creates a private `0700` run
+directory and copies `uv` and the wheel into it. Each source is opened once with
+no-follow, must be owned by the current user with no group or other write bit,
+and must hash to the digest the shell passed in. The copy is re-hashed against
+the same digest, and only the copies are used afterwards. A digest mismatch is
+`verification_failed`. A failure in any of these checks is a fixed `failed`
+event before any classification or mutation.
+
+Every uv call and the interpreter probe run with one allowlisted environment: a
+pinned `HOME` (the account home, which must equal `$HOME`), `PATH=/usr/bin:/bin:/usr/sbin:/sbin`,
+`LANG=C.UTF-8`, and nothing else. Each runs in its own session, in the private
+empty directory, with `--no-config` and the pinned default index; the variables
+that redirect tools, indexes, interpreters, loaders or TLS are never passed. The
+tool and bin directories must equal `<home>/.local/share/uv/tools` and
+`<home>/.local/bin`, or the run is `unknown_state`. The classifier gets the same
+environment. The wizard child keeps the caller's `PATH` and drops the same
+variables. Cancellation is polled while uv runs; cancel or timeout terminates
+and reaps the child's session. The probed interpreter is bound to the handoff's
+`engine_python` (same realpath and device and inode, else `wizard_failed`), and
+the `ciao` shim is re-checked before the wizard starts (else `install_failed`). uv links `<bin>/ciao` into `<tool>/ciaobot/bin`, so the shim is a symlink: its link identity and its resolved target (inside the tool env; device, inode and sha256) are both recorded and both re-checked. The tool interpreter may link into uv's managed Python root under the pinned home, which is where real uv installs point it; anywhere else is `install_failed`. The wizard is spawned as `<tool>/ciaobot/bin/python <verified target> run ...`: the interpreter by its tool-env path (so uv's `pyvenv.cfg` is found) and the console script by its resolved target, so nothing is resolved again at exec. The interpreter's resolved device and inode are recorded at the probe and re-checked with the shim (`python_changed`).
+
+The production steps are: the uv tool and bin
+directories (asked of the private uv copy only), the canonical classification, the
+private state and run lock (a held lock is reported on stderr with its pid and
+liveness, never removed), the bootstrap scratch, the second classification, the
+fresh host through `create_fresh_host`, a recheck of that host, the engine install
+(`uv tool install --python 3.13` on the private wheel copy, with no `--force`, probed
+and recorded as the one existing install receipt), the hidden wizard command, the
+schema-2 handoff read, `native_handoff.activate`, and the readiness proof
+`prove_native_readiness` for the handoff port. The coordinator owns the run lock,
+both classifications, the host install and the engine install; the shell only
+validates, preflights, bootstraps and downloads. Release: Not present in engine 1.7.0; ships in the next engine release after 1.7.0 (exact semver assigned at release).
+
+The testable private seam, `_run_native_install`, takes injected callables for
+every external effect. Its `NativeInstallOutcome` records attempted
 and completed flags separately, so a host or activation step that mutates and then
 raises is never reported as unattempted; `activation_attempted` means the service
 may be running.
@@ -641,7 +692,7 @@ pipe, reads one bounded `{schema:1,port:N}` record **and waits for the producer
 to close the pipe** (so a delayed second record is a refusal). The self-reported
 port is only a claim: `wizard_listener(port, child_pid)` must return every pid
 holding a listening socket on that port, IPv4 and IPv6. The set must be non-empty,
-and every pid must be the wizard child or in the session group it leads
+and every pid must be the wizard child or in the process group the child leads
 (`_OwnedChild.owns_process`), or the run is `wizard_failed` before `wizard_ready`
 is emitted. It then emits `wizard_ready`, validates the run-bound handoff, emits
 `setup_saved`, and calls activation. After `wizard_ready`, a wizard exit or any
@@ -676,8 +727,8 @@ leaves the lock and child as evidence. Tests: `tests/test_native_installer.py`.
 
 A lock at `~/.local/state/ciaobot/native-install.lock` means a native install is
 running, or one was killed (SIGKILL or power loss) before it could clean up. That
-path is the default state directory the coordinator will use from #2404; the
-coordinator is not wired to it yet.
+path is the state directory the native coordinator (`ciao.native_installer`, #2340)
+uses for its run lock.
 
 1. Nothing in the tool removes, adopts or repairs the lock automatically. A busy
    or unknown lock refuses every native run with `install_in_progress`. An unsafe
@@ -726,8 +777,8 @@ workspace, port, live definition path and interpreter. It adds no route, no
 environment variable and no second onboarding or install receipt, and never
 starts, stops or reloads a service. Remaining limits are real: a same-UID writer
 can interleave between a check and the write it guards; the child can prove the
-host is owned, not that this run created its record; and the public
-`run_native_install` still refuses until shell/readiness integration. Tests:
+host is owned, not that this run created its record. The native coordinator starts
+the setup child with `_wizard_argv`. Tests:
 `tests/test_native_bootstrap.py`.
 
 Replacing an owned legacy host with the signed one is the one host change that is
