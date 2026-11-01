@@ -1,0 +1,42 @@
+{
+  "id": "M6-memory-pass-decided-paraphrase",
+  "tier": "medium",
+  "category": "memory_pass",
+  "entry": {
+    "kind": "transcript",
+    "turns": [
+      {
+        "user": "Two things for your notes. First, I'm allergic to hazelnuts, so keep that in mind whenever food comes up.",
+        "assistant": "Got it: no hazelnuts in anything food-related."
+      },
+      {
+        "user": "And as usual, Sunday evening is when I like the weekly round-up to land.",
+        "assistant": "Sunday evening it is for this week's round-up."
+      },
+      {
+        "user": "That's it, thanks.",
+        "assistant": "Bye for now."
+      }
+    ]
+  },
+  "setup": [],
+  "requires": [],
+  "timeout_s": 900,
+  "checks": [
+    {
+      "kind": "proposals",
+      "include_files": ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"],
+      "must": ["hazelnut"]
+    },
+    {
+      "kind": "proposals",
+      "include_files": ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"],
+      "must_not": ["sunday"]
+    },
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/Workspace/Memory-Proposals.dismissed.jsonl",
+      "all": ["Send the weekly round-up on Sunday evenings."]
+    }
+  ]
+}
