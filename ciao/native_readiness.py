@@ -20,7 +20,11 @@ object rather than to a readable string:
    must be true, meaning the preflight refused an existing service. This proof
    makes no claim for a resumed, reused or old host;
 2. exactly one same-UID listener visible to lsof; foreign-UID listeners are not
-   enumerated, and identity rests on the startup_id and server.lock binding;
+   enumerated, and identity rests on the startup_id and server.lock binding.
+   Without root, ``lsof`` lists only this user's sockets: a listener held by
+   another account reads as ``listener_missing``, never as this run's engine.
+   ``tests/test_native_readiness.py::test_a_real_foreign_listener_on_the_port_is_never_ready``
+   pins the same-UID case;
 3. the startup-status answer carries the exact installed version, the startup
    API version, a canonical ``startup_id`` and the engine's own pid, and its
    ``server_starting`` phase is done with ``overall_ready`` set;
