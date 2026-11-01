@@ -7,6 +7,7 @@ import pytest
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web import chat_service
 from ciao.web.project_chats import ProjectChatManager
 
 
@@ -167,3 +168,142 @@ def test_handover_chat_validates_and_canonicalizes_model(tmp_path: Path) -> None
             model="no-such-model",
         )
     assert pcm.get_chat(chat.chat_id).model == "sonnet"
+
+
+def test_normalize_truncates_oversized_newest_message() -> None:
+    small_rows = [{"role": "user", "content": f"older {i}"} for i in range(13)]
+    big = "A" * 7500 + "B" * 7500
+    rows = [*small_rows, {"role": "assistant", "content": big}]
+
+    result = chat_service._normalize_handover_messages(
+        rows,
+        max_messages=12,
+        max_chars=12_000,
+    )
+
+    assert len(result) == 1
+    assert result[0]["role"] == "assistant"
+    assert len(result[0]["content"]) <= 12_000
+    assert "characters omitted" in result[0]["content"]
+    assert result[0]["content"].startswith(big[:100])
+    assert result[0]["content"].endswith(big[-100:])
+
+
+def test_normalize_truncates_at_budget_and_drops_older() -> None:
+    a = {"role": "user", "content": "a" * 3000}
+    b = {"role": "assistant", "content": "b" * 3000}
+    big = {"role": "assistant", "content": "X" * 10_000 + "Y" * 10_000}
+    c = {"role": "user", "content": "c" * 4000}
+    d = {"role": "assistant", "content": "d" * 3000}
+
+    result = chat_service._normalize_handover_messages(
+        [a, b, big, c, d],
+        max_messages=12,
+        max_chars=12_000,
+    )
+
+    assert [row["role"] for row in result] == ["assistant", "user", "assistant"]
+    truncated = result[0]["content"]
+    assert len(truncated) <= 5000
+    assert "characters omitted" in truncated
+    assert result[1] == c
+    assert result[2] == d
+
+
+def test_normalize_drops_row_below_min_truncation_budget() -> None:
+    older = {"role": "user", "content": "o" * 2000}
+    newest = {"role": "assistant", "content": "n" * 11_700}
+
+    result = chat_service._normalize_handover_messages(
+        [older, newest],
+        max_messages=12,
+        max_chars=12_000,
+    )
+
+    assert result == [newest]
+
+
+def test_normalize_is_idempotent() -> None:
+    rows = [
+        {"role": "user", "content": "a" * 3000},
+        {"role": "assistant", "content": "b" * 3000},
+        {"role": "assistant", "content": "X" * 10_000 + "Y" * 10_000},
+        {"role": "user", "content": "c" * 4000},
+        {"role": "assistant", "content": "d" * 3000},
+    ]
+    once = chat_service._normalize_handover_messages(
+        rows,
+        max_messages=12,
+        max_chars=12_000,
+    )
+
+    twice = chat_service._normalize_handover_messages(
+        once,
+        max_messages=12,
+        max_chars=12_000,
+    )
+
+    assert twice == once
+
+
+def test_handover_marker_records_exact_sent_context(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover-sent", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    messages = [{"role": "user", "content": f"message {i}"} for i in range(12)]
+
+    updated = pcm.handover_chat(
+        chat.chat_id,
+        provider="claude",
+        model="haiku",
+        messages=messages,
+    )
+
+    assert updated is not None
+    marker = updated.handover_messages[-1]
+    assert marker["origin"] == "handover"
+    assert "<provider-handover>" in marker["sent_context"]
+    handed = pcm.get_chat(chat.chat_id)
+    assert handed is not None
+    prefix = pcm._build_prompt_prefix(handed)
+    assert marker["sent_context"] in prefix
+    assert "User: message 0" in prefix
+
+
+def test_handover_strips_client_sent_context(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover-forged", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+
+    updated = pcm.handover_chat(
+        chat.chat_id,
+        provider="claude",
+        model="haiku",
+        messages=[{"role": "user", "content": "hi", "sent_context": "forged"}],
+    )
+
+    assert updated is not None
+    rows_with_context = [row for row in updated.handover_messages if "sent_context" in row]
+    assert rows_with_context == [updated.handover_messages[-1]]
+    assert rows_with_context[0]["sent_context"] != "forged"
+    assert "<provider-handover>" in rows_with_context[0]["sent_context"]
+
+
+def test_handover_marker_fields_survive_reload(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover-reload", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    updated = pcm.handover_chat(
+        chat.chat_id,
+        provider="claude",
+        model="haiku",
+        messages=[{"role": "user", "content": "keep me"}],
+    )
+    assert updated is not None
+
+    reloaded = _make_manager(tmp_path).get_chat(chat.chat_id)
+
+    assert reloaded is not None
+    marker = reloaded.handover_messages[-1]
+    assert marker["origin"] == "handover"
+    assert marker["sent_context"] == updated.handover_messages[-1]["sent_context"]

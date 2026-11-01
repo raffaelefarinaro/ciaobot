@@ -1909,8 +1909,8 @@ const injectedPrompts = computed(() => {
   for (const m of store.activeMessages) {
     // A user turn the engine wrote, or the system row the backend draws for a
     // background shell the provider ran itself.
-    if (m.role !== 'user' && !(m.role === 'system' && (m.origin === 'background_run' || m.origin === 'compaction'))) continue
-    const parsed = parseInjectedPrompt(m.content, m.origin)
+    if (m.role !== 'user' && !(m.role === 'system' && (m.origin === 'background_run' || m.origin === 'compaction' || m.origin === 'handover'))) continue
+    const parsed = parseInjectedPrompt(m.content, m.origin, m.sent_context)
     if (parsed) map.set(m, parsed)
   }
   return map
