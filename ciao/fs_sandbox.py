@@ -542,7 +542,80 @@ def claude_task_output_path_allowed(
     return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
 
 
-def claude_file_tool_guard(*, cwd: Path, roots: list[Path], cli_tmp_base: str | None = None) -> Any:
+def _resolved_tool_path(value: str, *, cwd: Path) -> Path | None:
+    """The path a tool argument names, resolved as ``path_outside_roots`` resolves it.
+
+    None when it cannot be resolved (a NUL byte, an unknown ``~user``).
+    """
+    text = _static_prefix(value.strip())
+    try:
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        return candidate.resolve()
+    except (ValueError, OSError, RuntimeError):
+        return None
+
+
+def _case_key(path: Path) -> tuple[str, ...]:
+    """The path's components, case-folded where the filesystem ignores case."""
+    if sys.platform in ("darwin", "win32"):
+        return tuple(part.casefold() for part in path.parts)
+    return path.parts
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Inode identity: a case variant or a hardlink of the same file matches."""
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def _is_read_only_target(target: Path, entries: Sequence[Path]) -> bool:
+    """Whether *target* is, or sits inside, one of the read-only *entries* (#2459).
+
+    An existing target is compared by identity, with each of its ancestors, so a
+    case variant of a pinned file or folder, or a hardlink to one, still matches.
+    A target that does not exist has no identity yet, so it is compared by its
+    components, case-folded on macOS and Windows.
+    """
+    if target.exists():
+        chain = [target, *target.parents]
+        return any(_same_file(node, entry) for entry in entries for node in chain)
+    key = _case_key(target)
+    return any(key[: len(entry_key)] == entry_key for entry_key in (_case_key(e) for e in entries))
+
+
+def _is_read_only_file(target: Path, entries: Sequence[Path]) -> bool:
+    """Whether *target* is exactly one of the read-only *entries* that is a file."""
+    return any(entry.is_file() and _same_file(target, entry) for entry in entries)
+
+
+def _resolved_read_only(paths: Sequence[Path]) -> list[Path]:
+    """The read-only entries, resolved. An entry that cannot resolve grants nothing."""
+    resolved: list[Path] = []
+    for path in paths:
+        try:
+            resolved.append(path.resolve())
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return resolved
+
+
+# Claude's file tools, split by what they do to the path. A read-only path is
+# readable by the read tools and writable by none of them.
+_CLAUDE_READ_TOOLS = frozenset({"Read", "Grep", "Glob", "LS"})
+_CLAUDE_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def claude_file_tool_guard(
+    *,
+    cwd: Path,
+    roots: list[Path],
+    cli_tmp_base: str | None = None,
+    read_only: Sequence[Path] = (),
+) -> Any:
     """PreToolUse hook denying Claude's file tools any path outside *roots*.
 
     Claude's plan directory is allowed as well: plan mode writes its plan file
@@ -550,12 +623,18 @@ def claude_file_tool_guard(*, cwd: Path, roots: list[Path], cli_tmp_base: str | 
     files of this chat's own native background tasks under the CLI temp
     directory *cli_tmp_base*, matched by the session id the CLI puts in the
     hook input; the CLI's tool result tells the model to Read them.
+
+    *read_only* paths (#2459) are never writable, inside a root or not, by any
+    write tool. Outside the roots, a read tool may open an exact *read-only file*
+    (a folder grant does not extend to its files), which is what lets a memory
+    pass read its source archive.
     """
     if not roots:
         raise ValueError("roots must not be empty")
     allowed = ", ".join(str(root) for root in roots)
     reachable = [*roots, Path.home() / ".claude" / "plans"]
     uid = getattr(os, "getuid", lambda: 0)()
+    read_only_paths = _resolved_read_only(read_only)
 
     async def on_pre_tool_use(
         input_data: dict[str, Any], tool_use_id: str | None, context: Any
@@ -570,7 +649,20 @@ def claude_file_tool_guard(*, cwd: Path, roots: list[Path], cli_tmp_base: str | 
         for key in keys:
             value = tool_input.get(key)
             if isinstance(value, str) and value.strip():
+                resolved = _resolved_tool_path(value, cwd=cwd)
+                if (
+                    tool_name in _CLAUDE_WRITE_TOOLS
+                    and resolved is not None
+                    and _is_read_only_target(resolved, read_only_paths)
+                ):
+                    return _claude_guard_deny(f"{value} is read-only.")
                 if path_outside_roots(value, cwd=cwd, roots=reachable):
+                    if (
+                        tool_name in _CLAUDE_READ_TOOLS
+                        and resolved is not None
+                        and _is_read_only_file(resolved, read_only_paths)
+                    ):
+                        continue
                     if (
                         tool_name == "Read"
                         and key == "file_path"
@@ -579,19 +671,22 @@ def claude_file_tool_guard(*, cwd: Path, roots: list[Path], cli_tmp_base: str | 
                         )
                     ):
                         continue
-                    return {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": (
-                                f"This workspace is confined to {allowed}; "
-                                f"{value} is outside it."
-                            ),
-                        }
-                    }
+                    return _claude_guard_deny(
+                        f"This workspace is confined to {allowed}; {value} is outside it."
+                    )
         return {}
 
     return on_pre_tool_use
+
+
+def _claude_guard_deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
 
 
 def _quote_seatbelt_subpath(root: str) -> str:

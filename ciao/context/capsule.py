@@ -126,11 +126,12 @@ PERMISSION_MODE_HINTS = {
 }
 
 
-def _file_access_line(file_roots: Sequence[str]) -> str:
-    """One line: where a workspace-scoped chat may write, and who can widen it."""
+def _file_access_line(file_roots: Sequence[str], file_read_only: Sequence[str] = ()) -> str:
+    """One line: where a workspace-scoped chat may write, what it only reads, and who widens it."""
     roots = ", ".join(_field(root, limit=300) for root in file_roots)
+    read_only = "".join(f"read only: {_field(path, limit=300)}; " for path in file_read_only)
     return (
-        f"file_access=workspace only: read and write under {roots}; other paths "
+        f"file_access=workspace only: read and write under {roots}; {read_only}other paths "
         'are refused by the sandbox ("Operation not permitted"). The owner changes '
         "this in Settings → Overview → File access."
     )
@@ -148,6 +149,7 @@ def build_context_capsule(
     handover: str = "",
     include_stable: bool = True,
     file_roots: Sequence[str] = (),
+    file_read_only: Sequence[str] = (),
     linked_repo_block: str = "",
     linked_repo_line: str = "",
     permission_mode: str = "",
@@ -158,7 +160,8 @@ def build_context_capsule(
     provider's cwd, so a path the model writes is usable verbatim.
 
     ``file_roots`` are the folders a workspace-scoped chat may read and write.
-    Empty means no file-access line (machine scope).
+    Empty means no file-access line (machine scope). ``file_read_only`` are single
+    files it may read and never write (a memory pass's source archive, #2459).
 
     ``permission_mode`` is the chat's effective permission mode; it is sent every
     turn with a one-line hint (see ``PERMISSION_MODE_HINTS``), since it can change
@@ -205,7 +208,7 @@ def build_context_capsule(
     if unattended:
         dynamic.append(UNATTENDED_CAPSULE_GUIDANCE)
     if file_roots:
-        dynamic.append(_file_access_line(file_roots))
+        dynamic.append(_file_access_line(file_roots, file_read_only))
     if permission_mode:
         line = f"permission_mode={_field(permission_mode, limit=20)}"
         hint = PERMISSION_MODE_HINTS.get(permission_mode)

@@ -1358,6 +1358,45 @@ async def test_claude_workspace_scope_passes_the_cli_tmp_base_to_the_guard(
 
 
 @pytest.mark.asyncio
+async def test_claude_workspace_scope_hands_the_read_only_grant_to_the_guard(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The memory pass's source archive is the one read-only file the guard lets through (#2459).
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive = tmp_path / "Logs" / "Chats" / "src-1" / "claude" / "s.md"
+    captured: dict = {}
+
+    def fake_guard(**kwargs):
+        captured.update(kwargs)
+
+        async def hook(*args):
+            return {}
+
+        return hook
+
+    class FakeClient:
+        def __init__(self, options):
+            pass
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    monkeypatch.setattr("ciao.providers.claude.claude_file_tool_guard", fake_guard)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(tmp_path / "agent"),),
+        agent_read_only=(str(archive),),
+    )
+
+    await provider._ensure_connected(request)
+
+    assert captured["read_only"] == [archive]
+
+
+@pytest.mark.asyncio
 async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_dirs(
     tmp_path: Path, monkeypatch,
 ) -> None:

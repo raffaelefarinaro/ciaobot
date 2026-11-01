@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -768,3 +770,214 @@ def test_symlinked_secrets_pointing_outside_every_root_is_not_denied(
     request = manager.build_agent_request(chat, prompt="hi")
 
     assert request.agent_denied == ()
+
+
+@pytest.fixture
+def archive_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A per-root install on workspace scope, as a fresh macOS install is born (#2459)."""
+    monkeypatch.setattr("ciao.fs_sandbox.gws_tool_read_roots", lambda path: [])
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    mark_born_per_root(tmp_path, runtime, ["personal"])
+    reset_reroot_cache()
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="workspace")
+    try:
+        yield manager
+    finally:
+        reset_reroot_cache()
+
+
+_NEEDS_SYMLINK = pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink privilege")
+
+
+def _write_archive(config, chat_id: str = "src-1") -> Path:
+    archive = config.logs_root / "Chats" / chat_id / "claude" / "2026-11-01T10-00-00-s.md"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_text("transcript", encoding="utf-8")
+    return archive
+
+
+def _pass_helper(archive: Path) -> dict:
+    return {
+        "kind": "memory_pass",
+        "source_chat_id": "src-1",
+        "archive_path": str(archive),
+        "archive_policy": "when_clean",
+    }
+
+
+def _memory_pass_chat(manager: ProjectChatManager, helper: dict) -> ChatInfo:
+    project = manager._memory_pass.ensure_project("personal")
+    return manager.create_chat(project.project_id, provider="claude", helper=helper)
+
+
+def test_a_memory_pass_chat_may_read_exactly_its_source_archive(archive_install) -> None:
+    manager = archive_install
+    config = manager._config
+    archive = _write_archive(config)
+    chat = _memory_pass_chat(manager, _pass_helper(archive))
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    real = archive.resolve()
+    assert str(real) in request.agent_read_only
+    assert not any(real.is_relative_to(Path(root)) for root in request.agent_roots)
+    logs = config.logs_root.resolve()
+    granted = {Path(p) for p in (*request.agent_read_only, *request.agent_roots)}
+    assert not granted & {logs, logs / "Chats", logs / "Chats" / "src-1"}
+    assert not any(
+        Path(p) != real and real.is_relative_to(Path(p)) for p in request.agent_read_only
+    )
+
+
+def test_a_relative_archive_path_resolves_against_the_workspace_root(archive_install) -> None:
+    manager = archive_install
+    config = manager._config
+    archive = _write_archive(config)
+    helper = _pass_helper(archive.relative_to(config.workspace_root))
+    chat = _memory_pass_chat(manager, helper)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(archive.resolve()) in request.agent_read_only
+
+
+def test_an_ordinary_chat_gets_no_archive_grant(archive_install) -> None:
+    manager = archive_install
+    config = manager._config
+    _write_archive(config)
+    project = manager.create_project("scoped", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert not any(
+        Path(p).is_relative_to(config.logs_root.resolve()) for p in request.agent_read_only
+    )
+
+
+def test_a_memory_pass_in_machine_scope_gets_no_archive_grant(archive_install) -> None:
+    manager = archive_install
+    config = manager._config
+    archive = _write_archive(config)
+    chat = _memory_pass_chat(manager, _pass_helper(archive))
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="machine")
+
+    assert manager.build_agent_request(chat, prompt="hi").agent_read_only == ()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "outside_logs",
+        "another_chat",
+        pytest.param("symlink", marks=_NEEDS_SYMLINK),
+        pytest.param("middle_symlink", marks=_NEEDS_SYMLINK),
+        pytest.param("symlinked_source_folder", marks=_NEEDS_SYMLINK),
+        "hardlink",
+        "traversal",
+        "missing",
+        "directory",
+    ],
+)
+def test_a_tampered_memory_pass_archive_path_is_not_granted(
+    archive_install, tmp_path: Path, case: str
+) -> None:
+    manager = archive_install
+    config = manager._config
+    archive = _write_archive(config)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    other = _write_archive(config, chat_id="other")
+    chats = config.logs_root / "Chats"
+    forbidden = {secret.resolve(), archive.resolve(), other.resolve()}
+    helper = _pass_helper(archive)
+    if case == "outside_logs":
+        helper["archive_path"] = str(secret)
+    elif case == "another_chat":
+        helper["archive_path"] = str(other)
+    elif case == "symlink":
+        link = archive.with_name("link.md")
+        link.symlink_to(secret)
+        helper["archive_path"] = str(link)
+    elif case == "middle_symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "s.md"
+        target.write_text("outside", encoding="utf-8")
+        (archive.parent / "linkdir").symlink_to(outside, target_is_directory=True)
+        helper["archive_path"] = str(archive.parent / "linkdir" / "s.md")
+        forbidden.add(target.resolve())
+    elif case == "symlinked_source_folder":
+        (chats / "linked").symlink_to(chats / "src-1", target_is_directory=True)
+        helper["source_chat_id"] = "linked"
+    elif case == "hardlink":
+        alias = archive.with_name("h.md")
+        os.link(secret, alias)
+        helper["archive_path"] = str(alias)
+        forbidden.add(alias.resolve())
+    elif case == "traversal":
+        helper["source_chat_id"] = "../src-1"
+    elif case == "missing":
+        helper["archive_path"] = str(archive.with_name("gone.md"))
+    elif case == "directory":
+        helper["archive_path"] = str(archive.parent)
+    chat = _memory_pass_chat(manager, helper)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    granted = {Path(p) for p in request.agent_read_only}
+    assert not granted & forbidden
+    assert not any(p.is_relative_to(config.logs_root.resolve()) for p in granted)
+
+
+def test_a_task_completion_pass_gets_no_archive_grant(archive_install) -> None:
+    manager = archive_install
+    config = manager._config
+    archive = _write_archive(config)
+    resolution = "Shipped the fix."
+    project = manager._memory_pass.ensure_project("personal")
+    chat = manager.create_chat(
+        project.project_id,
+        provider="claude",
+        helper={
+            "kind": "memory_pass",
+            "source_kind": "task_completion",
+            "task_path": "work/tasks/t.md",
+            "completion_id": "0" * 32,
+            "resolution": resolution,
+            "resolution_sha256": hashlib.sha256(resolution.encode("utf-8")).hexdigest(),
+            "archive_path": str(archive),
+            "archive_policy": "when_clean",
+        },
+    )
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert not any(
+        Path(p).is_relative_to(config.logs_root.resolve()) for p in request.agent_read_only
+    )
+
+
+def test_a_hardlink_in_the_source_folder_is_not_granted(archive_install, tmp_path: Path) -> None:
+    # A second name for a file another process can read is not a transcript
+    # archive: st_nlink must be 1, as the Claude task-output check requires (#2459).
+    manager = archive_install
+    config = manager._config
+    archive = _write_archive(config)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    alias = archive.parent / "h.md"
+    os.link(secret, alias)
+    chat = _memory_pass_chat(manager, _pass_helper(alias))
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(alias.resolve()) not in request.agent_read_only
+    assert str(secret.resolve()) not in request.agent_read_only
