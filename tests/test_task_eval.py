@@ -7,6 +7,10 @@ only through its pure environment builder; the runner uses a fake session.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import time
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -778,3 +782,153 @@ def test_prepare_workspace_pins_requested_provider_and_model(tmp_path: Path) -> 
     )
     assert config.default_provider_for_workspace("personal") == "claude"
     assert config.default_model_for_workspace("personal", "claude") == "haiku"
+
+
+# --- Fix round 2: env isolation, process groups, tolerant usage, symlinks, fences ---
+
+
+def test_harness_subprocesses_pass_base_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        calls.append((argv, kwargs))
+        if argv[0] == "git":
+            return _completed("abc123\n" if "rev-parse" in argv else "")
+        if "--version" in argv:
+            return _completed("claude 1.2\n")
+        return _completed(f"{Path(te.__file__).resolve().parent / '__init__.py'}\n")
+
+    monkeypatch.setattr(te.subprocess, "run", fake_run)
+
+    te.provider_version("claude")
+    te.code_revision()
+    te.cli_package_mismatch()
+
+    assert len(calls) == 4
+    assert all(kwargs.get("env") is te._BASE_ENV for _, kwargs in calls)
+
+
+def test_command_check_runs_with_stripped_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        te,
+        "_BASE_ENV",
+        {"PATH": "/usr/bin", "HOME": "/home/x", "CIAO_WORKSPACE": "/live",
+         "PWA_AUTH_TOKEN": "secret", "GWS_PROFILE": "work"},
+    )
+    seen: dict[str, Any] = {}
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return _completed("")
+
+    monkeypatch.setattr(te.subprocess, "run", fake_run)
+
+    result = te.CHECKS["command"](_ctx(tmp_path), {"kind": "command", "argv": ["{python}", "-c", "pass"]})
+
+    assert result.ok
+    assert seen["env"] == {"PATH": "/usr/bin", "HOME": "/home/x"}
+
+
+def test_resolve_in_root_refuses_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("TOKEN", encoding="utf-8")
+    (root / "real.md").write_text("inside", encoding="utf-8")
+    try:
+        (root / "escape.md").symlink_to(outside / "secret.md")
+        (root / "alias.md").symlink_to(root / "real.md")
+    except OSError:
+        pytest.skip("symlink creation unavailable on this platform")
+
+    assert te._resolve_in_root(root, "alias.md").read_text(encoding="utf-8") == "inside"
+    with pytest.raises(ValueError):
+        te._resolve_in_root(root, "escape.md")
+    result = te.CHECKS["file_contains"](
+        _ctx(root), {"kind": "file_contains", "path": "escape.md", "all": ["token"]}
+    )
+    assert not result.ok
+
+
+def test_close_kills_the_whole_engine_process_group(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("process groups are POSIX-only")
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys, time, pathlib\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+        "time.sleep(600)\n"
+    )
+    leader = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+    deadline = time.monotonic() + 15
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+    engine._proc = leader
+
+    engine.close()
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    pytest.fail("grandchild process survived engine close")
+
+
+def test_collect_usage_tolerates_truncated_telemetry_line(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "mcp_tool_calls.jsonl").write_text(
+        json.dumps({"status": "ok"}) + "\n"
+        + json.dumps({"status": "error"}) + "\n"
+        + '{"status": "ok", "tool": "tas',
+        encoding="utf-8",
+    )
+
+    usage = te.collect_usage(runtime)
+
+    assert usage["ciao_calls"] == 2
+    assert usage["ciao_errors"] == 1
+
+
+def test_collect_usage_tolerates_truncated_state(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "state.json").write_text('{"bot_state": {"cost": ', encoding="utf-8")
+
+    usage = te.collect_usage(runtime)
+
+    assert usage["cost_usd"] is None
+
+
+def test_resolve_in_root_allows_symlink_inside_root(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "real.md").write_text("inside", encoding="utf-8")
+    try:
+        (root / "alias.md").symlink_to(root / "real.md")
+    except OSError:
+        pytest.skip("symlink creation unavailable on this platform")
+
+    assert te._resolve_in_root(root, "alias.md").read_text(encoding="utf-8") == "inside"
+
+
+def test_frontmatter_closing_fence_must_be_its_own_line(tmp_path: Path) -> None:
+    (tmp_path / "note.md").write_text(
+        "---\ntype: person\nupdated: 2026-10-01\n----\nBody\n", encoding="utf-8"
+    )
+
+    result = te.CHECKS["frontmatter_valid"](
+        _ctx(tmp_path), {"kind": "frontmatter_valid", "path": "note.md"}
+    )
+
+    assert not result.ok
+    assert "unterminated" in result.detail

@@ -213,5 +213,6 @@ match the fixture exactly.
 
 - Only the easy tier and the `prompt` entry are in the catalog. Medium and hard
   tasks, and gws fakes for `requires`, come later.
+- `--jobs` above 1 has a small port race: each engine's port is probed free when its harness object is created and bound only when the engine starts, so two concurrent boots can collide. Use `--jobs 1` for a run whose numbers you will compare.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.

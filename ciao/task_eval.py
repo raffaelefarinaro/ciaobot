@@ -18,6 +18,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import shutil
 import socket
 import statistics
@@ -252,10 +253,13 @@ def _contains_spec(text: str, spec: dict[str, Any]) -> tuple[bool, str]:
 
 
 def _resolve_in_root(root: Path, rel: str) -> Path:
-    """A path under ``root``; anything that escapes it is refused."""
+    """The resolved path of ``rel`` under ``root``; anything that escapes it, symlinks included, is refused."""
     if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
         raise ValueError(f"path must be relative to the agent root: {rel!r}")
-    return root / rel
+    candidate = (root / rel).resolve()
+    if not candidate.is_relative_to(root.resolve()):
+        raise ValueError(f"path escapes the agent root through a symlink: {rel!r}")
+    return candidate
 
 
 def _check_answer_contains(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
@@ -428,14 +432,17 @@ def _check_new_files(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     return CheckResult("new_files", len(new) <= limit, f"{len(new)} new, max {limit}: {new[:10]}")
 
 
+_FENCE_RE = re.compile(r"^---[ \t]*$", re.MULTILINE)
+
+
 def _frontmatter_problems(text: str) -> str | None:
     if not text.startswith("---\n"):
         return "no frontmatter block"
-    end = text.find("\n---", 4)
-    if end == -1:
+    closing = _FENCE_RE.search(text, 4)
+    if closing is None:
         return "unterminated frontmatter block"
     try:
-        block = yaml.safe_load(text[4:end])
+        block = yaml.safe_load(text[4:closing.start()])
     except yaml.YAMLError as exc:
         return f"frontmatter does not parse: {exc}"
     if not isinstance(block, dict):
@@ -513,7 +520,14 @@ def _check_command(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     timeout = float(spec.get("timeout_s", 120))
     try:
         proc = subprocess.run(
-            argv, cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, check=False
+            argv,
+            cwd=cwd,
+            env=_without_live_vars(_BASE_ENV),
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return _fail("command", repr(exc)[:400])
@@ -570,6 +584,14 @@ def grade(task: EvalTask, ctx: GradeContext) -> list[CheckResult]:
 # --- isolation --------------------------------------------------------------------
 
 ENV_PREFIXES: tuple[str, ...] = ("CIAO_", "PWA_", "GWS_")
+# The caller's environment, captured once at import. Threads never read os.environ
+# (it is temporarily rewritten while setup_workspace runs), so every subprocess and
+# engine environment is built from this snapshot.
+_BASE_ENV: dict[str, str] = dict(os.environ)
+
+
+def _without_live_vars(env: Mapping[str, str]) -> dict[str, str]:
+    return {key: value for key, value in env.items() if not key.startswith(ENV_PREFIXES)}
 ENGINE_READY_TIMEOUT_S = 60.0
 ENGINE_STOP_TIMEOUT_S = 20.0
 SETTLE_POLL_S = 2.0
@@ -591,7 +613,7 @@ def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str
     run started inside a live Ciaobot chat cannot reach the live install. The
     storage roots are pointed into the throwaway ``workdir``.
     """
-    env = {key: value for key, value in base_env.items() if not key.startswith(ENV_PREFIXES)}
+    env = _without_live_vars(base_env)
     env.update(
         {
             "CIAO_WORKSPACE": str(ws),
@@ -609,7 +631,7 @@ def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str
 def _engine_environ(workdir: Path, ws: Path) -> Iterator[None]:
     saved = dict(os.environ)
     os.environ.clear()
-    os.environ.update(engine_env(saved, workdir, ws))
+    os.environ.update(engine_env(_BASE_ENV, workdir, ws))
     try:
         yield
     finally:
@@ -693,6 +715,20 @@ def prepare_workspace(
     return ws
 
 
+def _stop_process_group(proc: subprocess.Popen[bytes]) -> None:
+    """Stop an engine and whatever it spawned (provider CLIs), on POSIX via its process group."""
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
+    if sys.platform != "win32":
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
 class EngineSession(Protocol):
     """What a task run needs from an engine: API access, a chat, and its usage."""
 
@@ -718,8 +754,8 @@ class EngineSession(Protocol):
 class IsolatedEngine(EngineSession):
     """A real engine on a throwaway workspace, booted the way the operator boots one.
 
-    The agent root is ``ws/personal/memory-vault``; the fixture vault is copied
-    there and the task overlay over ``ws/personal``. Use :meth:`boot`, which
+    The agent root is ``ws/personal``; the fixture vault is copied to
+    ``ws/personal/memory-vault`` and the task overlay goes over ``ws/personal``. Use :meth:`boot`, which
     either returns a running, authenticated engine or cleans up after itself.
     """
 
@@ -761,12 +797,14 @@ class IsolatedEngine(EngineSession):
         self._log = self._log_path.open("wb")
         script = Path(sys.executable).with_name("ciao")
         command = [str(script), "run"] if script.exists() else [sys.executable, "-m", "ciao", "run"]
+        group: dict[str, Any] = {"start_new_session": True} if sys.platform != "win32" else {}
         self._proc = subprocess.Popen(
             command,
             cwd=self.ws,
-            env=engine_env(os.environ, self.workdir, self.ws),
+            env=engine_env(_BASE_ENV, self.workdir, self.ws),
             stdout=self._log,
             stderr=subprocess.STDOUT,
+            **group,
         )
         self._wait_ready()
         self.api("POST", "/api/auth", {"token": self.token})
@@ -864,13 +902,8 @@ class IsolatedEngine(EngineSession):
             return
         self._closed = True
         try:
-            if self._proc is not None and self._proc.poll() is None:
-                self._proc.terminate()
-                try:
-                    self._proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
-                except subprocess.TimeoutExpired:
-                    self._proc.kill()
-                    self._proc.wait(timeout=ENGINE_STOP_TIMEOUT_S)
+            if self._proc is not None:
+                _stop_process_group(self._proc)
         finally:
             if self._log is not None:
                 self._log.close()
@@ -947,7 +980,10 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
         for line in telemetry.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            row: Any = json.loads(line)
+            try:
+                row: Any = json.loads(line)
+            except ValueError:
+                continue  # a line the engine is still writing
             ciao_calls += 1
             if isinstance(row, dict) and row.get("status") != "ok":
                 ciao_errors += 1
@@ -955,7 +991,11 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
     cost_usd: float | None = None
     state_path = runtime / "state.json"
     if state_path.is_file():
-        state: Any = json.loads(state_path.read_text(encoding="utf-8"))
+        state: Any = None
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = None  # still being written; the cost is unknown for this read
         bot_state = state.get("bot_state") if isinstance(state, dict) else None
         cost = bot_state.get("cost") if isinstance(bot_state, dict) else None
         cost_usd = float(cost) if isinstance(cost, (int, float)) else None
@@ -1041,7 +1081,8 @@ def provider_version(provider: str) -> str | None:
     """First line of ``<provider> --version``, or None when the CLI is not runnable."""
     try:
         proc = subprocess.run(
-            [provider, "--version"], capture_output=True, encoding="utf-8", errors="replace", timeout=15, check=False
+            [provider, "--version"], capture_output=True, encoding="utf-8", errors="replace", timeout=15,
+            check=False, env=_BASE_ENV
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1060,7 +1101,9 @@ def cli_package_mismatch() -> str | None:
     harness = Path(__file__).resolve().parent
     probe = [sys.executable, "-I", "-c", "import ciao; print(ciao.__file__)"]
     try:
-        proc = subprocess.run(probe, capture_output=True, encoding="utf-8", errors="replace", timeout=60, check=False)
+        proc = subprocess.run(
+            probe, capture_output=True, encoding="utf-8", errors="replace", timeout=60, check=False, env=_BASE_ENV
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"could not import ciao in isolated mode: {exc!r}"
     printed = (proc.stdout or "").strip().splitlines()
@@ -1085,7 +1128,8 @@ def code_revision() -> str | None:
     def git(*args: str) -> subprocess.CompletedProcess[str] | None:
         try:
             return subprocess.run(
-                ["git", "-C", str(repo), *args], capture_output=True, encoding="utf-8", errors="replace", timeout=15, check=False
+                ["git", "-C", str(repo), *args], capture_output=True, encoding="utf-8", errors="replace",
+                timeout=15, check=False, env=_BASE_ENV
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
