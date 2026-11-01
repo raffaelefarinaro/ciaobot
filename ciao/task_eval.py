@@ -46,7 +46,7 @@ from typing import Any, Protocol
 import yaml
 
 import ciao
-from ciao import behavioral_eval, gws_auth
+from ciao import agent_paths, behavioral_eval, gws_auth
 from ciao.config import PERMISSION_MODES
 from ciao.os_support.tool_path import dedupe_path
 from ciao.tool_path import common_tool_dirs
@@ -54,6 +54,8 @@ from ciao.tool_path import common_tool_dirs
 TASKS_ROOT: Path = Path(__file__).resolve().parent / "stock" / "evals" / "tasks"
 FIXTURE_DIRNAME = "_fixture"
 WORKSPACE = "personal"
+# Prefix of every engine workdir; also the marker that lets cleanup touch a Claude project folder.
+EVAL_WORKDIR_PREFIX = "ciao-task-eval-"
 TIERS: frozenset[str] = frozenset({"easy", "medium", "hard"})
 ENTRY_KINDS: frozenset[str] = frozenset({"prompt", "delegate"})
 SETUP_KINDS: frozenset[str] = frozenset({"task", "project"})
@@ -934,6 +936,28 @@ class EngineSession(Protocol):
     def close(self) -> None: ...
 
 
+def _claude_project_dirs(agent_root: Path) -> list[Path]:
+    """Claude Code's project folders for an eval agent root, as they exist now.
+
+    Claude names the folder after the path it was started in, and on macOS that is
+    the resolved path (``/var`` becomes ``/private/var``), so both spellings are
+    candidates. Only a folder whose name carries the eval workdir prefix qualifies,
+    so a misconfigured root can never remove a real project's history: the root
+    itself must sit under a folder the harness created (its name starts with the
+    prefix), and the slug must still carry the prefix (a 200-character slug that
+    Claude truncated past it is left in place).
+    """
+    if not any(part.startswith(EVAL_WORKDIR_PREFIX) for part in agent_root.parts):
+        return []
+    candidates = {
+        agent_paths.claude_projects_dir(agent_root),
+        agent_paths.claude_projects_dir(agent_root.resolve()),
+    }
+    return sorted(
+        folder for folder in candidates if folder.is_dir() and EVAL_WORKDIR_PREFIX in folder.name
+    )
+
+
 class IsolatedEngine(EngineSession):
     """A real engine on a throwaway workspace, booted the way the operator boots one.
 
@@ -971,7 +995,7 @@ class IsolatedEngine(EngineSession):
         keep_workdir: bool = False,
         mode: str | None = None,
     ) -> "IsolatedEngine":
-        workdir = Path(tempfile.mkdtemp(prefix="ciao-task-eval-"))
+        workdir = Path(tempfile.mkdtemp(prefix=EVAL_WORKDIR_PREFIX))
         engine = cls(workdir, keep_workdir=keep_workdir)
         try:
             engine._start(task, provider, model, mode)
@@ -1115,7 +1139,10 @@ class IsolatedEngine(EngineSession):
             if self._keep_workdir:
                 print(f"kept task eval workdir: {self.workdir}", file=sys.stderr)
             else:
+                claude_dirs = _claude_project_dirs(self.agent_root)
                 shutil.rmtree(self.workdir, ignore_errors=True)
+                for folder in claude_dirs:
+                    shutil.rmtree(folder, ignore_errors=True)
 
 
 # --- gws fake: a stand-in ``gws`` that logs every call and never reaches Google -----
@@ -1730,10 +1757,17 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
     tokens = {name: 0 for name in _TOKEN_FIELDS}
     tool_calls = 0
     tool_errors = 0
+    provider_errors = 0
+    provider_error: str | None = None
     chat_ids: list[str] = []
     for path in _transcripts(runtime):
         chat_ids.append(path.parent.name)
         for turn in _read_transcript(path):
+            if turn.get("is_error"):
+                provider_errors += 1
+                if provider_error is None:
+                    response = turn.get("response")
+                    provider_error = (response if isinstance(response, str) else "")[:300]
             usage = turn.get("usage") or {}
             if isinstance(usage, dict):
                 for name, key in _TOKEN_FIELDS.items():
@@ -1777,6 +1811,8 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
         "tokens": tokens,
         "tool_calls": tool_calls,
         "tool_errors": tool_errors,
+        "provider_errors": provider_errors,
+        "provider_error": provider_error,
         "ciao_calls": ciao_calls,
         "ciao_errors": ciao_errors,
         "cost_usd": cost_usd,
@@ -1943,6 +1979,7 @@ def _base_record(
         "ciao_calls": 0,
         "ciao_errors": 0,
         "cost_usd": None,
+        "provider_errors": 0,
         "wall_s": 0.0,
         "timed_out": False,
         "chat_ids": [],
@@ -2011,13 +2048,24 @@ def run_task(
         )
         results = grade(task, ctx)
         usage = session.usage()
+        all_ok = all(r.ok for r in results)
+        provider_errors = _as_int(usage["provider_errors"])
+        status = "passed" if settled and all_ok else "failed"
+        error = None
+        # A provider failure (quota, auth, transport) that kept the run from passing
+        # is an outage, not a model failure. A passing run did the work despite it.
+        if provider_errors and status != "passed":
+            status = "error"
+            error = f"provider error: {usage['provider_error'] or '(no message)'}"
         record.update(
-            status="passed" if settled and all(r.ok for r in results) else "failed",
+            status=status,
+            error=error,
             checks=[asdict(r) for r in results],
             answer=ctx.answer[-ANSWER_TAIL_CHARS:],
             tokens=_tokens(usage["tokens"]),
             tool_calls=_as_int(usage["tool_calls"]),
             tool_errors=_as_int(usage["tool_errors"]),
+            provider_errors=provider_errors,
             ciao_calls=_as_int(usage["ciao_calls"]),
             ciao_errors=_as_int(usage["ciao_errors"]),
             cost_usd=usage["cost_usd"],
@@ -2106,8 +2154,9 @@ def _median(values: Sequence[float | None]) -> float | None:
 def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Per (label, provider, model, mode, code revision, task): counts, pass rate and medians.
 
-    A report from before the ``mode`` field has no mode to group by, so those rows
-    fall into the ``-`` group.
+    The pass rate and the medians are over runs that neither skipped nor errored;
+    ``errors`` counts the runs whose provider failed. A report from before the ``mode`` field has no
+    mode to group by, so those rows fall into the ``-`` group.
     """
     groups: dict[tuple[str, str, str, str, str, str], list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -2126,7 +2175,8 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         label, provider, model, mode, revision, task_id = key
         items = groups[key]
         ran = [r for r in items if r.get("status") != "skipped"]
-        passed = sum(1 for r in ran if r.get("status") == "passed")
+        scored = [r for r in ran if r.get("status") != "error"]
+        passed = sum(1 for r in scored if r.get("status") == "passed")
         summary.append(
             {
                 "label": label,
@@ -2138,11 +2188,12 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "n": len(items),
                 "ran": len(ran),
                 "skipped": len(items) - len(ran),
-                "pass_rate": passed / len(ran) if ran else None,
-                "median_context_total": _median([r["tokens"]["context_total"] for r in ran]),
-                "median_output": _median([r["tokens"]["output"] for r in ran]),
-                "median_wall_s": _median([r.get("wall_s") for r in ran]),
-                "median_cost_usd": _median([r.get("cost_usd") for r in ran]),
+                "errors": len(ran) - len(scored),
+                "pass_rate": passed / len(scored) if scored else None,
+                "median_context_total": _median([r["tokens"]["context_total"] for r in scored]),
+                "median_output": _median([r["tokens"]["output"] for r in scored]),
+                "median_wall_s": _median([r.get("wall_s") for r in scored]),
+                "median_cost_usd": _median([r.get("cost_usd") for r in scored]),
                 "tool_errors": sum(int(r.get("tool_errors") or 0) for r in items),
                 "timeouts": sum(1 for r in items if r.get("timed_out")),
             }
@@ -2210,13 +2261,13 @@ def _fmt(value: Any, digits: int = 2) -> str:
 
 def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
     lines = [
-        "| Task | Label | Provider | Model | Mode | Revision | n | Ran | Pass rate | Median context | Median output | Median wall s | Median cost USD | Tool errors | Timeouts |",
-        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Task | Label | Provider | Model | Mode | Revision | n | Ran | Errors | Pass rate | Median context | Median output | Median wall s | Median cost USD | Tool errors | Timeouts |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in summary:
         pass_rate = item["pass_rate"]
         lines.append(
-            "| {task} | {label} | {provider} | {model} | {mode} | {rev} | {n} | {ran} | {pass_rate} | "
+            "| {task} | {label} | {provider} | {model} | {mode} | {rev} | {n} | {ran} | {errors} | {pass_rate} | "
             "{ctx} | {out} | {wall} | {cost} | {terr} | {timeouts} |".format(
                 task=item["task_id"],
                 label=item["label"],
@@ -2226,6 +2277,7 @@ def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
                 rev=item["code_revision"],
                 n=item["n"],
                 ran=item["ran"],
+                errors=item["errors"],
                 pass_rate="-" if pass_rate is None else f"{pass_rate:.2f}",
                 ctx=_fmt(item["median_context_total"], 0),
                 out=_fmt(item["median_output"], 0),
