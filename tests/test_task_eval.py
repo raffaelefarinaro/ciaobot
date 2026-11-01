@@ -2170,7 +2170,10 @@ def test_run_task_merges_session_trace_over_transcript_summary(
             {"id": "toolu_a", "chat_id": "chat-1", "name": "Bash", "input": "Bash · list the vault", "error": False},
             {"id": "toolu_b", "chat_id": "chat-1", "name": "Read", "input": "read a note", "error": True},
         ],
-        session_calls=[{"id": "toolu_a", "name": "Bash", "input": "ls memory-vault/People"}],
+        session_calls=[
+            {"id": "toolu_a", "name": "Bash", "input": "ls memory-vault/People"},
+            {"id": "toolu_z", "name": "Grep", "input": "*.md"},
+        ],
         model_calls=2,
     )
 
@@ -2183,9 +2186,11 @@ def test_run_task_merges_session_trace_over_transcript_summary(
         session_factory=lambda task: session,
     )
 
+    # The unmatched session call comes after the transcript entries, with no chat.
     assert record["trace"] == [
         {"chat_id": "chat-1", "name": "Bash", "input": "ls memory-vault/People", "error": False},
         {"chat_id": "chat-1", "name": "Read", "input": "read a note", "error": True},
+        {"chat_id": "", "name": "Grep", "input": "*.md", "error": False},
     ]
     assert record["model_calls"] == 2
     assert record["trace_truncated"] is False
@@ -2246,6 +2251,121 @@ def test_summarize_reports_median_model_calls() -> None:
 
     assert group["median_model_calls"] == 7
     assert "Median model calls" in te.render_summary([group])
+
+
+@pytest.mark.parametrize("where", ["settle", "grade"])
+def test_run_task_error_still_records_session_trace(
+    tmp_path: Path, stable_provenance: None, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    class RaisingSession(FakeSession):
+        def wait_settled(self, timeout_s: float) -> bool:
+            if where == "settle":
+                raise RuntimeError("engine dropped")
+            return super().wait_settled(timeout_s)
+
+    def broken_grade(task: te.EvalTask, ctx: te.GradeContext) -> list[te.CheckResult]:
+        raise RuntimeError("grader broke")
+
+    if where == "grade":
+        monkeypatch.setattr(te, "grade", broken_grade)
+    session = RaisingSession(
+        tmp_path,
+        trace=[{"id": "toolu_a", "chat_id": "chat-1", "name": "Bash", "input": "summary", "error": False}],
+        session_calls=[{"id": "toolu_a", "name": "Bash", "input": "ls memory-vault"}],
+        model_calls=3,
+    )
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "error"
+    assert record["error"].startswith("RuntimeError(")
+    assert record["model_calls"] == 3
+    assert record["trace"] == [{"chat_id": "chat-1", "name": "Bash", "input": "ls memory-vault", "error": False}]
+    assert session.closed is True
+
+
+def test_trace_read_failure_never_changes_a_passed_status(
+    tmp_path: Path, stable_provenance: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class BrokenTraceSession(FakeSession):
+        def session_trace(self) -> tuple[list[dict[str, Any]], int | None]:
+            raise RuntimeError("unexpected log shape")
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: BrokenTraceSession(tmp_path),
+    )
+
+    assert record["status"] == "passed"
+    assert record["error"] is None
+    assert record["trace"] == []
+    assert record["trace_truncated"] is False
+    assert record["model_calls"] is None
+    assert "unexpected log shape" in capsys.readouterr().err
+
+
+def test_trace_read_failure_keeps_the_run_error(tmp_path: Path, stable_provenance: None) -> None:
+    class DeadSession(FakeSession):
+        def wait_settled(self, timeout_s: float) -> bool:
+            raise RuntimeError("engine dropped")
+
+        def session_trace(self) -> tuple[list[dict[str, Any]], int | None]:
+            raise RuntimeError("log already gone")
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: DeadSession(tmp_path),
+    )
+
+    assert record["status"] == "error"
+    assert record["error"] == "RuntimeError('engine dropped')"
+    assert record["trace"] == []
+    assert record["model_calls"] is None
+
+
+def test_memory_pass_session_calls_appear_in_trace(tmp_path: Path, stable_provenance: None) -> None:
+    outcome = te.MemoryPassOutcome("ok", "pass-1", dict(_PASS_TOKENS), "Queued 1 fact.", usage_known=True)
+    session = FakeTranscriptSession(
+        tmp_path,
+        outcome=outcome,
+        session_calls=[
+            {"id": "toolu_p1", "name": "Read", "input": "memory-vault/People/x.md"},
+            {"id": "toolu_p2", "name": "Bash", "input": "ls memory-vault"},
+        ],
+        model_calls=2,
+    )
+
+    record = te.run_task(
+        _transcript_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["trace"] == [
+        {"chat_id": "", "name": "Read", "input": "memory-vault/People/x.md", "error": False},
+        {"chat_id": "", "name": "Bash", "input": "ls memory-vault", "error": False},
+    ]
+    assert record["model_calls"] == 2
+
+
 def test_run_task_attention_pass_tokens_are_not_doubled(tmp_path: Path, stable_provenance: None) -> None:
     pre = {"input": 30, "output": 4, "cache_read": 5, "cache_write": 1}
     outcome = te.MemoryPassOutcome("attention", "pass-1", dict(_PASS_TOKENS), "", usage_known=True)
