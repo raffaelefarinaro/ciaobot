@@ -4207,7 +4207,7 @@ class ProjectChatManager:
         
         # Seed handover messages
         new_chat.handover_messages = chat_service._normalize_handover_messages(
-            parsed_messages,
+            chat_service.strip_engine_fields(parsed_messages),
             max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
             max_chars=chat_service._PROVIDER_HANDOVER_MAX_CHARS,
         )
@@ -4232,7 +4232,9 @@ class ProjectChatManager:
         if not isinstance(turn_index, int) or isinstance(turn_index, bool) or turn_index < 0:
             raise ValueError("Fork turn must be a non-negative integer")
 
-        clean_rows = chat_service._clean_handover_messages(messages)
+        clean_rows = chat_service._clean_handover_messages(
+            chat_service.strip_engine_fields(messages)
+        )
         if not clean_rows:
             raise ValueError("Fork history must be non-empty")
         if clean_rows[-1].get("role") != "assistant" or clean_rows[-1].get("is_error"):
@@ -4378,12 +4380,7 @@ class ProjectChatManager:
         old_model = chat.model
         # `sent_context` is engine-written only: a client row carrying one is
         # stripped so the disclosure always reflects what this handover sent.
-        messages = [
-            {k: v for k, v in m.items() if k != "sent_context"}
-            if isinstance(m, dict)
-            else m
-            for m in (messages or [])
-        ]
+        messages = chat_service.strip_engine_fields(messages)
         rows = chat_service._normalize_handover_messages(
             messages,
             max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
@@ -5667,9 +5664,18 @@ class ProjectChatManager:
     def _format_handover_context(self, chat: ChatInfo) -> str:
         if not chat.handover_context_pending or not chat.handover_messages:
             return ""
-        # The rows were bounded when the handover was recorded; sending exactly
-        # what was stored keeps the prompt equal to the marker's `sent_context`.
-        return chat_service.format_provider_handover(chat.handover_messages)
+        # A provider handover recorded its pack on the marker; sending that exact
+        # text keeps the prompt equal to what was disclosed. Forks and onboarding
+        # packs carry no marker, so they are bounded to the handover limits here.
+        newest = chat.handover_messages[-1]
+        if newest.get("origin") == "handover" and newest.get("sent_context"):
+            return str(newest["sent_context"])
+        rows = chat_service._normalize_handover_messages(
+            chat.handover_messages,
+            max_messages=chat_service._PROVIDER_HANDOVER_MAX_MESSAGES,
+            max_chars=chat_service._PROVIDER_HANDOVER_MAX_CHARS,
+        )
+        return chat_service.format_provider_handover(rows)
 
     def _migrate_drop_qn_prefix(self) -> None:
         """One-shot: reconcile project state with the dropped ``YYYY-qN-`` slug prefix.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -307,3 +308,66 @@ def test_handover_marker_fields_survive_reload(tmp_path: Path) -> None:
     marker = reloaded.handover_messages[-1]
     assert marker["origin"] == "handover"
     assert marker["sent_context"] == updated.handover_messages[-1]["sent_context"]
+
+
+def test_fork_strips_client_sent_context(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("fork-forged", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+
+    fork = pcm.fork_chat(
+        chat.chat_id,
+        messages=[
+            {"role": "user", "content": "question", "sent_context": "forged"},
+            {"role": "assistant", "content": "answer"},
+        ],
+        turn_index=0,
+    )
+
+    assert all("sent_context" not in row for row in fork.handover_messages)
+
+
+def test_fork_pack_is_bounded_at_send_time(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("fork-bounded", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    messages: list[dict] = []
+    for i in range(10):
+        messages.append({"role": "user", "content": f"u{i}"})
+        messages.append({"role": "assistant", "content": f"a{i}"})
+
+    fork = pcm.fork_chat(chat.chat_id, messages=messages, turn_index=9)
+
+    assert len(fork.handover_messages) == 20
+    prefix = pcm._build_prompt_prefix(fork)
+    assert "User: u4" in prefix
+    assert "Assistant: a9" in prefix
+    assert "User: u3" not in prefix
+
+
+def test_clean_keeps_origin_only_on_user_and_system_rows() -> None:
+    rows = chat_service._clean_handover_messages(
+        [
+            {"role": "assistant", "content": "x", "origin": "handover"},
+            {"role": "system", "content": "y", "origin": "handover"},
+            {"role": "user", "content": "z", "origin": "webhook"},
+        ]
+    )
+
+    assert "origin" not in rows[0]
+    assert rows[1]["origin"] == "handover"
+    assert rows[2]["origin"] == "webhook"
+
+
+@pytest.mark.parametrize("limit", [500, 12_000])
+def test_truncate_middle_stays_within_limit(limit: int) -> None:
+    text = "ab" * 50_000
+
+    out = chat_service._truncate_middle(text, limit)
+
+    assert len(out) <= limit
+    match = re.search(r"\[… (\d+) characters omitted …\]", out)
+    assert match is not None
+    assert len(match.group(1)) == 5
+    assert out.startswith(text[:50])
+    assert out.endswith(text[-50:])

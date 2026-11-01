@@ -185,6 +185,14 @@ def _provider_label(provider: str) -> str:
     return provider_registry.label(provider, short=True)
 
 
+def strip_engine_fields(messages: list[Any] | None) -> list[Any]:
+    """Drop the engine-written ``sent_context`` a caller-supplied row must not carry."""
+    return [
+        {k: v for k, v in m.items() if k != "sent_context"} if isinstance(m, dict) else m
+        for m in (messages or [])
+    ]
+
+
 def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
     """Sanitize visible chat rows without applying history limits."""
     rows: list[dict] = []
@@ -224,7 +232,7 @@ def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
         if tool:
             entry["tool"] = tool
         origin = str(raw.get("origin", "")).strip()
-        if origin:
+        if origin and role in {"user", "system"}:
             entry["origin"] = origin
         sent_context = raw.get("sent_context")
         if isinstance(sent_context, str) and sent_context:
