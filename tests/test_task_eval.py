@@ -937,8 +937,39 @@ def test_frontmatter_closing_fence_must_be_its_own_line(tmp_path: Path) -> None:
     assert "unterminated" in result.detail
 
 
-def test_stop_process_group_needs_no_waitid() -> None:
+def test_close_kills_a_sigterm_ignoring_straggler_without_waitid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # os.waitid exists on macOS only from CPython 3.13; the floor is 3.12 (#2435).
-    import inspect
+    # The grandchild ignores SIGTERM, so only the group SIGKILL after the reap clears it.
+    if sys.platform == "win32":
+        pytest.skip("process groups are POSIX-only")
+    monkeypatch.delattr(os, "waitid", raising=False)
+    pid_file = tmp_path / "child.pid"
+    child_code = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(600)"
+    script = (
+        "import subprocess, sys, time, pathlib\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+        "time.sleep(0.5)\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+        "time.sleep(600)\n"
+    )
+    leader = subprocess.Popen([sys.executable, "-c", script], start_new_session=True)
+    deadline = time.monotonic() + 15
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+    engine._proc = leader
 
-    assert "waitid" not in inspect.getsource(te._stop_process_group)
+    engine.close()
+
+    assert leader.returncode is not None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    pytest.fail("SIGTERM-ignoring grandchild survived engine close")
