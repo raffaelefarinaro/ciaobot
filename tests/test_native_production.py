@@ -1202,17 +1202,25 @@ def test_the_classifier_runs_in_the_private_cwd(
 
 
 #: A console script that is a Python file, as uv writes one: it records a bind
-#: report on the descriptor named by ``--installer-native-fd`` and exits 0.
-_BIND_CONSOLE = (
-    "import os, sys\n"
-    "for argument in sys.argv:\n"
-    "    if argument.startswith('--installer-native-fd='):\n"
-    "        fd = int(argument.split('=', 1)[1])\n"
-    "        os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
-    "        os.close(fd)\n"
-    "        sys.exit(0)\n"
-    "sys.exit(3)\n"
-)
+#: report on the descriptor named by ``--installer-native-fd``, then holds until
+#: the release file exists (bounded) and exits 0. Holding keeps the child alive
+#: through the coordinator's listener-ownership check, which a child that exits
+#: at once can lose on a slow runner.
+def _bind_console(release: Path) -> str:
+    return (
+        "import os, sys, time\n"
+        f"release = {str(release)!r}\n"
+        "for argument in sys.argv:\n"
+        "    if argument.startswith('--installer-native-fd='):\n"
+        "        fd = int(argument.split('=', 1)[1])\n"
+        "        os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "        os.close(fd)\n"
+        "        give_up = time.monotonic() + 30\n"
+        "        while not os.path.exists(release) and time.monotonic() < give_up:\n"
+        "            time.sleep(0.01)\n"
+        "        sys.exit(0)\n"
+        "sys.exit(3)\n"
+    )
 
 
 def _e2e(
@@ -1222,8 +1230,17 @@ def _e2e(
     monkeypatch.setattr(sys, "platform", "darwin")
     tools, bin_dir = _tool_dirs_under(pinned_home)
     monkeypatch.setattr(native, "_tool_dirs", lambda *a, **k: (tools, bin_dir))
+    release = tmp_path / "wizard-release"
     console = tmp_path / "ciao-console.py"
-    console.write_text(_BIND_CONSOLE, encoding="utf-8")
+    console.write_text(_bind_console(release), encoding="utf-8")
+    real_owns_process = native._OwnedChild.owns_process
+
+    def owns_then_release(self: native._OwnedChild, pid: int) -> bool:
+        result = real_owns_process(self, pid)
+        release.touch()
+        return result
+
+    monkeypatch.setattr(native._OwnedChild, "owns_process", owns_then_release)
     uv = _fake_uv(tmp_path, pinned_home, python="wrapper", console=console)
     artifacts = rehash(dataclasses.replace(make_artifacts(tmp_path), uv=uv))
     production = native._production_deps(_request(), artifacts, native.NativeCancellation())

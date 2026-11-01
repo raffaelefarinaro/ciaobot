@@ -10,6 +10,10 @@ evaluations that make those changes measurable.
 Implementation: `ciao/behavioral_eval.py`. Scenario catalog:
 `ciao/stock/evals/scenarios.json`. CLI: `ciao eval`.
 
+This file covers the single-turn, simulated half. The agentic half, which
+executes the task on an isolated engine and grades the workspace it leaves
+behind, is `ciao eval tasks` (`ciao/task_eval.py`); see `docs/TASK_EVAL.md`.
+
 ## Two halves
 
 ### 1. Deterministic contract checks (CI, no model)

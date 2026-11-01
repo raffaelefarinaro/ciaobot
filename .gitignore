@@ -51,6 +51,8 @@ dist/
 .DS_Store
 # Private memory vault data must never be committed to the app repo
 memory-vault/
+# ...except the synthetic task-eval overlays (docs/TASK_EVAL.md), which are not user data
+!ciao/stock/evals/tasks/*/overlay/memory-vault/
 # Operator credentials and provider token caches (e.g. secrets/gws-personal/)
 secrets/
 

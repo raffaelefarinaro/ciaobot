@@ -1,0 +1,16 @@
+{
+  "id": "M3-delegated-task",
+  "tier": "medium",
+  "category": "delegated_task",
+  "prompt": "",
+  "entry": {"kind": "delegate", "task_title": "Find the bike insurance renewal month"},
+  "setup": [
+    {"kind": "task", "title": "Find the bike insurance renewal month", "body": "Look up in the vault when the bike insurance renews and report the month as the outcome of this task."}
+  ],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "task_attempt", "title_contains": "bike insurance", "outcome": "done", "count": 1},
+    {"kind": "answer_contains", "any": ["November"]}
+  ]
+}

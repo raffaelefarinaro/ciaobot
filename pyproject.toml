@@ -97,6 +97,7 @@ namespaces = false
   "deploy/*.png",
   "deploy/*.svg",
   "evals/*.json",
+  "evals/tasks/**/*",
   "entity-types.yaml",
   "retired-entity-types.yaml",
   "public/*.md",
