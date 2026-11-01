@@ -70,6 +70,12 @@ SETUP_KINDS: frozenset[str] = frozenset({"task", "project"})
 SCHEMA = "ciao-task-eval/1"
 DEFAULT_TIMEOUT_S = 600.0
 ANSWER_TAIL_CHARS = 2000
+# A record's tool trace: every string in an entry is cut to TRACE_TEXT_CHARS and the
+# list keeps its first TRACE_MAX_ENTRIES calls (``trace_truncated`` says when it cut).
+TRACE_TEXT_CHARS = 200
+TRACE_MAX_ENTRIES = 200
+# The Claude session log's tool_use inputs that stand for the call, in priority order.
+_CLAUDE_INPUT_KEYS: tuple[str, ...] = ("command", "file_path", "pattern", "skill")
 # The permission mode a run's chats start in, per provider, unless the caller
 # asks for another (`--mode`). Mirrors a typical operator install. OpenCode's
 # `auto` puts every shell call behind an approval card that nobody answers in an
@@ -1057,6 +1063,8 @@ class EngineSession(Protocol):
 
     def usage(self) -> dict[str, Any]: ...
 
+    def session_trace(self) -> tuple[list[dict[str, Any]], int | None]: ...
+
     def close(self) -> None: ...
 
 
@@ -1304,6 +1312,49 @@ class IsolatedEngine(EngineSession):
         usage = collect_usage(self.ws / ".runtime")
         usage["chat_ids"] = sorted(set(usage["chat_ids"]) | set(self._chat_ids))
         return usage
+
+    def session_trace(self) -> tuple[list[dict[str, Any]], int | None]:
+        """The Claude session log's tool calls and model round-trips. Call it before :meth:`close`.
+
+        Each call is ``{"id", "name", "input"}``, with the real input and the tool_use
+        id that the transcript's tool event carries too. ``model_calls`` counts the
+        distinct message ids of the assistant lines. With no Claude session log (every
+        OpenCode run) both are unknown: ``([], None)``.
+        """
+        calls: list[dict[str, Any]] = []
+        message_ids: set[str] = set()
+        read_any = False
+        for folder in _claude_project_dirs(self.agent_root):
+            for path in sorted(folder.glob("*.jsonl")):
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue  # removed or unreadable: this log counts as not read
+                read_any = True
+                for line in text.splitlines():
+                    try:
+                        row: Any = json.loads(line)
+                    except ValueError:
+                        continue  # a line the session is still writing
+                    if not isinstance(row, dict) or row.get("type") != "assistant":
+                        continue
+                    message = row.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    message_id = message.get("id")
+                    if isinstance(message_id, str) and message_id:
+                        message_ids.add(message_id)
+                    content = message.get("content")
+                    for item in content if isinstance(content, list) else []:
+                        if isinstance(item, dict) and item.get("type") == "tool_use":
+                            calls.append(
+                                {
+                                    "id": str(item.get("id") or ""),
+                                    "name": _clip(str(item.get("name") or "tool")),
+                                    "input": _claude_tool_input(item.get("input")),
+                                }
+                            )
+        return calls, len(message_ids) if read_any else None
 
     def close(self) -> None:
         if self._closed:
@@ -1942,6 +1993,79 @@ def _add_usage(tokens: dict[str, int], usage: Any) -> None:
         tokens[name] += _as_int(value)
 
 
+def _clip(text: str) -> str:
+    return text[:TRACE_TEXT_CHARS]
+
+
+def _claude_tool_input(raw: Any) -> str:
+    """The input of a Claude tool call as one short line: its command, path, pattern or skill, else its JSON."""
+    if isinstance(raw, dict):
+        for key in _CLAUDE_INPUT_KEYS:
+            value = raw.get(key)
+            if isinstance(value, str) and value:
+                return _clip(value)
+    return _clip(json.dumps(raw, ensure_ascii=False))
+
+
+def _trace_entry(chat_id: str, event: Mapping[str, Any]) -> dict[str, Any]:
+    """One transcript tool event as a trace entry. ``id`` joins it to the Claude session log."""
+    summary = event.get("input")
+    text = summary.get("summary") if isinstance(summary, dict) else None
+    return {
+        "id": str(event.get("id") or ""),
+        "chat_id": _clip(chat_id),
+        "name": _clip(str(event.get("name") or "tool")),
+        "input": _clip(text) if isinstance(text, str) else "",
+        "error": event.get("error") is True,
+    }
+
+
+def _record_trace(
+    transcript: Sequence[Mapping[str, Any]], session_calls: Sequence[Mapping[str, Any]]
+) -> tuple[list[dict[str, Any]], bool]:
+    """The record's ``trace``, cut to ``TRACE_MAX_ENTRIES``.
+
+    The transcript's tool calls come first, in order, each input replaced by the
+    Claude session log's real input for the same tool_use id. Session calls with no
+    transcript entry follow in log order, with no chat and no error flag: a memory
+    pass's own calls land here once its transcript is gone.
+    """
+    real_inputs = {str(call["id"]): str(call["input"]) for call in session_calls if call["id"]}
+    matched = {str(call["id"]) for call in transcript if call["id"]}
+    entries = [
+        {
+            "chat_id": call["chat_id"],
+            "name": call["name"],
+            "input": real_inputs.get(str(call["id"]), call["input"]),
+            "error": call["error"],
+        }
+        for call in transcript
+    ]
+    entries += [
+        {"chat_id": "", "name": call["name"], "input": call["input"], "error": False}
+        for call in session_calls
+        if str(call["id"]) not in matched
+    ]
+    return entries[:TRACE_MAX_ENTRIES], len(entries) > TRACE_MAX_ENTRIES
+
+
+def _trace_fields(session: EngineSession, usage: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The record's trace fields, read from the session before it is closed.
+
+    ``usage`` is a transcript read the caller already has; without it the session is
+    read again. Never raises: a trace that cannot be read is reported on stderr and the
+    fields stay at the record's defaults, so it can never change a run's status.
+    """
+    try:
+        transcript = (session.usage() if usage is None else usage)["trace"]
+        session_calls, model_calls = session.session_trace()
+        trace, truncated = _record_trace(transcript, session_calls)
+    except Exception as exc:  # noqa: BLE001 - the trace is evidence, never a reason to fail a run
+        print(f"task eval: trace not recorded: {exc!r}", file=sys.stderr)
+        return {}
+    return {"trace": trace, "trace_truncated": truncated, "model_calls": model_calls}
+
+
 def collect_usage(runtime: Path) -> dict[str, Any]:
     """Token, tool, ciao-call and cost figures for one engine's runtime directory."""
     tokens = {name: 0 for name in _TOKEN_FIELDS}
@@ -1950,8 +2074,10 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
     provider_errors = 0
     provider_error: str | None = None
     chat_ids: list[str] = []
+    trace: list[dict[str, Any]] = []
     for path in _transcripts(runtime):
-        chat_ids.append(path.parent.name)
+        chat_id = path.parent.name
+        chat_ids.append(chat_id)
         for turn in _read_transcript(path):
             if turn.get("is_error"):
                 provider_errors += 1
@@ -1963,6 +2089,9 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
                 tool_calls += 1
                 if isinstance(call, dict) and call.get("error"):
                     tool_errors += 1
+            for event in turn.get("tool_events") or []:
+                if isinstance(event, dict):
+                    trace.append(_trace_entry(chat_id, event))
 
     ciao_calls = 0
     ciao_errors = 0
@@ -2001,6 +2130,7 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
         "ciao_errors": ciao_errors,
         "cost_usd": cost_usd,
         "chat_ids": chat_ids,
+        "trace": trace,
     }
 
 
@@ -2299,6 +2429,9 @@ def _base_record(
         "ciao_errors": 0,
         "cost_usd": None,
         "provider_errors": 0,
+        "trace": [],
+        "trace_truncated": False,
+        "model_calls": None,
         "wall_s": 0.0,
         "timed_out": False,
         "chat_ids": [],
@@ -2344,6 +2477,7 @@ def run_task(
     )
     started = time.monotonic()
     session: EngineSession | None = None
+    trace_read = False
     try:
         # Validated before any engine boots: an unknown mode is an error record.
         resolve_mode(provider, mode)
@@ -2384,6 +2518,9 @@ def run_task(
         )
         results = grade(task, ctx)
         usage = session.usage()
+        # Read before close(), which deletes the Claude session log.
+        record.update(_trace_fields(session, usage))
+        trace_read = True
         all_ok = all(r.ok for r in results)
         # The synthetic chat read before the archive can add nothing (it carries no
         # errors), but its counts are summed in so none can be lost to the archive.
@@ -2440,6 +2577,9 @@ def run_task(
         record.update(status="error", error=repr(exc)[:500])
     finally:
         if session is not None:
+            if not trace_read:
+                # The run ended before the grader read the session; the log lasts until close().
+                record.update(_trace_fields(session))
             try:
                 session.close()
             except Exception as exc:  # noqa: BLE001 - cleanup failure is noted, not raised
@@ -2558,6 +2698,7 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "median_output": _median([r["tokens"]["output"] for r in scored]),
                 "median_wall_s": _median([r.get("wall_s") for r in scored]),
                 "median_cost_usd": _median([r.get("cost_usd") for r in scored]),
+                "median_model_calls": _median([r.get("model_calls") for r in scored]),
                 "tool_errors": sum(int(r.get("tool_errors") or 0) for r in items),
                 "timeouts": sum(1 for r in items if r.get("timed_out")),
             }
@@ -2625,14 +2766,14 @@ def _fmt(value: Any, digits: int = 2) -> str:
 
 def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
     lines = [
-        "| Task | Label | Provider | Model | Mode | Revision | n | Ran | Errors | Pass rate | Median context | Median output | Median wall s | Median cost USD | Tool errors | Timeouts |",
-        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Task | Label | Provider | Model | Mode | Revision | n | Ran | Errors | Pass rate | Median context | Median output | Median wall s | Median cost USD | Median model calls | Tool errors | Timeouts |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in summary:
         pass_rate = item["pass_rate"]
         lines.append(
             "| {task} | {label} | {provider} | {model} | {mode} | {rev} | {n} | {ran} | {errors} | {pass_rate} | "
-            "{ctx} | {out} | {wall} | {cost} | {terr} | {timeouts} |".format(
+            "{ctx} | {out} | {wall} | {cost} | {calls} | {terr} | {timeouts} |".format(
                 task=item["task_id"],
                 label=item["label"],
                 provider=item["provider"],
@@ -2647,6 +2788,7 @@ def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
                 out=_fmt(item["median_output"], 0),
                 wall=_fmt(item["median_wall_s"], 1),
                 cost=_fmt(item["median_cost_usd"], 4),
+                calls=_fmt(item["median_model_calls"], 0),
                 terr=item["tool_errors"],
                 timeouts=item["timeouts"],
             )

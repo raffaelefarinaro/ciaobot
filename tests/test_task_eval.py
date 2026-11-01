@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -389,6 +390,9 @@ class FakeSession:
         provider_errors: int = 0,
         provider_error: str | None = None,
         settled: bool = True,
+        trace: Sequence[Mapping[str, Any]] = (),
+        session_calls: Sequence[Mapping[str, Any]] = (),
+        model_calls: int | None = None,
     ) -> None:
         self.agent_root = root
         self.settled = settled
@@ -396,6 +400,9 @@ class FakeSession:
         self.answer = answer
         self.provider_errors = provider_errors
         self.provider_error = provider_error
+        self.trace = list(trace)
+        self.session_calls = list(session_calls)
+        self.model_calls = model_calls
         self.closed = False
         self.stopped: list[str] = []
 
@@ -433,7 +440,11 @@ class FakeSession:
             "chat_ids": ["chat-1"],
             "provider_errors": self.provider_errors,
             "provider_error": self.provider_error,
+            "trace": list(self.trace),
         }
+
+    def session_trace(self) -> tuple[list[dict[str, Any]], int | None]:
+        return list(self.session_calls), self.model_calls
 
     def close(self) -> None:
         self.closed = True
@@ -670,6 +681,41 @@ def test_collect_usage_counts_provider_error_turns(tmp_path: Path) -> None:
 
     assert usage["provider_errors"] == 1
     assert usage["provider_error"].startswith("weekly usage limit")
+
+
+def test_collect_usage_builds_trace_from_tool_events(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    chats = {
+        "chat-a": [
+            {
+                "response": "one",
+                "tool_events": [
+                    {"id": "toolu_1", "name": "Bash", "input": {"summary": "ls memory-vault"}},
+                    {"id": "toolu_2", "name": "Read", "input": {"summary": "x" * 250}, "error": True},
+                ],
+            }
+        ],
+        "chat-b": [
+            {
+                "response": "two",
+                "tool_events": [
+                    {"id": "toolu_3", "name": "Write", "input": {"summary": "note"}, "error": False},
+                ],
+            }
+        ],
+    }
+    for chat_id, turns in chats.items():
+        folder = runtime / "transcripts" / chat_id
+        folder.mkdir(parents=True)
+        (folder / "claude.json").write_text(json.dumps({"turns": turns}), encoding="utf-8", newline="")
+
+    usage = te.collect_usage(runtime)
+
+    assert usage["trace"] == [
+        {"id": "toolu_1", "chat_id": "chat-a", "name": "Bash", "input": "ls memory-vault", "error": False},
+        {"id": "toolu_2", "chat_id": "chat-a", "name": "Read", "input": "x" * 200, "error": True},
+        {"id": "toolu_3", "chat_id": "chat-b", "name": "Write", "input": "note", "error": False},
+    ]
 
 
 def _row(
@@ -1875,6 +1921,7 @@ class FakeTranscriptSession(FakeSession):
             "chat_ids": [],
             "provider_errors": self.provider_errors if self.ran_pass else 0,
             "provider_error": self.provider_error if self.ran_pass else None,
+            "trace": [],
         }
 
 
@@ -2035,6 +2082,288 @@ def test_memory_pass_tasks_plant_facts() -> None:
     sunday_turn = next(turn["user"] for turn in m6.entry["turns"] if "Sunday" in turn["user"])
     # Code-level dedupe compares dedupe_key only, so a paraphrase must not share it.
     assert memory_proposals.dedupe_key(sunday_turn) != memory_proposals.dedupe_key(dismissed)
+
+
+# --- per-run tool trace and model calls -------------------------------------------
+
+
+def _claude_session_lines(home: Path, agent_root: Path, lines: list[dict[str, Any]]) -> Path:
+    folder = _claude_session_folder(home, agent_root)
+    log = folder / "x.jsonl"
+    log.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8", newline="")
+    return log
+
+
+def test_session_trace_reads_claude_session_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    engine = _isolated_engine_at(tmp_path / "ciao-task-eval-run", keep_workdir=True)
+    _claude_session_lines(
+        home,
+        engine.agent_root,
+        [
+            {"type": "user", "message": {"role": "user", "content": "clean up the vault"}},
+            {"type": "assistant", "message": {"id": "msg_1", "content": [
+                {"type": "tool_use", "id": "toolu_a", "name": "Bash",
+                 "input": {"command": "ls memory-vault", "description": "list"}},
+            ]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_a", "content": "People"},
+            ]}},
+            {"type": "assistant", "message": {"id": "msg_1", "content": [{"type": "text", "text": "Listing."}]}},
+            {"type": "assistant", "message": {"id": "msg_2", "content": [
+                {"type": "tool_use", "id": "toolu_b", "name": "Read",
+                 "input": {"file_path": "memory-vault/People/x.md"}},
+            ]}},
+        ],
+    )
+
+    calls, model_calls = engine.session_trace()
+
+    assert model_calls == 2
+    assert calls == [
+        {"id": "toolu_a", "name": "Bash", "input": "ls memory-vault"},
+        {"id": "toolu_b", "name": "Read", "input": "memory-vault/People/x.md"},
+    ]
+
+
+def test_session_trace_input_falls_back_to_json_and_caps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    engine = _isolated_engine_at(tmp_path / "ciao-task-eval-run", keep_workdir=True)
+    _claude_session_lines(
+        home,
+        engine.agent_root,
+        [
+            {"type": "assistant", "message": {"id": "msg_1", "content": [
+                {"type": "tool_use", "id": "toolu_g", "name": "Grep", "input": {"pattern": "*.md"}},
+                {"type": "tool_use", "id": "toolu_w", "name": "WebFetch",
+                 "input": {"url": "https://example.test/" + "p" * 300}},
+            ]}},
+        ],
+    )
+
+    calls, model_calls = engine.session_trace()
+
+    assert model_calls == 1
+    assert calls[0] == {"id": "toolu_g", "name": "Grep", "input": "*.md"}
+    assert calls[1]["id"] == "toolu_w"
+    assert calls[1]["input"].startswith('{"url": "https://example.test/')
+    assert len(calls[1]["input"]) == 200
+
+
+def test_session_trace_without_claude_log_is_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    engine = _isolated_engine_at(tmp_path / "ciao-task-eval-run", keep_workdir=True)
+
+    assert engine.session_trace() == ([], None)
+
+
+def test_run_task_merges_session_trace_over_transcript_summary(
+    tmp_path: Path, stable_provenance: None
+) -> None:
+    session = FakeSession(
+        tmp_path,
+        trace=[
+            {"id": "toolu_a", "chat_id": "chat-1", "name": "Bash", "input": "Bash · list the vault", "error": False},
+            {"id": "toolu_b", "chat_id": "chat-1", "name": "Read", "input": "read a note", "error": True},
+        ],
+        session_calls=[
+            {"id": "toolu_a", "name": "Bash", "input": "ls memory-vault/People"},
+            {"id": "toolu_z", "name": "Grep", "input": "*.md"},
+        ],
+        model_calls=2,
+    )
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    # The unmatched session call comes after the transcript entries, with no chat.
+    assert record["trace"] == [
+        {"chat_id": "chat-1", "name": "Bash", "input": "ls memory-vault/People", "error": False},
+        {"chat_id": "chat-1", "name": "Read", "input": "read a note", "error": True},
+        {"chat_id": "", "name": "Grep", "input": "*.md", "error": False},
+    ]
+    assert record["model_calls"] == 2
+    assert record["trace_truncated"] is False
+
+
+def test_run_task_without_claude_log_records_null_model_calls(
+    tmp_path: Path, stable_provenance: None
+) -> None:
+    session = FakeSession(
+        tmp_path,
+        trace=[{"id": "", "chat_id": "chat-1", "name": "shell", "input": "ls", "error": False}],
+    )
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="opencode",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["trace"] == [{"chat_id": "chat-1", "name": "shell", "input": "ls", "error": False}]
+    assert record["model_calls"] is None
+
+
+def test_trace_is_capped_at_200_entries(tmp_path: Path, stable_provenance: None) -> None:
+    trace = [
+        {"id": "", "chat_id": "chat-1", "name": "Bash", "input": f"cmd {n}", "error": False}
+        for n in range(250)
+    ]
+    session = FakeSession(tmp_path, trace=trace)
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert len(record["trace"]) == 200
+    assert record["trace"][0]["input"] == "cmd 0"
+    assert record["trace"][-1]["input"] == "cmd 199"
+    assert record["trace_truncated"] is True
+
+
+def test_summarize_reports_median_model_calls() -> None:
+    rows = [
+        {**_row(), "model_calls": 4},
+        {**_row(status="failed"), "model_calls": 10},
+        {**_row(), "model_calls": None},
+        {**_row(status="error"), "model_calls": 99},
+    ]
+
+    group = te.summarize(rows)[0]
+
+    assert group["median_model_calls"] == 7
+    assert "Median model calls" in te.render_summary([group])
+
+
+@pytest.mark.parametrize("where", ["settle", "grade"])
+def test_run_task_error_still_records_session_trace(
+    tmp_path: Path, stable_provenance: None, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    class RaisingSession(FakeSession):
+        def wait_settled(self, timeout_s: float) -> bool:
+            if where == "settle":
+                raise RuntimeError("engine dropped")
+            return super().wait_settled(timeout_s)
+
+    def broken_grade(task: te.EvalTask, ctx: te.GradeContext) -> list[te.CheckResult]:
+        raise RuntimeError("grader broke")
+
+    if where == "grade":
+        monkeypatch.setattr(te, "grade", broken_grade)
+    session = RaisingSession(
+        tmp_path,
+        trace=[{"id": "toolu_a", "chat_id": "chat-1", "name": "Bash", "input": "summary", "error": False}],
+        session_calls=[{"id": "toolu_a", "name": "Bash", "input": "ls memory-vault"}],
+        model_calls=3,
+    )
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "error"
+    assert record["error"].startswith("RuntimeError(")
+    assert record["model_calls"] == 3
+    assert record["trace"] == [{"chat_id": "chat-1", "name": "Bash", "input": "ls memory-vault", "error": False}]
+    assert session.closed is True
+
+
+def test_trace_read_failure_never_changes_a_passed_status(
+    tmp_path: Path, stable_provenance: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class BrokenTraceSession(FakeSession):
+        def session_trace(self) -> tuple[list[dict[str, Any]], int | None]:
+            raise RuntimeError("unexpected log shape")
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: BrokenTraceSession(tmp_path),
+    )
+
+    assert record["status"] == "passed"
+    assert record["error"] is None
+    assert record["trace"] == []
+    assert record["trace_truncated"] is False
+    assert record["model_calls"] is None
+    assert "unexpected log shape" in capsys.readouterr().err
+
+
+def test_trace_read_failure_keeps_the_run_error(tmp_path: Path, stable_provenance: None) -> None:
+    class DeadSession(FakeSession):
+        def wait_settled(self, timeout_s: float) -> bool:
+            raise RuntimeError("engine dropped")
+
+        def session_trace(self) -> tuple[list[dict[str, Any]], int | None]:
+            raise RuntimeError("log already gone")
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: DeadSession(tmp_path),
+    )
+
+    assert record["status"] == "error"
+    assert record["error"] == "RuntimeError('engine dropped')"
+    assert record["trace"] == []
+    assert record["model_calls"] is None
+
+
+def test_memory_pass_session_calls_appear_in_trace(tmp_path: Path, stable_provenance: None) -> None:
+    outcome = te.MemoryPassOutcome("ok", "pass-1", dict(_PASS_TOKENS), "Queued 1 fact.", usage_known=True)
+    session = FakeTranscriptSession(
+        tmp_path,
+        outcome=outcome,
+        session_calls=[
+            {"id": "toolu_p1", "name": "Read", "input": "memory-vault/People/x.md"},
+            {"id": "toolu_p2", "name": "Bash", "input": "ls memory-vault"},
+        ],
+        model_calls=2,
+    )
+
+    record = te.run_task(
+        _transcript_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["trace"] == [
+        {"chat_id": "", "name": "Read", "input": "memory-vault/People/x.md", "error": False},
+        {"chat_id": "", "name": "Bash", "input": "ls memory-vault", "error": False},
+    ]
+    assert record["model_calls"] == 2
 
 
 def test_run_task_attention_pass_tokens_are_not_doubled(tmp_path: Path, stable_provenance: None) -> None:
