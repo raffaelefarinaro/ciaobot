@@ -266,9 +266,10 @@ class NativeInstallState(str, Enum):
     read, without creating, writing or truncating it: held or unsafe is
     unknown, idle contributes no evidence.
 
-    This is a classification primitive only. In this issue nothing calls it in
-    production, and a ``fresh`` answer is not an activation permit: #2340 owns
-    the native entry point that must establish current-run state before any
+    This is a classification primitive only. The native coordinator
+    (``ciao.native_installer``) is its production caller, and it calls it before
+    any mutation. A ``fresh`` answer is not an activation permit: the native
+    entry point must establish current-run state before any
     engine, tool or workspace mutation, and it must refuse ``configured``,
     ``partial`` and ``unknown`` alike. The setup child cannot ask this question
     for a fresh answer once the parent has created its artifacts; #2340 must
@@ -844,8 +845,8 @@ def classify_native_install(
     run-id, timestamp or "this process wrote it" exemption here — because path
     presence is not ownership.
 
-    No production caller runs this yet. #2340 owns the native entry point on
-    both sides of the handoff. Neither the installer parent's decision nor a
+    The native coordinator (``ciao.native_installer``) calls this before its
+    first mutation, and its entry point owns both sides of the handoff. Neither the installer parent's decision nor a
     list of paths the installer is expected to create proves who created one:
     a same-UID writer can pre-create any of them. Each side must establish
     current-run ownership itself from owner-private, run-id-bound evidence and
