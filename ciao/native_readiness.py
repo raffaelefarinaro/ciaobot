@@ -19,11 +19,14 @@ object rather than to a readable string:
 1. explicit fresh-only evidence is present: ``fresh_install_service_absent``
    must be true, meaning the preflight refused an existing service. This proof
    makes no claim for a resumed, reused or old host;
-2. exactly one process holds the listening socket, before the request;
+2. exactly one same-UID listener visible to lsof; foreign-UID listeners are not
+   enumerated, and identity rests on the startup_id and server.lock binding;
 3. the startup-status answer carries the exact installed version, the startup
    API version, a canonical ``startup_id`` and the engine's own pid, and its
    ``server_starting`` phase is done with ``overall_ready`` set;
-4. exactly one process still holds the port afterwards, and it is the same pid;
+4. exactly one same-UID listener visible to lsof still holds the port afterwards,
+   and it is the same pid; foreign-UID listeners are not enumerated, and identity
+   rests on the startup_id and server.lock binding;
 5. the private runtime ``server.lock`` names that pid, the responder's
    ``startup_id``, the requested port, the resolved workspace and its resolved
    runtime directory; the lock is a single-link regular file owned by this user
@@ -160,9 +163,9 @@ PROC_PIDPATHINFO_MAXSIZE: Final[int] = 4096
 LISTENER_ATTEMPTS: Final[int] = 3
 LISTENER_INTERVAL_SECONDS: Final[float] = 1.0
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 60.0
-MAX_TIMEOUT_SECONDS: Final[float] = 300.0
+MAX_TIMEOUT_SECONDS: Final[float] = 60.0
 DEFAULT_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
-MAX_PROBE_TIMEOUT_SECONDS: Final[float] = 10.0
+MAX_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 MAX_PID: Final[int] = 2**31 - 1
 #: A single read-only adapter query. The whole proof's deadline still governs
 #: the sum; this only stops one stuck command from outliving the caller.
@@ -551,8 +554,9 @@ def _reject_json_constant(value: str) -> None:
 
 
 def _decode_json(raw: bytes) -> object:
+    """Strict UTF-8 only. ``json.loads`` on bytes would auto-detect UTF-16/32."""
     return json.loads(
-        raw,
+        raw.decode("utf-8"),
         object_pairs_hook=_reject_duplicate_keys,
         parse_constant=_reject_json_constant,
     )
@@ -601,6 +605,7 @@ def _parse_startup_status(raw: bytes, expected_version: str) -> _StartupStatus:
     pid = _pid(document.get("pid"))
     if pid is None:
         raise _Invalid("startup_status_invalid")
+    # Phase-count and message-length caps are deliberate; over-cap answers fail closed.
     phases = document.get("phases")
     if type(phases) is not list or len(phases) > MAX_STARTUP_PHASES:
         raise _Invalid("startup_status_invalid")
@@ -1636,8 +1641,3 @@ def make_native_readiness_deps(
         clock=clock,
         sleep=sleep,
     )
-
-
-#: The program name on the native host executable, re-exported so callers can
-#: build a request without importing ``ciao.server_host`` themselves.
-HOST_EXECUTABLE_NAME: Final[str] = EXECUTABLE_NAME
