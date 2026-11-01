@@ -787,6 +787,40 @@ def test_prepare_workspace_pins_requested_provider_and_model(tmp_path: Path) -> 
     assert config.default_model_for_workspace("personal", "claude") == "haiku"
 
 
+# --- Medium tier catalog ------------------------------------------------------------
+
+MEDIUM_TASK_IDS = (
+    "M1-proposal-merge",
+    "M2-project-exists",
+    "M2-project-missing",
+    "M3-delegated-task",
+)
+
+
+def test_medium_tasks_load() -> None:
+    by_id = {task.id: task for task in te.load_tasks()}
+
+    assert set(MEDIUM_TASK_IDS) <= set(by_id)
+    for task_id in MEDIUM_TASK_IDS:
+        assert by_id[task_id].tier == "medium", task_id
+
+
+def test_m1_overlay_has_one_queued_proposal() -> None:
+    from ciao import memory_proposals
+
+    proposals_path = te.TASKS_ROOT / "M1-proposal-merge" / "overlay" / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+
+    rows = memory_proposals.list_proposals(proposals_path)
+
+    assert len(rows) == 1
+    assert "Turin" in rows[0]["text"]
+
+
+def test_medium_fixture_facts_consistent() -> None:
+    assert "Bologna" in (FIXTURE / "People" / "lena-moretti.md").read_text(encoding="utf-8")
+    assert "November" in (FIXTURE / "Documents" / "insurance-overview.md").read_text(encoding="utf-8")
+
+
 # --- Fix round 2: env isolation, process groups, tolerant usage, symlinks, fences ---
 
 
