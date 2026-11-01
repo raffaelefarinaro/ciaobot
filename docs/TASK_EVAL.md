@@ -164,7 +164,7 @@ tasks; `_fixture/` is the base vault.
 | `M1-proposal-merge` | medium | `curation` | prompt, with a queued proposal in `overlay/` |
 | `M2-project-exists` | medium | `project_create` | prompt; the fixture's `projects/active/garden-shed/` folder registers itself as a project at boot |
 | `M2-project-missing` | medium | `project_create` | prompt |
-| `M3-delegated-task` | medium | `task_delegate` | delegate, with a `task` setup step |
+| `M3-delegated-task` | medium | `delegated_task` | delegate, with a `task` setup step |
 
 ### Check kinds
 

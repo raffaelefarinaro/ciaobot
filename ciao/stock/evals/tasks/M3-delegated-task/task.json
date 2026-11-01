@@ -1,7 +1,7 @@
 {
   "id": "M3-delegated-task",
   "tier": "medium",
-  "category": "task_delegate",
+  "category": "delegated_task",
   "prompt": "",
   "entry": {"kind": "delegate", "task_title": "Find the bike insurance renewal month"},
   "setup": [
