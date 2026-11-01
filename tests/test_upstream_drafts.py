@@ -61,6 +61,11 @@ def _config(tmp_path: Path, *names: str) -> CiaoConfig:
     return config
 
 
+def queue_path_text(config: CiaoConfig) -> str:
+    """The text of the ``work`` workspace's review queue, for before/after checks."""
+    return upstream_drafts.queue_path(config, "work").read_text(encoding="utf-8")
+
+
 def _stock_draft(**overrides: str) -> dict[str, str]:
     """A filing payload for a packaged skill, safe to publish by construction."""
     payload = {
@@ -165,6 +170,7 @@ def test_a_distinct_change_is_a_distinct_row(tmp_path: Path) -> None:
         **_stock_draft(
             change="State that a fetch that 404s is retried against the archive URL."
         ),
+        distinct_from=[first.id],
     )
 
     assert second.id != first.id
@@ -196,6 +202,203 @@ def test_re_worded_but_identical_change_is_the_same_row(tmp_path: Path) -> None:
 
     assert second.id == first.id
     assert len(read_records(config, "work")) == 1
+
+
+def test_a_reworded_refiling_after_rejection_is_not_requeued(tmp_path: Path) -> None:
+    """A defect a person already turned down does not come back in new words.
+
+    The reworded change gets a new id, so the sidecar and decision lookups miss.
+    Without a sibling check it would queue a fresh row for the same defect.
+    """
+    config = _config(tmp_path, "work")
+    first = file_draft(config, "work", **_stock_draft())
+    reject_draft(config, first.id, reason="already fixed upstream")
+
+    with pytest.raises(upstream_drafts.SiblingDraftExists) as exc:
+        file_draft(
+            config,
+            "work",
+            **_stock_draft(
+                title="Note the offline fallback for a fetch that times out",
+                change="Retry a timed-out fetch once with a longer budget before reporting it absent.",
+            ),
+        )
+
+    assert exc.value.sibling_ids == (first.id,)
+    assert read_queue(config, "work") == []
+    assert len(read_records(config, "work")) == 1
+
+
+def test_a_reworded_filing_for_a_skill_with_a_draft_is_refused_naming_it(
+    tmp_path: Path,
+) -> None:
+    """A reworded filing is refused by name, and nothing is written.
+
+    The refusal has to say how to proceed: `same_as` for the same defect,
+    `distinct_from` for a different one.
+    """
+    config = _config(tmp_path, "work")
+    first = file_draft(config, "work", **_stock_draft())
+    queue_before = queue_path_text(config)
+
+    with pytest.raises(upstream_drafts.SiblingDraftExists) as exc:
+        file_draft(
+            config,
+            "work",
+            **_stock_draft(
+                title="Note the offline fallback for a fetch that times out",
+                change="Retry a timed-out fetch once with a longer budget before reporting it absent.",
+            ),
+        )
+
+    assert first.id in str(exc.value)
+    assert "same_as" in str(exc.value)
+    assert "distinct_from" in str(exc.value)
+    assert len(read_records(config, "work")) == 1
+    assert queue_path_text(config) == queue_before
+
+
+def test_same_as_folds_a_reworded_sighting_into_the_existing_record(
+    tmp_path: Path,
+) -> None:
+    """`same_as` keeps the existing record and adds the new evidence to it."""
+    config = _config(tmp_path, "work")
+    first = file_draft(config, "work", **_stock_draft())
+
+    folded = file_draft(
+        config,
+        "work",
+        **_stock_draft(
+            title="Note the offline fallback for a fetch that times out",
+            change="Retry a timed-out fetch once with a longer budget before reporting it absent.",
+            private_evidence="chat-99 turn 3: same failure, other run",
+        ),
+        same_as=first.id,
+    )
+
+    assert folded.id == first.id
+    assert folded.title == first.title
+    assert folded.change == first.change
+    assert "chat-42" in folded.private_evidence
+    assert "chat-99" in folded.private_evidence
+    assert len(read_records(config, "work")) == 1
+    assert [
+        bullet.target
+        for bullet in map(parse_bullet, queue_path_text(config).splitlines())
+        if bullet is not None and bullet.target == first.id
+    ] == [first.id]
+
+
+def test_same_as_on_a_rejected_draft_keeps_it_rejected_and_unqueued(
+    tmp_path: Path,
+) -> None:
+    """Folding a sighting into a rejected draft does not reopen it."""
+    config = _config(tmp_path, "work")
+    first = file_draft(config, "work", **_stock_draft())
+    reject_draft(config, first.id, reason="already fixed upstream")
+    queue_before = queue_path_text(config)
+
+    folded = file_draft(
+        config,
+        "work",
+        **_stock_draft(
+            title="Note the offline fallback for a fetch that times out",
+            change="Retry a timed-out fetch once with a longer budget before reporting it absent.",
+        ),
+        same_as=first.id,
+    )
+
+    assert folded.lifecycle == "rejected"
+    assert read_queue(config, "work") == []
+    assert queue_path_text(config) == queue_before
+
+
+def test_distinct_from_must_name_every_sibling(tmp_path: Path) -> None:
+    """A filer who lists only some siblings is refused, and told which are missing."""
+    config = _config(tmp_path, "work")
+    first = file_draft(config, "work", **_stock_draft())
+    second = file_draft(
+        config,
+        "work",
+        **_stock_draft(
+            change="State that a fetch that 404s is retried against the archive URL.",
+        ),
+        distinct_from=[first.id],
+    )
+
+    with pytest.raises(upstream_drafts.SiblingDraftExists) as exc:
+        file_draft(
+            config,
+            "work",
+            **_stock_draft(change="State that a fetch that 500s is retried once."),
+            distinct_from=[first.id],
+        )
+    assert exc.value.sibling_ids == (second.id,)
+
+    third = file_draft(
+        config,
+        "work",
+        **_stock_draft(change="State that a fetch that 500s is retried once."),
+        distinct_from=[first.id, second.id],
+    )
+
+    assert len(read_records(config, "work")) == 3
+    assert third.id not in {first.id, second.id}
+
+
+def test_same_as_must_name_a_draft_of_the_same_skill(tmp_path: Path) -> None:
+    """`same_as` only folds into a draft of the same target and skill, and not both args."""
+    config = _config(tmp_path, "work")
+    first = file_draft(config, "work", **_stock_draft())
+    other = file_draft(
+        config, "work", **_stock_draft(skill="other-skill", change="State a different rule.")
+    )
+    reworded = _stock_draft(change="Retry a timed-out fetch once, then report it.")
+
+    with pytest.raises(DraftRefused):
+        file_draft(config, "work", **reworded, same_as="0000000000000000")
+    with pytest.raises(DraftRefused):
+        file_draft(config, "work", **reworded, same_as=other.id)
+    with pytest.raises(DraftRefused):
+        file_draft(
+            config, "work", **reworded, same_as=first.id, distinct_from=[first.id]
+        )
+
+
+@pytest.mark.parametrize("same_as", ["../x", "a/b", ".hidden", "a\x00b"])
+def test_same_as_refuses_names_outside_the_sidecar_directory(
+    tmp_path: Path, same_as: str
+) -> None:
+    """A `same_as` that is not one plain file name is refused before any file is touched."""
+    config = _config(tmp_path, "work")
+    file_draft(config, "work", **_stock_draft())
+    sidecar = upstream_drafts.sidecar_dir(config, "work")
+    before = sorted(p.relative_to(sidecar) for p in sidecar.rglob("*"))
+
+    with pytest.raises(DraftRefused):
+        file_draft(
+            config,
+            "work",
+            **_stock_draft(change="Retry a timed-out fetch once, then report it."),
+            same_as=same_as,
+        )
+
+    assert sorted(p.relative_to(sidecar) for p in sidecar.rglob("*")) == before
+
+
+def test_skill_draft_input_type_checks_same_as_and_distinct_from(tmp_path: Path) -> None:
+    """A mistyped `same_as` or `distinct_from` is refused by field name, not coerced."""
+    from ciao import cli
+
+    base = _stock_draft()
+    for field, value in (("same_as", 3), ("distinct_from", "x")):
+        path = tmp_path / f"{field}.json"
+        path.write_text(json.dumps({**base, field: value}), encoding="utf-8")
+
+        payload, why = cli._read_skill_draft_input(str(path))
+
+        assert payload is None
+        assert f'"{field}"' in why
 
 
 def test_filing_writes_one_review_bullet_and_does_not_stack_it(tmp_path: Path) -> None:

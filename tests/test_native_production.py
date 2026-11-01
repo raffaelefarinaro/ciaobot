@@ -1631,41 +1631,36 @@ def test_the_module_command_reaches_the_coordinator(tmp_path: Path) -> None:
     # `__main__` guard placed above the functions it calls raises NameError
     # before any event is written. Run the real module in a child, refused
     # safely (HOME does not match the account's home, so nothing is touched).
-    read_fd, write_fd = os.pipe()
-    os.set_inheritable(write_fd, True)
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(tmp_path / "not-the-real-home"),
         "PYTHONPATH": str(Path(__file__).resolve().parent.parent),
     }
     missing = str(tmp_path / "missing")
-    # The public range is 3-9; the shell maps the pipe onto 9 as install.sh would.
-    argv = [
-        "/bin/sh", "-c", f'exec 9>&{write_fd} {write_fd}>&-; exec "$@"', "sh",
-        sys.executable, "-m", "ciao.native_installer", "run",
-        "--run-id", "0f8fad5b-d9cb-469f-a165-70867728950e",
-        "--events-fd", "9", "--first-seq", "4", "--prior-events", "3",
-        "--version", "1.7.0",
-        "--uv", missing, "--uv-sha256", "0" * 64,
-        "--wheel", missing, "--wheel-sha256", "0" * 64,
-        "--manifest", missing, "--signature", missing, "--host-archive", missing,
-    ]
-    try:
+    with _public_event_pipe() as (read_fd, event_fd):
+        os.set_inheritable(event_fd, True)
+        argv = [
+            sys.executable, "-m", "ciao.native_installer", "run",
+            "--run-id", "0f8fad5b-d9cb-469f-a165-70867728950e",
+            "--events-fd", str(event_fd), "--first-seq", "4", "--prior-events", "3",
+            "--version", "1.7.0",
+            "--uv", missing, "--uv-sha256", "0" * 64,
+            "--wheel", missing, "--wheel-sha256", "0" * 64,
+            "--manifest", missing, "--signature", missing, "--host-archive", missing,
+        ]
         child = subprocess.run(
             argv,
             env=env,
             cwd=tmp_path,
-            pass_fds=(write_fd,),
+            pass_fds=(event_fd,),
             capture_output=True,
             text=True,
             encoding="utf-8",
             timeout=60,
             check=False,
         )
-    finally:
-        os.close(write_fd)
-    with os.fdopen(read_fd, "rb") as reader:
-        raw = reader.read()
+        os.close(event_fd)
+        raw = _drain(read_fd)
     assert "NameError" not in child.stderr
     assert "Traceback" not in child.stderr
     events = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
