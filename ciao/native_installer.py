@@ -2993,8 +2993,6 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(signum, handler)
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 def _run_native_install(
@@ -3383,3 +3381,7 @@ def _run_native_install(
         selected_workspace=selected_workspace,
         lock_retained=lock_retained,
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
