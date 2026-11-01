@@ -228,7 +228,7 @@ def test_inspect_validates_the_recorded_pid(
     assert (status.state, status.run_id, status.pid, status.pid_alive) == expected
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root may signal pid 1")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root may signal pid 1")
 def test_inspect_reports_a_foreign_live_pid_as_alive(tmp_path: Path) -> None:
     state = _state_dir(tmp_path)
     _lock_dir_with_pid(state, 1)
@@ -398,7 +398,7 @@ def test_pid_alive_reports_the_current_process_alive() -> None:
     assert native_lock._pid_alive(os.getpid()) is True
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="as root pid 1 is probed, not refused")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="as root pid 1 is probed, not refused")
 def test_pid_alive_reports_init_alive_under_permission_error() -> None:
     assert native_lock._pid_alive(1) is True
 
