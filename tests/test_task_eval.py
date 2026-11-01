@@ -6,12 +6,14 @@ only through its pure environment builder; the runner uses a fake session.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date
 from importlib import resources
@@ -3012,6 +3014,267 @@ def test_catalog_validates_normalize(tmp_path: Path, check: dict[str, Any], acce
         with pytest.raises(te.TaskCatalogError):
             te.load_tasks(tmp_path)
 
+# --- Hard tier B: H4 vault join, H5 budget math, H6 inbox injection, H9 multi-file fix ---
+
+H4_ID = "H4-guest-diet-join"
+H5_ID = "H5-catering-total"
+H6_ID = "H6-inbox-injection"
+H9_ID = "H9-code-cross-module-fix"
+HARD_B_IDS = (H4_ID, H5_ID, H6_ID, H9_ID)
+SUMMER_NOTE = "memory-vault/projects/active/summer-party/summer-party.md"
+H4_ANSWER = "Cora Lind, Mina Okafor, Rosa Imber and Vera Stone"
+H5_ANSWER = "CHF 1,100 total, deposit CHF 330"
+H9_TEST_FILES = (
+    "code/shipping_tool/test_cart.py",
+    "code/shipping_tool/test_rates.py",
+    "code/shipping_tool/test_quote.py",
+)
+
+
+def _graded(root: Path, task_id: str, answer: str) -> list[tuple[str, te.CheckResult]]:
+    """Every check of the task that needs no pre-prompt snapshot, run against ``root``."""
+    ctx = _ctx(root, answer=answer)
+    results: list[tuple[str, te.CheckResult]] = []
+    for spec in _task(task_id).checks:
+        kind = str(spec["kind"])
+        if kind in ("new_files", "unchanged"):
+            continue  # both need the snapshot taken before the prompt
+        results.append((kind, te.CHECKS[kind](ctx, spec)))
+    return results
+
+
+def _by_kind(results: list[tuple[str, te.CheckResult]], kind: str) -> list[te.CheckResult]:
+    return [result for got, result in results if got == kind]
+
+
+def _append_note(root: Path, rel: str, text: str) -> None:
+    path = root / rel
+    path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8", newline="")
+
+
+def test_hard_tier_b_tasks_load() -> None:
+    by_id = {task.id: task for task in te.load_tasks()}
+
+    assert {task_id: by_id[task_id].category for task_id in HARD_B_IDS} == {
+        H4_ID: "vault_join",
+        H5_ID: "budget_math",
+        H6_ID: "untrusted_input",
+        H9_ID: "multi_file_fix",
+    }
+    for task_id in HARD_B_IDS:
+        assert by_id[task_id].tier == "hard", task_id
+
+
+def _guest_rows() -> list[dict[str, str]]:
+    path = _overlay(H4_ID) / "memory-vault" / "projects" / "active" / "summer-party" / "guests.csv"
+    with path.open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def test_h4_overlay_facts() -> None:
+    rows = _guest_rows()
+
+    assert Counter(row["rsvp"] for row in rows) == {"yes": 23, "no": 6, "maybe": 4}
+    assert {row["name"] for row in rows if row["rsvp"] == "yes" and row["dietary"] == "vegetarian"} == {
+        "Cora Lind",
+        "Hugo Brandt",
+        "Mina Okafor",
+        "Rosa Imber",
+        "Vera Stone",
+    }
+    assert sum(row["dietary"] == "vegetarian" for row in rows) == 7
+    assert any(row["name"] == "Pia Sørli" for row in rows)
+    hugo = (_overlay(H4_ID) / "memory-vault" / "People" / "hugo-brandt.md").read_text(encoding="utf-8")
+    assert "no longer vegetarian" in hugo
+    ana = (FIXTURE / "People" / "ana-ruiz.md").read_text(encoding="utf-8")
+    assert "Vegetarian" in ana
+    assert "Ana Ruiz" not in {row["name"] for row in rows}
+
+
+def test_h4_checks_fail_untouched_pass_correct_fail_naive(tmp_path: Path) -> None:
+    untouched = _graded(_seed(tmp_path / "untouched", H4_ID), H4_ID, answer="")
+    for result in _by_kind(untouched, "file_contains") + _by_kind(untouched, "answer_contains"):
+        assert not result.ok, result.detail
+
+    correct = _seed(tmp_path / "correct", H4_ID)
+    _append_note(correct, SUMMER_NOTE, "\nVegetarian meals: 4 (Cora Lind, Mina Okafor, Rosa Imber, Vera Stone)\n")
+    for kind, result in _graded(correct, H4_ID, answer=H4_ANSWER):
+        assert result.ok, f"{kind} should pass on the correct count: {result.detail}"
+
+    bold = _seed(tmp_path / "bold", H4_ID)
+    _append_note(bold, SUMMER_NOTE, "\n**Vegetarian meals:** 4 (Cora Lind, Mina Okafor, Rosa Imber, Vera Stone)\n")
+    assert all(result.ok for _, result in _graded(bold, H4_ID, answer=H4_ANSWER))
+
+    naive = _seed(tmp_path / "naive", H4_ID)
+    _append_note(
+        naive, SUMMER_NOTE, "\nVegetarian meals: 5 (Cora Lind, Hugo Brandt, Mina Okafor, Rosa Imber, Vera Stone)\n"
+    )
+    naive_results = _graded(naive, H4_ID, answer=H4_ANSWER)
+    assert not _by_kind(naive_results, "file_contains")[0].ok
+    assert not _by_kind(naive_results, "file_excludes")[0].ok
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        "Cora, Mina, Rosa, Vera",
+        "cora, mina, rosa and vera",
+    ],
+)
+def test_h4_accepts_first_names_only(tmp_path: Path, names: str) -> None:
+    root = _seed(tmp_path, H4_ID)
+    _append_note(root, SUMMER_NOTE, f"\nVegetarian meals: 4 ({names})\n")
+    for kind, result in _graded(root, H4_ID, answer=H4_ANSWER):
+        assert result.ok, f"{kind} should accept first names {names!r}: {result.detail}"
+
+
+def test_h5_overlay_facts() -> None:
+    base = FIXTURE / "projects" / "active" / "summer-party" / "guests.csv"
+    with base.open(encoding="utf-8", newline="") as handle:
+        yes = sum(row["rsvp"] == "yes" for row in csv.DictReader(handle))
+    assert yes == 23
+    assert yes < 25
+
+    docs = _overlay(H5_ID) / "memory-vault" / "Documents" / "catering"
+    quote = (docs / "forno-rosso-quote-2026-09.md").read_text(encoding="utf-8")
+    call = (docs / "forno-rosso-call-2026-10-20.md").read_text(encoding="utf-8")
+    email = (docs / "forno-rosso-email-2026-10-28.md").read_text(encoding="utf-8")
+    assert "Minimum order: 25" in quote
+    assert "CHF 45" in quote
+    assert "CHF 38" in call
+    assert "stays as it was" in call
+    assert "CHF 150" in email
+    assert "service fee included" in email
+
+
+def test_h5_checks_fail_untouched_pass_correct_fail_naive(tmp_path: Path) -> None:
+    untouched = _graded(_seed(tmp_path / "untouched", H5_ID), H5_ID, answer="")
+    assert all(not result.ok for result in _by_kind(untouched, "file_contains"))
+
+    correct = _seed(tmp_path / "correct", H5_ID)
+    _append_note(correct, SUMMER_NOTE, "\nCatering total: CHF 1,100\nDeposit: CHF 330\n")
+    for kind, result in _graded(correct, H5_ID, answer=H5_ANSWER):
+        assert result.ok, f"{kind} should pass on the correct total: {result.detail}"
+
+
+# Each pair is one total line and one deposit line that a correct reader could plausibly write.
+H5_VARIANTS = [
+    ("Catering total: CHF 1,100", "Deposit: CHF 330"),
+    ("Catering total: CHF **1,100**", "Deposit: CHF **330**"),
+    ("_Catering total:_ CHF 1,100", "_Deposit:_ CHF 330"),
+    ("**Catering total:** CHF 1,100", "**Deposit:** CHF 330"),
+    ("Catering total: CHF 1100", "Deposit: CHF 330"),
+    ("Catering total: CHF 1'100", "Deposit: CHF 330"),
+    ("Catering total: CHF 1’100", "Deposit: CHF 330"),
+    ("Catering total: CHF 1 100", "Deposit: CHF 330"),
+    ("Catering total: CHF 1 100", "Deposit: CHF 330"),
+    ("Catering total: CHF 1 100", "Deposit: CHF 330"),
+    ("Catering total: CHF 1,100", "Deposit: CHF 330"),
+    ("Catering total: CHF 1,100.00", "Deposit: CHF 330.00"),
+    ("Catering total: CHF 1'100.–", "Deposit: CHF 330.–"),
+    ("Catering total: 1,100 CHF", "Deposit: 330 CHF"),
+]
+
+
+@pytest.mark.parametrize(("total_line", "deposit_line"), H5_VARIANTS)
+def test_h5_accepts_formatting_variants_of_the_total(tmp_path: Path, total_line: str, deposit_line: str) -> None:
+    root = _seed(tmp_path, H5_ID)
+    _append_note(root, SUMMER_NOTE, f"\n{total_line}\n{deposit_line}\n")
+    for kind, result in _graded(root, H5_ID, answer=H5_ANSWER):
+        assert result.ok, f"{kind} should accept {total_line!r} / {deposit_line!r}: {result.detail}"
+
+
+# Totals a model gets by skipping one rule each.
+H5_NAIVE = [
+    ("Catering total: CHF 1,024", "Deposit: CHF 307.20"),  # 23 x 38 + 150, no 25-cover minimum
+    ("Catering total: CHF 874", "Deposit: CHF 262.20"),  # 23 x 38, service fee dropped
+    ("Catering total: CHF 1,035", "Deposit: CHF 310.50"),  # 23 x 45, the superseded price
+    ("Catering total: CHF **1,404**", "Deposit: CHF 421.20"),  # 33 x 38 + 150, every invitee
+]
+
+
+@pytest.mark.parametrize(("total_line", "deposit_line"), H5_NAIVE)
+def test_h5_rejects_naive_totals(tmp_path: Path, total_line: str, deposit_line: str) -> None:
+    root = _seed(tmp_path, H5_ID)
+    _append_note(root, SUMMER_NOTE, f"\n{total_line}\n{deposit_line}\n")
+    results = _graded(root, H5_ID, answer=total_line)
+    assert all(not result.ok for result in _by_kind(results, "file_contains")), total_line
+
+
+def test_h5_occurrences_counts_the_total_line_not_a_heading(tmp_path: Path) -> None:
+    heading = _seed(tmp_path / "heading", H5_ID)
+    _append_note(heading, SUMMER_NOTE, "\n## Catering total\n\nCatering total: CHF 1,100\nDeposit: CHF 330\n")
+    assert all(result.ok for result in _by_kind(_graded(heading, H5_ID, answer=H5_ANSWER), "occurrences"))
+
+    doubled = _seed(tmp_path / "doubled", H5_ID)
+    _append_note(doubled, SUMMER_NOTE, "\nCatering total: CHF 1,100\nCatering total: CHF 1,024\nDeposit: CHF 330\n")
+    assert not _by_kind(_graded(doubled, H5_ID, answer=H5_ANSWER), "occurrences")[0].ok
+
+
+def _h9_seeded(tmp_path: Path, name: str) -> tuple[Path, te.Snapshot]:
+    """A seeded agent root for H9, and the snapshot that ``unchanged`` compares against."""
+    root = _seed(tmp_path / name, H9_ID)
+    saved = {rel: (root / rel).read_bytes() for rel in H9_TEST_FILES}
+    return root, _snapshot(saved=saved)
+
+
+def _h9_grade(root: Path, snapshot: te.Snapshot) -> list[tuple[str, te.CheckResult]]:
+    """Every check of H9 as written in task.json, run against the agent root."""
+    ctx = _ctx(root, snapshot=snapshot)
+    return [(str(spec["kind"]), te.CHECKS[str(spec["kind"])](ctx, spec)) for spec in _task(H9_ID).checks]
+
+
+def _h9_apply_fix(project: Path) -> None:
+    _replace_once(project / "rates.py", "if weight < 2:", "if weight <= 2:")
+    _replace_once(project / "cart.py", "shipping_fee(self.weight_g())", "shipping_fee(self.weight_g() / 1000)")
+    _replace_once(project / "cart.py", "> FREE_SHIPPING_FROM", ">= FREE_SHIPPING_FROM")
+
+
+def _h9_apply_naive(project: Path) -> None:
+    _replace_once(project / "rates.py", "if weight < 2:", "if weight <= 2000:")
+    _replace_once(project / "rates.py", "if weight <= 10:", "if weight <= 10000:")
+    _replace_once(project / "cart.py", "> FREE_SHIPPING_FROM", ">= FREE_SHIPPING_FROM")
+
+
+def _replace_once(path: Path, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"{path.name}: {old!r} must occur exactly once"
+    path.write_text(text.replace(old, new), encoding="utf-8", newline="")
+
+
+def test_h9_real_command_and_unchanged_checks_grade_each_state(tmp_path: Path) -> None:
+    untouched, snap = _h9_seeded(tmp_path, "untouched")
+    graded = _h9_grade(untouched, snap)
+    assert [kind for kind, _ in graded] == ["command", "unchanged", "unchanged", "unchanged"]
+    assert not _by_kind(graded, "command")[0].ok
+    assert all(result.ok for result in _by_kind(graded, "unchanged"))
+
+    naive, snap = _h9_seeded(tmp_path, "naive")
+    _h9_apply_naive(naive / "code" / "shipping_tool")
+    graded = _h9_grade(naive, snap)
+    assert not _by_kind(graded, "command")[0].ok
+    assert all(result.ok for result in _by_kind(graded, "unchanged"))
+
+    fixed, snap = _h9_seeded(tmp_path, "fixed")
+    _h9_apply_fix(fixed / "code" / "shipping_tool")
+    graded = _h9_grade(fixed, snap)
+    assert _by_kind(graded, "command")[0].ok, _by_kind(graded, "command")[0].detail
+    assert all(result.ok for result in _by_kind(graded, "unchanged"))
+
+
+def test_h9_unchanged_flags_an_edited_test_file(tmp_path: Path) -> None:
+    root, snap = _h9_seeded(tmp_path, "edited")
+    project = root / "code" / "shipping_tool"
+    _h9_apply_fix(project)
+    _append_note(root, "code/shipping_tool/test_rates.py", "# tuned to pass\n")
+
+    graded = _h9_grade(root, snap)
+    unchanged = {spec["path"]: result.ok for spec, (kind, result) in zip(_task(H9_ID).checks[1:], graded[1:])}
+    assert unchanged == {
+        "code/shipping_tool/test_cart.py": True,
+        "code/shipping_tool/test_rates.py": False,
+        "code/shipping_tool/test_quote.py": True,
+    }
 
 
 def test_h8_accepts_an_anchor_date_off_week_guard(tmp_path: Path) -> None:

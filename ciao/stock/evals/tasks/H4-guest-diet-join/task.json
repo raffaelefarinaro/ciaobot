@@ -1,0 +1,70 @@
+{
+  "id": "H4-guest-diet-join",
+  "tier": "hard",
+  "category": "vault_join",
+  "prompt": "I'm finalising the menu with the caterer. How many vegetarian meals do I need for the guests who said yes to the summer party? Add a line `Vegetarian meals: <number>` to the summer party project doc, followed by their names, and tell me who they are.",
+  "entry": {
+    "kind": "prompt"
+  },
+  "setup": [],
+  "requires": [],
+  "timeout_s": 900,
+  "checks": [
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "any": [
+        "vegetarian meals: 4",
+        "vegetarian meals: four"
+      ],
+      "normalize": true
+    },
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "all": [
+        "cora",
+        "mina",
+        "rosa",
+        "vera"
+      ]
+    },
+    {
+      "kind": "file_excludes",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md",
+      "any": [
+        "vegetarian meals: 3",
+        "vegetarian meals: 5",
+        "vegetarian meals: 6",
+        "vegetarian meals: 7",
+        "vegetarian meals: three",
+        "vegetarian meals: five",
+        "vegetarian meals: six",
+        "vegetarian meals: seven"
+      ],
+      "normalize": true
+    },
+    {
+      "kind": "answer_contains",
+      "all": [
+        "cora",
+        "mina",
+        "rosa",
+        "vera"
+      ]
+    },
+    {
+      "kind": "frontmatter_valid",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md"
+    },
+    {
+      "kind": "links_resolve",
+      "path": "memory-vault/projects/active/summer-party/summer-party.md"
+    },
+    {
+      "kind": "new_files",
+      "glob": "memory-vault/**/*.md",
+      "max": 0
+    }
+  ]
+}
