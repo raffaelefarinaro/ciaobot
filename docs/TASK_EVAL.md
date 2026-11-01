@@ -154,6 +154,23 @@ does not match its directory, and any file under the catalog that contains a
 `behavioral_eval.PRIVATE_MARKERS` string. Directories starting with `_` are not
 tasks; `_fixture/` is the base vault.
 
+### Tasks
+
+| Id | Tier | Category | Entry | What it grades |
+| --- | --- | --- | --- | --- |
+| `E1-task-capture` | easy | `task_capture` | prompt | a task is created with the right title and due day |
+| `E2-recall-abstain` | easy | `abstention` | prompt | an unknown person's phone number is declined, not invented |
+| `E2-recall-guest-count` | easy | `recall` | prompt | the guest count of the summer party is read from the vault |
+| `E3-schedule-create` | easy | `schedule_create` | prompt | a weekly schedule is created at the requested day and time |
+| `M1-proposal-merge` | medium | `curation` | prompt, with a queued proposal in `overlay/` | the fact lands in the person note, the stale line goes, the proposal is resolved |
+| `M2-project-exists` | medium | `project_create` | prompt; the fixture's `projects/active/garden-shed/` folder registers itself as a project at boot | no duplicate project or scaffolding is created |
+| `M2-project-missing` | medium | `project_create` | prompt | exactly one project is created, and nothing else |
+| `M3-delegated-task` | medium | `delegated_task` | delegate, with a `task` setup step | the delegated chat reports the task done once, with the answer |
+| `M4-email-draft` | medium | `email_draft` | prompt; requires `gws_fake` (see [Capabilities](#capabilities)) | a reply-only draft lands in the right Gmail thread and nothing is sent |
+| `H1-multi-source-synthesis` | hard | `synthesis` | prompt, with inbox notes in `overlay/` | three inbox notes (Slack, call, email) are merged into the summer party doc, and the superseded 45 quote is not stated as the current price (mentioning it as history is fine) |
+| `H2-code-bugfix` | hard | `coding` | prompt, with a toy package in `overlay/` | the seeded bug in `code/invoice_tool/invoice.py` is fixed and the unittest suite passes without touching the tests |
+| `H3-doc-revision` | hard | `doc_revision` | prompt, with the doc and its review in `overlay/` | four review comments are applied to `house-rules.md`, untouched sections survive, and the review file itself is left unchanged |
+
 ### Check kinds
 
 Paths are relative to the agent root (`T/ws/personal/`), so vault notes start
@@ -300,9 +317,7 @@ match the fixture exactly.
 
 ## Known limits
 
-- Every task in the catalog uses the `prompt` entry, so no `delegate` task is
-  in it yet, and the catalog has no hard-tier task. The `gws_fake` capability
-  is POSIX only.
+- The `gws_fake` capability is POSIX only; `run` skips M4 on Windows.
 - `--jobs` above 1 has a small port race: each engine's port is probed free when its harness object is created and bound only when the engine starts, so two concurrent boots can collide. Use `--jobs 1` for a run whose numbers you will compare.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.
