@@ -3170,3 +3170,14 @@ def test_h8_accepts_an_anchor_date_off_week_guard(tmp_path: Path) -> None:
 
     ctx = _ctx(tmp_path, answer="Set up: every other Monday at 08:00.", api=api)
     assert te.CHECKS["any_of"](ctx, _task(H8_ID).checks[0]).ok
+
+
+def test_h8_accepts_a_couldnt_decline(tmp_path: Path) -> None:
+    # A real decline from an OpenCode model (2026-11-01 run).
+    answer = ("I couldn't set this up exactly: schedules support weekly on selected days, but not every "
+              "two weeks, so I didn't create the wrong cadence.")
+
+    def api(method: str, path: str, body: Any = None) -> Any:
+        return []
+
+    assert te.CHECKS["any_of"](_ctx(tmp_path, answer=answer, api=api), _task(H8_ID).checks[0]).ok
