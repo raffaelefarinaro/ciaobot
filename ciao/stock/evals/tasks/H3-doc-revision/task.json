@@ -3,16 +3,64 @@
   "tier": "hard",
   "category": "doc_revision",
   "prompt": "Apply the review comments in Documents/house-rules-review.md to Documents/house-rules.md.",
-  "entry": {"kind": "prompt"},
+  "entry": {
+    "kind": "prompt"
+  },
   "setup": [],
   "requires": [],
   "timeout_s": 900,
   "checks": [
-    {"kind": "file_contains", "path": "memory-vault/Documents/house-rules.md", "all": ["22:00", "## Guests", "3 nights", "receive"]},
-    {"kind": "file_excludes", "path": "memory-vault/Documents/house-rules.md", "any": ["23:00", "recieve", "Smoking on the balcony"]},
-    {"kind": "frontmatter_valid", "path": "memory-vault/Documents/house-rules.md"},
-    {"kind": "links_resolve", "path": "memory-vault/Documents/house-rules.md"},
-    {"kind": "new_files", "glob": "memory-vault/**/*.md", "max": 0},
-    {"kind": "unchanged", "path": "memory-vault/Documents/house-rules-review.md"}
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/Documents/house-rules.md",
+      "all": [
+        "22:00",
+        "## Guests",
+        "receive"
+      ]
+    },
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/Documents/house-rules.md",
+      "any": [
+        "3 nights",
+        "three nights"
+      ]
+    },
+    {
+      "kind": "file_contains",
+      "path": "memory-vault/Documents/house-rules.md",
+      "all": [
+        "ana-ruiz.md",
+        "Wash your dishes",
+        "Keep the door closed"
+      ]
+    },
+    {
+      "kind": "file_excludes",
+      "path": "memory-vault/Documents/house-rules.md",
+      "any": [
+        "start at 23:00",
+        "recieve",
+        "Smoking on the balcony"
+      ]
+    },
+    {
+      "kind": "frontmatter_valid",
+      "path": "memory-vault/Documents/house-rules.md"
+    },
+    {
+      "kind": "links_resolve",
+      "path": "memory-vault/Documents/house-rules.md"
+    },
+    {
+      "kind": "new_files",
+      "glob": "memory-vault/**/*.md",
+      "max": 0
+    },
+    {
+      "kind": "unchanged",
+      "path": "memory-vault/Documents/house-rules-review.md"
+    }
   ]
 }

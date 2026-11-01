@@ -856,10 +856,33 @@ def test_h3_fixture_starts_failing(tmp_path: Path) -> None:
     for spec in _task(H3_ID).checks:
         kind = str(spec["kind"])
         result = te.CHECKS[kind](ctx, spec)
-        if kind in ("file_contains", "file_excludes"):
+        preserves_untouched_text = "Wash your dishes" in spec.get("all", [])
+        if kind in ("file_contains", "file_excludes") and not preserves_untouched_text:
             assert not result.ok, f"{kind} should fail on the untouched overlay: {result.detail}"
         if kind == "links_resolve":
             assert result.ok, result.detail
+
+
+def test_h3_correct_revision_passes_file_checks(tmp_path: Path) -> None:
+    root = tmp_path / "personal"
+    shutil.copytree(te.TASKS_ROOT / te.FIXTURE_DIRNAME, root / "memory-vault")
+    shutil.copytree(_overlay(H3_ID), root, dirs_exist_ok=True)
+    note = root / "memory-vault" / "Documents" / "house-rules.md"
+    text = note.read_text(encoding="utf-8")
+    text = text.replace("start at 23:00", "start at 22:00").replace("recieve", "receive")
+    text = text.replace("Smoking on the balcony is allowed after 20:00.\n", "")
+    text += "\n## Guests\n\nGuests may stay at most 3 nights.\n"
+    note.write_text(text, encoding="utf-8", newline="")
+    ctx = _ctx(root)
+
+    for spec in _task(H3_ID).checks:
+        kind = str(spec["kind"])
+        if kind in ("new_files", "unchanged"):
+            continue  # need a pre-prompt snapshot
+        result = te.CHECKS[kind](ctx, spec)
+        assert result.ok, f"{kind} should pass on a correct revision: {result.detail}"
+
+
 # --- Fix round 2: env isolation, process groups, tolerant usage, symlinks, fences ---
 
 
