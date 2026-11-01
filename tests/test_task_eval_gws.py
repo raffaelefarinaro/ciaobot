@@ -144,7 +144,8 @@ def test_gws_bin_override_missing_file_never_falls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cfg = _config(tmp_path)
-    monkeypatch.setenv("CIAO_GWS_BIN", "/nonexistent/gws")
+    missing = tmp_path / "missing" / "gws"  # absolute on every platform, never created
+    monkeypatch.setenv("CIAO_GWS_BIN", str(missing))
     monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: cfg))
     monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
     monkeypatch.setattr(
@@ -160,7 +161,7 @@ def test_gws_bin_override_missing_file_never_falls_back(
 
     assert gws_wrapper.main(["eval-sandbox", "gmail", "+triage"]) == 1
     assert "failed to run gws" in capsys.readouterr().err
-    assert attempted == [str(Path("/nonexistent/gws"))]
+    assert attempted == [str(missing)]
 
 
 def test_auth_status_uses_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
