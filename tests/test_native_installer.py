@@ -37,6 +37,7 @@ from ciao.install_discovery import NativeInstallState
 from ciao.native_installer import EventError, EventWriter
 from ciao.native_lock import NativeLockError, NativeRunLock
 from ciao.native_readiness import NativeReadinessProof
+from tests.native_artifacts import make_artifacts
 from tests.test_server_host_install import APP_NAME, _FakeRunner, _fixture
 
 #: A canonical run id: lowercase, hyphenated, exactly what ``--run-id`` accepts.
@@ -2785,6 +2786,10 @@ def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
             str(fd),
             str(tmp_path / WIZARD_RELEASE_NAME),
         ),
+        "wizard_environment": lambda: (
+            {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            tmp_path,
+        ),
         "read_handoff": lambda run_id: _handoff(run_id),
         "activate": lambda run_id, remaining: _handoff(run_id),
         "wizard_listener": lambda port, child_pid: frozenset({child_pid}),
@@ -3351,18 +3356,19 @@ def test_invalid_requests_are_refused_before_the_descriptor_is_used(
 def test_the_public_entry_builds_production_deps_and_runs_the_seam(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.test_native_production import _artifacts
-
     monkeypatch.setattr(sys, "platform", "darwin")
-    artifacts = _artifacts(tmp_path)
+    artifacts = make_artifacts(tmp_path)
     ready = NativeReadinessProof(
         ready=True, failure=None, port=54321, version=artifacts.version
     )
     monkeypatch.setattr(
         native,
         "_production_deps",
-        lambda request, artifacts, cancellation: _coordinator_deps(
-            tmp_path, prove_ready=lambda host, handoff, remaining: ready
+        lambda request, artifacts, cancellation: native._ProductionDeps(
+            deps=_coordinator_deps(
+                tmp_path, prove_ready=lambda host, handoff, remaining: ready
+            ),
+            private=native._PrivateRun(),
         ),
     )
     with _public_event_pipe() as (read_fd, write_fd):
@@ -3376,17 +3382,15 @@ def test_the_public_entry_builds_production_deps_and_runs_the_seam(
 
 
 def test_the_public_entry_validates_the_public_fd_range(tmp_path: Path) -> None:
-    from tests.test_native_production import _artifacts
-
     with _public_event_pipe() as (_read_fd, _write_fd):
         request = native.NativeInstallRequest(
             run_id=RUN_ID,
-            events_fd=10,
+            events_fd=native.MAX_EVENT_FD + 1,
             first_seq=1,
             prior_events=0,
         )
         with pytest.raises(native.NativeCoordinatorError) as caught:
-            native.run_native_install(request, _artifacts(tmp_path))
+            native.run_native_install(request, make_artifacts(tmp_path))
         assert caught.value.reason == "invalid_events_fd"
         assert caught.value.failure_code == "invalid_arguments"
 
@@ -4431,10 +4435,8 @@ def test_an_invalid_request_leaves_the_public_fd_to_the_caller(
         assert outcome.failure_code == "invalid_arguments"
         os.fstat(event_fd)  # the caller still owns the descriptor
         assert _available(read_fd) == b""
-        from tests.test_native_production import _artifacts
-
         with pytest.raises(native.NativeCoordinatorError):
-            native.run_native_install(bad, _artifacts(tmp_path))
+            native.run_native_install(bad, make_artifacts(tmp_path))
         os.fstat(event_fd)
 
 
