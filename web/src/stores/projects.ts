@@ -714,6 +714,23 @@ export const useProjectStore = defineStore('projects', () => {
   // Shape and parsing live in `lib/chatQuestions.ts`; the live card is here.
   const activeCapabilityQuestions = ref<Record<string, CapabilityQuestion[]>>({})
 
+  // The engine's `pending_question` shape: the tool_input JSON, plus the native
+  // request and session ids when the event carries them.
+  function mirroredPendingQuestion(toolInput: string, requestId: string, sessionId: string): string {
+    if (!requestId && !sessionId) return toolInput
+    try {
+      const parsed = JSON.parse(toolInput)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return toolInput
+      return JSON.stringify({
+        ...parsed,
+        ...(requestId ? { request_id: requestId } : {}),
+        ...(sessionId ? { session_id: sessionId } : {}),
+      })
+    } catch {
+      return toolInput
+    }
+  }
+
   // Restore the AskUserQuestion picker after a reload. The picker lives in
   // ephemeral `activeQuestions` (set only by the live stream), but the server
   // persists the unanswered question on the chat, so we rebuild from there on
@@ -6569,6 +6586,18 @@ export const useProjectStore = defineStore('projects', () => {
             const submission = questionSubmissions.value[chatId]
             if (!submission?.pending) delete questionSubmissions.value[chatId]
             activeQuestions.value[chatId] = qs
+            // Mirror the engine's persisted `pending_question` on the local
+            // chat. The question pause ends the turn and reloads history, and
+            // `rebuildPendingQuestion` would otherwise read the pre-question
+            // snapshot, dismiss this picker and mark it resolved.
+            const askingChat = chats.value.find(c => c.chat_id === chatId)
+            if (askingChat) {
+              askingChat.pending_question = mirroredPendingQuestion(
+                event.tool_input,
+                event.request_id || '',
+                event.session_id || '',
+              )
+            }
             // Nudge the user when the tab is backgrounded so they don't
             // miss a question that the model needs answered.
             if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {

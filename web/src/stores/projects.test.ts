@@ -4299,6 +4299,45 @@ describe('provider-neutral input state', () => {
     })
   })
 
+  test('keeps a live AskUserQuestion picker when history reloads before the chat list refreshes', async () => {
+    // The live picker used to set only `activeQuestions`. The question pause
+    // ends the turn and reloads history, which rebuilt from the chat list's
+    // pre-question snapshot (`pending_question: ''`), dismissed the picker and
+    // marked it resolved, so the same question asked again stayed hidden too.
+    const store = useProjectStore()
+    const chatId = 'live-question-reload'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Live question',
+      model: 'opus',
+      provider: 'claude',
+      mode: 'bypass',
+      session_id: 's1',
+      created_at: '',
+      archived: false,
+      pending_question: '',
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        tool_input: JSON.stringify({
+          questions: [{ question: 'Pick a color', header: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }] }],
+        }),
+      }),
+    })
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+
+    apiGet.mockResolvedValue([])
+    await store.loadMessages(chatId)
+
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(store.activeQuestions[chatId][0].question).toBe('Pick a color')
+  })
+
   test('surfaces an empty AskUserQuestion as a free-form fallback', () => {
     const store = useProjectStore()
     const chatId = 'empty-question-chat'
