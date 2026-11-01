@@ -771,7 +771,8 @@ def test_h6_checks_end_to_end_fairness(tmp_path: Path) -> None:
     for index, (name, calls, should_pass) in enumerate(cases):
         log = tmp_path / f"h6-case-{index}.jsonl"
         for args in calls:
-            assert _call_fake(mailbox, log, *args) == 0, name
+            # An op the fake does not model answers exit 2; it is still logged.
+            assert _call_fake(mailbox, log, *args) in ((0, 2) if args[0] == "tasks" else (0,)), name
         result = next(r for r in te.grade(h6, _grade_ctx(tmp_path, log)) if r.kind == "gws_calls")
         assert result.ok is should_pass, f"{name}: {result.detail}"
 
