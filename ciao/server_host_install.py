@@ -265,8 +265,10 @@ WARN_AND_CONTINUE = frozenset(
 STAGING_PREFIX = ".ciaobot-host-stage."
 
 #: The name a failed fresh install gives the bundle it renamed into its own
-#: staging directory before removing it. The entry is private to that call, so a
-#: same-UID writer has no reason to target it.
+#: staging directory before removing it. No other writer knows the name in
+#: advance, so the race moves onto it. The race is narrowed, not closed: a
+#: same-UID writer can still swap the stage directory or the scratch entry
+#: between the checks and the removal.
 _FRESH_ROLLBACK_PREFIX = "fresh-rollback-"
 
 #: ``install``'s exit status for a refusal in :data:`WARN_AND_CONTINUE`. The
@@ -3227,13 +3229,15 @@ def _require_fresh_surface(
 def _remove_fresh_bundle(
     bundle: Path, stage: Path, installed_identity: tuple[int, int] | None
 ) -> tuple[str, bool]:
-    """Remove the bundle a failed fresh install renamed into place, never by path.
+    """Remove the bundle a failed fresh install renamed into place.
 
-    The bundle is renamed into a private name inside this call's own staging
-    directory and only that entry is removed, and only after its inode matches
-    ``installed_identity``. A substitute swapped in before the rename is kept in
-    the staging directory. Returns ``(problem, keep_stage)``; an empty problem
-    means the bundle was removed or was already gone.
+    The bundle is renamed into a name inside this call's own staging directory
+    and only that entry is removed, and only after its inode matches
+    ``installed_identity``. This narrows the window between the check and the
+    removal; it does not close it. A same-UID writer can still swap the stage
+    directory or the scratch entry in between. A substitute swapped in before the
+    rename is kept in the staging directory. Returns ``(problem, keep_stage)``; an
+    empty problem means the bundle was removed or was already gone.
     """
     if installed_identity is None:
         return (
@@ -3284,6 +3288,12 @@ def _remove_fresh_bundle(
             True,
         )
     shutil.rmtree(scratch, ignore_errors=True)
+    if os.path.lexists(scratch):
+        return (
+            f"the host moved aside for cleanup could not be fully removed; it is "
+            f"kept at {scratch}",
+            True,
+        )
     return ("", False)
 
 
@@ -3799,7 +3809,8 @@ def _install_now(
         if renamed:
             if require_absent:
                 # Delete only what this call renamed into place, after moving it
-                # to a private name it alone uses; see _remove_fresh_bundle.
+                # to a name no other writer knows in advance; see
+                # _remove_fresh_bundle for what that does and does not close.
                 problem, keep_aside = _remove_fresh_bundle(
                     bundle, stage, installed_identity
                 )

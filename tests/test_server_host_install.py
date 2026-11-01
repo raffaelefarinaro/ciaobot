@@ -2486,7 +2486,15 @@ def test_require_absent_rollback_renames_then_removes_only_its_own_bundle(
             "the host is not proven ours", code=server_host.NOT_OWNED
         )
 
+    removed: list[Path] = []
+    real_rmtree = shutil.rmtree
+
+    def record_rmtree(path: Path, **kwargs: Any) -> None:
+        removed.append(Path(path))
+        real_rmtree(path, **kwargs)
+
     monkeypatch.setattr(server_host_install.os, "rename", spy)
+    monkeypatch.setattr(server_host_install.shutil, "rmtree", record_rmtree)
     monkeypatch.setattr(server_host_install, "verify_owned_host", refuse)
 
     # A clean rollback re-raises the original failure unchanged; only a leftover
@@ -2514,6 +2522,13 @@ def test_require_absent_rollback_renames_then_removes_only_its_own_bundle(
     ]
     assert len(moved) == 1
     assert moved[0].parent.name.startswith(server_host_install.STAGING_PREFIX)
+    # The removal targets the private scratch entry, never the canonical path.
+    assert moved[0] in removed
+    assert any(
+        path.name.startswith(server_host_install._FRESH_ROLLBACK_PREFIX)
+        for path in removed
+    )
+    assert target not in removed
 
 
 def test_require_absent_rollback_keeps_a_substitute_swapped_in_before_the_move(
@@ -2557,6 +2572,7 @@ def test_require_absent_rollback_keeps_a_substitute_swapped_in_before_the_move(
         )
 
     assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert "a different object was at" in str(caught.value)
     assert "it is kept at" in str(caught.value)
     assert ours.is_dir()
     kept = list(
@@ -2567,6 +2583,142 @@ def test_require_absent_rollback_keeps_a_substitute_swapped_in_before_the_move(
     )
     assert [path.read_text() for path in kept] == ["substitute"]
     assert not target.exists()
+
+
+def test_require_absent_rollback_keeps_the_bundle_when_the_move_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The rollback's own rename is refused. The bundle stays where it was placed,
+    # and the error says cleanup could not move it aside.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    real_rename = os.rename
+
+    def refuse_only_the_rollback(src: str, dst: str) -> None:
+        if Path(dst).name.startswith(server_host_install._FRESH_ROLLBACK_PREFIX):
+            raise OSError(errno.EXDEV, "cross-device link")
+        real_rename(src, dst)
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise server_host.ServerHostError(
+            "the host is not proven ours", code=server_host.NOT_OWNED
+        )
+
+    monkeypatch.setattr(server_host_install.os, "rename", refuse_only_the_rollback)
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert "could not be moved aside" in str(caught.value)
+    assert target.is_dir()
+
+
+def test_require_absent_rollback_keeps_an_unexaminable_moved_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The bundle is moved aside, but its new name cannot be examined. The stage
+    # directory is kept, and the error names where the object is.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    real_lstat = os.lstat
+
+    def fail_only_the_moved_entry(path: str | os.PathLike[str]) -> os.stat_result:
+        if Path(path).name.startswith(server_host_install._FRESH_ROLLBACK_PREFIX):
+            raise OSError(errno.EIO, "cannot examine the moved entry")
+        return real_lstat(path)
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise server_host.ServerHostError(
+            "the host is not proven ours", code=server_host.NOT_OWNED
+        )
+
+    monkeypatch.setattr(server_host_install.os, "lstat", fail_only_the_moved_entry)
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert "could not be examined" in str(caught.value)
+    assert not target.exists()
+    kept = list(
+        target.parent.glob(
+            f"{server_host_install.STAGING_PREFIX}*/"
+            f"{server_host_install._FRESH_ROLLBACK_PREFIX}*"
+        )
+    )
+    assert len(kept) == 1
+    assert kept[0].is_dir()
+
+
+def test_require_absent_rollback_reports_a_partial_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # rmtree may leave the moved bundle behind. The helper re-checks the scratch
+    # entry, reports the leftover, and keeps the stage directory.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    real_rmtree = shutil.rmtree
+
+    def keep_only_the_moved_entry(path: Path, **kwargs: Any) -> None:
+        if Path(path).name.startswith(server_host_install._FRESH_ROLLBACK_PREFIX):
+            return
+        real_rmtree(path, **kwargs)
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise server_host.ServerHostError(
+            "the host is not proven ours", code=server_host.NOT_OWNED
+        )
+
+    monkeypatch.setattr(server_host_install.shutil, "rmtree", keep_only_the_moved_entry)
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert "could not be fully removed" in str(caught.value)
+    assert "it is kept at" in str(caught.value)
+    kept = list(
+        target.parent.glob(
+            f"{server_host_install.STAGING_PREFIX}*/"
+            f"{server_host_install._FRESH_ROLLBACK_PREFIX}*"
+        )
+    )
+    assert len(kept) == 1
+    assert kept[0].is_dir()
 
 
 def test_require_absent_fresh_surface_checks_run_three_times_in_order(
@@ -2600,7 +2752,14 @@ def test_require_absent_fresh_surface_checks_run_three_times_in_order(
     assert moments == ["before", "preparing", "staging"]
 
 
-def test_fresh_surface_rejects_an_unknown_moment(tmp_path: Path) -> None:
+def test_fresh_surface_rejects_an_unknown_moment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The moment is validated before any filesystem check runs.
+    def fail_if_reached(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a filesystem check ran before the moment was validated")
+
+    monkeypatch.setattr(server_host_install, "_require_fresh_install_paths", fail_if_reached)
     with pytest.raises(ValueError, match="unknown fresh-surface moment"):
         server_host_install._require_fresh_surface(
             _target(tmp_path),
