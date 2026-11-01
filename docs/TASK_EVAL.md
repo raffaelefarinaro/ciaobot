@@ -153,6 +153,19 @@ does not match its directory, and any file under the catalog that contains a
 `behavioral_eval.PRIVATE_MARKERS` string. Directories starting with `_` are not
 tasks; `_fixture/` is the base vault.
 
+### Tasks
+
+| Id | Tier | Category | Entry |
+| --- | --- | --- | --- |
+| `E1-task-capture` | easy | `task_capture` | prompt |
+| `E2-recall-abstain` | easy | `abstention` | prompt |
+| `E2-recall-guest-count` | easy | `recall` | prompt |
+| `E3-schedule-create` | easy | `schedule_create` | prompt |
+| `M1-proposal-merge` | medium | `curation` | prompt, with a queued proposal in `overlay/` |
+| `M2-project-exists` | medium | `project_create` | prompt; the fixture's `projects/active/garden-shed/` folder registers itself as a project at boot |
+| `M2-project-missing` | medium | `project_create` | prompt |
+| `M3-delegated-task` | medium | `delegated_task` | delegate, with a `task` setup step |
+
 ### Check kinds
 
 Paths are relative to the agent root (`T/ws/personal/`), so vault notes start
@@ -213,8 +226,6 @@ match the fixture exactly.
 
 ## Known limits
 
-- Only the easy tier and the `prompt` entry are in the catalog. Medium and hard
-  tasks, and gws fakes for `requires`, come later.
 - `--jobs` above 1 has a small port race: each engine's port is probed free when its harness object is created and bound only when the engine starts, so two concurrent boots can collide. Use `--jobs 1` for a run whose numbers you will compare.
 - Settling is inferred from the restart-blocker list, not from the transcript.
   A chat that stops producing turns without a blocker is treated as settled.
