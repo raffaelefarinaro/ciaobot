@@ -2891,3 +2891,19 @@ def test_catalog_validates_normalize(tmp_path: Path, check: dict[str, Any], acce
     else:
         with pytest.raises(te.TaskCatalogError):
             te.load_tasks(tmp_path)
+
+
+
+def test_h8_accepts_an_anchor_date_off_week_guard(tmp_path: Path) -> None:
+    # A strong model's real answer (2026-11-01 run): weekly Monday 08:00 whose prompt
+    # decides on/off weeks from an anchor date. The parity list must accept it.
+    prompt = ("Biweekly reminder. Anchor: 2026-11-02. If the number of weeks since the anchor is odd, "
+              "reply 'Off week, no reminder.' Otherwise remind me to put the paper recycling out.")
+    schedule = {"schedule_id": "s-new", "scope": "user", "frequency": "weekly", "days_of_week": ["mon"],
+                "daily_time_utc": "08:00", "prompt": prompt}
+
+    def api(method: str, path: str, body: Any = None) -> Any:
+        return [schedule]
+
+    ctx = _ctx(tmp_path, answer="Set up: every other Monday at 08:00.", api=api)
+    assert te.CHECKS["any_of"](ctx, _task(H8_ID).checks[0]).ok
