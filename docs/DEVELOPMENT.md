@@ -623,8 +623,8 @@ refuses any re-emitted shell phase (`phase_out_of_order`). The coordinator owns
 events (four phases, `wizard_ready`, `setup_saved` and one terminal), and it
 refuses a handoff that leaves fewer than seven event slots instead of mutating
 with no room to report an outcome. The public event descriptor must be in the
-shell's 3–9 range, and the writer refuses a descriptor whose open file
-description is stdout or stderr (`stdio_alias`) before it changes any flag.
+shell's 3–9 range, and the writer refuses a descriptor that is the same underlying file (device and
+inode) as stdout or stderr (`stdio_alias`) before it changes any flag.
 
 The coordinator classifies fresh, prepares the private state directory, takes the
 run lock, prepares the bootstrap scratch chain, classifies again immediately
@@ -633,13 +633,16 @@ before the first host/engine mutation, creates the host through the real
 installs the engine, starts the wizard with only a private bind-notification
 pipe, reads one bounded `{schema:1,port:N}` record **and waits for the producer
 to close the pipe** (so a delayed second record is a refusal). The self-reported
-port is only a claim: `wizard_listener(port, child_pid)` must return a pid that is
-the wizard child or in the session group it leads (`_OwnedChild.owns_process`), or
-the run is `wizard_failed` before `wizard_ready` is emitted. It then emits
-`wizard_ready`, validates the run-bound handoff, emits `setup_saved`, and calls
-activation. `workspace` is only the classifier suggestion; the selected directory
-is read from the handoff and reported, and an optional `expected_workspace` is the
-only exact-match check.
+port is only a claim: `wizard_listener(port, child_pid)` must return every pid
+holding a listening socket on that port, IPv4 and IPv6. The set must be non-empty,
+and every pid must be the wizard child or in the session group it leads
+(`_OwnedChild.owns_process`), or the run is `wizard_failed` before `wizard_ready`
+is emitted. It then emits `wizard_ready`, validates the run-bound handoff, emits
+`setup_saved`, and calls activation. After `wizard_ready`, a wizard exit or any
+`failed` event ends trust in that origin, and the client must stop using it.
+`workspace` is only the classifier suggestion; the selected directory is read from
+the handoff and reported, and an optional `expected_workspace` is the only
+exact-match check.
 
 After activation a bounded readiness loop calls the injected `prove_ready`. The
 answers `listener_missing`, `startup_status_unavailable` and `startup_not_ready`

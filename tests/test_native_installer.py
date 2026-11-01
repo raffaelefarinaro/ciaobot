@@ -2730,16 +2730,39 @@ def _fresh_host_value(tmp_path: Path) -> native.FreshHostInstall:
     )
 
 
+#: The file whose existence releases a default wizard child to exit 0.
+WIZARD_RELEASE_NAME = "wizard-release"
+
+
 def _bind_script(port: int = 54321) -> str:
-    # The wizard stays alive briefly after its bind record: the coordinator
-    # proves the listener owner while the child is still running, and a child
-    # that exits first is refused. A fixed sleep here removes that race.
+    # After its bind record the child holds until the release sentinel (argv[2])
+    # exists. The autouse fixture below creates it right after the real
+    # listener-ownership check, so the check always sees a live child. The
+    # give-up bound only ends a child that nothing releases.
     return (
         "import os, sys, time\n"
         "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":%d}\\n')\n"
         "os.close(int(sys.argv[1]))\n"
-        "time.sleep(0.5)\n" % port
+        "give_up = time.monotonic() + 30\n"
+        "while not os.path.exists(sys.argv[2]) and time.monotonic() < give_up:\n"
+        "    time.sleep(0.01)\n" % port
     )
+
+
+@pytest.fixture(autouse=True)
+def _release_wizard_after_listener_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Run the real ownership check, then let a default wizard child exit."""
+    real_owns_process = native._OwnedChild.owns_process
+    release = tmp_path / WIZARD_RELEASE_NAME
+
+    def owns_then_release(self: native._OwnedChild, pid: int) -> bool:
+        result = real_owns_process(self, pid)
+        release.touch()
+        return result
+
+    monkeypatch.setattr(native._OwnedChild, "owns_process", owns_then_release)
 
 
 def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
@@ -2759,10 +2782,11 @@ def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
             "-c",
             _bind_script(),
             str(fd),
+            str(tmp_path / WIZARD_RELEASE_NAME),
         ),
         "read_handoff": lambda run_id: _handoff(run_id),
         "activate": lambda run_id, remaining: _handoff(run_id),
-        "wizard_listener": lambda port, child_pid: child_pid,
+        "wizard_listener": lambda port, child_pid: frozenset({child_pid}),
         "prove_ready": lambda host, handoff, remaining: NativeReadinessProof(
             ready=False,
             failure="startup_status_invalid",
@@ -4629,7 +4653,7 @@ def test_a_lock_release_failure_after_readiness_is_not_success(
     assert b"service_ready" not in raw
 
 
-@pytest.mark.parametrize("case", ["foreign", "none", "raises"])
+@pytest.mark.parametrize("case", ["foreign", "shared", "empty", "raises"])
 def test_wizard_ready_requires_the_child_to_hold_the_listener(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
@@ -4637,12 +4661,14 @@ def test_wizard_ready_requires_the_child_to_hold_the_listener(
     child_pids: list[int] = []
     activated: list[str] = []
 
-    def listener(port: int, child_pid: int) -> int | None:
+    def listener(port: int, child_pid: int) -> frozenset[int]:
         child_pids.append(child_pid)
         if case == "foreign":
-            return os.getpid()
-        if case == "none":
-            return None
+            return frozenset({os.getpid()})
+        if case == "shared":
+            return frozenset({child_pid, os.getpid()})
+        if case == "empty":
+            return frozenset()
         raise RuntimeError("listener lookup failed")
 
     def activate(run_id: str, remaining: float) -> native_handoff.NativeHandoffResult:
@@ -4661,6 +4687,30 @@ def test_wizard_ready_requires_the_child_to_hold_the_listener(
     assert len(child_pids) == 1
     with pytest.raises(ProcessLookupError):
         os.kill(child_pids[0], 0)
+
+
+def test_the_wizard_child_that_exited_before_the_listener_check_is_wizard_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    # Released up front, so the child exits right after writing its record.
+    (tmp_path / WIZARD_RELEASE_NAME).touch()
+    exited: list[int] = []
+
+    def listener(port: int, child_pid: int) -> frozenset[int]:
+        # WNOWAIT observes the exit without reaping, so the coordinator's own
+        # liveness check still sees a child that has exited.
+        os.waitid(os.P_PID, child_pid, os.WEXITED | os.WNOWAIT)
+        exited.append(child_pid)
+        return frozenset({child_pid})
+
+    outcome, events, raw = _run_coordinator(tmp_path, wizard_listener=listener)
+
+    assert exited
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.activation_attempted is False
+    assert [event["type"] for event in events] == ["phase", "phase", "failed"]
+    assert b"wizard_ready" not in raw
 
 
 def test_owns_process_accepts_only_the_child_or_its_session_group() -> None:
@@ -4787,3 +4837,111 @@ def test_readiness_policy_values_are_bounded(field: str, value: float) -> None:
         native._CoordinatorPolicy(**{field: value})
     assert caught.value.reason == "invalid_timeout"
     assert caught.value.failure_code == "internal_error"
+
+
+def test_a_cancelled_readiness_proof_ends_the_run_as_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        return NativeReadinessProof(
+            ready=False, failure="cancelled", port=handoff.port, version="1"
+        )
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=prove_ready)
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "cancelled"
+    assert outcome.activation_completed is True
+    assert events[-1]["code"] == "cancelled"
+    assert b"service_ready" not in raw
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_a_ready_proof_that_also_carries_a_failure_is_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        # The dataclass refuses this combination, so build it past __init__.
+        proof = object.__new__(NativeReadinessProof)
+        object.__setattr__(proof, "ready", True)
+        object.__setattr__(proof, "failure", "listener_missing")
+        object.__setattr__(proof, "port", handoff.port)
+        object.__setattr__(proof, "version", "1")
+        return proof
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=prove_ready)
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "service_not_ready"
+    assert b"service_ready" not in raw
+
+
+def test_a_failed_service_ready_after_a_ready_proof_is_a_channel_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        return NativeReadinessProof(
+            ready=True, failure=None, port=handoff.port, version="1"
+        )
+
+    def refuse_service_ready(self: EventWriter, port: int) -> None:
+        raise EventError("setup_not_saved")
+
+    monkeypatch.setattr(EventWriter, "service_ready", refuse_service_ready)
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=ready)
+
+    assert outcome.terminal is None
+    assert outcome.failure_code == "event_channel_failed"
+    assert outcome.activation_completed is True
+    assert not _lock_path(tmp_path / "state").exists()
+    types = [event["type"] for event in events]
+    assert "service_ready" not in types
+    assert "failed" not in types
+    assert b"service_ready" not in raw
+
+
+def test_cancellation_during_a_long_readiness_interval_returns_promptly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+    timers: list[threading.Timer] = []
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        # The fake schedules the cancel while the coordinator waits out a
+        # 60-second interval, so only the sliced wait can observe it.
+        timer = threading.Timer(0.2, cancellation.cancel)
+        timers.append(timer)
+        timer.start()
+        return NativeReadinessProof(
+            ready=False, failure="listener_missing", port=handoff.port, version="1"
+        )
+
+    policy = native._CoordinatorPolicy(readiness_interval=60.0, poll_interval=0.01)
+    started = time.monotonic()
+    try:
+        outcome, events, raw = _run_coordinator(
+            tmp_path,
+            prove_ready=prove_ready,
+            cancellation=cancellation,
+            policy=policy,
+        )
+    finally:
+        for timer in timers:
+            timer.cancel()
+    elapsed = time.monotonic() - started
+
+    assert outcome.failure_code == "cancelled"
+    assert events[-1]["code"] == "cancelled"
+    assert elapsed < 2.0

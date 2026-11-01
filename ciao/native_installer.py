@@ -92,7 +92,8 @@ The supported public descriptor range is 3–9 (the POSIX shell portable range);
 the shell and coordinator entry points own that check because they are the ones
 parsing the command line. This writer requires a non-stdio descriptor (``>= 3``)
 and refuses a read-only or closed one. It also refuses (``stdio_alias``) a
-descriptor whose open file description is stdout or stderr, so events and
+descriptor that is the same underlying file (device and inode) as stdout or
+stderr, so events and
 diagnostics never share one stream. ``after_phase`` pre-sets the last phase
 already announced by the shell, so the writer refuses to re-emit it. It accepts
 any writable descriptor the platform can write to, including pipes and sockets;
@@ -394,8 +395,8 @@ class EventWriter:
         if stat.S_ISDIR(info.st_mode):
             raise EventError("invalid_fd")
         # Diagnostics and events must never share one stream. Refuse before any
-        # flag change, because a shared open file description would share
-        # O_NONBLOCK with stdout or stderr.
+        # flag change: a descriptor on the same underlying file (device and
+        # inode) as stdout or stderr would share its O_NONBLOCK flag.
         for stdio in (1, 2):
             try:
                 other = os.fstat(stdio)
@@ -1128,7 +1129,11 @@ class _CoordinatorDeps:
     wizard_command: Callable[[int], tuple[str, ...]]
     read_handoff: Callable[[str], NativeHandoffResult]
     activate: Callable[[str, float], NativeHandoffResult]
-    wizard_listener: Callable[[int, int], int | None]
+    #: ``(port, child_pid) -> frozenset`` of every pid holding a listening socket
+    #: on ``port``. The lookup must cover every listening socket on that port,
+    #: IPv4 and IPv6, so a foreign same-UID listener (``SO_REUSEPORT`` or a more
+    #: specific bind) is returned too and fails the owned-listener check.
+    wizard_listener: Callable[[int, int], frozenset[int]]
     prove_ready: Callable[
         [FreshHostInstall, NativeHandoffResult, float], NativeReadinessProof
     ]
@@ -2239,12 +2244,16 @@ def _run_native_install(
                 # The child's self-reported port is only a claim. The port must
                 # have a listener owned by this child or its session group.
                 try:
-                    listener = deps.wizard_listener(port, child.pid)
+                    listeners = deps.wizard_listener(port, child.pid)
                 except (_Cancelled, _TimedOut):
                     raise
                 except Exception:
                     raise _Refusal("wizard_failed") from None
-                if listener is None or not child.owns_process(listener):
+                if (
+                    not isinstance(listeners, frozenset)
+                    or not listeners
+                    or not all(child.owns_process(pid) for pid in listeners)
+                ):
                     raise _Refusal("wizard_failed")
                 _check_stage(deadline, cancellation)
                 writer.wizard_ready(port)
@@ -2326,7 +2335,7 @@ def _run_native_install(
                     if not isinstance(proof, NativeReadinessProof):
                         raise _Refusal("service_not_ready")
                     if proof.ready:
-                        if proof.port != handoff.port:
+                        if proof.failure is not None or proof.port != handoff.port:
                             raise _Refusal("service_not_ready")
                         ready_port = handoff.port
                         break
