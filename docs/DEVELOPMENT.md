@@ -603,6 +603,43 @@ between a check and the write it guards, and a lost rename may leave the record 
 fresh attempt wrote (the existing `keep_record` path) while the run reports
 `HOST_EXISTS` and never claims that host as its own.
 
+The first coordinator lifecycle slice is now in `ciao.native_installer`, but it
+has **no production caller and no public run path**: `run_native_install`
+refuses with `coordinator_unavailable` until the setup child can write its
+schema-2 handoff from a native context and a Python readiness proof equivalent
+to the shell's fresh startup check exists. The testable private seam,
+`_run_native_install`, takes injected callables for every external effect. Its
+`NativeInstallOutcome` records attempted and completed flags separately, so a
+host or activation step that mutates and then raises is never reported as
+unattempted; `activation_attempted` means the service may be running. It
+classifies fresh, prepares the private state directory, takes the run lock,
+prepares the bootstrap scratch chain, classifies again immediately before the
+first host/engine mutation, creates the host through the real
+`create_fresh_host`, rechecks the host and lock before the engine install,
+installs the engine, starts the wizard with only a private bind-notification
+pipe, reads one bounded `{schema:1,port:N}` record **and waits for the producer
+to close the pipe** (so a delayed second record is a refusal), emits
+`wizard_ready`, validates the run-bound handoff, emits `setup_saved`, and calls
+activation. `workspace` is
+only the classifier suggestion; the selected directory is read from the handoff
+and reported, and an optional `expected_workspace` is the only exact-match
+check. Because its longest path is nine events, it refuses a handoff that leaves
+fewer than nine event slots instead of mutating with no room to report an
+outcome. The public event descriptor must be in the shell's 3–9 range at the
+coordinator boundary. It never emits `service_ready` in this slice: after
+activation it reports `failed("service_not_ready")`. Cancellation is a flag the
+normal loop observes; the loop sends SIGTERM, waits a finite grace, sends
+SIGKILL, and reaps only the child it started in that child's own session before
+releasing the lock, keeping the lock when reaping cannot be proven. The child
+waits are clamped to the whole-run budget, cleanup has its own bounded
+grace/reap deadlines, and injected synchronous steps are checked before and
+after but cannot be preempted by this module. It never passes the public event
+descriptor to a child (the wizard sees only the private pipe), never stops,
+reloads, quiesces or rolls back an activated service, preserves partial
+artifacts, writes no onboarding or install receipt, and adds no route. `SIGKILL`
+runs no cleanup and leaves the lock and child as evidence. Tests:
+`tests/test_native_installer.py`.
+
 Replacing an owned legacy host with the signed one is the one host change that is
 a *transaction*, because the previous app and its exact ownership record have to
 survive until the engine this run installs has answered healthily — which is

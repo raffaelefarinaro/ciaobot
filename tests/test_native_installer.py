@@ -15,7 +15,9 @@ import errno
 import inspect
 import json
 import os
+import select
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -27,8 +29,10 @@ from pathlib import Path
 
 import pytest
 
+from ciao import native_handoff
 from ciao import native_installer as native
 from ciao import release_manifest, server_host, server_host_install
+from ciao.install_discovery import NativeInstallState
 from ciao.native_installer import (
     EventError,
     EventWriter,
@@ -2664,3 +2668,1727 @@ def test_create_fresh_host_public_api_has_no_path_or_key_seams() -> None:
     private = inspect.signature(native._create_fresh_host).parameters
     assert "verify_manifest_fn" in private
     assert "install_fn" in private
+
+
+# ── coordinator lifecycle skeleton (#2340) ─────────────────────────────────
+
+
+def _handoff(
+    run_id: str = RUN_ID,
+    *,
+    port: int = 54321,
+    workspace: Path | None = None,
+) -> native_handoff.NativeHandoffResult:
+    identity = native_handoff.InterpreterIdentity(
+        device=1, inode=2, size=3, mtime_ns=4
+    )
+    return native_handoff.NativeHandoffResult(
+        run_id=run_id,
+        startup_id="a" * 32,
+        workspace=Path("/tmp/native-workspace")
+        if workspace is None
+        else workspace,
+        service_backend="macos",
+        definition_path=Path("/tmp/native-definition.plist"),
+        definition_sha256="0" * 64,
+        engine_program="/tmp/python",
+        engine_program_identity=identity,
+        engine_python="/tmp/python",
+        engine_python_identity=identity,
+        environment={},
+        port=port,
+    )
+
+
+def _ownership(tmp_path: Path) -> server_host.HostOwnership:
+    return server_host.HostOwnership(
+        schema=server_host.SCHEMA_VERSION,
+        bundle_path=str(tmp_path / "host"),
+        bundle_id=server_host.BUNDLE_ID,
+        host_revision=server_host.HOST_REVISION,
+        host_protocol=server_host.HOST_PROTOCOL,
+        executable_sha256="0" * 64,
+        per_arch_cdhashes={},
+        bundle_files={},
+    )
+
+
+def _fresh_host_value(tmp_path: Path) -> native.FreshHostInstall:
+    return native.FreshHostInstall(
+        run_id=RUN_ID,
+        ownership=_ownership(tmp_path),
+        bundle_path=tmp_path / "host",
+        ownership_path=tmp_path / "record",
+    )
+
+
+def _bind_script(port: int = 54321) -> str:
+    return (
+        "import os, sys\n"
+        "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":%d}\\n')\n"
+        "os.close(int(sys.argv[1]))\n" % port
+    )
+
+
+def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
+    state = tmp_path / "state"
+    values: dict[str, object] = {
+        "classify": lambda workspace: NativeInstallState.fresh,
+        "prepare_state_dir": lambda: _state_dir(tmp_path),
+        "acquire_lock": lambda directory, run_id: NativeRunLock.acquire(
+            directory, run_id=run_id
+        ),
+        "prepare_scratch": lambda: tmp_path / "scratch",
+        "create_host": lambda lock, run_id, remaining: _fresh_host_value(tmp_path),
+        "recheck_host": lambda host: None,
+        "install_engine": lambda remaining: None,
+        "wizard_command": lambda fd: (
+            sys.executable,
+            "-c",
+            _bind_script(),
+            str(fd),
+        ),
+        "read_handoff": lambda run_id: _handoff(run_id),
+        "activate": lambda run_id, remaining: _handoff(run_id),
+    }
+    values.update(overrides)
+    return native._CoordinatorDeps(**values)  # type: ignore[arg-type]
+
+
+@contextlib.contextmanager
+def _public_event_pipe():
+    """A real pipe whose write end is in the coordinator's 3–9 public range.
+
+    Pytest's fd capture usually holds every descriptor in 3–9. A free one is
+    used when available; otherwise the highest public descriptor is borrowed
+    for the duration of the call and restored afterwards. The coordinator still
+    validates the real 3–9 boundary, so tests never relax it.
+    """
+    read_fd, write_fd = os.pipe()
+    target: int | None = None
+    saved: int | None = None
+    saved_inheritable = False
+    for candidate in range(native.MIN_EVENT_FD, native.MAX_EVENT_FD + 1):
+        try:
+            saved = os.dup(candidate)
+        except OSError:
+            target = candidate
+            break
+        else:
+            os.close(saved)
+            saved = None
+    if target is None:
+        target = native.MAX_EVENT_FD
+        saved_inheritable = os.get_inheritable(target)
+        saved = os.dup(target)
+    os.dup2(write_fd, target)
+    os.close(write_fd)
+    try:
+        yield read_fd, target
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(target)
+        if saved is not None:
+            os.dup2(saved, target, inheritable=saved_inheritable)
+            os.close(saved)
+        os.close(read_fd)
+
+
+def _coordinator_request(
+    events_fd: int,
+    *,
+    first_seq: int = 1,
+    prior_events: int = 0,
+    workspace: Path | None = None,
+    expected_workspace: Path | None = None,
+) -> native.NativeInstallRequest:
+    return native.NativeInstallRequest(
+        run_id=RUN_ID,
+        events_fd=events_fd,
+        first_seq=first_seq,
+        prior_events=prior_events,
+        workspace=workspace,
+        expected_workspace=expected_workspace,
+    )
+
+
+def _run_coordinator(
+    tmp_path: Path,
+    *,
+    deps: object | None = None,
+    cancellation: native.NativeCancellation | None = None,
+    policy: native._CoordinatorPolicy | None = None,
+    workspace: Path | None = None,
+    expected_workspace: Path | None = None,
+    **overrides: object,
+) -> tuple[native.NativeInstallOutcome, list[dict[str, object]], bytes]:
+    with _public_event_pipe() as (read_fd, write_fd):
+        kwargs: dict[str, object] = {}
+        if cancellation is not None:
+            kwargs["cancellation"] = cancellation
+        if policy is not None:
+            kwargs["policy"] = policy
+        outcome = native._run_native_install(
+            _coordinator_request(
+                write_fd,
+                workspace=workspace,
+                expected_workspace=expected_workspace,
+            ),
+            deps=_coordinator_deps(tmp_path, **overrides)
+            if deps is None
+            else deps,
+            **kwargs,  # type: ignore[arg-type]
+        )
+        raw = _drain(read_fd)
+    events = [json.loads(line) for line in raw.splitlines()]
+    return outcome, events, raw
+
+
+def test_coordinator_runs_the_fresh_lifecycle_without_claiming_service_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    order: list[str] = []
+    held: list[NativeRunLock] = []
+
+    def create_host(
+        lock: NativeRunLock, run_id: str, remaining: float
+    ) -> native.FreshHostInstall:
+        assert run_id == RUN_ID
+        assert remaining > 0
+        lock.assert_held(run_id=RUN_ID)
+        held.append(lock)
+        order.append("host")
+        return _fresh_host_value(tmp_path)
+
+    def recheck_host(host: native.FreshHostInstall) -> None:
+        held[0].assert_held(run_id=RUN_ID)
+        order.append("recheck")
+
+    def install_engine(remaining: float) -> None:
+        assert remaining > 0
+        held[0].assert_held(run_id=RUN_ID)
+        order.append("engine")
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path,
+        create_host=create_host,
+        recheck_host=recheck_host,
+        install_engine=install_engine,
+    )
+
+    assert order == ["host", "recheck", "engine"]
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "service_not_ready"
+    assert outcome.exit_code == 1
+    assert outcome.host_step_attempted is True
+    assert outcome.host_step_completed is True
+    assert outcome.activation_attempted is True
+    assert outcome.activation_completed is True
+    assert outcome.service_may_be_running is True
+    assert outcome.selected_workspace == _handoff().workspace
+    assert outcome.lock_retained is False
+    assert not _lock_path(tmp_path / "state").exists()
+    assert b"service_ready" not in raw
+    types = [event["type"] for event in events]
+    assert types == [
+        "phase",
+        "phase",
+        "phase",
+        "phase",
+        "wizard_ready",
+        "setup_saved",
+        "phase",
+        "phase",
+        "failed",
+    ]
+    assert [event["seq"] for event in events] == list(range(1, 10))
+    assert events[4]["origin"] == "http://127.0.0.1:54321"
+    assert events[-1] == {
+        "schema": 1,
+        "run_id": RUN_ID,
+        "seq": 9,
+        "type": "failed",
+        "code": "service_not_ready",
+    }
+    assert [
+        event["phase"] for event in events if event["type"] == "phase"
+    ] == ["preflight", "bootstrap", "install", "wizard", "activation", "readiness"]
+    assert all(
+        len(line) + 1 <= native.MAX_EVENT_BYTES for line in raw.splitlines()
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "code"),
+    [
+        (NativeInstallState.configured, "existing_install"),
+        (NativeInstallState.partial, "partial_install"),
+        (NativeInstallState.unknown, "unknown_state"),
+    ],
+)
+def test_a_non_fresh_classification_refuses_before_any_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: NativeInstallState,
+    code: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("the coordinator mutated after a non-fresh answer")
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        classify=lambda workspace: state,
+        prepare_state_dir=forbidden,
+        acquire_lock=forbidden,
+        prepare_scratch=forbidden,
+        create_host=forbidden,
+        install_engine=forbidden,
+        wizard_command=forbidden,
+    )
+
+    assert outcome.failure_code == code
+    assert outcome.host_step_attempted is False
+    assert outcome.host_step_completed is False
+    assert outcome.activation_attempted is False
+    assert outcome.activation_completed is False
+    assert [event["type"] for event in events] == ["phase", "failed"]
+    assert events[0]["phase"] == "preflight"
+    assert not (tmp_path / "state").exists()
+
+
+def test_an_unreadable_classification_is_unknown_and_never_echoed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    sentinel = "sk-live-CLASSIFIER-SECRET-0123456789"
+
+    def explode(workspace: Path | None) -> NativeInstallState:
+        raise RuntimeError(f"{sentinel} at /Users/someone/private")
+
+    outcome, events, raw = _run_coordinator(tmp_path, classify=explode)
+
+    assert outcome.failure_code == "unknown_state"
+    assert sentinel.encode() not in raw
+    assert b"/Users/someone/private" not in raw
+    assert [event["type"] for event in events] == ["phase", "failed"]
+
+
+def test_a_stale_lock_refuses_before_tool_install_and_preserves_partial_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    state = _state_dir(tmp_path)
+    partial = state / "partial-artifact"
+    partial.write_text("left by an earlier run", encoding="utf-8")
+    stale = NativeRunLock.acquire(state, run_id=OTHER_RUN_ID)
+    try:
+        before = _record_path(state).read_bytes()
+        outcome, events, _raw = _run_coordinator(
+            tmp_path,
+            prepare_state_dir=lambda: state,
+            create_host=lambda *args: (_ for _ in ()).throw(
+                AssertionError("the host step ran over a held lock")
+            ),
+            install_engine=lambda remaining: (_ for _ in ()).throw(
+                AssertionError("the engine install ran over a held lock")
+            ),
+            wizard_command=lambda fd: (_ for _ in ()).throw(
+                AssertionError("the wizard started over a held lock")
+            ),
+        )
+        assert outcome.failure_code == "install_in_progress"
+        assert outcome.host_step_attempted is False
+        assert outcome.host_step_completed is False
+        assert _lock_path(state).is_dir()
+        assert _record_path(state).read_bytes() == before
+        assert partial.read_text(encoding="utf-8") == "left by an earlier run"
+        assert [event["type"] for event in events] == [
+            "phase",
+            "phase",
+            "failed",
+        ]
+        assert events[-1]["code"] == "install_in_progress"
+    finally:
+        stale.release()
+
+
+def test_a_changed_host_refuses_before_engine_install_and_is_preserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    artifact = tmp_path / "host-artifact"
+    artifact.write_text("partially installed host", encoding="utf-8")
+    engine_calls: list[float] = []
+
+    def changed(host: native.FreshHostInstall) -> None:
+        raise native.NativeCoordinatorError("host_changed", "install_failed")
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        recheck_host=changed,
+        install_engine=lambda remaining: engine_calls.append(remaining),
+    )
+
+    assert outcome.failure_code == "install_failed"
+    assert outcome.host_step_attempted is True
+    assert outcome.host_step_completed is True
+    assert outcome.activation_attempted is False
+    assert outcome.activation_completed is False
+    assert engine_calls == []
+    assert artifact.read_text(encoding="utf-8") == "partially installed host"
+    assert not _lock_path(tmp_path / "state").exists()
+    assert [event["type"] for event in events] == [
+        "phase",
+        "phase",
+        "phase",
+        "failed",
+    ]
+    assert "wizard" not in [
+        event.get("phase") for event in events if event["type"] == "phase"
+    ]
+
+
+def test_cancellation_kills_and_reaps_only_the_owned_child_before_unlocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+    pids: list[int] = []
+    spawned = threading.Event()
+    real_spawn = native._spawn_owned_child
+
+    def recording_spawn(*args: object, **kwargs: object) -> object:
+        child = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        pids.append(child.pid)
+        spawned.set()
+        return child
+
+    monkeypatch.setattr(native, "_spawn_owned_child", recording_spawn)
+    stubborn = (
+        "import signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "time.sleep(60)\n"
+    )
+    policy = native._CoordinatorPolicy(
+        bind_timeout=5.0,
+        term_grace=0.2,
+        reap_timeout=0.5,
+        poll_interval=0.02,
+    )
+
+    def cancel_when_spawned() -> None:
+        assert spawned.wait(timeout=5)
+        time.sleep(0.05)
+        cancellation.cancel()
+
+    canceller = threading.Thread(target=cancel_when_spawned, daemon=True)
+    canceller.start()
+    started = time.monotonic()
+    try:
+        outcome, events, _raw = _run_coordinator(
+            tmp_path,
+            wizard_command=lambda fd: (sys.executable, "-c", stubborn),
+            cancellation=cancellation,
+            policy=policy,
+        )
+    finally:
+        canceller.join(timeout=5)
+    elapsed = time.monotonic() - started
+
+    assert pids
+    pid = pids[0]
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    # SIGTERM was ignored, so the coordinator used its finite reap window and
+    # SIGKILL, then waited before releasing the lock.
+    assert elapsed < 3.0
+    assert outcome.failure_code == "cancelled"
+    assert outcome.terminal == "failed"
+    assert outcome.lock_retained is False
+    assert events[-1]["code"] == "cancelled"
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_cancellation_after_activation_never_stops_or_rolls_back_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+
+    def activate(
+        run_id: str, remaining: float
+    ) -> native_handoff.NativeHandoffResult:
+        cancellation.cancel()
+        return _handoff(run_id)
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path,
+        activate=activate,
+        cancellation=cancellation,
+    )
+
+    assert outcome.activation_attempted is True
+    assert outcome.activation_completed is True
+    assert outcome.service_may_be_running is True
+    assert outcome.failure_code == "cancelled"
+    assert outcome.terminal == "failed"
+    assert b"service_ready" not in raw
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "cancelled"
+    assert not _lock_path(tmp_path / "state").exists()
+    fields = set(native._CoordinatorDeps.__dataclass_fields__)
+    assert not fields & {"stop", "stop_service", "reload", "quiesce", "rollback"}
+
+
+def test_the_public_event_fd_is_never_inherited_by_the_wizard_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    child_fds_path = tmp_path / "child-fds.json"
+    notification_fds: list[int] = []
+    script = (
+        "import json, os, sys\n"
+        "with open(sys.argv[2], 'w', encoding='utf-8') as handle:\n"
+        "    json.dump(sorted(int(name) for name in os.listdir('/dev/fd')), handle)\n"
+        "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(int(sys.argv[1]))\n"
+    )
+
+    def wizard_command(fd: int) -> tuple[str, ...]:
+        notification_fds.append(fd)
+        return (sys.executable, "-c", script, str(fd), str(child_fds_path))
+
+    with _public_event_pipe() as (read_fd, write_fd):
+        outcome = native._run_native_install(
+            _coordinator_request(write_fd),
+            deps=_coordinator_deps(
+                tmp_path, wizard_command=wizard_command
+            ),
+        )
+        _drain(read_fd)
+
+    assert outcome.failure_code == "service_not_ready"
+    child_fds = json.loads(child_fds_path.read_text(encoding="utf-8"))
+    assert notification_fds
+    assert notification_fds[0] in child_fds
+    assert write_fd not in child_fds
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not-json\n",
+        b'{"schema":1,"port":54321,"extra":1}\n',
+        b'{"schema":1,"port":0}\n',
+        b'{"schema":1,"port":54321,"port":54322}\n',
+        b'{"schema":1,"port":54321}\n{"schema":1,"port":54322}\n',
+        b"x" * 200,
+    ],
+)
+def test_malformed_private_bind_records_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: bytes
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    script = (
+        "import os, sys\n"
+        f"os.write(int(sys.argv[1]), {payload!r})\n"
+        "os.close(int(sys.argv[1]))\n"
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.activation_attempted is False
+    assert outcome.activation_completed is False
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert "setup_saved" not in [event["type"] for event in events]
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_a_wizard_that_exits_without_binding_is_a_fixed_wizard_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    script = "import os, sys\nos.close(int(sys.argv[1]))\n"
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_a_failed_engine_install_is_fixed_and_preserves_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    sentinel = "sk-live-ENGINE-SECRET-0123456789"
+    host_marker = tmp_path / "host-marker"
+    host_marker.write_text("present", encoding="utf-8")
+
+    def fail_install(remaining: float) -> None:
+        raise RuntimeError(f"{sentinel} /Users/someone/private")
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path, install_engine=fail_install
+    )
+
+    assert outcome.failure_code == "install_failed"
+    assert outcome.host_step_attempted is True
+    assert outcome.host_step_completed is True
+    assert outcome.activation_attempted is False
+    assert outcome.activation_completed is False
+    assert sentinel.encode() not in raw
+    assert b"/Users/someone/private" not in raw
+    assert host_marker.read_text(encoding="utf-8") == "present"
+    assert not _lock_path(tmp_path / "state").exists()
+    assert [event["type"] for event in events] == [
+        "phase",
+        "phase",
+        "phase",
+        "failed",
+    ]
+    assert events[-1]["code"] == "install_failed"
+
+
+def test_invalid_requests_are_refused_before_the_descriptor_is_used(
+    tmp_path: Path,
+) -> None:
+    with _public_event_pipe() as (read_fd, event_fd):
+        requests = [
+            native.NativeInstallRequest(
+                run_id="not-a-uuid",
+                events_fd=event_fd,
+                first_seq=1,
+                prior_events=0,
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID, events_fd=2, first_seq=1, prior_events=0
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID, events_fd=-1, first_seq=1, prior_events=0
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID, events_fd=10, first_seq=1, prior_events=0
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID, events_fd=event_fd, first_seq=0, prior_events=0
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID,
+                events_fd=event_fd,
+                first_seq=1,
+                prior_events=native.MAX_EVENTS,
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID, events_fd=event_fd, first_seq=3, prior_events=5
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID,
+                events_fd=event_fd,
+                first_seq=25,
+                prior_events=24,
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID,
+                events_fd=event_fd,
+                first_seq=1,
+                prior_events=0,
+                workspace=Path("relative"),
+            ),
+            native.NativeInstallRequest(
+                run_id=RUN_ID,
+                events_fd=event_fd,
+                first_seq=1,
+                prior_events=0,
+                expected_workspace=Path("relative"),
+            ),
+        ]
+        for request in requests:
+            outcome = native._run_native_install(
+                request, deps=_coordinator_deps(tmp_path)
+            )
+            assert outcome.failure_code == "invalid_arguments"
+            assert outcome.terminal is None
+        assert _available(read_fd) == b""
+
+
+def test_the_public_entry_refuses_before_touching_the_descriptor() -> None:
+    with _public_event_pipe() as (read_fd, write_fd):
+        with pytest.raises(native.NativeCoordinatorError) as caught:
+            native.run_native_install(_coordinator_request(write_fd))
+        assert caught.value.reason == "coordinator_unavailable"
+        assert caught.value.failure_code == "internal_error"
+        os.fstat(write_fd)  # the public entry did not take ownership
+        assert _available(read_fd) == b""
+
+
+def test_the_public_entry_validates_the_public_fd_range() -> None:
+    with _public_event_pipe() as (_read_fd, _write_fd):
+        request = native.NativeInstallRequest(
+            run_id=RUN_ID,
+            events_fd=10,
+            first_seq=1,
+            prior_events=0,
+        )
+        with pytest.raises(native.NativeCoordinatorError) as caught:
+            native.run_native_install(request)
+        assert caught.value.reason == "invalid_events_fd"
+        assert caught.value.failure_code == "invalid_arguments"
+
+
+def test_sigkill_leaves_the_lock_and_the_owned_child_as_evidence(
+    tmp_path: Path,
+) -> None:
+    state = _state_dir(tmp_path)
+    root = Path(__file__).resolve().parents[1]
+    script = (
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "from ciao.native_installer import NativeRunLock\n"
+        "lock = NativeRunLock.acquire(Path(sys.argv[1]), run_id=sys.argv[2])\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "    start_new_session=True,\n"
+        ")\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(state), RUN_ID],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(root)},
+        stdout=subprocess.PIPE,
+    )
+    child_pid = 0
+    try:
+        assert process.stdout is not None
+        line = process.stdout.readline()
+        child_pid = int(line.strip())
+        assert _lock_path(state).is_dir()
+        process.kill()
+        process.wait(timeout=10)
+        # SIGKILL ran no cleanup: the lock and the orphaned child remain.
+        assert _lock_path(state).is_dir()
+        os.kill(child_pid, 0)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        if child_pid:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(child_pid, signal.SIGKILL)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+    assert _lock_path(state).is_dir()
+
+
+def test_the_coordinator_creates_the_host_with_the_real_fresh_helper(
+    tmp_path: Path,
+    home_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    runner = _FakeRunner()
+    target = server_host.default_bundle_path()
+    record = server_host.default_ownership_path()
+
+    def create_host(
+        lock: NativeRunLock, run_id: str, remaining: float
+    ) -> native.FreshHostInstall:
+        assert run_id == RUN_ID
+        lock.assert_held(run_id=RUN_ID)
+        return _fresh_host(lock=lock, archive=archive, entry=entry, runner=runner)
+
+    def recheck_host(host: native.FreshHostInstall) -> None:
+        assert host.bundle_path == target
+        assert host.ownership_path == record
+        assert (
+            server_host.verify_owned_host(
+                host.bundle_path,
+                ownership_path=host.ownership_path,
+                runner=runner,
+            )
+            == host.ownership
+        )
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path,
+        create_host=create_host,
+        recheck_host=recheck_host,
+    )
+
+    assert outcome.host_step_attempted is True
+    assert outcome.host_step_completed is True
+    assert outcome.activation_attempted is True
+    assert outcome.activation_completed is True
+    assert outcome.failure_code == "service_not_ready"
+    assert target.is_dir()
+    assert record.is_file()
+    assert not _lock_path(tmp_path / "state").exists()
+    assert b"service_ready" not in raw
+    assert "wizard_ready" in [event["type"] for event in events]
+    commands = " ".join(" ".join(command) for command in runner.commands)
+    for forbidden in ("launchctl", "bootout", "bootstrap", "/usr/bin/open", "stop"):
+        assert forbidden not in commands
+
+
+def test_a_second_preflight_refuses_a_service_that_appeared_before_host_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    answers = iter(
+        [NativeInstallState.fresh, NativeInstallState.configured]
+    )
+    host_calls: list[object] = []
+
+    def classify(workspace: Path | None) -> NativeInstallState:
+        return next(answers)
+
+    def create_host(*args: object) -> native.FreshHostInstall:
+        host_calls.append(args)
+        return _fresh_host_value(tmp_path)
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path, classify=classify, create_host=create_host
+    )
+
+    assert outcome.failure_code == "existing_install"
+    assert outcome.host_step_attempted is False
+    assert outcome.host_step_completed is False
+    assert host_calls == []
+    assert not _lock_path(tmp_path / "state").exists()
+    assert [event["type"] for event in events] == [
+        "phase",
+        "phase",
+        "failed",
+    ]
+    assert events[-1]["code"] == "existing_install"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, float("inf"), float("nan"), native.COORDINATOR_MAX_TIMEOUT_SECONDS + 1],
+)
+def test_every_coordinator_deadline_is_finite_and_bounded(value: float) -> None:
+    with pytest.raises(native.NativeCoordinatorError) as caught:
+        native._CoordinatorPolicy(run_timeout=value)
+    assert caught.value.reason == "invalid_timeout"
+    assert caught.value.failure_code == "internal_error"
+
+
+def test_an_expired_run_deadline_refuses_before_any_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def slow_classify(workspace: Path | None) -> NativeInstallState:
+        time.sleep(0.02)
+        return NativeInstallState.fresh
+
+    policy = native._CoordinatorPolicy(
+        run_timeout=0.01, poll_interval=0.005
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        classify=slow_classify,
+        policy=policy,
+    )
+
+    assert outcome.failure_code == "internal_error"
+    assert outcome.host_step_attempted is False
+    assert outcome.host_step_completed is False
+    assert not (tmp_path / "state").exists()
+    assert [event["type"] for event in events] == ["phase", "failed"]
+
+
+def test_the_public_coordinator_exposes_no_injection_seams() -> None:
+    parameters = inspect.signature(native.run_native_install).parameters
+    assert list(parameters) == ["request"]
+    assert not {
+        "deps",
+        "classify",
+        "create_host",
+        "install_engine",
+        "wizard_command",
+        "activate",
+    } & set(parameters)
+
+
+def test_a_bind_timeout_is_a_fixed_wizard_failure_and_reaps_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    pids: list[int] = []
+    real_spawn = native._spawn_owned_child
+
+    def recording_spawn(*args: object, **kwargs: object) -> object:
+        child = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        pids.append(child.pid)
+        return child
+
+    monkeypatch.setattr(native, "_spawn_owned_child", recording_spawn)
+    policy = native._CoordinatorPolicy(
+        bind_timeout=0.1,
+        term_grace=0.2,
+        reap_timeout=0.5,
+        poll_interval=0.02,
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+        ),
+        policy=policy,
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert events[-1]["code"] == "wizard_failed"
+    assert pids
+    with pytest.raises(ProcessLookupError):
+        os.kill(pids[0], 0)
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_a_wizard_exit_timeout_is_a_fixed_wizard_failure_and_reaps_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    pids: list[int] = []
+    real_spawn = native._spawn_owned_child
+
+    def recording_spawn(*args: object, **kwargs: object) -> object:
+        child = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        pids.append(child.pid)
+        return child
+
+    monkeypatch.setattr(native, "_spawn_owned_child", recording_spawn)
+    script = (
+        "import os, sys, time\n"
+        "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(int(sys.argv[1]))\n"
+        "time.sleep(60)\n"
+    )
+    policy = native._CoordinatorPolicy(
+        bind_timeout=2.0,
+        wizard_exit_timeout=0.1,
+        term_grace=0.2,
+        reap_timeout=0.5,
+        poll_interval=0.02,
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+        policy=policy,
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert "wizard_ready" in [event["type"] for event in events]
+    assert "setup_saved" not in [event["type"] for event in events]
+    assert events[-1]["code"] == "wizard_failed"
+    assert pids
+    with pytest.raises(ProcessLookupError):
+        os.kill(pids[0], 0)
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_an_unsafe_bootstrap_scratch_is_unknown_and_stops_before_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def unsafe_scratch() -> Path:
+        raise native_handoff.NativeHandoffError("the scratch chain is unsafe")
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path, prepare_scratch=unsafe_scratch
+    )
+
+    assert outcome.failure_code == "unknown_state"
+    assert outcome.host_step_attempted is False
+    assert outcome.host_step_completed is False
+    assert not _lock_path(tmp_path / "state").exists()
+    assert events[-1]["code"] == "unknown_state"
+
+
+def test_a_host_verification_failure_is_not_reported_as_a_plain_install_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    engine_calls: list[float] = []
+
+    def bad_archive(
+        lock: NativeRunLock, run_id: str, remaining: float
+    ) -> native.FreshHostInstall:
+        raise server_host_install.ServerHostInstallError(
+            "the archive does not match its signed entry",
+            code=server_host_install.ARCHIVE_MISMATCH,
+        )
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        create_host=bad_archive,
+        install_engine=lambda remaining: engine_calls.append(remaining),
+    )
+
+    assert outcome.failure_code == "verification_failed"
+    assert outcome.host_step_attempted is True
+    assert outcome.host_step_completed is False
+    assert engine_calls == []
+    assert events[-1]["code"] == "verification_failed"
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_a_host_step_that_mutates_then_raises_is_still_marked_attempted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    partial_bundle = tmp_path / "partial-host-bundle"
+    partial_bundle.write_text("written before the refusal", encoding="utf-8")
+
+    def create_host(
+        lock: NativeRunLock, run_id: str, remaining: float
+    ) -> native.FreshHostInstall:
+        raise server_host_install.ServerHostInstallError(
+            "the host write failed after mutation",
+            code=server_host_install.INSTALL_FAILED,
+        )
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path, create_host=create_host
+    )
+
+    assert outcome.failure_code == "install_failed"
+    assert outcome.host_step_attempted is True
+    assert outcome.host_step_completed is False
+    assert outcome.activation_attempted is False
+    assert outcome.activation_completed is False
+    assert partial_bundle.read_text(encoding="utf-8") == (
+        "written before the refusal"
+    )
+    assert events[-1]["code"] == "install_failed"
+
+
+@pytest.mark.parametrize("error_kind", ["handoff", "unexpected"])
+def test_activation_that_mutates_then_raises_is_marked_attempted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_kind: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    definition = tmp_path / "service-definition.plist"
+    definition.write_text("activation started", encoding="utf-8")
+
+    def activate(
+        run_id: str, remaining: float
+    ) -> native_handoff.NativeHandoffResult:
+        if error_kind == "handoff":
+            raise native_handoff.NativeHandoffError(
+                "activation wrote the job and then failed"
+            )
+        raise RuntimeError("activation failed unexpectedly")
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path, activate=activate
+    )
+
+    assert outcome.failure_code == "activation_refused"
+    assert outcome.activation_attempted is True
+    assert outcome.activation_completed is False
+    assert outcome.service_may_be_running is True
+    assert definition.read_text(encoding="utf-8") == "activation started"
+    assert events[-1]["code"] == "activation_refused"
+    fields = set(native._CoordinatorDeps.__dataclass_fields__)
+    assert not fields & {"stop", "stop_service", "reload", "quiesce", "rollback"}
+
+
+def test_an_unexpected_child_cleanup_error_retains_the_lock_and_emits_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    class BadChild:
+        pid = 424242
+
+        def terminate_and_reap(self) -> None:
+            raise RuntimeError("cleanup failed unexpectedly")
+
+    monkeypatch.setattr(
+        native, "_spawn_owned_child", lambda *args, **kwargs: BadChild()
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", "pass"),
+    )
+
+    # The child may still exist, so the lock is deliberately retained, but the
+    # original fixed failure and the terminal event are not skipped.
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.lock_retained is True
+    assert _lock_path(tmp_path / "state").is_dir()
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_an_unexpected_lock_release_error_preserves_the_original_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    class BadLock:
+        def assert_held(self, *, run_id: str | None = None) -> None:
+            return None
+
+        def release(self) -> None:
+            raise RuntimeError("release failed unexpectedly")
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path, acquire_lock=lambda directory, run_id: BadLock()
+    )
+
+    # The release is unproven, so the lock is retained; the original
+    # service_not_ready failure is preserved rather than overwritten.
+    assert outcome.failure_code == "service_not_ready"
+    assert outcome.lock_retained is True
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "service_not_ready"
+
+
+def test_a_delayed_second_bind_record_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    script = (
+        "import os, sys, time\n"
+        "fd = int(sys.argv[1])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "time.sleep(0.1)\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54322}\\n')\n"
+        "os.close(fd)\n"
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert "setup_saved" not in [event["type"] for event in events]
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_a_bind_record_without_prompt_eof_is_refused_and_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    pids: list[int] = []
+    real_spawn = native._spawn_owned_child
+
+    def recording_spawn(*args: object, **kwargs: object) -> object:
+        child = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        pids.append(child.pid)
+        return child
+
+    monkeypatch.setattr(native, "_spawn_owned_child", recording_spawn)
+    script = (
+        "import os, sys, time\n"
+        "fd = int(sys.argv[1])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "time.sleep(60)\n"
+    )
+    policy = native._CoordinatorPolicy(
+        bind_timeout=0.2,
+        term_grace=0.2,
+        reap_timeout=0.5,
+        poll_interval=0.02,
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+        policy=policy,
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert pids
+    with pytest.raises(ProcessLookupError):
+        os.kill(pids[0], 0)
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_cancellation_during_the_wizard_wait_reaps_and_never_activates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+    pids: list[int] = []
+    real_spawn = native._spawn_owned_child
+
+    def recording_spawn(*args: object, **kwargs: object) -> object:
+        child = real_spawn(*args, **kwargs)  # type: ignore[arg-type]
+        pids.append(child.pid)
+        return child
+
+    monkeypatch.setattr(native, "_spawn_owned_child", recording_spawn)
+    script = (
+        "import os, sys, time\n"
+        "fd = int(sys.argv[1])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(fd)\n"
+        "time.sleep(60)\n"
+    )
+    policy = native._CoordinatorPolicy(
+        bind_timeout=2.0,
+        wizard_exit_timeout=5.0,
+        term_grace=0.2,
+        reap_timeout=0.5,
+        poll_interval=0.02,
+    )
+    with _public_event_pipe() as (read_fd, write_fd):
+        outcome_box: list[native.NativeInstallOutcome] = []
+
+        def drive() -> None:
+            outcome_box.append(
+                native._run_native_install(
+                    _coordinator_request(write_fd),
+                    deps=_coordinator_deps(
+                        tmp_path,
+                        wizard_command=lambda fd: (
+                            sys.executable,
+                            "-c",
+                            script,
+                            str(fd),
+                        ),
+                    ),
+                    cancellation=cancellation,
+                    policy=policy,
+                )
+            )
+
+        runner = threading.Thread(target=drive, daemon=True)
+        runner.start()
+        raw = bytearray()
+        events: list[dict[str, object]] = []
+        wizard_ready_seen = False
+        deadline = time.monotonic() + 5
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                readable, _, _ = select.select(
+                    [read_fd], [], [], min(remaining, 0.05)
+                )
+            except OSError:
+                break
+            if not readable:
+                continue
+            chunk = os.read(read_fd, 65536)
+            if not chunk:
+                break
+            raw.extend(chunk)
+            while b"\n" in raw:
+                line, _, rest = raw.partition(b"\n")
+                raw = bytearray(rest)
+                event = json.loads(line)
+                events.append(event)
+                if (
+                    event["type"] == "wizard_ready"
+                    and not wizard_ready_seen
+                ):
+                    wizard_ready_seen = True
+                    cancellation.cancel()
+        cancellation.cancel()
+        runner.join(timeout=5)
+        assert not runner.is_alive()
+
+    outcome = outcome_box[0]
+    assert wizard_ready_seen is True
+    assert outcome.failure_code == "cancelled"
+    assert outcome.activation_attempted is False
+    assert outcome.activation_completed is False
+    assert pids
+    with pytest.raises(ProcessLookupError):
+        os.kill(pids[0], 0)
+    assert not _lock_path(tmp_path / "state").exists()
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "cancelled"
+
+
+def test_the_bind_wait_is_clamped_to_the_whole_run_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    policy = native._CoordinatorPolicy(
+        run_timeout=0.2,
+        bind_timeout=5.0,
+        term_grace=0.1,
+        reap_timeout=0.5,
+        poll_interval=0.02,
+    )
+    started = time.monotonic()
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+        ),
+        policy=policy,
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert outcome.failure_code == "wizard_failed"
+    assert "wizard_ready" not in [event["type"] for event in events]
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_the_wizard_exit_wait_is_clamped_to_the_whole_run_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    script = (
+        "import os, sys, time\n"
+        "fd = int(sys.argv[1])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(fd)\n"
+        "time.sleep(60)\n"
+    )
+    policy = native._CoordinatorPolicy(
+        run_timeout=0.5,
+        bind_timeout=5.0,
+        wizard_exit_timeout=5.0,
+        term_grace=0.1,
+        reap_timeout=0.5,
+        poll_interval=0.02,
+    )
+    started = time.monotonic()
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+        policy=policy,
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert "wizard_ready" in [event["type"] for event in events]
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.activation_attempted is False
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_a_workspace_suggestion_is_passed_to_the_classifier_but_never_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    suggestion = tmp_path / "suggested"
+    chosen = tmp_path / "chosen-by-wizard"
+    seen: list[Path | None] = []
+
+    def classify(workspace: Path | None) -> NativeInstallState:
+        seen.append(workspace)
+        return NativeInstallState.fresh
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        classify=classify,
+        read_handoff=lambda run_id: _handoff(run_id, workspace=chosen),
+        activate=lambda run_id, remaining: _handoff(
+            run_id, workspace=chosen
+        ),
+        workspace=suggestion,
+    )
+
+    assert seen == [suggestion, suggestion]
+    # The wizard may legitimately choose a different workspace; a suggestion is
+    # not an exact requirement.
+    assert outcome.failure_code == "service_not_ready"
+    assert outcome.selected_workspace == chosen
+    assert "setup_saved" in [event["type"] for event in events]
+
+
+def test_an_explicit_expected_workspace_must_match_the_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    chosen = tmp_path / "chosen-by-wizard"
+    required = tmp_path / "required-by-caller"
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        read_handoff=lambda run_id: _handoff(run_id, workspace=chosen),
+        activate=lambda run_id, remaining: _handoff(
+            run_id, workspace=chosen
+        ),
+        expected_workspace=required,
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.selected_workspace == chosen
+    assert outcome.activation_attempted is False
+    assert "setup_saved" not in [event["type"] for event in events]
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_an_explicit_expected_workspace_that_matches_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    chosen = tmp_path / "chosen-by-wizard"
+
+    outcome, _events, _raw = _run_coordinator(
+        tmp_path,
+        read_handoff=lambda run_id: _handoff(run_id, workspace=chosen),
+        activate=lambda run_id, remaining: _handoff(
+            run_id, workspace=chosen
+        ),
+        expected_workspace=chosen,
+    )
+
+    assert outcome.failure_code == "service_not_ready"
+    assert outcome.selected_workspace == chosen
+    assert outcome.activation_completed is True
+
+
+def test_the_private_notification_fd_is_not_inherited_by_a_wizard_grandchild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    grandchild_fds_path = tmp_path / "grandchild-fds.json"
+    script = (
+        "import json, os, subprocess, sys\n"
+        "fd = int(sys.argv[1])\n"
+        "os.set_inheritable(fd, False)\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "lister = (\n"
+        "    'import json, os, sys\\n'\n"
+        "    'with open(sys.argv[1], \"w\", encoding=\"utf-8\") as handle:\\n'\n"
+        "    '    json.dump(sorted(int(n) for n in os.listdir(\"/dev/fd\")), handle)\\n'\n"
+        ")\n"
+        "grandchild = subprocess.Popen([sys.executable, '-c', lister, sys.argv[2]])\n"
+        "grandchild.wait()\n"
+        "os.close(fd)\n"
+    )
+    notification_fds: list[int] = []
+
+    def wizard_command(fd: int) -> tuple[str, ...]:
+        notification_fds.append(fd)
+        return (
+            sys.executable,
+            "-c",
+            script,
+            str(fd),
+            str(grandchild_fds_path),
+        )
+
+    outcome, _events, _raw = _run_coordinator(
+        tmp_path, wizard_command=wizard_command
+    )
+
+    assert outcome.failure_code == "service_not_ready"
+    assert notification_fds
+    grandchild_fds = json.loads(
+        grandchild_fds_path.read_text(encoding="utf-8")
+    )
+    assert notification_fds[0] not in grandchild_fds
+
+
+def test_a_handoff_for_another_run_refuses_before_setup_saved_and_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    activated: list[str] = []
+
+    def activate(
+        run_id: str, remaining: float
+    ) -> native_handoff.NativeHandoffResult:
+        activated.append(run_id)
+        raise AssertionError("activation ran for another run's handoff")
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        read_handoff=lambda run_id: _handoff(OTHER_RUN_ID),
+        activate=activate,
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.selected_workspace is None
+    assert outcome.activation_attempted is False
+    assert outcome.activation_completed is False
+    assert activated == []
+    phases = [
+        event.get("phase") for event in events if event["type"] == "phase"
+    ]
+    assert "activation" not in phases
+    assert "setup_saved" not in [event["type"] for event in events]
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "wizard_failed"
+
+
+@pytest.mark.parametrize("mismatch", ["run_id", "port"])
+def test_an_activation_result_mismatch_is_refused_after_the_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def activate(
+        run_id: str, remaining: float
+    ) -> native_handoff.NativeHandoffResult:
+        if mismatch == "run_id":
+            return _handoff(OTHER_RUN_ID)
+        return _handoff(run_id, port=54322)
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path, activate=activate
+    )
+
+    assert outcome.failure_code == "activation_refused"
+    assert outcome.activation_attempted is True
+    assert outcome.activation_completed is True
+    assert outcome.service_may_be_running is True
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "activation_refused"
+    fields = set(native._CoordinatorDeps.__dataclass_fields__)
+    assert not fields & {"stop", "stop_service", "reload", "quiesce", "rollback"}
+
+
+def test_a_child_that_exits_nonzero_after_binding_is_a_wizard_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    script = (
+        "import os, sys\n"
+        "fd = int(sys.argv[1])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(fd)\n"
+        "raise SystemExit(7)\n"
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", script, str(fd)),
+    )
+
+    assert "wizard_ready" in [event["type"] for event in events]
+    assert "setup_saved" not in [event["type"] for event in events]
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.activation_attempted is False
+    assert outcome.activation_completed is False
+    assert events[-1]["code"] == "wizard_failed"
+
+
+@pytest.mark.parametrize(
+    ("reason", "code"),
+    [
+        ("lock_busy", "install_in_progress"),
+        ("lock_unknown", "install_in_progress"),
+        ("lock_changed", "install_in_progress"),
+        ("lock_not_held", "install_in_progress"),
+        ("lock_run_mismatch", "install_in_progress"),
+        ("lock_unsafe", "unknown_state"),
+        ("state_dir_unsafe", "unknown_state"),
+        ("invalid_run_id", "invalid_arguments"),
+        ("lock_cleanup_refused", "internal_error"),
+        ("lock_create_failed", "install_failed"),
+        ("lock_record_failed", "install_failed"),
+    ],
+)
+def test_lock_refusals_map_to_fixed_codes_at_the_coordinator_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    code: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def acquire(directory: Path, run_id: str) -> NativeRunLock:
+        raise NativeLockError(reason)
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path, acquire_lock=acquire
+    )
+
+    assert outcome.failure_code == code
+    assert outcome.host_step_attempted is False
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == code
+
+
+@pytest.mark.parametrize(
+    ("host_code", "code"),
+    [
+        (server_host_install.HOST_EXISTS, "existing_install"),
+        (server_host_install.TRANSACTION_CONFLICT, "partial_install"),
+        (server_host_install.TARGET_UNSAFE, "unknown_state"),
+        (server_host_install.TRANSACTION_BUSY, "install_in_progress"),
+        (server_host_install.ARCHIVE_MISMATCH, "verification_failed"),
+        (server_host_install.ARCHIVE_UNSAFE, "verification_failed"),
+        (server_host.INVALID_OWNERSHIP, "verification_failed"),
+        (server_host.NOT_OWNED, "verification_failed"),
+        (server_host_install.POLICY_REFUSED, "verification_failed"),
+        (server_host.SIGNATURE_REJECTED, "verification_failed"),
+        (server_host.UNSUPPORTED_SCHEMA, "verification_failed"),
+        (server_host_install.INSTALL_FAILED, "install_failed"),
+    ],
+)
+def test_host_refusals_map_to_fixed_codes_at_the_coordinator_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_code: str,
+    code: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def create_host(
+        lock: NativeRunLock, run_id: str, remaining: float
+    ) -> native.FreshHostInstall:
+        raise server_host_install.ServerHostInstallError(
+            "host refused", code=host_code
+        )
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path, create_host=create_host
+    )
+
+    assert outcome.failure_code == code
+    assert outcome.host_step_attempted is True
+    assert outcome.host_step_completed is False
+    assert outcome.activation_attempted is False
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == code
+
+
+def test_a_truly_unreapable_owned_child_retains_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    class NeverReapable:
+        pid = 424242
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            time.sleep(min(timeout or 0, 0.001))
+            raise subprocess.TimeoutExpired(["child"], timeout)
+
+        def send_signal(self, sig: int) -> None:
+            return None
+
+    monkeypatch.setattr(native, "_GETPGID", lambda pid: pid)
+    monkeypatch.setattr(native, "_KILLPG", lambda pid, sig: None)
+    child = native._OwnedChild(
+        NeverReapable(),  # type: ignore[arg-type]
+        term_grace=0.01,
+        reap_timeout=0.01,
+        poll_interval=0.001,
+    )
+    monkeypatch.setattr(
+        native, "_spawn_owned_child", lambda *args, **kwargs: child
+    )
+    policy = native._CoordinatorPolicy(
+        bind_timeout=0.1,
+        term_grace=0.01,
+        reap_timeout=0.01,
+        poll_interval=0.001,
+    )
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        wizard_command=lambda fd: (sys.executable, "-c", "pass"),
+        policy=policy,
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.lock_retained is True
+    assert _lock_path(tmp_path / "state").is_dir()
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["code"] == "wizard_failed"
+
+
+def test_a_non_darwin_platform_refuses_before_state_or_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("a non-Darwin run touched an install step")
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        prepare_state_dir=forbidden,
+        acquire_lock=forbidden,
+        prepare_scratch=forbidden,
+        create_host=forbidden,
+        install_engine=forbidden,
+        wizard_command=forbidden,
+    )
+
+    assert outcome.failure_code == "unknown_state"
+    assert outcome.host_step_attempted is False
+    assert outcome.activation_attempted is False
+    assert not (tmp_path / "state").exists()
+    assert [event["type"] for event in events] == ["failed"]
+    assert events[-1]["code"] == "unknown_state"
+
+
+def test_a_validated_public_fd_is_owned_closed_and_non_inheritable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    inheritance: list[bool] = []
+
+    with _public_event_pipe() as (read_fd, write_fd):
+
+        def create_host(
+            lock: NativeRunLock, run_id: str, remaining: float
+        ) -> native.FreshHostInstall:
+            inheritance.append(os.get_inheritable(write_fd))
+            return _fresh_host_value(tmp_path)
+
+        outcome = native._run_native_install(
+            _coordinator_request(write_fd),
+            deps=_coordinator_deps(tmp_path, create_host=create_host),
+        )
+        with pytest.raises(OSError):
+            os.fstat(write_fd)
+        _drain(read_fd)
+
+    assert inheritance == [False]
+    assert outcome.failure_code == "service_not_ready"
+
+
+def test_an_invalid_request_leaves_the_public_fd_to_the_caller(
+    tmp_path: Path,
+) -> None:
+    with _public_event_pipe() as (read_fd, event_fd):
+        bad = native.NativeInstallRequest(
+            run_id="not-a-uuid",
+            events_fd=event_fd,
+            first_seq=1,
+            prior_events=0,
+        )
+        outcome = native._run_native_install(
+            bad, deps=_coordinator_deps(tmp_path)
+        )
+        assert outcome.failure_code == "invalid_arguments"
+        os.fstat(event_fd)  # the caller still owns the descriptor
+        assert _available(read_fd) == b""
+        with pytest.raises(native.NativeCoordinatorError):
+            native.run_native_install(bad)
+        os.fstat(event_fd)

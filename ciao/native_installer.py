@@ -143,6 +143,26 @@ a failed release is not silently retried and keeps its cleanup report. A
 handlers must not call ``release`` either; cancellation belongs to the
 coordinator's normal loop. A same-UID writer can still race between a check and
 the mutation it guards, so these checks are evidence, not proof.
+
+The module also contains the first, deliberately partial native coordinator
+lifecycle (#2340). ``_run_native_install`` is the private test seam: callers
+inject the classifier, state/lock preparation, the real ``create_fresh_host``
+step, the engine install, the wizard command, the handoff reader and activation,
+so the order and the cleanup rules can be driven with fakes and real short-lived
+child processes. The public ``run_native_install`` exposes none of those seams
+and refuses before it touches the descriptor: the setup child cannot yet record
+a schema-2 handoff from native context, and no Python readiness proof exists, so
+the coordinator must not claim success. The lifecycle enforces the fresh-only
+preflight and the run lock before the engine install, creates the host through
+the real fresh-host helper, rechecks the lock and host immediately before each
+mutation, never passes the public event descriptor to a child, and terminates
+and reaps only the child it started before releasing the lock. Cancellation is
+a flag the caller sets (a signal handler may only set it); the normal loop emits
+``failed("cancelled")``. An activated service is never stopped, reloaded,
+quiesced or rolled back: a later failure or cancellation preserves it and the
+partial artifacts. ``SIGKILL`` runs no cleanup, so a held lock and a child are
+left as evidence. The coordinator never writes an onboarding or install-success
+receipt and adds no route.
 """
 
 from __future__ import annotations
@@ -165,6 +185,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, NoReturn
 
+from ciao.install_discovery import NativeInstallState
+from ciao.native_handoff import NativeHandoffError, NativeHandoffResult
 from ciao.os_support.private import (
     descriptor_acl_grants_another_account,
     is_owned_descriptor,
@@ -177,8 +199,11 @@ from ciao.release_manifest import (
 )
 from ciao.server_host import (
     APP_NAME,
+    INVALID_OWNERSHIP,
     NOT_OWNED,
+    SIGNATURE_REJECTED,
     UNSUPPORTED_PLATFORM,
+    UNSUPPORTED_SCHEMA,
     HostOwnership,
     Runner,
     default_bundle_path,
@@ -186,9 +211,13 @@ from ciao.server_host import (
     verify_owned_host,
 )
 from ciao.server_host_install import (
+    ARCHIVE_MISMATCH,
+    ARCHIVE_UNSAFE,
     HOST_EXISTS,
     INSTALL_FAILED,
+    POLICY_REFUSED,
     TARGET_UNSAFE,
+    TRANSACTION_BUSY,
     TRANSACTION_CONFLICT,
     ServerHostInstallError,
     install_server_host,
@@ -1825,4 +1854,971 @@ def _create_fresh_host(
         ownership=verified,
         bundle_path=Path(verified.bundle_path),
         ownership_path=record,
+    )
+
+
+# ── the native coordinator lifecycle skeleton (#2340) ────────────────────────
+
+#: The highest descriptor the public channel may use. Both the shell and the
+#: coordinator validate the POSIX-shell 3–9 range.
+MAX_EVENT_FD: Final[int] = 9
+#: One private bind notification: compact JSON plus newline and nothing else.
+MAX_BIND_NOTIFICATION_BYTES: Final[int] = 128
+#: The coordinator's own run-budget target. Injected synchronous steps can
+#: overrun it and must bound themselves; child waits and pipe reads are clamped.
+COORDINATOR_RUN_TIMEOUT_SECONDS: Final[float] = 3600.0
+#: How long the wizard may take to report its successful bind.
+COORDINATOR_BIND_TIMEOUT_SECONDS: Final[float] = 120.0
+#: How long the wizard may keep running after it bound (user interaction).
+COORDINATOR_WIZARD_EXIT_TIMEOUT_SECONDS: Final[float] = 1800.0
+#: SIGTERM grace before an owned child is killed.
+COORDINATOR_TERM_GRACE_SECONDS: Final[float] = 5.0
+#: How long reaping may take after SIGKILL.
+COORDINATOR_REAP_TIMEOUT_SECONDS: Final[float] = 5.0
+#: Poll slice for child waits and the private bind pipe.
+COORDINATOR_POLL_INTERVAL_SECONDS: Final[float] = 0.05
+#: Hard ceiling for every configurable coordinator deadline.
+COORDINATOR_MAX_TIMEOUT_SECONDS: Final[float] = 7200.0
+#: The most events this coordinator can write on its longest path: six phases,
+#: ``wizard_ready``, ``setup_saved`` and the terminal ``failed``. The run must
+#: have room for all of them or it could reach a mutation with no way to report
+#: an outcome.
+COORDINATOR_EVENT_BUDGET: Final[int] = 9
+
+_STATE_FAILURES: Final[dict[NativeInstallState, str]] = {
+    NativeInstallState.configured: "existing_install",
+    NativeInstallState.partial: "partial_install",
+    NativeInstallState.unknown: "unknown_state",
+}
+_LOCK_IN_PROGRESS: Final[frozenset[str]] = frozenset(
+    {
+        "lock_busy",
+        "lock_unknown",
+        "lock_changed",
+        "lock_not_held",
+        "lock_run_mismatch",
+    }
+)
+_LOCK_UNKNOWN: Final[frozenset[str]] = frozenset(
+    {"lock_unsafe", "state_dir_unsafe"}
+)
+_HOST_IN_PROGRESS: Final[frozenset[str]] = frozenset({TRANSACTION_BUSY})
+_HOST_VERIFICATION: Final[frozenset[str]] = frozenset(
+    {
+        ARCHIVE_MISMATCH,
+        ARCHIVE_UNSAFE,
+        INVALID_OWNERSHIP,
+        NOT_OWNED,
+        POLICY_REFUSED,
+        SIGNATURE_REJECTED,
+        UNSUPPORTED_SCHEMA,
+    }
+)
+# Windows has no SIGKILL/getpgid/killpg. The native coordinator refuses before
+# it spawns anything there; these aliases keep the module importable and make
+# the POSIX-only child cleanup fail closed if a caller reaches it.
+_SIGKILL: Final[int | None] = getattr(signal, "SIGKILL", None)
+_GETPGID: Final[Callable[[int], int] | None] = getattr(os, "getpgid", None)
+_KILLPG: Final[Callable[[int, int], None] | None] = getattr(os, "killpg", None)
+
+
+class NativeCoordinatorError(RuntimeError):
+    """A coordinator refusal with a fixed reason and a public failure code."""
+
+    def __init__(self, reason: str, failure_code: str) -> None:
+        if failure_code not in FAILURE_CODES:
+            raise ValueError("unknown native coordinator failure code")
+        super().__init__(reason)
+        self.reason = reason
+        self.failure_code = failure_code
+
+
+class NativeCancellation:
+    """The only cancellation primitive the coordinator reads.
+
+    A signal handler may call :meth:`cancel` (a plain assignment) and return; it
+    must never call the event writer, the lock or a child. The blocking waits
+    this module owns (child waits and the private bind pipe) are bounded polls
+    that observe this flag, so cancellation is acted on from the normal loop.
+    Injected synchronous steps cannot be preempted and must bound themselves.
+    """
+
+    __slots__ = ("_cancelled",)
+
+    def __init__(self) -> None:
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+
+@dataclass(frozen=True, slots=True)
+class NativeInstallRequest:
+    """The validated public inputs for one native install run.
+
+    ``events_fd`` is the public inherited non-stdio descriptor (the shell's
+    public range is 3–9), ``first_seq`` is the next sequence number after the
+    shell's events, and ``prior_events`` is how many events the shell already
+    wrote. The two are separate because ``seq`` may jump.
+
+    ``workspace`` is only a classifier suggestion: the wizard may legitimately
+    save a different workspace, so it is never compared with the handoff. Use
+    ``expected_workspace`` only when the caller has already fixed the choice;
+    then the handoff must name that same directory. The independently selected
+    workspace is reported in :attr:`NativeInstallOutcome.selected_workspace`.
+    """
+
+    run_id: str
+    events_fd: int
+    first_seq: int
+    prior_events: int
+    workspace: Path | None = None
+    expected_workspace: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class NativeInstallOutcome:
+    """What the coordinator attempted and completed, without logs or strings.
+
+    The ``*_attempted`` flags are set before the corresponding effect starts, so
+    a step that mutates and then raises is never reported as "nothing happened".
+    The ``*_completed`` flags are set only after the effect returned successfully.
+    ``service_may_be_running`` is true from the moment activation is attempted.
+    """
+
+    run_id: str
+    terminal: str | None
+    failure_code: str | None
+    host_step_attempted: bool
+    host_step_completed: bool
+    activation_attempted: bool
+    activation_completed: bool
+    selected_workspace: Path | None
+    lock_retained: bool
+
+    @property
+    def service_may_be_running(self) -> bool:
+        return self.activation_attempted
+
+    @property
+    def exit_code(self) -> int:
+        return 0 if self.terminal == "service_ready" else 1
+
+
+class _Refusal(Exception):
+    def __init__(self, code: str) -> None:
+        if code not in FAILURE_CODES:
+            raise AssertionError("unknown coordinator failure code")
+        super().__init__(code)
+        self.code = code
+
+
+class _Cancelled(Exception):
+    pass
+
+
+class _TimedOut(Exception):
+    pass
+
+
+class _ChildCleanupFailed(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _Deadline:
+    expires_at: float
+
+    @classmethod
+    def after(cls, seconds: float) -> _Deadline:
+        return cls(time.monotonic() + seconds)
+
+    def remaining(self) -> float:
+        return self.expires_at - time.monotonic()
+
+
+def _sub_deadline(run_deadline: _Deadline, seconds: float) -> _Deadline:
+    """A child-wait deadline clamped to what is left of the whole run.
+
+    Cleanup uses its own separately bounded grace/reap deadlines; those must not
+    be shortened by an already-expired run budget, because a lock may only be
+    released after the owned child is definitely reaped.
+    """
+    return _Deadline(min(run_deadline.expires_at, time.monotonic() + seconds))
+
+
+@dataclass(frozen=True, slots=True)
+class _CoordinatorPolicy:
+    """Finite, bounded deadlines and child-cleanup allowances for one run.
+
+    Only the coordinator's own child waits, private-pipe reads and cleanup are
+    enforced here. Injected synchronous steps (classify, state/lock preparation,
+    host install, engine install, handoff read and activation) cannot be
+    preempted by a library; the coordinator checks the deadline before and after
+    each one and the real implementations must bound themselves. Cleanup gets
+    its own grace and reap deadlines even after the whole-run budget is spent.
+    """
+
+    run_timeout: float = COORDINATOR_RUN_TIMEOUT_SECONDS
+    bind_timeout: float = COORDINATOR_BIND_TIMEOUT_SECONDS
+    wizard_exit_timeout: float = COORDINATOR_WIZARD_EXIT_TIMEOUT_SECONDS
+    term_grace: float = COORDINATOR_TERM_GRACE_SECONDS
+    reap_timeout: float = COORDINATOR_REAP_TIMEOUT_SECONDS
+    poll_interval: float = COORDINATOR_POLL_INTERVAL_SECONDS
+
+    def __post_init__(self) -> None:
+        for name in (
+            "run_timeout",
+            "bind_timeout",
+            "wizard_exit_timeout",
+            "term_grace",
+            "reap_timeout",
+            "poll_interval",
+        ):
+            value = getattr(self, name)
+            if type(value) not in (int, float):
+                raise NativeCoordinatorError("invalid_timeout", "internal_error")
+            number = float(value)
+            if (
+                not math.isfinite(number)
+                or number <= 0
+                or number > COORDINATOR_MAX_TIMEOUT_SECONDS
+            ):
+                raise NativeCoordinatorError("invalid_timeout", "internal_error")
+
+
+@dataclass(frozen=True, slots=True)
+class _CoordinatorDeps:
+    """Every external effect, injected only by tests and the next slice.
+
+    The public entry point exposes none of this. The production wiring must
+    supply the real classifier, the private state/lock helpers, the real
+    :func:`create_fresh_host` step, the verified-wheel engine install, the
+    native bootstrap command and :func:`ciao.native_handoff.activate`.
+    """
+
+    classify: Callable[[Path | None], NativeInstallState]
+    prepare_state_dir: Callable[[], Path]
+    acquire_lock: Callable[[Path, str], NativeRunLock]
+    prepare_scratch: Callable[[], Path]
+    create_host: Callable[[NativeRunLock, str, float], FreshHostInstall]
+    recheck_host: Callable[[FreshHostInstall], None]
+    install_engine: Callable[[float], None]
+    wizard_command: Callable[[int], tuple[str, ...]]
+    read_handoff: Callable[[str], NativeHandoffResult]
+    activate: Callable[[str, float], NativeHandoffResult]
+
+
+class _OwnedChild:
+    """A child this run started in its own session, and no other process.
+
+    Cancellation sends SIGTERM to the child's own process group, falls back to
+    SIGKILL after the configured grace, and waits (and therefore reaps) before
+    the coordinator releases the run lock. If the group can no longer be proven
+    to be this child's, only the child pid is signalled; a pid cannot be reused
+    while it is unreaped. If reaping cannot be proven, the lock is retained and
+    the run refuses instead of claiming cleanup.
+    """
+
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        term_grace: float,
+        reap_timeout: float,
+        poll_interval: float,
+    ) -> None:
+        self._process = process
+        self._term_grace = term_grace
+        self._reap_timeout = reap_timeout
+        self._poll_interval = poll_interval
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    def poll(self) -> int | None:
+        return self._process.poll()
+
+    def wait_for_exit(
+        self, deadline: _Deadline, cancellation: NativeCancellation
+    ) -> int:
+        while True:
+            code = self._process.poll()
+            if code is not None:
+                return code
+            if cancellation.cancelled:
+                raise _Cancelled
+            remaining = deadline.remaining()
+            if remaining <= 0:
+                raise _TimedOut
+            try:
+                return self._process.wait(
+                    timeout=min(remaining, self._poll_interval)
+                )
+            except subprocess.TimeoutExpired:
+                continue
+
+    def terminate_and_reap(self) -> None:
+        if self._process.poll() is not None:
+            return
+        self._signal_owned(signal.SIGTERM)
+        if self._wait_quiet(self._term_grace):
+            return
+        if _SIGKILL is None:
+            raise _ChildCleanupFailed
+        self._signal_owned(_SIGKILL)
+        if self._wait_quiet(self._reap_timeout):
+            return
+        raise _ChildCleanupFailed
+
+    def _signal_owned(self, signum: int) -> None:
+        if _GETPGID is None or _KILLPG is None:
+            raise _ChildCleanupFailed
+        pid = self._process.pid
+        try:
+            group = _GETPGID(pid)
+        except ProcessLookupError:
+            return
+        except OSError:
+            raise _ChildCleanupFailed from None
+        try:
+            if group == pid:
+                _KILLPG(pid, signum)
+            else:
+                # The child left the session this coordinator created. The pid
+                # is still unreaped and therefore still this child's; only the
+                # child is signalled, never an unrelated group.
+                self._process.send_signal(signum)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return
+            raise _ChildCleanupFailed from None
+
+    def _wait_quiet(self, seconds: float) -> bool:
+        end = time.monotonic() + seconds
+        while True:
+            if self._process.poll() is not None:
+                return True
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                self._process.wait(
+                    timeout=min(remaining, self._poll_interval)
+                )
+            except subprocess.TimeoutExpired:
+                continue
+            return True
+
+
+def _close_fd(fd: int) -> None:
+    if fd < 0:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _spawn_owned_child(
+    argv: tuple[str, ...],
+    *,
+    notification_fd: int,
+    public_fd: int,
+    policy: _CoordinatorPolicy,
+) -> _OwnedChild:
+    """Start the wizard with only the private notification descriptor.
+
+    ``close_fds=True`` plus an explicit ``pass_fds`` is the inheritance rule:
+    the public event descriptor is not in that tuple, so the child cannot see
+    it. ``start_new_session`` makes the child's process group this run's, which
+    is what cancellation is allowed to signal.
+
+    ``pass_fds`` deliberately makes the private notification descriptor
+    inheritable in the child. The child integration contract is: write exactly
+    one bounded record, then close the descriptor (or at least set it
+    non-inheritable) before spawning any descendant, and never pass it on. The
+    coordinator cannot set a descriptor flag inside the child after exec; the
+    real bootstrap command must do that itself.
+    """
+    if type(argv) is not tuple or not argv:
+        raise NativeCoordinatorError("invalid_child_command", "internal_error")
+    if any(type(argument) is not str or not argument for argument in argv):
+        raise NativeCoordinatorError("invalid_child_command", "internal_error")
+    if type(notification_fd) is not int or notification_fd < MIN_EVENT_FD:
+        raise NativeCoordinatorError("invalid_child_fd", "internal_error")
+    if notification_fd == public_fd:
+        raise NativeCoordinatorError("invalid_child_fd", "internal_error")
+    try:
+        os.set_inheritable(public_fd, False)
+    except OSError:
+        raise NativeCoordinatorError("invalid_child_fd", "internal_error") from None
+    try:
+        process = subprocess.Popen(
+            list(argv),
+            stdin=subprocess.DEVNULL,
+            pass_fds=(notification_fd,),
+            close_fds=True,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        raise NativeCoordinatorError(
+            "child_spawn_failed", "wizard_failed"
+        ) from None
+    return _OwnedChild(
+        process,
+        term_grace=policy.term_grace,
+        reap_timeout=policy.reap_timeout,
+        poll_interval=policy.poll_interval,
+    )
+
+
+def _bind_pipe() -> tuple[int, int]:
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_inheritable(read_fd, False)
+        # pass_fds makes the write end inheritable in the child; mark it here
+        # as well so the intent is explicit and testable.
+        os.set_inheritable(write_fd, True)
+    except OSError:
+        _close_fd(read_fd)
+        _close_fd(write_fd)
+        raise NativeCoordinatorError(
+            "bind_pipe_failed", "wizard_failed"
+        ) from None
+    return read_fd, write_fd
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("a private bind record repeats a key")
+        result[key] = value
+    return result
+
+
+def _parse_bind_notification(line: bytes) -> int:
+    if not line or len(line) > MAX_BIND_NOTIFICATION_BYTES:
+        raise NativeCoordinatorError(
+            "bind_record_invalid", "wizard_failed"
+        ) from None
+    try:
+        payload = json.loads(
+            line.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise NativeCoordinatorError(
+            "bind_record_invalid", "wizard_failed"
+        ) from None
+    if type(payload) is not dict or set(payload) != {"schema", "port"}:
+        raise NativeCoordinatorError("bind_record_invalid", "wizard_failed")
+    schema = payload.get("schema")
+    port = payload.get("port")
+    if type(schema) is not int or schema != 1:
+        raise NativeCoordinatorError("bind_record_invalid", "wizard_failed")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise NativeCoordinatorError("bind_record_invalid", "wizard_failed")
+    return port
+
+
+def _read_bind_notification(
+    read_fd: int,
+    deadline: _Deadline,
+    cancellation: NativeCancellation,
+    poll_interval: float,
+) -> int:
+    """Read one bounded bind record and require the producer to close the pipe.
+
+    The producer's contract is exact: write one compact
+    ``{"schema":1,"port":N}`` line, then close this private descriptor (or set
+    ``FD_CLOEXEC``) before spawning any descendant. The coordinator keeps
+    reading until EOF, so a record followed by a delayed second record, trailing
+    bytes or a descriptor left open is a refusal, not a silent success. The
+    deadline is the caller's bind deadline, already clamped to the whole-run
+    budget.
+    """
+    buffer = bytearray()
+    record: bytes | None = None
+    while True:
+        if cancellation.cancelled:
+            raise _Cancelled
+        remaining = deadline.remaining()
+        if remaining <= 0:
+            raise _TimedOut
+        try:
+            readable, _, _ = select.select(
+                [read_fd], [], [], min(remaining, poll_interval)
+            )
+        except InterruptedError:
+            continue
+        except (OSError, ValueError):
+            raise NativeCoordinatorError(
+                "bind_record_invalid", "wizard_failed"
+            ) from None
+        if not readable:
+            continue
+        limit = MAX_BIND_NOTIFICATION_BYTES + 1 - len(buffer)
+        if limit <= 0:
+            raise NativeCoordinatorError("bind_record_invalid", "wizard_failed")
+        try:
+            chunk = os.read(read_fd, limit)
+        except OSError:
+            raise NativeCoordinatorError(
+                "bind_record_invalid", "wizard_failed"
+            ) from None
+        if not chunk:
+            if record is None:
+                # The child closed the private pipe without reporting a bind.
+                raise NativeCoordinatorError(
+                    "bind_record_missing", "wizard_failed"
+                )
+            return _parse_bind_notification(record)
+        if record is not None:
+            # A second record or any trailing byte after the first line.
+            raise NativeCoordinatorError("bind_record_invalid", "wizard_failed")
+        buffer.extend(chunk)
+        newline = buffer.find(b"\n")
+        if newline >= 0:
+            if newline + 1 != len(buffer):
+                # Extra bytes in the same read as the first line.
+                raise NativeCoordinatorError(
+                    "bind_record_invalid", "wizard_failed"
+                )
+            record = bytes(buffer[:newline])
+            buffer.clear()
+            # Keep reading: success requires the producer to close promptly.
+            continue
+        if len(buffer) > MAX_BIND_NOTIFICATION_BYTES:
+            raise NativeCoordinatorError("bind_record_invalid", "wizard_failed")
+
+
+def _check_stage(
+    deadline: _Deadline, cancellation: NativeCancellation
+) -> None:
+    if cancellation.cancelled:
+        raise _Cancelled
+    if deadline.remaining() <= 0:
+        raise _TimedOut
+
+
+def _remaining(deadline: _Deadline) -> float:
+    remaining = deadline.remaining()
+    if remaining <= 0:
+        raise _TimedOut
+    return remaining
+
+
+def _validate_request(request: NativeInstallRequest) -> None:
+    run_id = request.run_id
+    if type(run_id) is not str:
+        raise NativeCoordinatorError("invalid_run_id", "invalid_arguments")
+    try:
+        parsed = uuid.UUID(run_id)
+    except (AttributeError, TypeError, ValueError):
+        raise NativeCoordinatorError("invalid_run_id", "invalid_arguments") from None
+    if str(parsed) != run_id:
+        raise NativeCoordinatorError("invalid_run_id", "invalid_arguments")
+    if type(request.events_fd) is not int:
+        raise NativeCoordinatorError("invalid_events_fd", "invalid_arguments")
+    if not MIN_EVENT_FD <= request.events_fd <= MAX_EVENT_FD:
+        raise NativeCoordinatorError("invalid_events_fd", "invalid_arguments")
+    if type(request.first_seq) is not int or request.first_seq < 1:
+        raise NativeCoordinatorError("invalid_sequence", "invalid_arguments")
+    if type(request.prior_events) is not int or request.prior_events < 0:
+        raise NativeCoordinatorError("invalid_sequence", "invalid_arguments")
+    if request.prior_events >= MAX_EVENTS:
+        raise NativeCoordinatorError("invalid_sequence", "invalid_arguments")
+    if request.prior_events > request.first_seq - 1:
+        raise NativeCoordinatorError("invalid_sequence", "invalid_arguments")
+    if request.prior_events + COORDINATOR_EVENT_BUDGET > MAX_EVENTS:
+        raise NativeCoordinatorError("invalid_sequence", "invalid_arguments")
+    for value in (request.workspace, request.expected_workspace):
+        if value is None:
+            continue
+        if not isinstance(value, Path) or not value.is_absolute():
+            raise NativeCoordinatorError("invalid_workspace", "invalid_arguments")
+        if any(part in {".", ".."} for part in value.parts):
+            raise NativeCoordinatorError("invalid_workspace", "invalid_arguments")
+
+
+def _failure_outcome(request: NativeInstallRequest, code: str) -> NativeInstallOutcome:
+    run_id = request.run_id if type(request.run_id) is str else ""
+    return NativeInstallOutcome(
+        run_id=run_id,
+        terminal=None,
+        failure_code=code,
+        host_step_attempted=False,
+        host_step_completed=False,
+        activation_attempted=False,
+        activation_completed=False,
+        selected_workspace=None,
+        lock_retained=False,
+    )
+
+
+def _map_lock_failure(exc: NativeLockError) -> str:
+    if exc.reason in _LOCK_IN_PROGRESS:
+        return "install_in_progress"
+    if exc.reason in _LOCK_UNKNOWN:
+        return "unknown_state"
+    if exc.reason == "invalid_run_id":
+        return "invalid_arguments"
+    if exc.reason == "lock_cleanup_refused":
+        return "internal_error"
+    return "install_failed"
+
+
+def _map_host_failure(exc: ServerHostInstallError) -> str:
+    if exc.code == HOST_EXISTS:
+        return "existing_install"
+    if exc.code == TRANSACTION_CONFLICT:
+        return "partial_install"
+    if exc.code == TARGET_UNSAFE:
+        return "unknown_state"
+    if exc.code in _HOST_IN_PROGRESS:
+        return "install_in_progress"
+    if exc.code in _HOST_VERIFICATION:
+        return "verification_failed"
+    return "install_failed"
+
+
+def _map_classification(state: NativeInstallState) -> None:
+    if state is NativeInstallState.fresh:
+        return
+    code = _STATE_FAILURES.get(state)
+    if code is None:
+        raise NativeCoordinatorError("invalid_classification", "internal_error")
+    raise _Refusal(code)
+
+
+def run_native_install(request: NativeInstallRequest) -> NativeInstallOutcome:
+    """Refuse the public native coordinator until its proof path exists.
+
+    This is the production entry point. It deliberately exposes no injection
+    seams: the next slice must supply the native bootstrap context and schema-2
+    handoff recording in the setup child, and a real readiness proof equivalent
+    to the shell's fresh startup check, before this can start a run. Invalid
+    inputs are refused first with ``invalid_arguments``; a valid request then
+    fails with ``coordinator_unavailable`` before reading the descriptor,
+    acquiring the lock, touching the host or starting a child.
+    :func:`_run_native_install` is the testable lifecycle seam and is not public
+    API.
+    """
+    _validate_request(request)
+    raise NativeCoordinatorError("coordinator_unavailable", "internal_error")
+
+
+def _run_native_install(
+    request: NativeInstallRequest,
+    *,
+    deps: _CoordinatorDeps,
+    cancellation: NativeCancellation | None = None,
+    policy: _CoordinatorPolicy | None = None,
+) -> NativeInstallOutcome:
+    """Drive the first coordinator lifecycle slice; tests inject every effect.
+
+    The order is deliberate: classify fresh, then prepare the private state and
+    take the run lock, then prepare the bootstrap scratch chain, then create the
+    host through the real fresh-host helper and recheck it, then install the
+    engine, then start the wizard. Every mutation is preceded by a cancellation
+    and deadline check and (after acquisition) by ``assert_held``. The engine
+    install cannot begin on ``configured``, ``partial``, ``unknown`` or a held
+    lock. Readiness proof is not implemented, so this slice always ends with
+    ``failed("service_not_ready")``; it never emits ``service_ready``.
+
+    The injected synchronous steps cannot be preempted by this module: the
+    deadline is checked before and after each one and the real implementation
+    must bound itself. The coordinator's own child waits and private-pipe reads
+    are clamped to the whole-run budget, while cleanup uses its separately
+    bounded grace/reap deadlines so an expired run budget cannot prevent a
+    definite reaping decision. This is not a claim that every injected step is
+    interruptible. ``KeyboardInterrupt``/``SystemExit`` and ``SIGKILL`` are not
+    converted into an event; the lock is left as evidence in those paths.
+    """
+    cancellation = NativeCancellation() if cancellation is None else cancellation
+    policy = _CoordinatorPolicy() if policy is None else policy
+    try:
+        _validate_request(request)
+    except NativeCoordinatorError as exc:
+        return _failure_outcome(request, exc.failure_code)
+    try:
+        os.set_inheritable(request.events_fd, False)
+    except OSError:
+        return _failure_outcome(request, "event_channel_failed")
+    try:
+        writer = EventWriter(
+            request.events_fd,
+            run_id=request.run_id,
+            first_seq=request.first_seq,
+            prior_events=request.prior_events,
+        )
+    except EventError:
+        _close_fd(request.events_fd)
+        return _failure_outcome(request, "event_channel_failed")
+
+    lock: NativeRunLock | None = None
+    child: _OwnedChild | None = None
+    host_step_attempted = False
+    host_step_completed = False
+    activation_attempted = False
+    activation_completed = False
+    selected_workspace: Path | None = None
+    failure: str | None = None
+    channel_dead = False
+    lock_retained = False
+
+    try:
+        try:
+            try:
+                if sys.platform != "darwin":
+                    raise _Refusal("unknown_state")
+                deadline = _Deadline.after(policy.run_timeout)
+                _check_stage(deadline, cancellation)
+
+                writer.phase("preflight")
+                try:
+                    classification = deps.classify(request.workspace)
+                except Exception:
+                    # An unreadable surface is never fresh.
+                    raise _Refusal("unknown_state") from None
+                _map_classification(classification)
+                _check_stage(deadline, cancellation)
+
+                writer.phase("bootstrap")
+                state_dir = deps.prepare_state_dir()
+                lock = deps.acquire_lock(state_dir, request.run_id)
+                lock.assert_held(run_id=request.run_id)
+                try:
+                    deps.prepare_scratch()
+                except NativeHandoffError:
+                    raise _Refusal("unknown_state") from None
+                _check_stage(deadline, cancellation)
+                # A second read-only classification is the last pre-mutation
+                # check for a definition, workspace, receipt or tool directory
+                # that appeared while the private state and lock were created.
+                # The host helper repeats its own host/journal checks; this scan
+                # narrows the window and is not proof.
+                lock.assert_held(run_id=request.run_id)
+                try:
+                    confirmation = deps.classify(request.workspace)
+                except Exception:
+                    raise _Refusal("unknown_state") from None
+                _map_classification(confirmation)
+                lock.assert_held(run_id=request.run_id)
+
+                writer.phase("install")
+                host_step_attempted = True
+                try:
+                    host = deps.create_host(
+                        lock, request.run_id, _remaining(deadline)
+                    )
+                except (_Cancelled, _TimedOut):
+                    raise
+                except (
+                    NativeCoordinatorError,
+                    NativeLockError,
+                    ServerHostInstallError,
+                ):
+                    raise
+                except Exception:
+                    raise _Refusal("install_failed") from None
+                host_step_completed = True
+                try:
+                    deps.recheck_host(host)
+                except (_Cancelled, _TimedOut):
+                    raise
+                except (
+                    NativeCoordinatorError,
+                    NativeLockError,
+                    ServerHostInstallError,
+                ):
+                    raise
+                except Exception:
+                    raise _Refusal("install_failed") from None
+                lock.assert_held(run_id=request.run_id)
+                _check_stage(deadline, cancellation)
+                try:
+                    deps.install_engine(_remaining(deadline))
+                except (_Cancelled, _TimedOut):
+                    raise
+                except NativeCoordinatorError:
+                    raise
+                except Exception:
+                    raise _Refusal("install_failed") from None
+                lock.assert_held(run_id=request.run_id)
+                _check_stage(deadline, cancellation)
+
+                writer.phase("wizard")
+                read_fd, write_fd = _bind_pipe()
+                try:
+                    try:
+                        argv = deps.wizard_command(write_fd)
+                    except NativeCoordinatorError:
+                        raise
+                    except Exception:
+                        raise _Refusal("wizard_failed") from None
+                    child = _spawn_owned_child(
+                        argv,
+                        notification_fd=write_fd,
+                        public_fd=request.events_fd,
+                        policy=policy,
+                    )
+                    _close_fd(write_fd)
+                    write_fd = -1
+                    try:
+                        port = _read_bind_notification(
+                            read_fd,
+                            _sub_deadline(deadline, policy.bind_timeout),
+                            cancellation,
+                            policy.poll_interval,
+                        )
+                    except _TimedOut:
+                        raise _Refusal("wizard_failed") from None
+                finally:
+                    _close_fd(write_fd)
+                    _close_fd(read_fd)
+                writer.wizard_ready(port)
+                try:
+                    code = child.wait_for_exit(
+                        _sub_deadline(deadline, policy.wizard_exit_timeout),
+                        cancellation,
+                    )
+                except _TimedOut:
+                    raise _Refusal("wizard_failed") from None
+                if code != 0:
+                    raise _Refusal("wizard_failed")
+                _check_stage(deadline, cancellation)
+                try:
+                    handoff = deps.read_handoff(request.run_id)
+                except NativeHandoffError:
+                    raise _Refusal("wizard_failed") from None
+                except OSError:
+                    raise _Refusal("wizard_failed") from None
+                except (_Cancelled, _TimedOut):
+                    raise
+                except Exception:
+                    raise _Refusal("wizard_failed") from None
+                if handoff.run_id != request.run_id:
+                    raise _Refusal("wizard_failed")
+                selected_workspace = handoff.workspace
+                if request.expected_workspace is not None:
+                    try:
+                        expected = Path(
+                            os.path.realpath(request.expected_workspace)
+                        )
+                    except OSError:
+                        raise _Refusal("wizard_failed") from None
+                    if handoff.workspace != expected:
+                        raise _Refusal("wizard_failed")
+                writer.setup_saved()
+                lock.assert_held(run_id=request.run_id)
+                _check_stage(deadline, cancellation)
+
+                writer.phase("activation")
+                activation_attempted = True
+                try:
+                    activated_result = deps.activate(
+                        request.run_id, _remaining(deadline)
+                    )
+                except NativeHandoffError:
+                    raise _Refusal("activation_refused") from None
+                except OSError:
+                    raise _Refusal("activation_refused") from None
+                except (_Cancelled, _TimedOut):
+                    raise
+                except Exception:
+                    raise _Refusal("activation_refused") from None
+                # The service may now be running. Nothing below stops, reloads,
+                # quiesces or rolls it back.
+                activation_completed = True
+                if (
+                    activated_result.run_id != request.run_id
+                    or activated_result.port != handoff.port
+                ):
+                    raise _Refusal("activation_refused")
+                _check_stage(deadline, cancellation)
+
+                writer.phase("readiness")
+                # Readiness proof is not implemented in this slice. A truthful
+                # service_not_ready failure is the only terminal this slice may emit;
+                # there is deliberately no service_ready call in the coordinator.
+                raise _Refusal("service_not_ready")
+            except _Refusal as refusal:
+                failure = refusal.code
+            except _Cancelled:
+                failure = "cancelled"
+            except _TimedOut:
+                failure = "cancelled" if cancellation.cancelled else "internal_error"
+            except NativeCoordinatorError as exc:
+                failure = exc.failure_code
+            except NativeLockError as exc:
+                failure = _map_lock_failure(exc)
+            except ServerHostInstallError as exc:
+                failure = _map_host_failure(exc)
+            except NativeHandoffError:
+                failure = (
+                    "activation_refused"
+                    if activation_attempted
+                    else "wizard_failed"
+                )
+            except EventError:
+                failure = "event_channel_failed"
+                channel_dead = True
+            except OSError:
+                failure = "internal_error"
+            except Exception:
+                failure = "internal_error"
+        finally:
+            cleanup_failed = False
+            if child is not None:
+                try:
+                    child.terminate_and_reap()
+                except Exception:
+                    # Includes _ChildCleanupFailed and any unexpected cleanup
+                    # error: the child may still be alive. Keep the lock so a
+                    # second run cannot install beside it, and continue to the
+                    # terminal event below instead of skipping it.
+                    lock_retained = True
+                    cleanup_failed = True
+            if lock is not None and not lock_retained:
+                try:
+                    lock.release()
+                except Exception:
+                    lock_retained = True
+                    cleanup_failed = True
+            if cleanup_failed and failure is None:
+                failure = "internal_error"
+
+        try:
+            if failure is None:
+                failure = "internal_error"
+            if not channel_dead:
+                try:
+                    writer.failed(failure)
+                except EventError:
+                    channel_dead = True
+                    failure = "event_channel_failed"
+        finally:
+            writer.close()
+
+    finally:
+        writer.close()
+    return NativeInstallOutcome(
+        run_id=request.run_id,
+        terminal=None if channel_dead else "failed",
+        failure_code=failure,
+        host_step_attempted=host_step_attempted,
+        host_step_completed=host_step_completed,
+        activation_attempted=activation_attempted,
+        activation_completed=activation_completed,
+        selected_workspace=selected_workspace,
+        lock_retained=lock_retained,
     )
