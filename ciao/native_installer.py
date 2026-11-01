@@ -171,7 +171,8 @@ The bootstrap child side is :class:`NativeBootstrapContext` plus
 host's verified ownership snapshot, the private scratch chain, the absent live
 definition, handoff result and launchd job, and the bootstrap config/runtime
 directory identities. The context is threaded through ``create_app`` to the
-existing authenticated setup handler; ``notify_native_bind`` makes the private
+existing loopback-only, bootstrap-mode-only ``/api/setup/finish`` (no session
+cookie; see docs/REMOTE_BOUNDARY.md); ``notify_native_bind`` makes the private
 descriptor non-inheritable and writes one bounded record only when the server
 reports its bind. Neither is a public entry point: the hidden CLI handover is
 refused without installer bootstrap and run id, and the legacy schema-1 path

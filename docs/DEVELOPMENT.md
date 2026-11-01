@@ -277,8 +277,9 @@ uncertain and starts nothing.
 That legacy schema-1 path is unchanged. #2339 isolates a native handoff in
 `ciao/native_handoff.py`, using the same `~/.ciao/installer-bootstrap/handoff.json`
 file but **schema 2 only**. The legacy CLI, routes and installer paths never
-import it; the setup child's native branch and the existing authenticated
-`/api/setup/finish` do, through the explicit `NativeBootstrapContext` described
+import it; the setup child's native branch and the existing loopback-only,
+bootstrap-mode-only `/api/setup/finish` (no session cookie; see
+docs/REMOTE_BOUNDARY.md) do, through the explicit `NativeBootstrapContext` described
 below, while the installer parent's activation wiring still waits for the
 shell/readiness integration. Its result additionally records the
 definition's sha256, the program the definition actually executes and the

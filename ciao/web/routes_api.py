@@ -6415,6 +6415,132 @@ def _request_native_failure_exit(request: Request) -> None:
     os._exit(1)
 
 
+class _NativeFinishRefusal(Exception):
+    """A fixed refusal after the native claim; the handler maps it to its 409."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _publish_setup_environment(workspace: Path, port: int, password: str) -> None:
+    # Hand the chosen workspace to the relaunched process. A foreground
+    # `ciao run` restarts by re-execing itself with the current environment,
+    # and nothing else tells the fresh process where setup landed — without
+    # this it boots straight back into the bootstrap wizard.
+    os.environ["CIAO_WORKSPACE"] = str(workspace)
+    os.environ["PWA_PORT"] = str(port)
+    # Same reason for the credentials: `load_dotenv` does not override values
+    # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
+    # bootstrap process would outrank the password just written to .env.
+    os.environ["PWA_AUTH_TOKEN"] = password
+
+
+async def _native_finish_write(
+    context: NativeBootstrapContext,
+    *,
+    workspace: Path,
+    setup_kwargs: dict[str, Any],
+    password: str,
+    port: int,
+    startup_id: str,
+    bootstrap_host: str,
+    bootstrap_port: int,
+) -> tuple[Path, list[Path]]:
+    """Everything the native bootstrap does after its single-flight claim.
+
+    Resolve, re-check the captured state, write, record and read back. Returns
+    the resolved workspace and what setup wrote. A refusal is raised as
+    :class:`_NativeFinishRefusal` with its fixed message; any other exception
+    propagates to the handler, which treats it the same way. The caller requests
+    the failure exit on every exception, so nothing here has to clean up.
+    """
+    from ciao import native_handoff
+    from ciao.cli import setup_workspace
+    from ciao.native_handoff import NativeHandoffError
+    from ciao.native_installer import NativeBootstrapError
+
+    resolved_workspace = workspace.resolve()
+    # Last read-only gate before the first destination write. It re-checks the
+    # host snapshot, the bootstrap directory identities, the private scratch
+    # chain, the absent live definition and handoff result, the chosen workspace
+    # and the engine interpreter. It runs off the event loop because the host
+    # check reads files and runs the codesign probe.
+    try:
+        resolved_workspace = await asyncio.to_thread(
+            context.assert_ready_to_write,
+            startup_id=startup_id,
+            workspace=resolved_workspace,
+            port=port,
+            engine_python=sys.executable,
+            config_host=bootstrap_host,
+            config_port=bootstrap_port,
+        )
+    except NativeBootstrapError:
+        raise _NativeFinishRefusal(_NATIVE_SETUP_STATE_CHANGED) from None
+
+    # setup_workspace only writes workspace files and the bundled-engine
+    # LaunchAgent. The release installer owns app downloads, so setup remains
+    # responsive and never reaches out to GitHub. The native branch never
+    # overwrites a definition: setup_kwargs carries exclusive_service_definition.
+    written = await asyncio.to_thread(
+        functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
+    )
+    _publish_setup_environment(resolved_workspace, port, password)
+
+    # The definition this setup wrote must be exactly the one the context
+    # proved absent before the write. Comparing the reported path catches a
+    # legacy override or a setup that wrote nowhere.
+    try:
+        written_definitions = [
+            Path(path).resolve()
+            for path in written
+            if Path(path).name == context.definition_path.name
+        ]
+    except OSError:
+        written_definitions = []
+    if written_definitions != [context.definition_path.resolve()]:
+        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED)
+    try:
+        # The schema-2 record binds the definition's digest, the executed
+        # program/interpreter identities and the environment. It is written
+        # off the event loop; the read-back below is the record identity check
+        # for this run and this child.
+        recorded = await asyncio.to_thread(
+            functools.partial(
+                native_handoff.record_setup_completion,
+                run_id=context.run_id,
+                startup_id=context.startup_id,
+                workspace=resolved_workspace,
+                written=written,
+                port=port,
+                engine_python=str(context.engine_python),
+            )
+        )
+        result = await asyncio.to_thread(
+            native_handoff.read_result,
+            expected_run_id=context.run_id,
+        )
+    except (NativeHandoffError, OSError, ValueError):
+        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED) from None
+    try:
+        identity_ok = (
+            Path(recorded).resolve() == context.handoff_path.resolve()
+            and result.run_id == context.run_id
+            and result.startup_id == context.startup_id
+            and result.workspace == resolved_workspace
+            and result.port == port
+            and result.service_backend == "macos"
+            and result.definition_path.resolve() == context.definition_path.resolve()
+            and Path(result.engine_python).resolve() == context.engine_python.resolve()
+        )
+    except OSError:
+        identity_ok = False
+    if not identity_ok:
+        raise _NativeFinishRefusal(_NATIVE_SETUP_RECORD_REFUSED)
+    return resolved_workspace, written
+
+
 async def setup_finish_endpoint(request: Request) -> JSONResponse:
     """Write real setup config from bootstrap mode and request supervisor restart."""
     config = request.app.state.config
@@ -6531,37 +6657,22 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    resolved_workspace = Path(workspace).expanduser().resolve()
+    # The native branch resolves the workspace inside its guarded block, after
+    # the claim; the legacy path resolves it here as before.
+    resolved_workspace = Path(workspace).expanduser()
+    if native_context is None:
+        resolved_workspace = resolved_workspace.resolve()
     tracker = getattr(request.app.state, "startup_tracker", None)
 
     if native_context is not None:
-        # Last read-only gate before the first destination write. It re-checks
-        # the host snapshot, the bootstrap directory identities, the private
-        # scratch chain, the absent live definition and handoff result, the
-        # chosen workspace and the engine interpreter. It runs off the event
-        # loop because the host check reads files and runs the codesign probe.
-        from ciao.native_installer import NativeBootstrapError
-
-        # Single flight: claimed synchronously before the first await below and
-        # never released, so a second request, or a retry after a refusal, is
-        # refused rather than racing the non-exclusive workspace writes.
+        # Single flight: claimed synchronously before the first await in the
+        # guarded block and never released, so a second request, or a retry
+        # after a refusal, is refused rather than racing the non-exclusive
+        # workspace writes. Refusals before this line take no claim and exit
+        # nothing; every path after it ends in the failure exit or an ok.
         if getattr(request.app.state, "native_finish_claimed", False):
             return JSONResponse({"error": _NATIVE_SETUP_ALREADY_CLAIMED}, status_code=409)
         request.app.state.native_finish_claimed = True
-        try:
-            resolved_workspace = await asyncio.to_thread(
-                native_context.assert_ready_to_write,
-                startup_id=getattr(tracker, "startup_id", "") or "",
-                workspace=resolved_workspace,
-                port=port,
-                engine_python=sys.executable,
-                config_host=config.pwa_host,
-                config_port=config.pwa_port,
-            )
-        except NativeBootstrapError:
-            return JSONResponse(
-                {"error": _NATIVE_SETUP_STATE_CHANGED}, status_code=409
-            )
 
     # setup_workspace only writes workspace files and the bundled-engine
     # LaunchAgent. The release installer owns app downloads, so setup remains
@@ -6590,31 +6701,38 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         # Use the host snapshot this child proved at capture, not a second
         # independent selection that could downgrade to the direct shape.
         setup_kwargs["verified_host"] = native_context.expected_host
-    try:
-        written = await asyncio.to_thread(
-            functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
-        )
-    except Exception as exc:
-        if native_context is not None:
-            # The write may have touched the destination before failing, so the
-            # child leaves nonzero rather than serving a partial install.
+    if native_context is not None:
+        try:
+            resolved_workspace, written = await _native_finish_write(
+                native_context,
+                workspace=resolved_workspace,
+                setup_kwargs=setup_kwargs,
+                password=password,
+                port=port,
+                startup_id=getattr(tracker, "startup_id", "") or "",
+                bootstrap_host=config.pwa_host,
+                bootstrap_port=config.pwa_port,
+            )
+        except _NativeFinishRefusal as finish_refusal:
+            # The claim is taken and something may already be on disk: the
+            # child leaves nonzero, the installer parent never activates.
+            _request_native_failure_exit(request)
+            return JSONResponse({"error": finish_refusal.message}, status_code=409)
+        except Exception:
+            # Any other failure after the claim, including one raised before the
+            # write, ends the same way: a nonzero exit, never a served wizard.
             _request_native_failure_exit(request)
             return JSONResponse(
                 {"error": _NATIVE_SETUP_WRITE_REFUSED}, status_code=409
             )
-        if isinstance(exc, RuntimeError):
+    else:
+        try:
+            written = await asyncio.to_thread(
+                functools.partial(setup_workspace, str(resolved_workspace), **setup_kwargs)
+            )
+        except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-        raise
-    # Hand the chosen workspace to the relaunched process. A foreground
-    # `ciao run` restarts by re-execing itself with the current environment,
-    # and nothing else tells the fresh process where setup landed — without
-    # this it boots straight back into the bootstrap wizard.
-    os.environ["CIAO_WORKSPACE"] = str(resolved_workspace)
-    os.environ["PWA_PORT"] = str(port)
-    # Same reason for the credentials: `load_dotenv` does not override values
-    # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
-    # bootstrap process would outrank the password just written to .env.
-    os.environ["PWA_AUTH_TOKEN"] = password
+        _publish_setup_environment(resolved_workspace, port, password)
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. Nothing
     # menu-bar related happens here any more: Ciaobot.app is the menu bar, and
@@ -6624,72 +6742,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         and not str(body.get("launch_agents_dir", "")).strip()
     )
 
-    if native_context is not None:
-        from ciao import native_handoff
-        from ciao.native_handoff import NativeHandoffError
-
-        # The definition this setup wrote must be exactly the one the context
-        # proved absent before the write. Comparing the reported path catches a
-        # legacy override or a setup that wrote nowhere.
-        try:
-            written_definitions = [
-                Path(path).resolve()
-                for path in written
-                if Path(path).name == native_context.definition_path.name
-            ]
-        except OSError:
-            written_definitions = []
-        if written_definitions != [native_context.definition_path.resolve()]:
-            _request_native_failure_exit(request)
-            return JSONResponse(
-                {"error": _NATIVE_SETUP_RECORD_REFUSED}, status_code=409
-            )
-        try:
-            # The schema-2 record binds the definition's digest, the executed
-            # program/interpreter identities and the environment. It is written
-            # off the event loop; the read-back below is the record identity
-            # check for this run and this child.
-            recorded = await asyncio.to_thread(
-                functools.partial(
-                    native_handoff.record_setup_completion,
-                    run_id=native_context.run_id,
-                    startup_id=native_context.startup_id,
-                    workspace=resolved_workspace,
-                    written=written,
-                    port=port,
-                    engine_python=str(native_context.engine_python),
-                )
-            )
-            result = await asyncio.to_thread(
-                native_handoff.read_result,
-                expected_run_id=native_context.run_id,
-            )
-        except (NativeHandoffError, OSError, ValueError):
-            _request_native_failure_exit(request)
-            return JSONResponse(
-                {"error": _NATIVE_SETUP_RECORD_REFUSED}, status_code=409
-            )
-        try:
-            identity_ok = (
-                Path(recorded).resolve() == native_context.handoff_path.resolve()
-                and result.run_id == native_context.run_id
-                and result.startup_id == native_context.startup_id
-                and result.workspace == resolved_workspace
-                and result.port == port
-                and result.service_backend == "macos"
-                and result.definition_path.resolve()
-                == native_context.definition_path.resolve()
-                and Path(result.engine_python).resolve()
-                == native_context.engine_python.resolve()
-            )
-        except OSError:
-            identity_ok = False
-        if not identity_ok:
-            _request_native_failure_exit(request)
-            return JSONResponse(
-                {"error": _NATIVE_SETUP_RECORD_REFUSED}, status_code=409
-            )
-    elif installer_mode:
+    if native_context is None and installer_mode:
         # The installer parent owns the service: this child records what setup
         # wrote, exits 0, and the parent verifies and activates. This is the
         # unchanged schema-1 legacy path.

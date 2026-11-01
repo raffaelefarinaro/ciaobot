@@ -748,7 +748,8 @@ def test_native_setup_refuses_a_race_before_writing_anything(
     )
     assert not workspace.exists()
     assert not native_handoff.result_path().exists()
-    assert restarts == []
+    assert (launch / "com.ciao.server.plist").read_text(encoding="utf-8") == "present"
+    assert restarts == [1]
 
 
 def test_native_setup_refuses_body_overrides_before_writing(
@@ -786,7 +787,7 @@ def test_native_setup_refuses_an_explicit_workspace_mismatch(
     resp = _post(client, isolated_home / "other")
     assert resp.status_code == 409
     assert not (isolated_home / "other").exists()
-    assert restarts == []
+    assert restarts == [1]
 
 
 def test_native_setup_refuses_an_existing_definition_without_overwriting(
@@ -800,7 +801,9 @@ def test_native_setup_refuses_an_existing_definition_without_overwriting(
     resp = _post(client, isolated_home / "workspace")
     assert resp.status_code == 409
     assert definition.read_text(encoding="utf-8") == "do not replace"
-    assert restarts == []
+    assert not (isolated_home / "workspace").exists()
+    assert not native_handoff.result_path().exists()
+    assert restarts == [1]
 
 
 def test_native_setup_errors_are_sanitized(
@@ -1194,7 +1197,7 @@ def test_a_second_native_finish_request_is_refused_and_setup_runs_once(
 def test_a_refused_native_finish_keeps_the_claim(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, _context, launch, _restarts = _native_client_with_fakes(
+    client, _context, launch, restarts = _native_client_with_fakes(
         isolated_home, monkeypatch
     )
     monkeypatch.setattr(
@@ -1204,10 +1207,20 @@ def test_a_refused_native_finish_keeps_the_claim(
     definition.write_text("present", encoding="utf-8")
     first = _post(client, isolated_home / "workspace")
     assert first.status_code == 409
+    assert first.json() == {"error": _STATE_CHANGED}
+    # The refusal after the claim leaves the child to exit nonzero, and writes
+    # nothing: no workspace, no handoff, the foreign definition untouched.
+    assert restarts == [1]
+    assert not (isolated_home / "workspace").exists()
+    assert not native_handoff.result_path().exists()
+    assert definition.read_text(encoding="utf-8") == "present"
     definition.unlink()
     second = _post(client, isolated_home / "workspace")
     assert second.status_code == 409
     assert second.json() == {"error": _ALREADY_CLAIMED}
+    # The claim refusal is not a new claimed path, so it adds no second exit.
+    assert restarts == [1]
+    assert not (isolated_home / "workspace").exists()
 
 
 @pytest.mark.parametrize(
@@ -1385,7 +1398,7 @@ def test_native_finish_refuses_a_handoff_that_appears_during_the_wizard(
     assert resp.json() == {"error": _STATE_CHANGED}
     assert not (isolated_home / "workspace").exists()
     assert context.handoff_path.read_text(encoding="utf-8") == "{}"
-    assert restarts == []
+    assert restarts == [1]
 
 
 def test_capture_refuses_a_read_only_notification_descriptor(
@@ -1519,9 +1532,20 @@ def test_native_save_refuses_a_service_changed_while_wizard_open(
     client, _context, launch, restarts = _native_client_with_fakes(
         isolated_home, monkeypatch
     )
+    # Only the launchd job probe changes: the definition stays absent, so the
+    # refusal can only come from the job guard.
     monkeypatch.setattr(native_installer, "_server_job_absent", lambda: False)
-    definition = launch / "com.ciao.server.plist"
-    definition.write_text("created after capture", encoding="utf-8")
+    reasons: list[str] = []
+    real_assert = NativeBootstrapContext.assert_ready_to_write
+
+    def spy(self, **kwargs):
+        try:
+            return real_assert(self, **kwargs)
+        except NativeBootstrapError as exc:
+            reasons.append(exc.reason)
+            raise
+
+    monkeypatch.setattr(NativeBootstrapContext, "assert_ready_to_write", spy)
     monkeypatch.setattr(
         cli, "setup_workspace", lambda *a, **k: pytest.fail("setup wrote")
     )
@@ -1529,10 +1553,11 @@ def test_native_save_refuses_a_service_changed_while_wizard_open(
     resp = _post(client, workspace)
     assert resp.status_code == 409
     assert resp.json() == {"error": _STATE_CHANGED}
+    assert reasons == ["service_changed"]
     assert not workspace.exists()
     assert not native_handoff.result_path().exists()
-    assert definition.read_text(encoding="utf-8") == "created after capture"
-    assert restarts == []
+    assert not (launch / "com.ciao.server.plist").exists()
+    assert restarts == [1]
 
 
 def test_public_event_fd_is_not_inherited_by_children(
@@ -1569,3 +1594,66 @@ def test_public_event_fd_is_not_inherited_by_children(
     finally:
         os.close(control_read)
         os.close(control_write)
+
+
+# ── every path after the claim fails closed (#2340 round 2) ─────────────────
+
+
+@pytest.mark.parametrize("trigger", ["record", "read-back", "resolve"])
+def test_any_failure_after_the_claim_fails_closed(
+    trigger: str, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, _launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+    if trigger == "record":
+
+        def failing_record(**kwargs):
+            raise RuntimeError("record")
+
+        monkeypatch.setattr(native_handoff, "record_setup_completion", failing_record)
+    elif trigger == "read-back":
+
+        def failing_read(**kwargs):
+            raise RuntimeError("read")
+
+        monkeypatch.setattr(native_handoff, "read_result", failing_read)
+    else:
+        # Only the native branch's own resolves (routes_api frames) fail; the
+        # workspace writer in ciao.cli keeps its real resolves.
+        real_resolve = Path.resolve
+
+        def failing_resolve(self, *args, **kwargs):
+            if sys._getframe(1).f_globals.get("__name__") == "ciao.web.routes_api":
+                raise RuntimeError("resolve")
+            return real_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", failing_resolve)
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _WRITE_REFUSED}
+    assert "ok" not in resp.json()
+    assert restarts == [1]
+
+
+def test_an_unexpected_pre_write_exception_fails_closed(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _context, launch, restarts = _native_client_with_fakes(
+        isolated_home, monkeypatch
+    )
+
+    def unexpected(self, **kwargs):
+        raise RuntimeError("the host check exploded")
+
+    monkeypatch.setattr(NativeBootstrapContext, "assert_ready_to_write", unexpected)
+    monkeypatch.setattr(
+        cli, "setup_workspace", lambda *a, **k: pytest.fail("setup wrote")
+    )
+    resp = _post(client, isolated_home / "workspace")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": _WRITE_REFUSED}
+    assert not (isolated_home / "workspace").exists()
+    assert not native_handoff.result_path().exists()
+    assert not (launch / "com.ciao.server.plist").exists()
+    assert restarts == [1]
