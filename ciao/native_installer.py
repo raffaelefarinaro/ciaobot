@@ -2286,13 +2286,14 @@ class _ShimIdentity:
     target_sha256: str
 
 
-def _shim_identity(bin_dir: Path, tool_dir: Path) -> _ShimIdentity:
-    """Identify the shim: a symlink whose realpath is a regular file in the tool env.
+def _shim_identity(bin_dir: Path, tool_dir: Path) -> tuple[_ShimIdentity, Path]:
+    """Identify the shim and return the verified target path it resolves to.
 
     The link is read with ``lstat``/``readlink``. Its target is resolved with
-    ``realpath(strict=True)``, must lie inside ``<tool>/ciaobot/bin`` once both
-    sides are resolved, and is opened without a no-follow flag, since the link is
-    already resolved. Any other shape is a fixed refusal.
+    ``realpath(strict=True)``, must lie inside ``<tool>/ciaobot/bin``, and is
+    opened without a no-follow flag, since the link is already resolved. Any other
+    shape is a fixed refusal. The wizard is spawned through the returned target,
+    never through the link.
     """
     refusal = NativeCoordinatorError("shim_invalid", "install_failed")
     link = bin_dir / "ciao"
@@ -2304,6 +2305,8 @@ def _shim_identity(bin_dir: Path, tool_dir: Path) -> _ShimIdentity:
         target = Path(os.path.realpath(link, strict=True))
     except OSError:
         raise refusal from None
+    # Both sides are already realpath-resolved, so this is a containment check
+    # on real paths, not on the link's spelling.
     allowed = Path(os.path.realpath(tool_dir / "ciaobot" / "bin"))
     if not target.is_relative_to(allowed):
         raise refusal
@@ -2322,7 +2325,7 @@ def _shim_identity(bin_dir: Path, tool_dir: Path) -> _ShimIdentity:
         raise refusal from None
     finally:
         os.close(fd)
-    return _ShimIdentity(
+    identity = _ShimIdentity(
         link_device=info.st_dev,
         link_inode=info.st_ino,
         link_target=link_target,
@@ -2330,11 +2333,21 @@ def _shim_identity(bin_dir: Path, tool_dir: Path) -> _ShimIdentity:
         target_inode=target_info.st_ino,
         target_sha256=hasher.hexdigest(),
     )
+    return identity, target
 
 
 def _managed_python_root() -> Path:
     """uv's managed Python root under the pinned home: where a tool python may link."""
     return _pinned_home() / ".local" / "share" / "uv" / "python"
+
+
+def _python_identity(tool_python: Path) -> tuple[int, int]:
+    """(device, inode) of the interpreter the tool python resolves to."""
+    try:
+        info = os.stat(os.path.realpath(tool_python, strict=True))
+    except OSError:
+        raise NativeCoordinatorError("python_changed", "install_failed") from None
+    return info.st_dev, info.st_ino
 
 
 def _interpreter_inside(tool_python: Path, tool_dir: Path) -> None:
@@ -2362,6 +2375,8 @@ class _EngineInstall:
 
     tool_python: Path
     shim: _ShimIdentity
+    #: The probed interpreter's resolved (device, inode), re-checked before the spawn.
+    python_identity: tuple[int, int]
 
 
 def _verified_copy(
@@ -2725,6 +2740,10 @@ def _install_engine(
         raise _engine_failed() from None
     if code != 0 or output.decode("utf-8", errors="replace") != artifacts.version:
         raise _engine_failed()
+    try:
+        python_identity = _python_identity(tool_python)
+    except NativeCoordinatorError:
+        raise _engine_failed() from None
 
     receipt = install_receipt.InstallReceipt(
         version=artifacts.version,
@@ -2746,20 +2765,29 @@ def _install_engine(
         or Path(written.python) != tool_python
     ):
         raise _engine_failed()
-    shim = _shim_identity(bin_dir, tool_dir)
-    return _EngineInstall(tool_python=tool_python, shim=shim)
+    shim, _target = _shim_identity(bin_dir, tool_dir)
+    return _EngineInstall(
+        tool_python=tool_python, shim=shim, python_identity=python_identity
+    )
 
 
 def _wizard_argv(
-    bin_dir: Path,
+    tool_python: Path,
+    target: Path,
     run_id: str,
     fd: int,
     workspace: Path | None,
     expected: Path | None,
 ) -> tuple[str, ...]:
-    """The hidden native bootstrap command the coordinator starts as its child."""
+    """The hidden native bootstrap command: the verified interpreter runs the verified target.
+
+    The target is the console script's resolved path, never the ``bin`` link, so
+    nothing is resolved again at exec. The interpreter is spawned by its tool-env
+    path, which is what lets uv's ``pyvenv.cfg`` be found.
+    """
     argv: tuple[str, ...] = (
-        str(bin_dir / "ciao"),
+        str(tool_python),
+        str(target),
         "run",
         "--installer-bootstrap",
         "--installer-run-id",
@@ -2889,16 +2917,20 @@ def _production_deps(
             raise
 
     def wizard_command(fd: int) -> tuple[str, ...]:
-        tool_dir, bin_dir = dirs()
+        tool_dir, _bin_dir = dirs()
         engine = _required(private.engine)
+        # Both checks run immediately before the spawn that uses their results.
         try:
-            shim = _shim_identity(bin_dir, tool_dir)
+            shim, target = _shim_identity(_bin_dir, tool_dir)
         except NativeCoordinatorError:
             raise NativeCoordinatorError("shim_changed", "install_failed") from None
         if shim != engine.shim:
             raise NativeCoordinatorError("shim_changed", "install_failed")
+        if _python_identity(engine.tool_python) != engine.python_identity:
+            raise NativeCoordinatorError("python_changed", "install_failed")
         return _wizard_argv(
-            bin_dir,
+            engine.tool_python,
+            target,
             request.run_id,
             fd,
             request.workspace,

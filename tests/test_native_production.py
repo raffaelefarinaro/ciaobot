@@ -137,6 +137,7 @@ def _fake_uv(
     python: str | None = "copy",
     python_version: str | None = None,
     probe: tuple[Path, int] | None = None,
+    console: Path | None = None,
 ) -> Path:
     """A uv stub for ``tool install`` that records its argv, env and cwd.
 
@@ -174,6 +175,20 @@ def _fake_uv(
     ]
     if python == "copy":
         lines += _place(tools / "ciaobot" / "bin" / "python", stub)
+    elif python == "wrapper":
+        # A regular interpreter that answers the probe and runs its arguments
+        # under the test's own Python, so the wizard can run a Python console.
+        wrapper = root / "python-wrapper"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'case "$1" in\n'
+            f'  -I) printf "%s" "{python_version or _version()}"; exit 0 ;;\n'
+            "esac\n"
+            f'exec "{sys.executable}" "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(wrapper, 0o755)
+        lines += _place(tools / "ciaobot" / "bin" / "python", wrapper)
     elif python in {"managed", "elsewhere"}:
         if python == "managed":
             interpreter = home / ".local" / "share" / "uv" / "python" / "cpython-3.13-test" / "bin" / "python3.13"
@@ -182,7 +197,7 @@ def _fake_uv(
         lines += _place(interpreter, stub)
         lines += _link(tools / "ciaobot" / "bin" / "python", interpreter)
     if shim == "link":
-        lines += _place(tools / "ciaobot" / "bin" / "ciao", stub)
+        lines += _place(tools / "ciaobot" / "bin" / "ciao", console or stub)
         lines += _link(bin_dir / "ciao", tools / "ciaobot" / "bin" / "ciao")
     elif shim == "file":
         lines += _place(bin_dir / "ciao", stub)
@@ -914,9 +929,12 @@ def test_the_seam_makes_the_event_descriptor_non_inheritable_before_any_step(
 def test_wizard_argv_is_the_hidden_native_bootstrap_command(
     workspace: Path | None, expected: Path | None, tail: tuple[str, ...]
 ) -> None:
-    argv = native._wizard_argv(Path("/opt/bin"), RUN_ID, 5, workspace, expected)
+    argv = native._wizard_argv(
+        Path("/opt/tool/python"), Path("/opt/tool/ciao"), RUN_ID, 5, workspace, expected
+    )
     assert argv == (
-        "/opt/bin/ciao",
+        "/opt/tool/python",
+        "/opt/tool/ciao",
         "run",
         "--installer-bootstrap",
         "--installer-run-id",
@@ -945,9 +963,11 @@ def _installed(
 def test_a_swapped_shim_before_the_wizard_spawn_is_install_failed(
     tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    production, _tools, bin_dir = _installed(tmp_path, pinned_home, monkeypatch)
+    production, tools, bin_dir = _installed(tmp_path, pinned_home, monkeypatch)
     try:
-        assert production.deps.wizard_command(5)[0] == str(bin_dir / "ciao")
+        assert production.deps.wizard_command(5)[0] == str(
+            tools / "ciaobot" / "bin" / "python"
+        )
         (bin_dir / "ciao").write_bytes(b"#!/bin/sh\necho swapped\n")
         with pytest.raises(NativeCoordinatorError) as caught:
             production.deps.wizard_command(5)
@@ -1181,32 +1201,36 @@ def test_the_classifier_runs_in_the_private_cwd(
         production.close()
 
 
-def test_the_symlinked_shim_path_reaches_service_ready(
+#: A console script that is a Python file, as uv writes one: it records a bind
+#: report on the descriptor named by ``--installer-native-fd`` and exits 0.
+_BIND_CONSOLE = (
+    "import os, sys\n"
+    "for argument in sys.argv:\n"
+    "    if argument.startswith('--installer-native-fd='):\n"
+    "        fd = int(argument.split('=', 1)[1])\n"
+    "        os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+    "        os.close(fd)\n"
+    "        sys.exit(0)\n"
+    "sys.exit(3)\n"
+)
+
+
+def _e2e(
     tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """End to end with the symlinked stub: production install, shim check and spawn."""
+) -> tuple[native._ProductionDeps, native._CoordinatorDeps, Path]:
+    """Production install and wizard over a real spawn; only the readiness steps are faked."""
     monkeypatch.setattr(sys, "platform", "darwin")
     tools, bin_dir = _tool_dirs_under(pinned_home)
     monkeypatch.setattr(native, "_tool_dirs", lambda *a, **k: (tools, bin_dir))
-    artifacts = rehash(
-        dataclasses.replace(make_artifacts(tmp_path), uv=_fake_uv(tmp_path, pinned_home))
-    )
+    console = tmp_path / "ciao-console.py"
+    console.write_text(_BIND_CONSOLE, encoding="utf-8")
+    uv = _fake_uv(tmp_path, pinned_home, python="wrapper", console=console)
+    artifacts = rehash(dataclasses.replace(make_artifacts(tmp_path), uv=uv))
     production = native._production_deps(_request(), artifacts, native.NativeCancellation())
-    real_wizard = production.deps.wizard_command
     tool_python = tools / "ciaobot" / "bin" / "python"
     handoff = dataclasses.replace(
         _handoff(RUN_ID), engine_python=str(tool_python), port=54321
     )
-    bind = (
-        "import os, sys\n"
-        "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":54321}\\n')\n"
-        "os.close(int(sys.argv[1]))\n"
-    )
-
-    def wizard(fd: int) -> tuple[str, ...]:
-        real_wizard(fd)  # the shim re-check; its own argv is not spawned here
-        return (sys.executable, "-c", bind, str(fd))
-
     monkeypatch.setattr(
         native_handoff, "read_result", lambda *, expected_run_id: handoff
     )
@@ -1222,12 +1246,19 @@ def test_the_symlinked_shim_path_reaches_service_ready(
         create_host=lambda lock, run_id, remaining: _fresh_host_value(tmp_path),
         recheck_host=lambda host: None,
         prepare_scratch=lambda: tmp_path / "scratch",
-        wizard_command=wizard,
         wizard_listener=lambda port, child_pid: frozenset({child_pid}),
         prove_ready=lambda host, handoff_, remaining: NativeReadinessProof(
             ready=True, failure=None, port=54321, version=artifacts.version
         ),
     )
+    return production, deps, tool_python
+
+
+def test_the_symlinked_shim_path_reaches_service_ready(
+    tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: a symlinked shim, a Python console script, a real spawn."""
+    production, deps, _tool_python = _e2e(tmp_path, pinned_home, monkeypatch)
     try:
         with _public_event_pipe() as (read_fd, write_fd):
             outcome = native._run_native_install(
@@ -1238,6 +1269,63 @@ def test_the_symlinked_shim_path_reaches_service_ready(
         production.close()
     assert outcome.terminal == "service_ready"
     assert events[-1]["type"] == "service_ready"
+
+
+def test_the_wizard_spawns_the_verified_target_not_the_link(
+    tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link retargeted after the identity check must not change what runs."""
+    production, deps, tool_python = _e2e(tmp_path, pinned_home, monkeypatch)
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    verified_target = (tools / "ciaobot" / "bin" / "ciao").resolve()
+    marker = tmp_path / "evil-ran"
+    evil = tmp_path / "evil-ciao"
+    evil.write_text(
+        f"open({str(marker)!r}, 'w').close()\nimport sys; sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    recorded: dict[str, tuple[str, ...]] = {}
+    real_spawn = native._spawn_owned_child
+
+    def spawn_after_retarget(argv: tuple[str, ...], **kwargs: object) -> object:
+        recorded["argv"] = argv
+        link = bin_dir / "ciao"
+        link.unlink()
+        link.symlink_to(evil)  # after the identity check, before the spawn
+        return real_spawn(argv, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(native, "_spawn_owned_child", spawn_after_retarget)
+    try:
+        with _public_event_pipe() as (read_fd, write_fd):
+            outcome = native._run_native_install(
+                _coordinator_request(write_fd), deps=deps
+            )
+            _drain(read_fd)
+    finally:
+        production.close()
+    argv = recorded["argv"]
+    assert argv[0] == str(tool_python)
+    assert Path(argv[1]) == verified_target
+    assert not marker.exists()
+    assert outcome.terminal == "service_ready"
+
+
+def test_the_interpreter_replaced_after_the_probe_is_install_failed(
+    tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    production, tools, _bin = _installed_with_shim(tmp_path, pinned_home, monkeypatch)
+    try:
+        python = tools / "ciaobot" / "bin" / "python"
+        replacement = python.with_name("python.new")
+        replacement.write_bytes(python.read_bytes())
+        os.chmod(replacement, 0o755)
+        os.replace(replacement, python)  # a new inode at the same path
+        with pytest.raises(NativeCoordinatorError) as caught:
+            production.deps.wizard_command(5)
+        assert caught.value.failure_code == "install_failed"
+        assert caught.value.reason == "python_changed"
+    finally:
+        production.close()
 
 
 # ── production dependency closures ───────────────────────────────────────────
@@ -1283,8 +1371,12 @@ def test_production_deps_delegate_to_the_real_steps(
     os.chmod(shim_target, 0o755)
     bin_dir.mkdir(parents=True, exist_ok=True)
     (bin_dir / "ciao").symlink_to(shim_target)
+    shim_identity, _target = native._shim_identity(bin_dir, tools)
+    python_stat = os.stat(tool_python)
     engine_value = native._EngineInstall(
-        tool_python=tool_python, shim=native._shim_identity(bin_dir, tools)
+        tool_python=tool_python,
+        shim=shim_identity,
+        python_identity=(python_stat.st_dev, python_stat.st_ino),
     )
     monkeypatch.setattr(native, "_install_engine", record("engine", engine_value))
     handoff = dataclasses.replace(_handoff(RUN_ID), engine_python=str(tool_python))
@@ -1334,7 +1426,8 @@ def test_production_deps_delegate_to_the_real_steps(
         engine_args = calls["engine"][0]  # type: ignore[index]
         assert engine_args[2] == bin_dir and engine_args[1] == tools
         argv = deps.wizard_command(5)
-        assert argv[0] == str(bin_dir / "ciao")
+        assert argv[0] == str(tool_python)
+        assert Path(argv[1]).resolve() == shim_target.resolve()
         assert deps.read_handoff(RUN_ID) is handoff
         assert calls["read"] == ((), {"expected_run_id": RUN_ID})
         assert deps.activate(RUN_ID, 30.0) is handoff
