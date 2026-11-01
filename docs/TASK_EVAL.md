@@ -240,8 +240,6 @@ matching is case-insensitive.
 | --- | --- | --- |
 | `answer_contains` | `all`, `any`, `normalize` | the final answer contains every `all` needle and at least one `any` needle |
 | `answer_excludes` | `any`, `normalize` | the answer contains none of the needles |
-
-`normalize: true` removes `*`, `_` and backticks from both the text and the needles before matching, so a needle that must contain a literal underscore cannot use it.
 | `abstains` | | the answer matches a clean refusal (`don't know`, `not recorded`, `could not find`, ...) |
 | `new_tasks` | `count`, `title_contains`, `due`, `project_name_contains`, `titles_cover` | exactly `count` tasks are new; every new task has the needles in its title and the due date. `weekday:friday` means that weekday, 1 to 7 days after the run date. `project_name_contains` resolves each new task's `project_id` to a name through `GET /api/projects` (an id not in that list is used as its own name; no project is an empty name), and every needle must be in that name. `titles_cover` is a list of needle groups: exactly one new task matches each group, and every new task matches some group |
 | `new_schedules` | `count`, `frequency`, `days_of_week`, `time`, `prompt_contains`, `prompt_any` | exactly `count` new non-system schedules match; days compare as 3-letter sets; `time` is the wall-clock `daily_time_utc`. `prompt_contains` needs every needle in the prompt; `prompt_any` needs at least one |
