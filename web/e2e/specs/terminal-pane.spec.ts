@@ -465,8 +465,11 @@ test.describe('on a touch screen wide enough for the tile', () => {
     await expect(keys.getByRole('button')).toHaveCount(9)
     await expect(keys.getByRole('button', { name: 'Enter' })).toBeEnabled()
 
-    // The row is under the screen, not beside it or above it.
+    // The row is under the screen, not beside it or above it. The tile slides
+    // in with chat-tile-in, which starts at scale(0.985): a key read before the
+    // tile (not just the pane) settles measures 44 * 0.985 = 43.34px (#2391).
     const surface = pane.locator('.tp-surface')
+    await settled(page.locator('.chat-split-side'))
     await settled(pane)
     const surfaceBox = (await surface.boundingBox())!
     const rowBox = (await keys.boundingBox())!
