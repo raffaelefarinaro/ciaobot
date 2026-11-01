@@ -9,9 +9,13 @@ client depends on are proven before any code can emit an event.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import errno
+import inspect
 import json
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -24,12 +28,14 @@ from pathlib import Path
 import pytest
 
 from ciao import native_installer as native
+from ciao import release_manifest, server_host, server_host_install
 from ciao.native_installer import (
     EventError,
     EventWriter,
     NativeLockError,
     NativeRunLock,
 )
+from tests.test_server_host_install import APP_NAME, _FakeRunner, _fixture
 
 #: A canonical run id: lowercase, hyphenated, exactly what ``--run-id`` accepts.
 RUN_ID = "0f6f7c0e-2f3a-4b4c-8d1e-2a3b4c5d6e7f"
@@ -2102,3 +2108,559 @@ def test_a_failed_acquire_surfaces_cleanup_and_original_failure(
         _lock_reason(NativeRunLock.acquire, state, run_id=OTHER_RUN_ID)
         == "lock_unknown"
     )
+
+
+# ── assert_held: the public held-lock predicate (#2340) ─────────────────────
+
+
+def test_assert_held_accepts_the_unmodified_lock_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    state = _state_dir(tmp_path)
+    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    try:
+        record = _record_path(state)
+        inode = record.stat().st_ino
+        before = record.read_bytes()
+        lock.assert_held(run_id=RUN_ID)
+        assert record.stat().st_ino == inode
+        assert record.read_bytes() == before
+        assert _lock_reason(lock.assert_held, run_id=OTHER_RUN_ID) == "lock_run_mismatch"
+    finally:
+        lock.release()
+
+
+def test_assert_held_refuses_a_released_lock(tmp_path: Path) -> None:
+    state = _state_dir(tmp_path)
+    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock.release()
+
+    assert _lock_reason(lock.assert_held, run_id=RUN_ID) == "lock_not_held"
+
+
+def test_assert_held_refuses_changed_record_bytes_without_repairing_them(
+    tmp_path: Path,
+) -> None:
+    state = _state_dir(tmp_path)
+    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    record = _record_path(state)
+    record.write_bytes(_record_bytes(OTHER_RUN_ID))
+    changed = record.read_bytes()
+    try:
+        assert _lock_reason(lock.assert_held, run_id=RUN_ID) == "lock_changed"
+        assert record.read_bytes() == changed
+    finally:
+        # The record was substituted, so release must refuse; the test owns the
+        # isolated state directory and removes the evidence itself.
+        with contextlib.suppress(NativeLockError):
+            lock.release()
+        shutil.rmtree(state, ignore_errors=True)
+
+
+def test_assert_held_refuses_a_substituted_lock_directory(tmp_path: Path) -> None:
+    state = _state_dir(tmp_path)
+    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    _lock_path(state).rename(state / "moved-lock")
+    _lock_path(state).mkdir(mode=0o700)
+    os.chmod(_lock_path(state), 0o700)
+    try:
+        assert _lock_reason(lock.assert_held, run_id=RUN_ID) == "lock_changed"
+    finally:
+        with contextlib.suppress(NativeLockError):
+            lock.release()
+        shutil.rmtree(state, ignore_errors=True)
+
+
+# ── create_fresh_host: the native host slice (#2340) ────────────────────────
+
+
+def _manifest_with(entry: dict[str, object]) -> dict[str, object]:
+    return release_manifest.build_manifest(
+        "1.2.3", [entry], created="2026-11-01T00:00:00+00:00"
+    )
+
+
+def _manifest_verifier(
+    manifest: dict[str, object],
+    *,
+    expected_public_key: str = release_manifest.RELEASE_PUBLIC_KEY,
+) -> native.ManifestVerifier:
+    def verify(data: bytes, signature: str, public_key: str) -> dict[str, object]:
+        assert data == b"signed-manifest-bytes"
+        assert signature == "signed-manifest-signature"
+        assert public_key == expected_public_key
+        return manifest
+
+    return verify
+
+
+@contextlib.contextmanager
+def _held_lock(tmp_path: Path) -> object:
+    state = _state_dir(tmp_path)
+    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    try:
+        yield lock
+    finally:
+        with contextlib.suppress(NativeLockError):
+            lock.release()
+
+
+def _fresh_host(
+    *,
+    lock: NativeRunLock,
+    archive: Path,
+    entry: dict[str, object],
+    runner: object,
+    **overrides: object,
+) -> native.FreshHostInstall:
+    seams: dict[str, object] = {
+        "verify_manifest_fn": _manifest_verifier(_manifest_with(entry)),
+        "select_entry_fn": release_manifest.select_server_host_artifact,
+        "verify_archive_fn": server_host_install.verify_host_archive,
+        "install_fn": server_host_install.install_server_host,
+        "verify_owned_fn": server_host.verify_owned_host,
+    }
+    seams.update(overrides)
+    return native._create_fresh_host(
+        run_lock=lock,
+        run_id=RUN_ID,
+        manifest_bytes=b"signed-manifest-bytes",
+        signature_text="signed-manifest-signature",
+        archive_path=archive,
+        runner=runner,  # type: ignore[arg-type]
+        **seams,  # type: ignore[arg-type]
+    )
+
+
+def _fresh_paths() -> tuple[Path, Path]:
+    return server_host.default_bundle_path(), server_host.default_ownership_path()
+
+
+def test_create_fresh_host_installs_only_a_new_verified_host(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+    runner = _FakeRunner()
+
+    with _held_lock(tmp_path) as lock:
+        result = _fresh_host(
+            lock=lock,  # type: ignore[arg-type]
+            archive=archive,
+            entry=entry,
+            runner=runner,
+        )
+
+    assert result.run_id == RUN_ID
+    assert result.bundle_path == target
+    assert result.ownership_path == record
+    assert result.ownership == server_host.read_host_ownership(record)
+    assert target.is_dir()
+    assert (
+        server_host.verify_owned_host(target, ownership_path=record, runner=runner)
+        == result.ownership
+    )
+    # The only subprocesses are the fixed native codesign probes; nothing starts,
+    # stops, bootstraps or quiesces a service.
+    assert runner.commands
+    assert all(command[0] == server_host.CODESIGN for command in runner.commands)
+    joined = " ".join(" ".join(command) for command in runner.commands)
+    for forbidden in ("launchctl", "bootout", "bootstrap", "/usr/bin/open", "stop"):
+        assert forbidden not in joined
+
+
+def test_create_fresh_host_refuses_a_same_policy_host_inserted_after_preflight(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+    runner = _FakeRunner()
+    inserted: dict[str, object] = {}
+
+    def insert_then_install(*args: object, **kwargs: object) -> object:
+        # The helper's own preflight already saw both paths absent. A concurrent
+        # same-policy installer wins the target before the real fresh call.
+        server_host_install.install_server_host(archive, entry, runner=runner)
+        inserted["inode"] = target.stat().st_ino
+        inserted["record"] = record.read_bytes()
+        return server_host_install.install_server_host(*args, **kwargs)
+
+    with _held_lock(tmp_path) as lock:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=runner,
+                install_fn=insert_then_install,
+            )
+
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert target.stat().st_ino == inserted["inode"]
+    assert record.read_bytes() == inserted["record"]
+    assert server_host.read_host_ownership(record).bundle_path == os.path.realpath(target)
+
+
+def test_create_fresh_host_refuses_an_orphan_record_or_journal_before_install(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+    runner = _FakeRunner()
+    calls: list[object] = []
+
+    def never_install(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        raise AssertionError("install must not run for pre-existing evidence")
+
+    with _held_lock(tmp_path) as lock:
+        # Record-only: a complete host was installed once, then its bundle was
+        # removed. The record is partial state and stays byte-identical.
+        server_host_install.install_server_host(archive, entry, runner=runner)
+        record_bytes = record.read_bytes()
+        shutil.rmtree(target)
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=runner,
+                install_fn=never_install,
+            )
+        assert caught.value.code == server_host_install.HOST_EXISTS
+        assert not os.path.lexists(target)
+        assert record.read_bytes() == record_bytes
+        assert calls == []
+
+        # Journal-only: any journal name is evidence, even before it is read.
+        record.unlink()
+        journal = server_host_install.upgrade_journal_path()
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_bytes(b"journal evidence this run must not settle")
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=runner,
+                install_fn=never_install,
+            )
+        assert caught.value.code == server_host_install.TRANSACTION_CONFLICT
+        assert journal.read_bytes() == b"journal evidence this run must not settle"
+        assert calls == []
+
+
+def test_create_fresh_host_refuses_unsafe_bundle_or_record_links(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    target.parent.mkdir(parents=True)
+    target.symlink_to(elsewhere, target_is_directory=True)
+
+    calls: list[object] = []
+
+    def never_install(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        raise AssertionError("install must not run for an unsafe target")
+
+    with _held_lock(tmp_path) as lock:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=_FakeRunner(),
+                install_fn=never_install,
+            )
+        assert caught.value.code == server_host_install.TARGET_UNSAFE
+        assert target.is_symlink()
+        assert calls == []
+
+        target.unlink()
+        record.parent.mkdir(parents=True)
+        record.symlink_to(elsewhere / "record.json")
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=_FakeRunner(),
+                install_fn=never_install,
+            )
+        assert caught.value.code == server_host_install.HOST_EXISTS
+        assert record.is_symlink()
+        assert calls == []
+
+
+def test_create_fresh_host_refuses_a_changed_postinstall_host(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+    runner = _FakeRunner()
+    real_install = server_host_install.install_server_host
+
+    def install_then_tamper(*args: object, **kwargs: object) -> object:
+        snapshot = real_install(*args, **kwargs)  # type: ignore[arg-type]
+        (target / "Contents" / "Resources" / server_host.ICON_NAME).write_bytes(
+            b"changed after the install returned"
+        )
+        return snapshot
+
+    with _held_lock(tmp_path) as lock:
+        with pytest.raises(server_host.ServerHostError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=runner,
+                install_fn=install_then_tamper,
+            )
+
+    assert caught.value.code in (server_host.NOT_OWNED, server_host.INSPECTION_FAILED)
+    # The helper refuses but never deletes a changed host: a concurrent writer
+    # may own it, and preserving the state is the retry evidence.
+    assert target.is_dir()
+    assert record.is_file()
+
+
+def test_create_fresh_host_refuses_a_returned_and_verified_snapshot_mismatch(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+    runner = _FakeRunner()
+    real_verify = server_host.verify_owned_host
+
+    def verify_a_different_snapshot(*args: object, **kwargs: object) -> object:
+        real = real_verify(*args, **kwargs)  # type: ignore[arg-type]
+        return dataclasses.replace(real, executable_sha256="0" * 64)
+
+    with _held_lock(tmp_path) as lock:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=runner,
+                verify_owned_fn=verify_a_different_snapshot,
+            )
+
+    assert caught.value.code == server_host.NOT_OWNED
+    assert target.is_dir()
+    assert record.is_file()
+
+
+def test_create_fresh_host_refuses_manifest_failure_before_any_install(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _archive, _bundle, _entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+
+    with _held_lock(tmp_path) as lock:
+        with pytest.raises(release_manifest.SignatureError):
+            native.create_fresh_host(
+                run_lock=lock,
+                run_id=RUN_ID,
+                manifest_bytes=b"{}",
+                signature_text="not a signature",
+                archive_path=tmp_path / "unused.tar.gz",
+                runner=_FakeRunner(),
+            )
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(record)
+
+
+def test_create_fresh_host_refuses_a_manifest_with_no_host(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target, record = _fresh_paths()
+    wheel = {
+        "filename": "ciaobot-1.2.3-py3-none-any.whl",
+        "kind": "wheel",
+        "platform": "any",
+        "arch": "any",
+        "sha256": "ab" * 32,
+        "size": 1024,
+    }
+    manifest = release_manifest.build_manifest(
+        "1.2.3", [wheel], created="2026-11-01T00:00:00+00:00"
+    )
+    calls: list[object] = []
+
+    def never_install(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        raise AssertionError("install must not run without a host entry")
+
+    with _held_lock(tmp_path) as lock:
+        with pytest.raises(ValueError, match="no server host"):
+            native._create_fresh_host(
+                run_lock=lock,
+                run_id=RUN_ID,
+                manifest_bytes=b"signed-manifest-bytes",
+                signature_text="signed-manifest-signature",
+                archive_path=tmp_path / "unused.tar.gz",
+                runner=_FakeRunner(),
+                verify_manifest_fn=lambda _data, _sig, _key: manifest,
+                select_entry_fn=release_manifest.select_server_host_artifact,
+                verify_archive_fn=server_host_install.verify_host_archive,
+                install_fn=never_install,
+                verify_owned_fn=server_host.verify_owned_host,
+            )
+    assert calls == []
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(record)
+
+
+def test_create_fresh_host_requires_a_held_run_lock(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _archive, _bundle, _entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+
+    state = _state_dir(tmp_path)
+    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    lock.release()
+    with pytest.raises(NativeLockError) as caught:
+        native.create_fresh_host(
+            run_lock=lock,
+            run_id=RUN_ID,
+            manifest_bytes=b"signed-manifest-bytes",
+            signature_text="signed-manifest-signature",
+            archive_path=tmp_path / "unused.tar.gz",
+            runner=_FakeRunner(),
+        )
+    assert caught.value.reason == "lock_not_held"
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(record)
+
+
+def test_create_fresh_host_refuses_a_substituted_lock_record(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _archive, _bundle, _entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+
+    state = _state_dir(tmp_path)
+    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    _record_path(state).write_bytes(_record_bytes(OTHER_RUN_ID))
+    try:
+        with pytest.raises(NativeLockError) as caught:
+            native.create_fresh_host(
+                run_lock=lock,
+                run_id=RUN_ID,
+                manifest_bytes=b"signed-manifest-bytes",
+                signature_text="signed-manifest-signature",
+                archive_path=tmp_path / "unused.tar.gz",
+                runner=_FakeRunner(),
+            )
+        assert caught.value.reason == "lock_changed"
+        assert not os.path.lexists(target)
+        assert not os.path.lexists(record)
+    finally:
+        with contextlib.suppress(NativeLockError):
+            lock.release()
+        shutil.rmtree(state, ignore_errors=True)
+
+
+def test_create_fresh_host_refuses_a_changed_archive_before_install(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+    archive.write_bytes(b"not the bytes the signed entry selects")
+    calls: list[object] = []
+
+    def never_install(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        raise AssertionError("install must not run for a changed archive")
+
+    with _held_lock(tmp_path) as lock:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=_FakeRunner(),
+                install_fn=never_install,
+            )
+    assert caught.value.code == server_host_install.ARCHIVE_MISMATCH
+    assert calls == []
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(record)
+
+
+def test_assert_held_refuses_a_substituted_state_directory(tmp_path: Path) -> None:
+    state = _state_dir(tmp_path)
+    lock = NativeRunLock.acquire(state, run_id=RUN_ID)
+    moved = tmp_path / "moved-state"
+    state.rename(moved)
+    state.mkdir(mode=0o700)
+    os.chmod(state, 0o700)
+    try:
+        assert _lock_reason(lock.assert_held, run_id=RUN_ID) == "lock_changed"
+    finally:
+        with contextlib.suppress(NativeLockError):
+            lock.release()
+        shutil.rmtree(moved, ignore_errors=True)
+        shutil.rmtree(state, ignore_errors=True)
+
+
+def test_create_fresh_host_refuses_if_the_run_lock_is_released_during_install(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target, record = _fresh_paths()
+    runner = _FakeRunner()
+    real_install = server_host_install.install_server_host
+
+    with _held_lock(tmp_path) as lock:
+        def install_then_release(*args: object, **kwargs: object) -> object:
+            snapshot = real_install(*args, **kwargs)  # type: ignore[arg-type]
+            lock.release()  # type: ignore[attr-defined]
+            return snapshot
+
+        with pytest.raises(NativeLockError) as caught:
+            _fresh_host(
+                lock=lock,  # type: ignore[arg-type]
+                archive=archive,
+                entry=entry,
+                runner=runner,
+                install_fn=install_then_release,
+            )
+
+    assert caught.value.reason == "lock_not_held"
+    # The host was written before the lock was lost; it is preserved, not
+    # reported as this run's success and not silently reinstalled.
+    assert target.is_dir()
+    assert record.is_file()
+
+
+def test_create_fresh_host_public_api_has_no_path_or_key_seams() -> None:
+    # The public helper is bound to the home-relative canonical host paths and the
+    # release public key. Only the private implementation takes test doubles; a
+    # caller cannot point it at another ownership record, bundle or key.
+    parameters = inspect.signature(native.create_fresh_host).parameters
+    for forbidden in ("public_key", "bundle_path", "ownership_path", "entry"):
+        assert forbidden not in parameters
+    assert "run_lock" in parameters
+    assert "manifest_bytes" in parameters
+    assert "signature_text" in parameters
+    private = inspect.signature(native._create_fresh_host).parameters
+    assert "verify_manifest_fn" in private
+    assert "install_fn" in private

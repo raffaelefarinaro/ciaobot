@@ -1,13 +1,19 @@
-"""The native installer's bounded NDJSON event channel (#2340, first slice).
+"""The native installer's bounded NDJSON channel and fresh-host step (#2340).
 
 The Mac client that runs the native installer needs deterministic progress
 without parsing stdout/stderr and without ever receiving a credential. The
 contract is one compact JSON object per line on a writable descriptor the
 client passes in (``--events-fd``); everything else the installer prints stays
-diagnostics. This module is only that wire contract: the writer, its fixed
+diagnostics. The event writer is only that wire contract: the writer, its fixed
 vocabulary, its bounds and its failure semantics. It starts no process, reads
-no file, touches no service, writes no workspace and is imported by no
-production caller yet.
+no file, touches no service and writes no workspace.
+
+The same module owns the run-bound native-install lock and, since #2340, the
+native-only :func:`create_fresh_host` helper. That helper authenticates the
+signed manifest and archive through the existing release and host APIs, requires
+the caller's held :class:`NativeRunLock`, and writes only the existing
+owner-only host ownership record. It starts no service, writes no onboarding
+receipt, and still has no production caller.
 
 An event has exactly four common keys — ``schema``, ``run_id``, ``seq`` and
 ``type`` — plus the keys its type allows:
@@ -148,19 +154,46 @@ import os
 import select
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Final, NoReturn
+from typing import Any, Final, NoReturn
 
 from ciao.os_support.private import (
     descriptor_acl_grants_another_account,
     is_owned_descriptor,
     is_private_descriptor_strict,
+)
+from ciao.release_manifest import (
+    RELEASE_PUBLIC_KEY,
+    select_server_host_artifact,
+    verify_manifest,
+)
+from ciao.server_host import (
+    APP_NAME,
+    NOT_OWNED,
+    UNSUPPORTED_PLATFORM,
+    HostOwnership,
+    Runner,
+    default_bundle_path,
+    default_ownership_path,
+    verify_owned_host,
+)
+from ciao.server_host_install import (
+    HOST_EXISTS,
+    INSTALL_FAILED,
+    TARGET_UNSAFE,
+    TRANSACTION_CONFLICT,
+    ServerHostInstallError,
+    install_server_host,
+    upgrade_journal_path,
+    verify_host_archive,
 )
 
 #: The wire schema for every event this module writes.
@@ -1278,6 +1311,130 @@ class NativeRunLock:
     def run_id(self) -> str:
         return self._run_id
 
+    def assert_held(self, *, run_id: str | None = None) -> None:
+        """Prove this object still holds the exact lock it created; never mutates.
+
+        The check is descriptor-bound: the held directory descriptor must still
+        name the created device/inode, the public name under the parent must still
+        resolve to that same directory, the directory must still be private and
+        contain exactly the one record, and the record must still be the same
+        inode, private, single-linked, the expected size and the exact bytes this
+        run wrote. Those bytes bind the schema, canonical run id and pid, so an
+        optional ``run_id`` must also match both this object and the record.
+
+        A released object, a descriptor closed by a failed release, a substituted
+        directory or record, an extra entry or link, changed bytes and a changed
+        run id are all refusals with fixed reasons: ``lock_not_held``,
+        ``lock_changed``, ``lock_unsafe``, ``lock_run_mismatch`` or
+        ``invalid_run_id``. Nothing here writes, unlinks, renames, chmods or
+        repairs; a refusal leaves the state for release or the next acquisition
+        to classify. As everywhere else in this lock, a same-UID writer can still
+        race between a check and the next operation; this narrows and reports the
+        window, it does not claim to close it.
+        """
+        with self._release_guard:
+            if (
+                self._released
+                or self._cleanup_failed
+                or self._dir_fd < 0
+                or self._parent_fd < 0
+            ):
+                raise NativeLockError("lock_not_held")
+            if run_id is not None:
+                try:
+                    canonical = _canonical_run_id(run_id)
+                except EventError:
+                    raise NativeLockError("invalid_run_id") from None
+                if canonical != self._run_id:
+                    raise NativeLockError("lock_run_mismatch")
+            try:
+                state_named = os.lstat(self._state_dir)
+                state_held = _fstat(self._parent_fd)
+            except OSError:
+                raise NativeLockError("lock_changed") from None
+            if (
+                not stat.S_ISDIR(state_named.st_mode)
+                or (state_named.st_dev, state_named.st_ino)
+                != (state_held.st_dev, state_held.st_ino)
+            ):
+                raise NativeLockError("lock_changed")
+            try:
+                if not is_private_descriptor_strict(self._parent_fd):
+                    raise NativeLockError("lock_unsafe")
+            except OSError:
+                raise NativeLockError("lock_unsafe") from None
+            try:
+                held = _fstat(self._dir_fd)
+            except OSError:
+                raise NativeLockError("lock_not_held") from None
+            if (
+                not stat.S_ISDIR(held.st_mode)
+                or (held.st_dev, held.st_ino) != self._dir_identity
+            ):
+                raise NativeLockError("lock_changed")
+            try:
+                named = os.stat(
+                    LOCK_DIR_NAME,
+                    dir_fd=self._parent_fd,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                raise NativeLockError("lock_changed") from None
+            if (
+                not stat.S_ISDIR(named.st_mode)
+                or (named.st_dev, named.st_ino) != self._dir_identity
+            ):
+                raise NativeLockError("lock_changed")
+            try:
+                if not is_private_descriptor_strict(self._dir_fd):
+                    raise NativeLockError("lock_unsafe")
+            except OSError:
+                raise NativeLockError("lock_unsafe") from None
+            try:
+                names = os.listdir(self._dir_fd)
+            except OSError:
+                raise NativeLockError("lock_changed") from None
+            if names != [LOCK_RECORD_NAME]:
+                raise NativeLockError("lock_changed")
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_BINARY", 0)
+            )
+            try:
+                descriptor = os.open(
+                    LOCK_RECORD_NAME, flags, dir_fd=self._dir_fd
+                )
+            except OSError:
+                raise NativeLockError("lock_changed") from None
+            try:
+                try:
+                    opened = _fstat(descriptor)
+                except OSError:
+                    raise NativeLockError("lock_not_held") from None
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_nlink != 1
+                    or (opened.st_dev, opened.st_ino) != self._record_identity
+                ):
+                    raise NativeLockError("lock_changed")
+                try:
+                    if not is_private_descriptor_strict(descriptor):
+                        raise NativeLockError("lock_unsafe")
+                except OSError:
+                    raise NativeLockError("lock_unsafe") from None
+                if opened.st_size != len(self._record_bytes):
+                    raise NativeLockError("lock_changed")
+                data = _read_bounded_fd(descriptor, MAX_LOCK_RECORD_BYTES)
+                if data != self._record_bytes:
+                    raise NativeLockError("lock_changed")
+            finally:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
     def release(self) -> None:
         """Remove this run's own lock, or refuse and leave it untouched."""
         with self._release_guard:
@@ -1430,3 +1587,242 @@ class NativeRunLock:
                 # visible as its cause instead of suppressing either one.
                 raise cleanup_error from exc
             raise
+
+
+# ── the native fresh-host creation helper (#2340) ───────────────────────────
+
+
+ManifestVerifier = Callable[[bytes, str, str], dict[str, Any]]
+HostEntrySelector = Callable[[dict[str, Any]], dict[str, Any]]
+ArchiveVerifier = Callable[[Path, Mapping[str, Any]], None]
+HostInstaller = Callable[..., HostOwnership]
+OwnedHostVerifier = Callable[..., HostOwnership]
+
+
+@dataclass(frozen=True, slots=True)
+class FreshHostInstall:
+    """One host this native run proved it created, and where it lives.
+
+    A value is returned only after :func:`ciao.server_host.verify_owned_host`
+    accepted the installed bundle against the record this run wrote. The run id
+    ties the result to the caller's held :class:`NativeRunLock`; the two paths are
+    the exact targets the install used. Nothing here is persisted: this is the
+    in-memory result of the step, not a second install/onboarding receipt.
+    """
+
+    run_id: str
+    ownership: HostOwnership
+    bundle_path: Path
+    ownership_path: Path
+
+
+def _require_absent_path(
+    path: Path,
+    *,
+    what: str,
+    code: str,
+    symlink_code: str,
+) -> None:
+    """Refuse any name at ``path``; an unreadable name is a refusal too.
+
+    This is deliberately a name check only. A regular file, directory, special
+    file or symlink is present, and presence is enough for a fresh install to
+    refuse. A symlink gets the caller's more specific code so an unsafe target is
+    not reported as an ordinary existing host. Any other OS error is fail-closed:
+    "could not tell" is never "absent".
+    """
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the {what} at {path} cannot be examined: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise ServerHostInstallError(
+            f"the {what} at {path} is a symlink; a fresh install never follows "
+            f"or reuses it",
+            code=symlink_code,
+        )
+    raise ServerHostInstallError(
+        f"a {what} already exists at {path}; a fresh install never reuses or "
+        f"replaces it",
+        code=code,
+    )
+
+
+def create_fresh_host(
+    *,
+    run_lock: NativeRunLock,
+    run_id: str,
+    manifest_bytes: bytes,
+    signature_text: str,
+    archive_path: Path,
+    runner: Runner = subprocess.run,
+) -> FreshHostInstall:
+    """Create and prove one brand-new native server host, or refuse.
+
+    This is the native-only fresh path. It has no production caller yet and does
+    not start, stop, reload, bootstrap or quiesce a service; it never writes a
+    receipt and never calls the legacy ``main`` warning/skip path. The trust
+    boundary is the caller's *manifest bytes and signature*, not an
+    already-selected ``entry``: this function calls
+    :func:`ciao.release_manifest.verify_manifest` and
+    :func:`ciao.release_manifest.select_server_host_artifact` itself, then
+    re-verifies the archive against the selected entry with
+    :func:`ciao.server_host_install.verify_host_archive`. A missing or ambiguous
+    host, a bad signature and a changed archive are all refusals; a wheel-only
+    release is never silently treated as success.
+
+    The host paths are fixed to :func:`ciao.server_host.default_bundle_path` and
+    :func:`ciao.server_host.default_ownership_path` under the current home, and
+    the release public key is :data:`ciao.release_manifest.RELEASE_PUBLIC_KEY`.
+    There is deliberately no caller-supplied ownership path, bundle path, public
+    key or pre-selected entry: those are the trust boundary, not tuning knobs.
+    Tests exercise the internal seams in :func:`_create_fresh_host` with an
+    isolated ``HOME``.
+
+    The supplied ``run_lock`` must still be held, and its record must carry
+    ``run_id``. The helper checks that again immediately before and after the
+    install. It then requires the bundle, ownership record and upgrade journal all
+    to be absent, and calls ``install_server_host(..., require_absent=True,
+    trusted_root=Path.home())`` under the host upgrade lock. That second line of
+    defence is what refuses a same-policy host inserted after this helper's own
+    preflight: the installer never returns a ``_CURRENT`` host in fresh mode.
+
+    After the install the helper re-runs ``verify_owned_host`` and requires the
+    result to equal the snapshot the installer returned. A changed bundle or
+    record is refused with :data:`ciao.server_host.NOT_OWNED`; the helper does not
+    delete the changed object, because a concurrent writer may own it and this
+    path preserves pre-existing and partially created state rather than rolling
+    it back.
+
+    A same-UID writer can still race between a check and the mutation it guards;
+    those checks are refusal points, not proof. In the narrow lost-rename window
+    the installer may leave the record it wrote while the run still refuses; see
+    ``install_server_host``.
+    """
+    return _create_fresh_host(
+        run_lock=run_lock,
+        run_id=run_id,
+        manifest_bytes=manifest_bytes,
+        signature_text=signature_text,
+        archive_path=archive_path,
+        runner=runner,
+        verify_manifest_fn=verify_manifest,
+        select_entry_fn=select_server_host_artifact,
+        verify_archive_fn=verify_host_archive,
+        install_fn=install_server_host,
+        verify_owned_fn=verify_owned_host,
+    )
+
+
+def _create_fresh_host(
+    *,
+    run_lock: NativeRunLock,
+    run_id: str,
+    manifest_bytes: bytes,
+    signature_text: str,
+    archive_path: Path,
+    runner: Runner,
+    verify_manifest_fn: ManifestVerifier,
+    select_entry_fn: HostEntrySelector,
+    verify_archive_fn: ArchiveVerifier,
+    install_fn: HostInstaller,
+    verify_owned_fn: OwnedHostVerifier,
+) -> FreshHostInstall:
+    """The private implementation; injection seams are for tests only."""
+    if not isinstance(run_lock, NativeRunLock):
+        raise NativeLockError("lock_not_held")
+    run_lock.assert_held(run_id=run_id)
+    if sys.platform != "darwin":
+        raise ServerHostInstallError(
+            "the native server host install is macOS-only", code=UNSUPPORTED_PLATFORM
+        )
+
+    manifest: dict[str, Any] = verify_manifest_fn(
+        manifest_bytes, signature_text, RELEASE_PUBLIC_KEY
+    )
+    entry: dict[str, Any] = select_entry_fn(manifest)
+    archive = Path(archive_path)
+    verify_archive_fn(archive, entry)
+
+    bundle = default_bundle_path()
+    record = default_ownership_path()
+    if not bundle.is_absolute():
+        raise ServerHostInstallError(
+            f"the host bundle path must be absolute: {bundle}", code=INSTALL_FAILED
+        )
+    if bundle.name != APP_NAME:
+        raise ServerHostInstallError(
+            f"the host bundle must be named {APP_NAME!r}: {bundle}",
+            code=INSTALL_FAILED,
+        )
+    if not record.is_absolute():
+        raise ServerHostInstallError(
+            f"the ownership record path must be absolute: {record}",
+            code=INSTALL_FAILED,
+        )
+    if Path(os.path.realpath(record)).is_relative_to(os.path.realpath(bundle)):
+        raise ServerHostInstallError(
+            "the ownership record must live outside the host bundle it describes",
+            code=INSTALL_FAILED,
+        )
+
+    # Read-only preflight. The installer repeats these checks under the host
+    # upgrade lock; this pass refuses before any expensive staging work and makes
+    # the helper's own contract explicit. A journal is refused even when it is
+    # terminal: this run never settles another operation's evidence.
+    _require_absent_path(
+        bundle,
+        what="host bundle",
+        code=HOST_EXISTS,
+        symlink_code=TARGET_UNSAFE,
+    )
+    _require_absent_path(
+        record,
+        what="ownership record",
+        code=HOST_EXISTS,
+        symlink_code=HOST_EXISTS,
+    )
+    _require_absent_path(
+        upgrade_journal_path(),
+        what="host upgrade journal",
+        code=TRANSACTION_CONFLICT,
+        symlink_code=TRANSACTION_CONFLICT,
+    )
+
+    # The lock can have been released or substituted while the manifest and
+    # archive were being read. Prove it again at the last read-only point.
+    run_lock.assert_held(run_id=run_id)
+
+    installed: HostOwnership = install_fn(
+        archive,
+        entry,
+        bundle_path=bundle,
+        ownership_path=record,
+        runner=runner,
+        require_absent=True,
+        trusted_root=Path.home(),
+    )
+    # The run lock must also cover the mutation. A caller that released or lost
+    # it while the host was being written gets a refusal; the host is left for
+    # the next freshness preflight rather than reported as this run's success.
+    run_lock.assert_held(run_id=run_id)
+    verified: HostOwnership = verify_owned_fn(
+        bundle, ownership_path=record, runner=runner
+    )
+    if verified != installed:
+        raise ServerHostInstallError(
+            "the freshly installed host no longer matches the snapshot this run "
+            "returned; it is left in place for inspection",
+            code=NOT_OWNED,
+        )
+    return FreshHostInstall(
+        run_id=run_id,
+        ownership=verified,
+        bundle_path=Path(verified.bundle_path),
+        ownership_path=record,
+    )

@@ -568,6 +568,41 @@ run placed. The host install is inert: it writes no launchd job itself;
 activation is `ciao setup` registering the hosted plist when a verified host
 is installed. No step requests a permission prompt.
 
+The native fresh-install path (#2340) is a separate, opt-in entry point and has no
+production caller yet. `ciao.native_installer.create_fresh_host` takes the
+authenticated manifest bytes and signature, not a caller-selected entry, and calls
+`verify_manifest`, `select_server_host_artifact` and `verify_host_archive` itself.
+It fixes the host bundle and ownership record to the canonical home paths and the
+release public key; there is no caller-supplied path, key or pre-selected entry.
+It requires the run's `NativeRunLock.assert_held(run_id=…)` and refuses a bundle,
+ownership record or host-upgrade journal that already exists, including terminal
+journal evidence it must not settle. Fresh mode also requires canonical absolute
+paths with no `.`, `..` or symlinked ancestor within the trusted home, a record
+outside the bundle, and every existing ancestor to be a real directory owned by
+this user, not group/other writable and free of a foreign extended-ACL grant; an
+existing record or journal parent must already be private and is never chmod'ed.
+The sibling upgrade lock follows the same rule: an existing lock must be a
+regular single-link owner-only ACL-clean file and is never chmod'ed; only a lock
+this run creates with `O_EXCL`/`O_NOFOLLOW` is set exactly `0600` with `fchmod`
+on its descriptor, and the public name is re-bound after `flock`. A replaced,
+hard-linked, ACL-granting or unverifiable lock refuses. Missing controlled
+directories are created one component at a time relative to held no-follow
+parent descriptors and made exactly `0700` with `fchmod`; existing safe `0755`
+parents (for example `.local`/`state` or `Applications`) are validated and left
+unchanged. A umask that strips the owner bits fails closed and leaves the new
+name as evidence instead of using a path-based chmod. It then calls
+`install_server_host(..., require_absent=True, trusted_root=Path.home())`: under
+the host upgrade lock that
+mode refuses any `_CURRENT` same-policy host or superseded replacement instead of
+adopting or replacing it, and it never finishes a journal. The default `False`
+keeps every legacy no-op/replacement path unchanged. After the install the helper
+re-verifies the owned host and requires equality with the snapshot the installer
+returned; a changed host is refused and left in place, never rolled back. The
+checks are refusal points, not proof: a same-UID writer can still interleave
+between a check and the write it guards, and a lost rename may leave the record the
+fresh attempt wrote (the existing `keep_record` path) while the run reports
+`HOST_EXISTS` and never claims that host as its own.
+
 Replacing an owned legacy host with the signed one is the one host change that is
 a *transaction*, because the previous app and its exact ownership record have to
 survive until the engine this run installs has answered healthily — which is
