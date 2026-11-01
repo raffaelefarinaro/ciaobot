@@ -90,7 +90,10 @@ on every row.
    was accepted. This also covers chats spawned by a delegation. On timeout the
    chat is stopped, the run is marked `timed_out`, and it is still graded.
 7. Checks grade the state. The engine receives SIGTERM (after 20 s, a kill),
-   and `T` is deleted unless `--keep-workdir` is given.
+   and `T` is deleted unless `--keep-workdir` is given. Claude Code's session
+   folder for the run's agent root (`~/.claude/projects/<slug>`, under both the
+   given and the resolved path) is deleted with it, and only when its name carries
+   the `ciao-task-eval-` prefix.
 
 A run never raises. A failure is recorded as `status: "error"` with the
 exception text. A task whose `requires` names a capability the harness does
@@ -109,19 +112,22 @@ Each run is one JSON object per line:
 | `code_revision` | short HEAD of the checkout, plus `-dirty` when the tree is not clean |
 | `provider_version` | first line of `<provider> --version` |
 | `catalog_sha256` | hash over the task catalog bytes |
-| `status` | `passed`, `failed`, `skipped` or `error` |
+| `status` | `passed`, `failed`, `skipped` or `error`. `error` is also set when a provider error (quota, auth, transport) hit the run and the run did not pass, so a settle timeout or a failed check counts as an error too; the record's `error` then starts with `provider error:` and carries the provider's message. A run that passed despite a provider error stays `passed` |
 | `answer` | the last 2000 characters of the answer text (all turns of all chats, most recent last) |
 | `checks` | per check: `kind`, `ok`, `detail` |
 | `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run. OpenCode's camelCase usage keys (`inputTokens` and so on) are read too; a field present in both spellings counts the snake_case one |
 | `tool_calls`, `tool_errors` | from the turns' tool-call lists |
 | `ciao_calls`, `ciao_errors` | from `mcp_tool_calls.jsonl`; an error is any status other than `ok` |
 | `cost_usd` | the engine's recorded cost, or null |
+| `provider_errors` | the number of transcript turns the provider failed (`is_error`), summed over every chat; 0 on skipped and error rows that never reached the grader |
 | `wall_s`, `timed_out`, `chat_ids` | timing and the chats measured |
 
 `summarize` groups rows by label, provider, model, mode, code revision and task,
 so two runs that differ only in mode appear as separate rows (`Mode` column).
 Reports written before the `mode` field group under `-`. Its pass rate and
-medians exclude skipped runs. `compare` joins two reports by task id and reports
+medians (context, output, wall time, cost) exclude skipped and error runs, so a
+provider outage neither counts against the model nor drags the medians toward
+zero; the `Errors` column counts the error runs of each group. `compare` joins two reports by task id and reports
 the pass-rate difference and the percentage change in context, wall time and
 cost; its table shows each side's mode.
 
