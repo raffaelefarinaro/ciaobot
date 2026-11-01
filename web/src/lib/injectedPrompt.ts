@@ -29,6 +29,7 @@ export type InjectedPrompt =
   | { kind: 'retry' }
   | { kind: 'restart_resume' }
   | { kind: 'error'; label: string; copy: string; text: string }
+  | { kind: 'handover'; from: string; to: string; sent: string }
 
 // Mirrors the format produced by `format_finished_runs` in ciao/background_notice.py.
 export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\./
@@ -44,6 +45,8 @@ const SCHEDULE_PREAMBLE_RE = /^The scheduled command `([\s\S]*?)` ran before thi
 // Mirrors ciao/task_attempts.py build_resume_prompt.
 const TASK_RESUME_RE = /^This is a continuation of the delegated task you were already given in this chat: (.*)\.$/
 const TASK_RESUME_STATE_RE = /^The previous attempt ended as ([a-z_]+)/
+// Mirrors ciao/web/chat_service.py _handover_marker.
+const HANDOVER_RE = /^Handed over from (.+?) to (.+)\.$/
 // Mirrors ciao/webhook_dispatch.py EVENT_PREAMBLE / EVENT_FENCE_OPEN / _neutralize.
 const WEBHOOK_PREAMBLE = 'The block between the webhook-event tags is the event text'
 
@@ -169,7 +172,11 @@ function parseWebhook(content: string): InjectedPrompt {
  * resend carries the request it repeats, so the text never says "retry".
  * A restart resume is recognised the same way, by its recorded origin only.
  */
-export function parseInjectedPrompt(content: string | null | undefined, origin?: string): InjectedPrompt | null {
+export function parseInjectedPrompt(
+  content: string | null | undefined,
+  origin?: string,
+  sentContext?: string,
+): InjectedPrompt | null {
   if (!content) return null
   if (origin === undefined || origin === 'background_run') {
     const m = BACKGROUND_WAKE_RE.exec(content)
@@ -189,8 +196,15 @@ export function parseInjectedPrompt(content: string | null | undefined, origin?:
     case 'update_task': return { kind: 'update_task' }
     case 'retry': return { kind: 'retry' }
     case 'restart_resume': return { kind: 'restart_resume' }
+    case 'handover': return parseHandover(content, sentContext)
     default: return null
   }
+}
+
+function parseHandover(content: string, sentContext: string | undefined): InjectedPrompt | null {
+  const m = HANDOVER_RE.exec(content.trim())
+  if (!m) return null
+  return { kind: 'handover', from: m[1], to: m[2], sent: sentContext ?? '' }
 }
 
 /** A failed turn's error, drawn as a notice labelled with its cause. */
@@ -277,5 +291,7 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Continue after restart', facts: 'The engine restarted mid-turn', tone: null }
     case 'error':
       return { label: prompt.label, facts: '', tone: null, hint: errorHint(prompt.text) }
+    case 'handover':
+      return { label: 'Handed over', facts: `${prompt.from} → ${prompt.to}`, tone: null }
   }
 }
