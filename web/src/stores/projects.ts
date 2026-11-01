@@ -74,6 +74,7 @@ import {
   type ServerRow,
 } from '../lib/chatHistory'
 import {
+  mirroredPendingQuestion,
   parseCapabilityQuestion,
   parseQuestions,
   questionsSignature,
@@ -2210,6 +2211,16 @@ export const useProjectStore = defineStore('projects', () => {
   // each chat. A read may only write when neither of them is newer than it.
   let terminalOfferSnapshotClock = 0
   const terminalOfferChatClock: Record<string, number> = {}
+  // The clock value at which the live stream last mirrored an AskUserQuestion
+  // onto a chat's `pending_question`. A chat-list read that started before it
+  // carries the pre-question snapshot and must not erase the mirror.
+  const liveQuestionClock: Record<string, number> = {}
+
+  function keepLivePendingQuestion(next: ChatInfo, readStartedAt: number): ChatInfo {
+    if (next.pending_question || readStartedAt >= (liveQuestionClock[next.chat_id] ?? 0)) return next
+    const local = chats.value.find(c => c.chat_id === next.chat_id)?.pending_question
+    return local ? { ...next, pending_question: local } : next
+  }
 
   function nextTerminalOfferClock(): number {
     terminalOfferClock += 1
@@ -2388,7 +2399,7 @@ export const useProjectStore = defineStore('projects', () => {
         merged.push(existing)
         activeById.delete(existing.chat_id)
       } else if (activeById.has(existing.chat_id)) {
-        merged.push(activeById.get(existing.chat_id)!)
+        merged.push(keepLivePendingQuestion(activeById.get(existing.chat_id)!, readStartedAt))
         activeById.delete(existing.chat_id)
       }
       // else: an active row that vanished server-side is dropped.
@@ -3227,7 +3238,8 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  function replaceChat(chat: ChatInfo, readStartedAt: number = terminalOfferClock) {
+  function replaceChat(incoming: ChatInfo, readStartedAt: number = terminalOfferClock) {
+    const chat = keepLivePendingQuestion(incoming, readStartedAt)
     const idx = chats.value.findIndex(x => x.chat_id === chat.chat_id)
     if (idx >= 0) chats.value[idx] = chat
     else chats.value.push(chat)
@@ -6569,6 +6581,19 @@ export const useProjectStore = defineStore('projects', () => {
             const submission = questionSubmissions.value[chatId]
             if (!submission?.pending) delete questionSubmissions.value[chatId]
             activeQuestions.value[chatId] = qs
+            // Mirror the engine's persisted `pending_question` on the local
+            // chat. The question pause ends the turn and reloads history, and
+            // `rebuildPendingQuestion` would otherwise read the pre-question
+            // snapshot, dismiss this picker and mark it resolved.
+            const askingChat = chats.value.find(c => c.chat_id === chatId)
+            if (askingChat) {
+              askingChat.pending_question = mirroredPendingQuestion(
+                event.tool_input,
+                event.request_id || '',
+                event.session_id || '',
+              )
+              liveQuestionClock[chatId] = nextTerminalOfferClock()
+            }
             // Nudge the user when the tab is backgrounded so they don't
             // miss a question that the model needs answered.
             if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {

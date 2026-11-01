@@ -4299,6 +4299,96 @@ describe('provider-neutral input state', () => {
     })
   })
 
+  test('keeps a live AskUserQuestion picker when history reloads before the chat list refreshes', async () => {
+    // The live picker used to set only `activeQuestions`. The question pause
+    // ends the turn and reloads history, which rebuilt from the chat list's
+    // pre-question snapshot (`pending_question: ''`), dismissed the picker and
+    // marked it resolved, so the same question asked again stayed hidden too.
+    const store = useProjectStore()
+    const chatId = 'live-question-reload'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Live question',
+      model: 'opus',
+      provider: 'claude',
+      mode: 'bypass',
+      session_id: 's1',
+      created_at: '',
+      archived: false,
+      pending_question: '',
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        tool_input: JSON.stringify({
+          questions: [{ question: 'Pick a color', header: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }] }],
+        }),
+      }),
+    })
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+
+    apiGet.mockResolvedValue([])
+    await store.loadMessages(chatId)
+
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(store.activeQuestions[chatId][0].question).toBe('Pick a color')
+  })
+
+  test('a chat-list read that started before a live question does not erase it', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    const chatId = 'live-question-stale-list'
+    const row = {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Live question',
+      model: 'opus',
+      provider: 'claude',
+      mode: 'bypass',
+      session_id: 's1',
+      created_at: '',
+      archived: false,
+      pending_question: '',
+    }
+    store.chats = [{ ...row }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+
+    // The poll is in flight with the pre-question snapshot when the question lands.
+    let releaseList: (rows: unknown[]) => void = () => {}
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats?active_only=1') {
+        return new Promise(resolve => { releaseList = resolve })
+      }
+      return Promise.resolve([])
+    })
+    const sync = store.syncLatest()
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'req-1',
+        session_id: 's1',
+        tool_input: JSON.stringify({
+          questions: [{ question: 'Pick a color', header: 'Color', options: [{ label: 'Red' }, { label: 'Blue' }] }],
+        }),
+      }),
+    })
+    releaseList([{ ...row }])
+    await sync
+
+    const mirrored = JSON.parse(store.chats.find(c => c.chat_id === chatId)?.pending_question || '{}')
+    expect(mirrored.request_id).toBe('req-1')
+    expect(mirrored.session_id).toBe('s1')
+    apiGet.mockResolvedValue([])
+    await store.loadMessages(chatId)
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+  })
+
   test('surfaces an empty AskUserQuestion as a free-form fallback', () => {
     const store = useProjectStore()
     const chatId = 'empty-question-chat'
