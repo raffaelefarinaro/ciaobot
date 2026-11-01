@@ -157,14 +157,25 @@ def test_a_fresh_setup_writes_the_vocabulary_the_first_memory_pass_types_from(
     """A new workspace has no VOCABULARY.md until the vault index runs, so the
     first memory pass cannot type a note: it reads the Categories section of
     that file and asks the owner to create it. Setup writes it up front."""
-    _fresh(tmp_path)
+    from ciao import vault_index
 
-    vocabulary = tmp_path / "personal" / "memory-vault" / "VOCABULARY.md"
+    vault = tmp_path / "personal" / "memory-vault"
+    written = setup_workspace(tmp_path, auth_token="t")
+
+    vocabulary = vault / "VOCABULARY.md"
     assert vocabulary.is_file()
+    assert vocabulary.resolve() in {Path(p).resolve() for p in written}
     text = vocabulary.read_text(encoding="utf-8")
     assert "## Categories" in text
-    assert "`person`" in text
+    assert "- `project`" in text
+    assert "- `person`" in text
     assert "## Types (canonical" in text
+
+    # Byte parity with `ciao vault-index --write`, the generator the weekly
+    # hygiene pass runs: setup must not produce a different file.
+    before = vocabulary.read_bytes()
+    assert vault_index.main(["--vault-root", str(vault), "--write"]) == 0
+    assert vocabulary.read_bytes() == before
 
 
 def test_a_setup_rerun_keeps_an_owner_edited_vocabulary(tmp_path: Path) -> None:
@@ -180,10 +191,11 @@ def test_a_setup_rerun_keeps_an_owner_edited_vocabulary(tmp_path: Path) -> None:
 
 
 def test_a_failed_vocabulary_write_does_not_fail_setup(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, capsys
 ) -> None:
     """The vocabulary is a scaffold step like the rest: a scan that raises is
-    reported, and setup still finishes with its registry and receipt in place."""
+    reported on stderr, and setup still finishes with its registry and receipt
+    in place."""
     from ciao import vault_index
 
     def _boom(*args, **kwargs):
@@ -193,6 +205,10 @@ def test_a_failed_vocabulary_write_does_not_fail_setup(
 
     written = setup_workspace(tmp_path, auth_token="t")
 
+    vault = tmp_path / "personal" / "memory-vault"
     assert (tmp_path / ".runtime" / "workspaces.json").is_file()
     assert written
-    assert not (tmp_path / "personal" / "memory-vault" / "VOCABULARY.md").exists()
+    assert not (vault / "VOCABULARY.md").exists()
+    err = capsys.readouterr().err
+    assert "vocabulary not written for" in err
+    assert str(vault.resolve()) in err

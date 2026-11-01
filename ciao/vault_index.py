@@ -1710,23 +1710,24 @@ def write_vocabulary_file(
     dest.write_text(header + "\n".join(sections), encoding="utf-8", newline="")
 
 
-def write_vocabulary_if_missing(vault_root: Path) -> bool:
-    """Write ``VOCABULARY.md`` for *vault_root* when the file does not exist yet.
+def ensure_vocabulary_file(vault_root: Path) -> Path | None:
+    """Write ``VOCABULARY.md`` for *vault_root* only when the file is missing.
 
     Setup calls this so a new workspace can type its first note: the memory pass
     reads the Categories section of this file, and before the first vault index
     run there is no file to read. The body is what ``vault-index --write`` would
-    produce for the same vault (same registry, same scan). An existing file is
-    left alone, because it is owned by the vault index and the category editor,
-    not by setup. Returns True when it wrote the file.
+    produce for the same vault (same registry, same scan). Missing-only because a
+    rerun of setup must not rescan a large adopted vault, and the weekly
+    ``--write`` keeps an existing file current. Returns the path when it wrote the
+    file, ``None`` when one was already there.
     """
     dest = vault_root / "VOCABULARY.md"
     if dest.exists():
-        return False
+        return None
     registry = load_entity_types(vault_root)
     entries = scan_vault(vault_root, registry=registry)
     write_vocabulary_file(entries, dest, registry=registry)
-    return True
+    return dest
 
 
 # ---- CLI -------------------------------------------------------------------
