@@ -759,6 +759,7 @@ Arguments and descriptor:
 - `--migrate`, `--as-host`, `--as-client` and `--no-start` are incompatible with `--native-install`. `--no-modify-path` is accepted and redundant: native mode never edits a shell profile.
 - Any other refusal after the descriptor is known is one `failed` event with `invalid_arguments`.
 - Without `--native-install`, `--events-fd` or `--run-id` is refused as a legacy usage error.
+- Parse-stage refusals emit nothing: an unknown option, a missing value for `--version`, `--workspace`, `--as-client`, `--events-fd` or `--run-id`, and `--help`. They end before the channel is validated, so the client gets diagnostics and exit 1 (`--help` exits 0 after printing usage) and no event.
 
 Events:
 
@@ -788,7 +789,16 @@ Cancellation: SIGINT, SIGTERM or SIGHUP to the shell (or its process group) befo
 
 Lock and partial state: the coordinator owns the run lock and both canonical classifications. The shell's system-only preflight refuses an existing, partial, unknown or locked Mac before any network work and changes nothing it found. The native installer never repairs, retries or reinstalls; see the recovery paragraph above.
 
-Trust chain: the pinned uv digest table authenticates the uv archive; the extracted uv executable's sha256 and the wheel's sha256 are passed to the coordinator, which re-hashes its private copies; the signed manifest authenticates the wheel and the server host, which are checked before the handover. The client pins the `install.sh` digest described above.
+Trust chain: the pinned uv digest table authenticates the uv archive. The shell's own sha256 of the extracted uv executable is passed to the coordinator as `--uv-sha256`. The signed manifest authenticates the wheel and the server host, and both are checked before the handover; the wheel's manifest sha256 is passed as `--wheel-sha256`. The coordinator re-hashes its private copies, and it re-verifies the host archive (`verify_host_archive`) before it installs anything.
+
+What native mode does to the environment. Every uv call, and every call to the coordinator's venv python before the handover, runs under `/usr/bin/env -i` with a fixed PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), `HOME`, a private `TMPDIR` and `LANG=C`, from a private working directory. Commands resolve only through that PATH. uv runs with `--no-config` (no `uv.toml` or `UV_*` configuration), `--managed-python` (uv's own CPython, never a PATH `python3.13`) and `--default-index https://pypi.org/simple`. `uv run` adds `--no-build`, and `uv pip install` adds `--only-binary :all:`. Every release fetch is https-only, quiet (`-q`, no curlrc) and bounded to 600 seconds and 512 MiB.
+
+Limits:
+
+- Full hash-pinning of `cryptography` and of the wheel's dependency closure is not done. The residual exposure is a compromise of PyPI or of the index the pinned URL names. The wheel and the host archive are pinned by the signed manifest.
+- The uv flag spellings were checked against `uv --help` of uv 0.13.6. The pinned release is 0.12.17, which was not run locally, so the flags are unverified there. A release that changes them must update `uv_call` and this section together.
+- Same-user limits: a process running as this user can still change files in the private working directory between a check and its use, and it can replace the staged uv or the release files in that window. The mode-0700 directory keeps other users out; it does not stop the user's own processes.
+- The client must pin the `install.sh` digest itself (see the release sentence above).
 
 Tests: `tests/test_native_install_sh.py` (shell, fake tools) and `tests/test_native_installer.py` (coordinator).
 

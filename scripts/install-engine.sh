@@ -188,6 +188,18 @@ native_verify_want_size=
 NATIVE_WRITE_TIMEOUT=5
 NATIVE_TIMER=/bin/sleep
 NATIVE_COORDINATOR_PROTOCOL=1
+# Native mode resolves every command through this fixed path, so the public
+# descriptor is never handed to a program found on a caller's PATH. The test
+# harness rewrites this line to put its fake tools first.
+NATIVE_PATH=/usr/bin:/bin:/usr/sbin:/sbin
+# The only release scheme native mode accepts. The harness rewrites it to file://.
+NATIVE_RELEASE_SCHEME=https
+# Native mode sets these: the curl flags that bound the uv bootstrap download.
+# Empty in legacy runs, so the legacy argv is unchanged.
+uv_curl_q=
+uv_curl_limits=
+# Set before the working directory exists, so an early trap can remove it.
+tmp=
 
 usage() {
     cat >&2 <<'USAGE'
@@ -854,6 +866,9 @@ cleanup_on_exit() {
     # before `$tmp` and the wheel are deleted, because the module that performs it
     # is run out of that wheel. The original status is preserved.
     cleanup_status=$?
+    # Native mode: an abort no fixed-code fail reported still gives the client its
+    # one terminal event. A no-op in legacy runs and after the handover.
+    [ "$cleanup_status" -eq 0 ] || native_report_failure
     if [ "$native_host_pending" -eq 0 ] && [ "$native_host_install_started" -ne 0 ]; then
         # The child can finish the durable install before `native_host_begin` has
         # recorded the operation - its status query, its own failure, or a signal
@@ -867,7 +882,12 @@ cleanup_on_exit() {
     if [ "$native_host_pending" -ne 0 ]; then
         native_host_rollback || true
     fi
-    rm -rf "$tmp"
+    if [ "$native_install" -eq 1 ]; then
+        # The public descriptor can still be open here, so the removal runs isolated.
+        native_isolated rm -rf "$tmp" || true
+    else
+        rm -rf "$tmp"
+    fi
     exit "$cleanup_status"
 }
 
@@ -904,14 +924,19 @@ native_watchdog_stop() {
     wait "$native_watchdog" 2>/dev/null || true
 }
 
+native_write_event() {
+    # $1 is the type-specific tail of one event.
+    native_seq=$((native_seq + 1))
+    native_write_line "{\"schema\":1,\"run_id\":\"$native_run_id\",\"seq\":$native_seq,$1}"
+}
+
 native_emit() {
-    # $1 is the type-specific tail of one event. Refused once the channel is shut,
-    # handed over, or terminal, so a failure after the end cannot add a line.
+    # Refused once the channel is shut, handed over, or terminal, so a failure
+    # after the end cannot add a line.
     [ "$native_channel_open" -eq 1 ] || return 1
     [ "$native_handed_over" -eq 0 ] || return 1
     [ "$native_terminal" -eq 0 ] || return 1
-    native_seq=$((native_seq + 1))
-    native_write_line "{\"schema\":1,\"run_id\":\"$native_run_id\",\"seq\":$native_seq,$1}"
+    native_write_event "$1"
 }
 
 native_emit_phase() {
@@ -928,13 +953,15 @@ native_report_failure() {
     [ "$native_channel_open" -eq 1 ] || return 0
     [ "$native_handed_over" -eq 0 ] || return 0
     [ "$native_terminal" -eq 0 ] || return 0
+    # Claimed before the write: a signal that lands during it finds the slot taken,
+    # so the client never sees a second terminal event.
+    native_terminal=1
     case "$native_code" in
         invalid_arguments|existing_install|partial_install|unknown_state|install_in_progress) ;;
         download_failed|verification_failed|install_failed|cancelled) ;;
         *) native_code=install_failed ;;
     esac
-    native_emit "\"type\":\"failed\",\"code\":\"$native_code\"" || true
-    native_terminal=1
+    native_write_event "\"type\":\"failed\",\"code\":\"$native_code\"" || true
 }
 
 native_isolated() {
@@ -991,7 +1018,9 @@ native_valid_workspace() {
     case "/$1/" in
         */./*|*/../*) return 1 ;;
     esac
-    printf '%s' "$1" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
+    case "$1" in
+        *[[:cntrl:]]*) return 1 ;;
+    esac
     return 0
 }
 
@@ -1004,6 +1033,8 @@ native_validate_arguments() {
         fi
         return 0
     fi
+    PATH=$NATIVE_PATH
+    export PATH
     case "$events_fd" in
         [3-9]) ;;
         *) fail "--native-install requires --events-fd with a descriptor from 3 to 9" ;;
@@ -1016,6 +1047,12 @@ native_validate_arguments() {
         || fail "--native-install requires --run-id with a canonical lowercase UUID"
     native_channel_open=1
     native_code=invalid_arguments
+    case "$release_base" in
+        "$NATIVE_RELEASE_SCHEME"://*) ;;
+        *) fail "--native-install needs a $NATIVE_RELEASE_SCHEME release base" ;;
+    esac
+    uv_curl_q=-q
+    uv_curl_limits="--max-time 600 --max-filesize 536870912"
     [ -n "$version" ] || fail "--native-install requires --version"
     [ "$migrate" -eq 0 ] || fail "--migrate cannot be combined with --native-install"
     [ "$as_host" -eq 0 ] || fail "--as-host cannot be combined with --native-install"
@@ -1169,9 +1206,16 @@ done
 [ -x "$STAT" ] || fail "required command not found: $STAT"
 [ -x "$SHASUM" ] || fail "required command not found: $SHASUM"
 
-[ "$(uname -s)" = "Darwin" ] || fail "this installer supports macOS; Linux servers use docs/LINUX.md"
-
-major=$(sw_vers -productVersion | awk -F. '{print $1}')
+if [ "$native_install" -eq 1 ]; then
+    # The public descriptor is open at this point, so these run isolated.
+    native_os=$(native_isolated uname -s) || fail "could not determine the operating system"
+    [ "$native_os" = Darwin ] || fail "this installer supports macOS; Linux servers use docs/LINUX.md"
+    native_sw_vers=$(native_isolated sw_vers -productVersion) || fail "could not determine the macOS version"
+    major=${native_sw_vers%%.*}
+else
+    [ "$(uname -s)" = "Darwin" ] || fail "this installer supports macOS; Linux servers use docs/LINUX.md"
+    major=$(sw_vers -productVersion | awk -F. '{print $1}')
+fi
 case "$major" in
     ''|*[!0-9]*) fail "could not determine the macOS version" ;;
 esac
@@ -1200,18 +1244,39 @@ case "$version" in
 esac
 base="$release_base/v$version"
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-engine.XXXXXX")
-chmod 700 "$tmp"
-# One EXIT handler for every ending: it gives the previous server host back if
-# this run left a native-host upgrade uncommitted, and only then deletes the
-# wheel it needs to do that. A signal handler that only cleaned up would fall
-# through into the next step with the temp dir already deleted; `on_signal` exits
-# and so runs this trap.
-trap cleanup_on_exit EXIT
-trap on_signal HUP INT TERM
+if [ "$native_install" -eq 1 ]; then
+    # The traps come first, so a failure during mktemp still ends in the fixed
+    # failure event. TMPDIR is used only when it is an absolute path.
+    trap cleanup_on_exit EXIT
+    trap on_signal HUP INT TERM
+    case "${TMPDIR:-}" in
+        /*) native_tmp_root=$TMPDIR ;;
+        *) native_tmp_root=/tmp ;;
+    esac
+    tmp=$(native_isolated mktemp -d "$native_tmp_root/ciaobot-engine.XXXXXX") \
+        || fail "could not create a private working directory"
+    native_isolated chmod 700 "$tmp" || fail "could not protect the working directory"
+else
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/ciaobot-engine.XXXXXX")
+    chmod 700 "$tmp"
+    # One EXIT handler for every ending: it gives the previous server host back if
+    # this run left a native-host upgrade uncommitted, and only then deletes the
+    # wheel it needs to do that. A signal handler that only cleaned up would fall
+    # through into the next step with the temp dir already deleted; `on_signal` exits
+    # and so runs this trap.
+    trap cleanup_on_exit EXIT
+    trap on_signal HUP INT TERM
+fi
 
 download() {
     "$CURL" -fsSL --retry 3 --connect-timeout 15 "$1" -o "$2"
+}
+
+native_download() {
+    # Native mode: quiet (no curlrc), protocol-pinned to the release scheme, and
+    # bounded in time and size. Never reached by a legacy run.
+    "$CURL" -q -fsSL --proto "=$NATIVE_RELEASE_SCHEME" --proto-redir "=$NATIVE_RELEASE_SCHEME" \
+        --retry 3 --connect-timeout 15 --max-time 600 --max-filesize 536870912 "$1" -o "$2"
 }
 
 # The pinned uv release a missing uv is bootstrapped from. These are the six
@@ -1258,7 +1323,7 @@ bootstrap_verified_uv() {
     uv_asset=$(uv_archive_asset)
     uv_expected=$(uv_archive_sha256 "$uv_asset")
     uv_archive="$tmp/$uv_asset"
-    "$CURL" --proto '=https' --proto-redir '=https' -fsSL --retry 3 --connect-timeout 15 \
+    "$CURL" ${uv_curl_q:-} --proto '=https' --proto-redir '=https' -fsSL ${uv_curl_limits:-} --retry 3 --connect-timeout 15 \
         "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/$uv_asset" \
         -o "$uv_archive" || fail "could not download the uv archive"
     [ -f "$uv_archive" ] || fail "the downloaded uv archive is not a regular file"
@@ -1590,12 +1655,46 @@ refuse_desktop_engine() {
     fi
 }
 
+uv_call() {
+    # Every uv command the installer starts goes through here. A legacy run gets
+    # exactly "$uv" "$@". A native run gets a cleared environment, the pinned PATH,
+    # a private working directory, uv's own managed Python and no uv configuration.
+    # The index and the build policy are pinned here. Full hash-pinning of the
+    # resolved packages is not done; see docs/DEVELOPMENT.md.
+    if [ "$native_install" -eq 0 ]; then
+        "$uv" "$@"
+        return
+    fi
+    uv_call_sub=$1
+    shift
+    cd "$tmp" || return 1
+    case "$uv_call_sub" in
+        venv)
+            /usr/bin/env -i PATH="$NATIVE_PATH" HOME="$HOME" TMPDIR="$tmp" LANG=C \
+                "$uv" venv --no-config --managed-python "$@"
+            ;;
+        run)
+            /usr/bin/env -i PATH="$NATIVE_PATH" HOME="$HOME" TMPDIR="$tmp" LANG=C \
+                "$uv" run --no-config --managed-python --default-index https://pypi.org/simple \
+                --no-build "$@"
+            ;;
+        pip)
+            [ "${1:-}" = install ] || return 1
+            shift
+            /usr/bin/env -i PATH="$NATIVE_PATH" HOME="$HOME" TMPDIR="$tmp" LANG=C \
+                "$uv" pip install --no-config --managed-python --default-index https://pypi.org/simple \
+                --only-binary :all: "$@"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 read_manifest() {
     # Verifies the manifest signature with the embedded key, then the schema,
     # the requested version and the single wheel entry, and prints that entry
     # as "<filename> <sha256> <size>". Nothing outside this heredoc is
     # trusted, and nothing from the manifest is ever executed.
-    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$CRYPTOGRAPHY_PIN" \
+    uv_call run --quiet --no-project --python "$PYTHON_VERSION" --with "$CRYPTOGRAPHY_PIN" \
         python - "$tmp/ciaobot-engine-manifest.json" "$tmp/ciaobot-engine-manifest.json.sig" "$version" "$RELEASE_PUBLIC_KEY" <<'PY'
 # --- embedded verifier (keep in sync with ciao/release_manifest.py) ---
 import base64, hashlib, json, sys
@@ -2822,6 +2921,12 @@ native_verify_file() {
     [ "${1:-}" = "$native_verify_want_size" ] || return 1
 }
 
+native_py() {
+    # The coordinator's venv python, under the same cleared environment as uv.
+    cd "$tmp" || return 1
+    /usr/bin/env -i PATH="$NATIVE_PATH" HOME="$HOME" TMPDIR="$tmp" LANG=C "$native_python" "$@"
+}
+
 native_handover() {
     native_code=internal_error
     set -- run --run-id "$native_run_id" --events-fd "$events_fd" \
@@ -2868,24 +2973,30 @@ native_main() {
     native_uv_sha=${native_uv_sha%% *}
 
     native_emit_phase download || { native_channel_open=0; fail "the --events-fd descriptor stopped accepting events"; }
-    native_isolated download "$base/ciaobot-engine-manifest.json" "$tmp/ciaobot-engine-manifest.json" \
+    native_isolated native_download "$base/ciaobot-engine-manifest.json" "$tmp/ciaobot-engine-manifest.json" \
         || fail "could not download the release manifest"
-    native_isolated download "$base/ciaobot-engine-manifest.json.sig" "$tmp/ciaobot-engine-manifest.json.sig" \
+    native_isolated native_download "$base/ciaobot-engine-manifest.json.sig" "$tmp/ciaobot-engine-manifest.json.sig" \
         || fail "could not download the release manifest signature"
     native_code=verification_failed
     native_isolated read_manifest > "$tmp/native-manifest-info" || fail "release manifest verification failed"
     read -r manifest_info < "$tmp/native-manifest-info" || fail "release manifest verification failed"
+    set -f
     set -- $manifest_info
+    set +f
     wheel_name=${1:-}
     wheel_sha=${2:-}
     wheel_size=${3:-}
     if [ -z "$wheel_name" ] || [ -z "$wheel_sha" ] || [ -z "$wheel_size" ]; then
         fail "release manifest verification failed"
     fi
+    # A name with a separator or a parent reference never names a file in the temp dir.
+    case "$wheel_name" in
+        */*|*..*) fail "release manifest verification failed" ;;
+    esac
 
     wheel="$tmp/$wheel_name"
     native_code=download_failed
-    native_isolated download "$base/$wheel_name" "$wheel" || fail "could not download $wheel_name"
+    native_isolated native_download "$base/$wheel_name" "$wheel" || fail "could not download $wheel_name"
     native_code=verification_failed
     native_verify_file "$wheel" "$wheel_sha" "$wheel_size" \
         || fail "downloaded wheel does not match the signed manifest"
@@ -2893,34 +3004,40 @@ native_main() {
     # The coordinator's private venv: built from the verified wheel by the verified uv.
     native_code=install_failed
     native_python="$tmp/native-coordinator/bin/python"
-    native_isolated "$uv" venv --quiet --python "$PYTHON_VERSION" "$tmp/native-coordinator" >/dev/null \
+    native_isolated uv_call venv --quiet --python "$PYTHON_VERSION" "$tmp/native-coordinator" >/dev/null \
         || fail "could not prepare the installer environment"
-    native_isolated "$uv" pip install --quiet --python "$native_python" "$wheel" >/dev/null \
+    native_isolated uv_call pip install --quiet --python "$native_python" "$wheel" >/dev/null \
         || fail "could not prepare the installer environment"
+    [ -x "$native_python" ] || fail "the installer environment has no python"
     native_code=invalid_arguments
-    native_isolated "$native_python" -I -c 'import sys
+    native_isolated native_py -I -c 'import sys
 from ciao.native_installer import NATIVE_COORDINATOR_PROTOCOL as p
 sys.exit(0 if p == int(sys.argv[1]) else 3)' "$NATIVE_COORDINATOR_PROTOCOL" >/dev/null 2>&1 \
         || fail "release $version does not support --native-install"
 
     native_code=verification_failed
-    native_isolated "$native_python" -I -m ciao.server_host_install select --describe \
+    native_isolated native_py -I -m ciao.server_host_install select --describe \
         "$tmp/ciaobot-engine-manifest.json" "$tmp/ciaobot-engine-manifest.json.sig" \
         --public-key "$RELEASE_PUBLIC_KEY" > "$tmp/native-host-entry" \
         || fail "the signed manifest's server host entry could not be read"
     host_entry=
     read -r host_entry < "$tmp/native-host-entry" || host_entry=
     [ -n "$host_entry" ] || fail "release $version has no server host this installer can install"
+    set -f
     set -- $host_entry
+    set +f
     host_name=${1:-}
     host_sha=${2:-}
     host_size=${3:-}
     if [ -z "$host_name" ] || [ -z "$host_sha" ] || [ -z "$host_size" ]; then
         fail "the signed manifest's server host entry is malformed"
     fi
+    case "$host_name" in
+        */*|*..*) fail "the signed manifest's server host entry is malformed" ;;
+    esac
     host="$tmp/$host_name"
     native_code=download_failed
-    native_isolated download "$base/$host_name" "$host" || fail "could not download $host_name"
+    native_isolated native_download "$base/$host_name" "$host" || fail "could not download $host_name"
     native_code=verification_failed
     native_verify_file "$host" "$host_sha" "$host_size" \
         || fail "downloaded server host does not match the signed manifest"

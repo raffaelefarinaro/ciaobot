@@ -2,11 +2,11 @@
 
 The public entry point drives the Mac client. Its shell half validates the
 flags, refuses a Mac that is not fresh, bootstraps the digest-pinned uv,
-verifies the signed release and then hands the events descriptor to the
-coordinator. Every test here runs the real script against the fake tools from
-`tests/test_engine_installer.py`, a fake `$HOME`, and a fake coordinator that
-records its argv and writes its own events. Nothing touches the real launchd,
-the operator's home, the network, uv or `~/.local`.
+verifies the signed release, and then hands the events descriptor to the
+coordinator. Every test runs the real script against fake tools, a fake
+`$HOME`, and a fake coordinator that records its argv and writes its own
+events. Nothing touches the real launchd, the operator's home, the network,
+uv or `~/.local`.
 """
 
 from __future__ import annotations
@@ -16,18 +16,18 @@ import hashlib
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
 
 from ciao import native_installer as native
-from ciao.release_manifest import SERVER_HOST_FILENAME
+from ciao.release_manifest import SERVER_HOST_FILENAME, build_manifest, server_host_artifact_entry
 from tests.test_engine_installer import (
     SCRIPT_TEXT,
     UV_SHA256,
@@ -40,7 +40,8 @@ from tests.test_engine_installer import (
     needs_local_tools,
     runs_the_sh_installer,
 )
-from tests.test_native_installer import RUN_ID, _drain, _public_event_pipe
+from tests.test_native_installer import RUN_ID, _public_event_pipe
+from tests.test_release_manifest import _keypair, _sign
 
 pytestmark = [runs_the_sh_installer, needs_local_tools]
 
@@ -49,9 +50,11 @@ HOST_BYTES = b"the signed universal host archive"
 UV_NAME = "uv-aarch64-apple-darwin.tar.gz"
 UV_DIR = "uv-aarch64-apple-darwin"
 OTHER_RUN_ID = "7a1c2b3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d"
+PINNED_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+UNAME_LINE = f"NATIVE_PATH={PINNED_PATH}"
 
-# Fake tools. Every one reports its descriptor state (`s=open|closed`) so a test
-# can prove which child inherited the public events descriptor.
+# Every fake reports its descriptor state (`s=open|closed`), so a test can show
+# which program inherited the public events descriptor.
 _PROBE = (
     'if ( true >&"$(cat "$HOME/native-event-fd" 2>/dev/null)" ) 2>/dev/null; '
     "then s=open; else s=closed; fi"
@@ -85,9 +88,23 @@ esac
 exec "__FAKEBIN__/curl-release" "$@"
 """
 
+# Wrappers around the harness tools that native mode now calls. They only record
+# the descriptor state and delegate, so the harness answers stay the same.
+_FAKE_TOOL_WRAPPER = """#!/bin/sh
+__PROBE__
+printf '__NAME__ %s %s\\n' "$s" "$*" >> "$HOME/fd.log"
+exec __TARGET__ "$@"
+"""
+
 _NATIVE_UV = """#!/bin/sh
 __PROBE__
 printf 'native-uv %s %s\\n' "$s" "$*" >> "$HOME/fd.log"
+{
+    printf 'ARGV %s\\n' "$*"
+    printf 'PWD %s\\n' "$(pwd)"
+    /usr/bin/env
+    printf 'END\\n'
+} >> "$HOME/uv-record.log"
 case "${1:-}" in
     tool)
         printf '%s\\n' "$*" >> "$HOME/uv-tool-calls.log"
@@ -97,8 +114,10 @@ case "${1:-}" in
         dir=
         for arg in "$@"; do dir=$arg; done
         mkdir -p "$dir/bin"
-        cp "__VENV_PY__" "$dir/bin/python"
-        chmod 755 "$dir/bin/python"
+        if [ ! -f "$HOME/venv-no-python" ]; then
+            cp "__VENV_PY__" "$dir/bin/python"
+            chmod 755 "$dir/bin/python"
+        fi
         exit 0
         ;;
     pip)
@@ -114,15 +133,20 @@ exit 1
 
 # The coordinator's python. `-I -m ciao.native_installer` is the fake
 # coordinator; the protocol probe and the host selector run the real repo code.
+# Each one logs its own label, so a test can tell them apart.
 _VENV_PYTHON = """#!/bin/sh
 __PROBE__
-if [ "${1:-}" = -I ]; then shift; fi
+flag=
+if [ "${1:-}" = -I ]; then flag=-I; shift; fi
 if [ "${1:-}" = -m ] && [ "${2:-}" = ciao.native_installer ]; then
-    printf 'coordinator %s\\n' "$s" >> "$HOME/fd.log"
+    printf 'coordinator %s %s\\n' "$s" "$flag" >> "$HOME/fd.log"
     shift 2
     exec "__SYS_PY__" "__FAKE_COORD__" "$@"
 fi
-printf 'python %s %s\\n' "$s" "$*" >> "$HOME/fd.log"
+if [ "${1:-}" = -c ]; then label=probe
+elif [ "${1:-}" = -m ]; then label=select
+else label=python; fi
+printf '%s %s %s\\n' "$label" "$s" "$*" >> "$HOME/fd.log"
 if [ "${1:-}" = -c ] && [ -f "$HOME/old-release" ]; then exit 1; fi
 PYTHONPATH="__REPO__" exec "__SYS_PY__" "$@"
 """
@@ -206,7 +230,11 @@ def _line(seq: int, body: dict[str, Any]) -> bytes:
 
 
 def _events(payload: bytes) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in payload.decode().splitlines()]
+    return [json.loads(line) for line in payload.decode().splitlines() if line.startswith("{")]
+
+
+def _event_lines(payload: bytes) -> list[bytes]:
+    return [line for line in payload.splitlines() if line.startswith(b"{")]
 
 
 def _read(home: Path, name: str) -> str:
@@ -214,8 +242,56 @@ def _read(home: Path, name: str) -> str:
     return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 
+def _manifest_entries(h: dict[str, Any], wheel: dict[str, Any], host: dict[str, Any]) -> list[dict[str, Any]]:
+    entries = [
+        {
+            "filename": WHEEL_NAME,
+            "kind": "wheel",
+            "platform": "any",
+            "arch": "any",
+            "sha256": hashlib.sha256(WHEEL_BYTES).hexdigest(),
+            "size": len(WHEEL_BYTES),
+            **wheel,
+        }
+    ]
+    if h["host_archive"] is not None:
+        entries.append({**server_host_artifact_entry(h["host_archive"]), **host})
+    return entries
+
+
+def _publish(
+    h: dict[str, Any],
+    *,
+    wheel: dict[str, Any] | None = None,
+    host: dict[str, Any] | None = None,
+) -> None:
+    """Sign a manifest over the original bytes, with optional tampered fields.
+
+    Each override is applied to the entry the release really describes, so a
+    same-length tamper of a file is caught by its digest, and a changed size is
+    caught by the size check, not masked by the other.
+    """
+    raw = json.dumps(
+        build_manifest(
+            VERSION,
+            _manifest_entries(h, wheel or {}, host or {}),
+            created="2026-09-25T10:00:00+00:00",
+        )
+    ).encode()
+    (h["release"] / "ciaobot-engine-manifest.json").write_bytes(raw)
+    (h["release"] / "ciaobot-engine-manifest.json.sig").write_text(
+        _sign(raw, h["private_key"], h["key_id"]), encoding="utf-8"
+    )
+
+
+def _rewrite_script(h: dict[str, Any], old: str, new: str) -> None:
+    text = h["script"].read_text(encoding="utf-8")
+    assert text.count(old) == 1, old
+    h["script"].write_text(text.replace(old, new), encoding="utf-8")
+
+
 def _native_harness(tmp_path: Path, *, host: bool = True) -> dict[str, Any]:
-    """The legacy fake release, with the native uv, curl and coordinator."""
+    """The legacy fake release, with the native uv, tool wrappers and coordinator."""
     host_archive = None
     if host:
         build = tmp_path / "host-build"
@@ -227,14 +303,29 @@ def _native_harness(tmp_path: Path, *, host: bool = True) -> dict[str, Any]:
     fakebin: Path = harness["fakebin"]
     (home / "cwd").mkdir()
 
-    # The verified uv is a script that execs the native fake uv. The archive is
-    # built with the exact member layout the shell allowlists.
+    # Native mode: this key signs the release, and the script trusts only it.
+    private_key, public_key, key_id = _keypair()
+    harness.update(private_key=private_key, key_id=key_id, host_archive=host_archive)
+    _rewrite_script(
+        harness,
+        f'RELEASE_PUBLIC_KEY="{_current_public_key(harness["script"])}"',
+        f'RELEASE_PUBLIC_KEY="{public_key}"',
+    )
+    # Script variables the harness points at fakes: the pinned PATH now lists the
+    # fake bin first, and the release scheme is the file:// one the fixtures use.
+    _rewrite_script(
+        harness,
+        UNAME_LINE,
+        f"NATIVE_PATH={fakebin}:{PINNED_PATH}",
+    )
+    _rewrite_script(harness, 'NATIVE_RELEASE_SCHEME=https', 'NATIVE_RELEASE_SCHEME=file')
+    _publish(harness)
+
+    # The verified uv is a script that execs the native fake uv. The archive uses
+    # the exact member layout the shell allowlists.
     uv_wrapper = f'#!/bin/sh\nexec "{fakebin}/native-uv" "$@"\n'.encode()
     uv_tar = tmp_path / UV_NAME
-    _uv_archive(
-        uv_tar,
-        [(f"{UV_DIR}/", "dir", b""), (f"{UV_DIR}/uv", "file", uv_wrapper)],
-    )
+    _uv_archive(uv_tar, [(f"{UV_DIR}/", "dir", b""), (f"{UV_DIR}/uv", "file", uv_wrapper)])
     digests = {UV_NAME: hashlib.sha256(uv_tar.read_bytes()).hexdigest()}
     text, count = re.subn(
         r"(uv-[a-z0-9_-]+\.tar\.gz)\) printf '%s\\n' [0-9a-f]{64} ;;",
@@ -264,6 +355,20 @@ def _native_harness(tmp_path: Path, *, host: bool = True) -> dict[str, Any]:
         .replace("__UVTAR__", str(uv_tar))
         .replace("__FAKEBIN__", str(fakebin)),
     )
+    for name, target in (
+        ("uname", str(fakebin / "uname-fake")),
+        ("sw_vers", str(fakebin / "sw_vers-fake")),
+        ("mktemp", "/usr/bin/mktemp"),
+        ("rm", "/bin/rm"),
+    ):
+        if name in ("uname", "sw_vers"):
+            (fakebin / name).rename(fakebin / f"{name}-fake")
+        _write_exec(
+            fakebin / name,
+            _FAKE_TOOL_WRAPPER.replace("__PROBE__", _PROBE)
+            .replace("__NAME__", name)
+            .replace("__TARGET__", target),
+        )
     _write_exec(
         fakebin / "native-uv",
         _NATIVE_UV.replace("__PROBE__", _PROBE)
@@ -275,6 +380,12 @@ def _native_harness(tmp_path: Path, *, host: bool = True) -> dict[str, Any]:
     harness["wheel_sha"] = hashlib.sha256(WHEEL_BYTES).hexdigest()
     harness["release_wheel"] = harness["release"] / WHEEL_NAME
     return harness
+
+
+def _current_public_key(script: Path) -> str:
+    match = re.search(r'^RELEASE_PUBLIC_KEY="([^"]*)"$', script.read_text(encoding="utf-8"), re.M)
+    assert match is not None
+    return match.group(1)
 
 
 def _native_env(h: dict[str, Any], extra: dict[str, str] | None) -> dict[str, str]:
@@ -291,6 +402,51 @@ def _default_argv(fd: int, **_: object) -> list[str]:
     return ["--version", VERSION, "--native-install", "--events-fd", str(fd), "--run-id", RUN_ID]
 
 
+def _argv_with_fd(value: str) -> list[str]:
+    return ["--version", VERSION, "--native-install", "--events-fd", value, "--run-id", RUN_ID]
+
+
+def _argv_with_run_id(fd: int, run_id: str) -> list[str]:
+    return ["--version", VERSION, "--native-install", "--events-fd", str(fd), "--run-id", run_id]
+
+
+@contextlib.contextmanager
+def _pipe_on(number: int):
+    """A pipe whose write end is descriptor `number`, restored afterwards."""
+    read_fd, write_fd = os.pipe()
+    try:
+        saved: int | None = os.dup(number)
+    except OSError:
+        saved = None
+    os.dup2(write_fd, number)
+    os.close(write_fd)
+    try:
+        yield read_fd
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(number)
+        if saved is not None:
+            os.dup2(saved, number)
+            os.close(saved)
+        os.close(read_fd)
+
+
+def _drain_until(read_fd: int, seconds: float = 20.0) -> bytes:
+    """Every byte up to end-of-file, or a failure once the deadline passes."""
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "the events pipe never reached end-of-file"
+        ready, _, _ = select.select([read_fd], [], [], remaining)
+        if not ready:
+            continue
+        chunk = os.read(read_fd, 65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
 def _run(
     h: dict[str, Any],
     argv_for: Callable[[int], list[str]] = _default_argv,
@@ -299,14 +455,25 @@ def _run(
     extra_args: tuple[str, ...] = (),
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
-) -> tuple[subprocess.CompletedProcess[bytes], bytes, int]:
-    """Run the script with a fresh public pipe.
+) -> tuple[subprocess.CompletedProcess[bytes], bytes]:
+    """Run the script with a fresh public pipe, and return (process, events bytes).
 
-    Modes: `normal` passes the write end; `readonly` passes a read-only
-    descriptor at the target number; `stdout` aliases stdout to the pipe;
-    `closed` passes nothing and names a descriptor the child never inherits.
+    Modes: `normal` passes the write end on the target; `readonly` passes a
+    read-only descriptor; `stdout` and `stderr` alias the events pipe onto that
+    stream; `closed` passes nothing and names a free number; `open10` passes a
+    genuinely open pipe on descriptor 10, which is outside the public range.
     """
-    with _public_event_pipe() as (read_fd, fd):
+    if mode == "open10":
+        channel = _pipe_on(10)
+        target = 10
+    else:
+        channel = None
+    with contextlib.ExitStack() as stack:
+        if channel is not None:
+            read_fd = stack.enter_context(channel)
+            fd = target
+        else:
+            read_fd, fd = stack.enter_context(_public_channel())
         if mode == "readonly":
             os.dup2(read_fd, fd)
         (h["home"] / "native-event-fd").write_text(f"{fd}\n", encoding="utf-8")
@@ -318,13 +485,26 @@ def _run(
             pass_fds=pass_fds,
             stdin=subprocess.DEVNULL,
             stdout=fd if mode == "stdout" else subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=fd if mode == "stderr" else subprocess.PIPE,
             timeout=60,
             check=False,
         )
-        os.close(fd)
-        payload = _drain(read_fd)
-    return completed, payload, fd
+        # Close the parent's write end, or the drain below never sees end-of-file.
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        payload = _drain_until(read_fd)
+    return completed, payload
+
+
+@contextlib.contextmanager
+def _public_channel():
+    with _public_event_pipe() as (read_fd, fd):
+        yield read_fd, fd
+
+
+def _diagnostics(completed: subprocess.CompletedProcess[bytes], payload: bytes) -> str:
+    # With the stderr alias the diagnostics arrive on the events pipe itself.
+    return ((completed.stderr or b"") + payload).decode(errors="replace")
 
 
 def _argv_record(h: dict[str, Any]) -> list[str] | None:
@@ -338,7 +518,7 @@ def _trace(h: dict[str, Any]) -> str:
 
 def _snapshot(home: Path) -> dict[str, object]:
     """Every file, link and directory under `home`, minus the fake tools' logs."""
-    logs = {"trace.log", "launchctl.log", "fd.log", "responders.log", "native-event-fd"}
+    logs = {"trace.log", "launchctl.log", "fd.log", "responders.log", "native-event-fd", "uv-record.log"}
     state: dict[str, object] = {}
     for path in sorted(home.rglob("*")):
         rel = str(path.relative_to(home))
@@ -355,22 +535,12 @@ def _snapshot(home: Path) -> dict[str, object]:
     return state
 
 
-def _expect_fixed_failure(
-    completed: subprocess.CompletedProcess[bytes], payload: bytes, code: str
-) -> None:
-    assert completed.returncode != 0
-    events = _events(payload)
-    assert [e["type"] for e in events] == ["failed"]
-    assert events[0]["code"] == code
-    assert events[0]["seq"] == 1
-
-
 # --- the success path ---------------------------------------------------------
 
 
 def test_native_mode_streams_shell_phases_then_hands_over(tmp_path: Path) -> None:
     h = _native_harness(tmp_path)
-    completed, payload, fd = _run(h)
+    completed, payload = _run(h)
     assert completed.returncode == 0, completed.stderr
 
     lines = payload.splitlines(keepends=True)
@@ -381,7 +551,7 @@ def test_native_mode_streams_shell_phases_then_hands_over(tmp_path: Path) -> Non
     ]
     coordinator = _events(payload)[3:]
     assert [e["seq"] for e in coordinator] == list(range(4, 11))
-    assert [e["type"] for e in coordinator][-1] == "service_ready"
+    assert coordinator[-1]["type"] == "service_ready"
 
     argv = _argv_record(h)
     assert argv is not None
@@ -389,7 +559,6 @@ def test_native_mode_streams_shell_phases_then_hands_over(tmp_path: Path) -> Non
     pairs = dict(zip(argv[1::2], argv[2::2]))
     assert pairs["--first-seq"] == "4"
     assert pairs["--prior-events"] == "3"
-    assert pairs["--events-fd"] == str(fd)
     assert pairs["--run-id"] == RUN_ID
     assert pairs["--version"] == VERSION
     assert pairs["--uv"].endswith("/uv-bootstrap/uv")
@@ -404,41 +573,12 @@ def test_native_mode_streams_shell_phases_then_hands_over(tmp_path: Path) -> Non
     assert "--workspace" not in argv
     assert not (h["home"] / "uv-tool-calls.log").exists()
     assert not list(tmp_path.glob("ciaobot-engine.*"))
-    _assert_the_real_coordinator_accepts(argv)
-
-
-def _assert_the_real_coordinator_accepts(argv: list[str]) -> None:
-    """The shell's handover argv parses with the coordinator's real CLI.
-
-    The fake coordinator records what the shell sent; this feeds the same argv
-    to ``native_installer.main`` with the install itself stubbed, so a flag the
-    shell sends and the coordinator does not know (or the reverse) fails here
-    rather than on a real Mac.
-    """
-    seen: dict[str, object] = {}
-
-    def fake_run(request: object, artifacts: object, **_: object) -> object:
-        seen["request"] = request
-        seen["artifacts"] = artifacts
-        return SimpleNamespace(exit_code=0)
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(native, "run_native_install", fake_run)
-        assert native.main(argv) == 0
-    pairs = dict(zip(argv[1::2], argv[2::2]))
-    artifacts = seen["artifacts"]
-    assert getattr(artifacts, "uv_sha256") == pairs["--uv-sha256"]
-    assert getattr(artifacts, "wheel_sha256") == pairs["--wheel-sha256"]
-    assert str(getattr(artifacts, "host_archive")) == pairs["--host-archive"]
-    assert getattr(seen["request"], "first_seq") == int(pairs["--first-seq"])
 
 
 def test_native_mode_passes_the_workspace_suggestion(tmp_path: Path) -> None:
     h = _native_harness(tmp_path)
     workspace = h["home"] / "Elsewhere"
-    completed, _, _ = _run(
-        h, lambda fd: _default_argv(fd), extra_args=("--workspace", str(workspace))
-    )
+    completed, _ = _run(h, extra_args=("--workspace", str(workspace)))
     assert completed.returncode == 0, completed.stderr
     argv = _argv_record(h)
     assert argv is not None
@@ -448,73 +588,96 @@ def test_native_mode_passes_the_workspace_suggestion(tmp_path: Path) -> None:
 
 # --- argument and descriptor validation --------------------------------------
 
-# Refused before any event: the descriptor or run id is unusable.
-_ZERO_BYTE_CASES = {
-    "fd-2": ("normal", lambda fd: _argv_with_fd("2")),
-    "fd-10": ("normal", lambda fd: _argv_with_fd("10")),
-    "fd-x": ("normal", lambda fd: _argv_with_fd("x")),
-    "fd-closed": ("closed", lambda fd: _argv_with_fd("8")),
-    "fd-readonly": ("readonly", lambda fd: _argv_with_fd(str(fd))),
-    "fd-stdout": ("stdout", lambda fd: _argv_with_fd(str(fd))),
-    "run-id-upper": ("normal", lambda fd: _argv_with_run_id(fd, RUN_ID.upper())),
-    "run-id-short": ("normal", lambda fd: _argv_with_run_id(fd, RUN_ID[:-1])),
-}
-
-# Refused after the channel opens: exactly one failed(invalid_arguments).
-_EVENT_CASES = {
-    "no-version": lambda fd: ["--native-install", "--events-fd", str(fd), "--run-id", RUN_ID],
-    "migrate": lambda fd: _default_argv(fd) + ["--migrate"],
-    "as-host": lambda fd: _default_argv(fd) + ["--as-host"],
-    "as-client": lambda fd: _default_argv(fd) + ["--as-client", "https://example.test"],
-    "no-start": lambda fd: _default_argv(fd) + ["--no-start"],
-    "ws-relative": lambda fd: _default_argv(fd) + ["--workspace", "relative/dir"],
-    "ws-dotdot": lambda fd: _default_argv(fd) + ["--workspace", "/tmp/a/../b"],
+# Refused before any event: the descriptor or run id is unusable. Each names the
+# diagnostic it must print, so a refusal for the wrong reason fails.
+_ZERO_EVENT_CASES: dict[str, tuple[str, Callable[[int], list[str]], str]] = {
+    "fd-2": ("normal", lambda fd: _argv_with_fd("2"), "from 3 to 9"),
+    "fd-10": ("normal", lambda fd: _argv_with_fd("10"), "from 3 to 9"),
+    "fd-10-open": ("open10", lambda fd: _argv_with_fd("10"), "from 3 to 9"),
+    "fd-x": ("normal", lambda fd: _argv_with_fd("x"), "from 3 to 9"),
+    "fd-closed": ("closed", lambda fd: _argv_with_fd("8"), "is not open"),
+    "fd-readonly": ("readonly", lambda fd: _argv_with_fd(str(fd)), "not writable"),
+    "fd-stdout": ("stdout", lambda fd: _argv_with_fd(str(fd)), "standard output or standard error"),
+    "fd-stderr": ("stderr", lambda fd: _argv_with_fd(str(fd)), "standard output or standard error"),
+    "run-id-upper": ("normal", lambda fd: _argv_with_run_id(fd, RUN_ID.upper()), "canonical lowercase UUID"),
+    "run-id-short": ("normal", lambda fd: _argv_with_run_id(fd, RUN_ID[:-1]), "canonical lowercase UUID"),
+    "run-id-no-hyphen": (
+        "normal",
+        lambda fd: _argv_with_run_id(fd, RUN_ID.replace("-", "")),
+        "canonical lowercase UUID",
+    ),
 }
 
 
-def _argv_with_fd(value: str) -> list[str]:
-    return ["--version", VERSION, "--native-install", "--events-fd", value, "--run-id", RUN_ID]
-
-
-def _argv_with_run_id(fd: int, run_id: str) -> list[str]:
-    return ["--version", VERSION, "--native-install", "--events-fd", str(fd), "--run-id", run_id]
-
-
-@pytest.mark.parametrize("case", sorted(_ZERO_BYTE_CASES))
+@pytest.mark.parametrize("case", sorted(_ZERO_EVENT_CASES))
 def test_native_mode_validates_flags_and_descriptor(tmp_path: Path, case: str) -> None:
     h = _native_harness(tmp_path)
-    mode, argv_for = _ZERO_BYTE_CASES[case]
-    completed, payload, _ = _run(h, argv_for, mode=mode)
+    mode, argv_for, fragment = _ZERO_EVENT_CASES[case]
+    completed, payload = _run(h, argv_for, mode=mode)
     assert completed.returncode != 0
-    assert payload == b""
+    assert _event_lines(payload) == []
+    assert fragment in _diagnostics(completed, payload)
     assert "curl" not in _trace(h)
     assert not (h["home"] / "fd.log").exists()
+
+
+# Refused after the channel opens: exactly one failed(invalid_arguments).
+_EVENT_CASES: dict[str, tuple[Callable[[int], list[str]], str]] = {
+    "no-version": (
+        lambda fd: ["--native-install", "--events-fd", str(fd), "--run-id", RUN_ID],
+        "requires --version",
+    ),
+    "migrate": (lambda fd: _default_argv(fd) + ["--migrate"], "--migrate cannot"),
+    "as-host": (lambda fd: _default_argv(fd) + ["--as-host"], "--as-host cannot"),
+    "as-client": (
+        lambda fd: _default_argv(fd) + ["--as-client", "https://example.test"],
+        "--as-client cannot",
+    ),
+    "no-start": (lambda fd: _default_argv(fd) + ["--no-start"], "--no-start cannot"),
+    "ws-relative": (lambda fd: _default_argv(fd) + ["--workspace", "relative/dir"], "absolute path"),
+    "ws-dotdot": (lambda fd: _default_argv(fd) + ["--workspace", "/tmp/a/../b"], "absolute path"),
+    "ws-newline": (lambda fd: _default_argv(fd) + ["--workspace", "/tmp/a\nb"], "absolute path"),
+    "ws-control": (lambda fd: _default_argv(fd) + ["--workspace", "/tmp/a\x01b"], "absolute path"),
+}
 
 
 @pytest.mark.parametrize("case", sorted(_EVENT_CASES))
 def test_native_mode_refuses_bad_arguments_with_one_event(tmp_path: Path, case: str) -> None:
     h = _native_harness(tmp_path)
-    completed, payload, _ = _run(h, _EVENT_CASES[case])
-    _expect_fixed_failure(completed, payload, "invalid_arguments")
+    argv_for, fragment = _EVENT_CASES[case]
+    completed, payload = _run(h, argv_for)
+    assert completed.returncode != 0
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["failed"]
+    assert events[0] == {"schema": 1, "run_id": RUN_ID, "seq": 1, "type": "failed", "code": "invalid_arguments"}
+    assert fragment in _diagnostics(completed, payload)
     assert "curl" not in _trace(h)
     assert not (h["home"] / "fd.log").exists()
 
 
-def test_orphan_native_flags_take_the_legacy_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("flag", ["events-fd", "run-id"])
+def test_orphan_native_flags_take_the_legacy_failure(tmp_path: Path, flag: str) -> None:
     h = _native_harness(tmp_path)
-    flags = {"events-fd": ["--events-fd", "5"], "run-id": ["--run-id", RUN_ID]}
-    for name in ("events-fd", "run-id"):
-        completed = _run_installer(h, "--version", VERSION, *flags[name])
-        assert completed.returncode != 0
-        assert "--native-install" in completed.stderr
+    flags = {"events-fd": ["--events-fd", "5"], "run-id": ["--run-id", RUN_ID]}[flag]
+    completed = _run_installer(h, "--version", VERSION, *flags)
+    assert completed.returncode != 0
+    assert "--native-install" in completed.stderr
+    assert "curl" not in _trace(h)
+
+
+def test_native_mode_refuses_a_non_https_release_base_before_any_network(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    completed, payload = _run(h, env={"CIAO_RELEASE_BASE_URL": "http://example.test/releases"})
+    _expect_one_terminal(payload, "invalid_arguments")
+    assert completed.returncode != 0
     assert "curl" not in _trace(h)
 
 
 def test_no_modify_path_is_accepted_and_no_profile_is_touched(tmp_path: Path) -> None:
     h = _native_harness(tmp_path)
-    completed, payload, _ = _run(h, extra_args=("--no-modify-path",))
+    completed, payload = _run(h, extra_args=("--no-modify-path",))
     assert completed.returncode == 0, completed.stderr
-    assert [e["type"] for e in _events(payload)][-1] == "service_ready"
+    assert _events(payload)[-1]["type"] == "service_ready"
     for profile in (".zshrc", ".bash_profile", ".profile"):
         assert not (h["home"] / profile).exists()
 
@@ -616,56 +779,78 @@ _REFUSALS = {
 
 
 @pytest.mark.parametrize("case", sorted(_REFUSALS))
-def test_native_mode_refuses_existing_setups_before_any_download(
-    tmp_path: Path, case: str
-) -> None:
+def test_native_mode_refuses_existing_setups_before_any_download(tmp_path: Path, case: str) -> None:
     h = _native_harness(tmp_path)
     extra = _setup_refusal(case)(h)
     before = _snapshot(h["home"])
-    completed, payload, _ = _run(
-        h,
-        lambda fd: _default_argv(fd),
-        extra_args=tuple(extra),
-        cwd=h["home"] / "cwd",
-    )
+    completed, payload = _run(h, extra_args=tuple(extra))
     assert completed.returncode != 0
     events = _events(payload)
     assert [e["type"] for e in events] == ["phase", "failed"]
     assert events[1]["code"] == _REFUSALS[case]
     assert "curl" not in _trace(h)
-    assert not (h["home"] / "fd.log").exists()
+    # The platform probes run before the refusal; no fetch or uv call does.
+    fd_log = _read(h["home"], "fd.log")
+    assert "curl" not in fd_log and "native-uv" not in fd_log and "select" not in fd_log
     assert _snapshot(h["home"]) == before
 
 
-def test_native_mode_refuses_a_held_lock_and_keeps_it(tmp_path: Path) -> None:
+_LOCK_CASES = {
+    # run.json names a reaped pid: launchd-free liveness says "not running".
+    "dead-pid": "not running",
+    # run.json names this test process: a live owner.
+    "live-pid": "running",
+    # run.json has no readable pid: the owner cannot be read.
+    "garbage": "cannot be read",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_LOCK_CASES))
+def test_a_held_lock_reports_owner_liveness_and_is_kept(tmp_path: Path, case: str) -> None:
     h = _native_harness(tmp_path)
     lock = h["home"] / ".local/state/ciaobot/native-install.lock"
     lock.mkdir(parents=True)
     record = lock / "run.json"
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
-    child.wait()
-    record.write_text(
-        json.dumps({"schema": 1, "run_id": OTHER_RUN_ID, "pid": child.pid}, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    if case == "dead-pid":
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        body = json.dumps({"schema": 1, "run_id": OTHER_RUN_ID, "pid": child.pid}, separators=(",", ":"))
+    elif case == "live-pid":
+        body = json.dumps({"schema": 1, "run_id": OTHER_RUN_ID, "pid": os.getpid()}, separators=(",", ":"))
+    else:
+        body = "not json at all"
+    record.write_text(body, encoding="utf-8")
     before = record.read_bytes()
-    completed, payload, _ = _run(h)
+    completed, payload = _run(h)
     events = _events(payload)
-    assert events[-1] == {"schema": 1, "run_id": RUN_ID, "seq": 2, "type": "failed", "code": "install_in_progress"}
-    assert b"not running" in completed.stderr
+    assert events[-1]["code"] == "install_in_progress"
+    assert events[-1]["seq"] == 2
+    assert _LOCK_CASES[case].encode() in completed.stderr
     assert record.read_bytes() == before
     assert "curl" not in _trace(h)
 
 
-# Cases that plant a file or link on disk. The env and permission cases are
-# handled inline in the test below.
-_UNKNOWN_CASES: dict[str, Callable[[dict[str, Any]], None]] = {
-    "launchctl-indeterminate": lambda h: _write(h["home"] / "launchctl-print-indeterminate"),
-    "state-symlink": lambda h: _link_state(h),
-    "state-file": lambda h: _write(h["home"] / ".local/state/ciaobot"),
-    "env-fifo": lambda h: _fifo(h["home"] / "Ciaobot/.env"),
-}
-_INLINE_UNKNOWN = ("env-redirect", "uv-tool-dir", "ancestor-unreadable")
+_REDIRECTS = [
+    "CIAO_WORKSPACE",
+    "CIAO_WORKSPACES",
+    "CIAO_RUNTIME_ROOT",
+    "CIAO_MEMORY_DIR",
+    "CIAO_VAULT_DIR",
+    "CIAO_VAULT_ROOT",
+    "CIAO_LAUNCH_AGENTS_DIR",
+    "UV_TOOL_DIR",
+    "UV_TOOL_BIN_DIR",
+]
+
+
+@pytest.mark.parametrize("name", _REDIRECTS)
+def test_an_inherited_redirect_is_unknown_state(tmp_path: Path, name: str) -> None:
+    h = _native_harness(tmp_path)
+    completed, payload = _run(h, env={name: str(h["home"] / "redirected")})
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "failed"]
+    assert events[1]["code"] == "unknown_state"
+    assert "curl" not in _trace(h)
 
 
 def _link_state(h: dict[str, Any]) -> None:
@@ -680,24 +865,27 @@ def _fifo(path: Path) -> None:
     os.mkfifo(path)
 
 
-@pytest.mark.parametrize("case", sorted([*_UNKNOWN_CASES, *_INLINE_UNKNOWN]))
+_UNKNOWN_CASES: dict[str, Callable[[dict[str, Any]], None]] = {
+    "launchctl-indeterminate": lambda h: _write(h["home"] / "launchctl-print-indeterminate"),
+    "state-symlink": lambda h: _link_state(h),
+    "state-file": lambda h: _write(h["home"] / ".local/state/ciaobot"),
+    "env-fifo": lambda h: _fifo(h["home"] / "Ciaobot/.env"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNKNOWN_CASES) + ["ancestor-unreadable"])
 def test_native_mode_unknown_state_is_not_fresh(tmp_path: Path, case: str) -> None:
     if case == "ancestor-unreadable" and hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("root reads every directory")
     h = _native_harness(tmp_path)
-    env: dict[str, str] | None = None
     library = h["home"] / "Library"
-    if case == "env-redirect":
-        env = {"CIAO_RUNTIME_ROOT": str(h["home"] / "redirected")}
-    elif case == "uv-tool-dir":
-        env = {"UV_TOOL_DIR": str(h["home"] / "tools")}
-    elif case == "ancestor-unreadable":
+    if case == "ancestor-unreadable":
         library.mkdir(parents=True, exist_ok=True)
         library.chmod(0)
     else:
         _UNKNOWN_CASES[case](h)
     try:
-        completed, payload, _ = _run(h, env=env)
+        completed, payload = _run(h)
     finally:
         if library.exists():
             library.chmod(0o755)
@@ -710,8 +898,11 @@ def test_native_mode_unknown_state_is_not_fresh(tmp_path: Path, case: str) -> No
 # --- download and verification ------------------------------------------------
 
 
-def _mutate_uv(h: dict[str, Any]) -> None:
-    h["uv_tar"].write_bytes(b"not the reviewed archive")
+def _uv_other_body(h: dict[str, Any]) -> None:
+    """A valid tar with the same member layout and a different uv body."""
+    fakebin = h["fakebin"]
+    body = f'#!/bin/sh\nexec "{fakebin}/native-uv" "$@" # tampered\n'.encode()
+    _uv_archive(h["uv_tar"], [(f"{UV_DIR}/", "dir", b""), (f"{UV_DIR}/uv", "file", body)])
 
 
 def _remove_manifest(h: dict[str, Any]) -> None:
@@ -722,12 +913,35 @@ def _bad_signature(h: dict[str, Any]) -> None:
     (h["release"] / "ciaobot-engine-manifest.json.sig").write_text("garbage\n", encoding="utf-8")
 
 
-def _bad_wheel(h: dict[str, Any]) -> None:
-    h["release_wheel"].write_bytes(b"a different wheel")
+def _same_length_wheel(h: dict[str, Any]) -> None:
+    h["release_wheel"].write_bytes(b"THE SIGNED WHEEL")
+    assert len(b"THE SIGNED WHEEL") == len(WHEEL_BYTES)
 
 
-def _bad_host(h: dict[str, Any]) -> None:
-    (h["release"] / SERVER_HOST_FILENAME).write_bytes(b"a different host")
+def _same_length_host(h: dict[str, Any]) -> None:
+    (h["release"] / SERVER_HOST_FILENAME).write_bytes(b"THE SIGNED UNIVERSAL HOST ARCHIVE")
+    assert len(b"THE SIGNED UNIVERSAL HOST ARCHIVE") == len(HOST_BYTES)
+
+
+def _wheel_size_mismatch(h: dict[str, Any]) -> None:
+    _publish(h, wheel={"size": len(WHEEL_BYTES) + 1})
+
+
+def _host_size_mismatch(h: dict[str, Any]) -> None:
+    _publish(h, host={"size": len(HOST_BYTES) + 1})
+
+
+def _traversal_name(h: dict[str, Any]) -> None:
+    _publish(h, wheel={"filename": "../" + WHEEL_NAME})
+
+
+def _glob_wheel_name(h: dict[str, Any]) -> None:
+    """A signed wheel name that is a glob. The embedded verifier refuses it, so it
+    never reaches the shell's field split (that split is also set -f)."""
+    cwd = h["home"] / "cwd"
+    (cwd / "a").write_text("a", encoding="utf-8")
+    (cwd / "b").write_text("b", encoding="utf-8")
+    _publish(h, wheel={"filename": "*"})
 
 
 def _old_release(h: dict[str, Any]) -> None:
@@ -738,64 +952,174 @@ def _pip_fails(h: dict[str, Any]) -> None:
     _write(h["home"] / "fail-pip", "")
 
 
-_FAILURE_CASES = {
-    "uv-digest": (_mutate_uv, True, "download_failed"),
-    "no-manifest": (_remove_manifest, True, "download_failed"),
-    "bad-signature": (_bad_signature, True, "verification_failed"),
-    "wheel-digest": (_bad_wheel, True, "verification_failed"),
-    "no-host": (None, False, "verification_failed"),
-    "host-digest": (_bad_host, True, "verification_failed"),
-    "old-release": (_old_release, True, "invalid_arguments"),
-    "pip-fails": (_pip_fails, True, "install_failed"),
+def _venv_without_python(h: dict[str, Any]) -> None:
+    _write(h["home"] / "venv-no-python", "")
+
+
+_FAILURE_CASES: dict[str, tuple[Callable[[dict[str, Any]], None] | None, bool, str, str]] = {
+    # case: (mutation, host, expected code, expected diagnostic)
+    "uv-digest": (_uv_other_body, True, "download_failed", "does not match its reviewed sha256"),
+    "no-manifest": (_remove_manifest, True, "download_failed", "could not download the release manifest"),
+    "bad-signature": (_bad_signature, True, "verification_failed", "release manifest verification failed"),
+    "wheel-digest": (_same_length_wheel, True, "verification_failed", "does not match the signed manifest"),
+    "wheel-size": (_wheel_size_mismatch, True, "verification_failed", "does not match the signed manifest"),
+    "wheel-name": (_traversal_name, True, "verification_failed", "release manifest verification failed"),
+    "wheel-glob": (_glob_wheel_name, True, "verification_failed", "release manifest verification failed"),
+    "no-host": (None, False, "verification_failed", "has no server host"),
+    "host-digest": (_same_length_host, True, "verification_failed", "server host does not match"),
+    "host-size": (_host_size_mismatch, True, "verification_failed", "server host does not match"),
+    "old-release": (_old_release, True, "invalid_arguments", "does not support --native-install"),
+    "pip-fails": (_pip_fails, True, "install_failed", "could not prepare the installer environment"),
+    "venv-no-python": (_venv_without_python, True, "install_failed", "has no python"),
 }
 
 
 @pytest.mark.parametrize("case", sorted(_FAILURE_CASES))
 def test_native_mode_maps_download_and_verification_failures(tmp_path: Path, case: str) -> None:
-    mutate, host, code = _FAILURE_CASES[case]
+    mutate, host, code, fragment = _FAILURE_CASES[case]
     h = _native_harness(tmp_path, host=host)
     if mutate is not None:
         mutate(h)
-    completed, payload, _ = _run(h)
+    completed, payload = _run(h)
     assert completed.returncode != 0
     events = _events(payload)
     terminal = [e for e in events if e["type"] in native.TERMINAL_TYPES]
     assert len(terminal) == 1
     assert terminal[0]["code"] == code
     assert events[-1] is terminal[0]
+    assert fragment in _diagnostics(completed, payload)
     assert _argv_record(h) is None
+    # The failure path cleans up through rm, and no child of it may see the channel.
+    fd_log = _read(h["home"], "fd.log")
+    assert "rm closed" in fd_log
+    assert " open " not in fd_log
+
+
+def test_the_uv_environment_is_cleared_and_pinned(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    planted = tmp_path / "planted-bin"
+    planted.mkdir()
+    _write_exec(planted / "python3.13", "#!/bin/sh\nexit 3\n")
+    poison = {
+        "UV_INDEX_URL": "https://evil.test/simple",
+        "UV_PYTHON": "/evil/python",
+        "PYTHONPATH": "/evil/lib",
+        "DYLD_INSERT_LIBRARIES": "/evil/hook.dylib",
+        "UV_CONFIG_FILE": "/evil/uv.toml",
+        "PATH": f"{planted}:{h['env']['PATH']}",
+    }
+    completed, _ = _run(h, env=poison)
+    assert completed.returncode == 0, completed.stderr
+    blocks = _uv_blocks(h)
+    # The manifest verifier, the venv and the wheel install; the host selector and
+    # the protocol probe run through the venv's python, not through uv.
+    assert [b["argv"].split()[0] for b in blocks] == ["run", "venv", "pip"]
+    for block in blocks:
+        assert set(block["env"]) <= {"PATH", "HOME", "TMPDIR", "LANG", "PWD", "SHLVL", "_"}, block["env"]
+        for forbidden in ("UV_INDEX_URL", "UV_PYTHON", "PYTHONPATH", "DYLD_INSERT_LIBRARIES", "UV_CONFIG_FILE"):
+            assert forbidden not in block["env"]
+        assert block["env"]["PATH"] == f"{h['fakebin']}:{PINNED_PATH}"
+        assert str(planted) not in block["env"]["PATH"]
+        assert block["env"]["LANG"] == "C"
+        assert Path(block["env"]["TMPDIR"]).resolve() == Path(block["pwd"]).resolve()
+        assert Path(block["pwd"]).resolve().parent == tmp_path.resolve()
+        assert "--no-config" in block["argv"].split()
+        assert "--managed-python" in block["argv"].split()
+    by_command = {b["argv"].split()[0]: b["argv"] for b in blocks}
+    assert "--default-index https://pypi.org/simple" in by_command["run"]
+    assert "--no-build" in by_command["run"]
+    assert "--default-index https://pypi.org/simple" in by_command["pip"]
+    assert "--only-binary :all:" in by_command["pip"]
+    assert "--only-binary" not in by_command["venv"]
+
+
+def _uv_blocks(h: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in _read(h["home"], "uv-record.log").splitlines():
+        if line.startswith("ARGV "):
+            current = {"argv": line[5:], "env": {}, "pwd": ""}
+            blocks.append(current)
+        elif line.startswith("PWD ") and current is not None:
+            current["pwd"] = line[4:]
+        elif line == "END":
+            current = None
+        elif current is not None and "=" in line:
+            key, _, value = line.partition("=")
+            current["env"][key] = value
+    return blocks
+
+
+def test_the_caller_path_cannot_supply_a_tool(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    planted = tmp_path / "planted-tools"
+    planted.mkdir()
+    # A caller-controlled uname that would refuse this Mac. Native mode resolves
+    # tools through the pinned PATH only, so the planted one is never run.
+    _write_exec(planted / "uname", "#!/bin/sh\necho Linux\n")
+    completed, payload = _run(h, env={"PATH": f"{planted}:{h['env']['PATH']}"})
+    assert completed.returncode == 0, completed.stderr
+    assert _events(payload)[-1]["type"] == "service_ready"
+
+
+def test_a_relative_tmpdir_falls_back_to_tmp(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    completed, payload = _run(h, env={"TMPDIR": "relative-tmp"})
+    assert completed.returncode == 0, completed.stderr
+    assert "mktemp closed -d /tmp/ciaobot-engine." in _read(h["home"], "fd.log")
 
 
 def test_children_never_see_the_public_descriptor(tmp_path: Path) -> None:
     h = _native_harness(tmp_path)
-    completed, _, _ = _run(h)
+    completed, _ = _run(h)
     assert completed.returncode == 0, completed.stderr
     lines = _read(h["home"], "fd.log").splitlines()
-    assert any(line.startswith("curl closed") for line in lines)
-    assert any(line.startswith("native-uv closed") for line in lines)
-    assert any(line.startswith("python closed") for line in lines)
-    # Only the coordinator is handed the descriptor; every other child saw it closed.
-    assert [line for line in lines if line.startswith("coordinator")] == ["coordinator open"]
+    for prefix in ("curl closed", "native-uv closed", "probe closed", "select closed", "uname closed", "sw_vers closed", "mktemp closed"):
+        assert any(line.startswith(prefix) for line in lines), prefix
+    # Only the coordinator is handed the descriptor, and it is handed it with -I.
+    assert [line for line in lines if line.startswith("coordinator")] == ["coordinator open -I"]
     assert not [line for line in lines if " open " in line and not line.startswith("coordinator")]
 
 
+def test_the_native_download_is_https_bounded_and_quiet(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    completed, _ = _run(h)
+    assert completed.returncode == 0, completed.stderr
+    calls = [line for line in _trace(h).splitlines() if "ciaobot-engine-manifest.json" in line]
+    assert calls
+    for call in calls:
+        assert "-q" in call.split()
+        assert "--proto =file" in call and "--proto-redir =file" in call
+        assert "--max-time" in call and "--max-filesize" in call
+
+
 # --- after the handover ----------------------------------------------------------
+
+
+def _expect_one_terminal(payload: bytes, code: str) -> None:
+    events = _events(payload)
+    terminal = [e for e in events if e["type"] in native.TERMINAL_TYPES]
+    assert len(terminal) == 1
+    assert terminal[0]["code"] == code
 
 
 @pytest.mark.parametrize("outcome", ["failed", "silent"])
 def test_after_handover_the_shell_writes_nothing(tmp_path: Path, outcome: str) -> None:
     h = _native_harness(tmp_path)
     _write(h["home"] / "coordinator-outcome", outcome)
-    completed, payload, _ = _run(h)
+    completed, payload = _run(h)
     assert completed.returncode == 1
     events = _events(payload)
     assert [e["seq"] for e in events[:3]] == [1, 2, 3]
-    assert events[:3][0]["phase"] == "preflight"
+    assert events[0]["phase"] == "preflight"
     if outcome == "silent":
         assert len(events) == 3
     else:
         assert events[-1] == {"schema": 1, "run_id": RUN_ID, "seq": 10, "type": "failed", "code": "service_not_ready"}
         assert len(events) == 10
+        # The EXIT handler sees the coordinator's status 1 and must not add a
+        # second terminal event after the coordinator's own.
+        assert len([e for e in events if e["type"] == "failed"]) == 1
     assert "launchctl bootstrap" not in _trace(h)
     assert "launchctl kickstart" not in _trace(h)
     assert not (h["home"] / "uv-tool-calls.log").exists()
@@ -803,22 +1127,22 @@ def test_after_handover_the_shell_writes_nothing(tmp_path: Path, outcome: str) -
     assert b"http" not in completed.stdout
 
 
-def test_a_signal_before_handover_reports_cancelled(tmp_path: Path) -> None:
+def test_a_signal_before_handover_reports_cancelled_once(tmp_path: Path) -> None:
     h = _native_harness(tmp_path)
     _write(h["home"] / "term-on-manifest", "")
-    completed, payload, _ = _run(h)
+    completed, payload = _run(h)
     assert completed.returncode != 0
     events = _events(payload)
     assert events[-1]["type"] == "failed"
     assert events[-1]["code"] == "cancelled"
-    assert [e["type"] for e in events if e["type"] in native.TERMINAL_TYPES] == ["failed"]
+    _expect_one_terminal(payload, "cancelled")
     assert _argv_record(h) is None
 
 
 def test_a_signal_after_handover_is_forwarded_to_the_coordinator(tmp_path: Path) -> None:
     h = _native_harness(tmp_path)
     _write(h["home"] / "coordinator-wait-term", "")
-    with _public_event_pipe() as (read_fd, fd):
+    with _public_channel() as (read_fd, fd):
         (h["home"] / "native-event-fd").write_text(f"{fd}\n", encoding="utf-8")
         proc = subprocess.Popen(
             ["sh", str(h["script"]), *_default_argv(fd)],
@@ -848,7 +1172,7 @@ def test_a_signal_after_handover_is_forwarded_to_the_coordinator(tmp_path: Path)
                 with contextlib.suppress(ProcessLookupError):
                     os.kill(int(coordinator_pid), signal.SIGKILL)
             os.close(fd)
-            payload = _drain(read_fd)
+            payload = _drain_until(read_fd)
     events = _events(payload)
     assert events[-1]["type"] == "failed"
     assert events[-1]["code"] == "cancelled"
@@ -858,14 +1182,8 @@ def test_a_signal_after_handover_is_forwarded_to_the_coordinator(tmp_path: Path)
 
 def test_a_blocked_event_reader_cannot_hang_the_shell(tmp_path: Path) -> None:
     h = _native_harness(tmp_path)
-    script = h["script"]
-    script.write_text(
-        script.read_text(encoding="utf-8").replace(
-            "NATIVE_WRITE_TIMEOUT=5", "NATIVE_WRITE_TIMEOUT=1"
-        ),
-        encoding="utf-8",
-    )
-    with _public_event_pipe() as (read_fd, fd):
+    _rewrite_script(h, "NATIVE_WRITE_TIMEOUT=5", "NATIVE_WRITE_TIMEOUT=1")
+    with _public_channel() as (read_fd, fd):
         os.set_blocking(fd, False)
         try:
             while True:
@@ -874,8 +1192,9 @@ def test_a_blocked_event_reader_cannot_hang_the_shell(tmp_path: Path) -> None:
             pass
         os.set_blocking(fd, True)
         (h["home"] / "native-event-fd").write_text(f"{fd}\n", encoding="utf-8")
+        started = time.monotonic()
         completed = subprocess.run(
-            ["sh", str(script), *_default_argv(fd)],
+            ["sh", str(h["script"]), *_default_argv(fd)],
             env=_native_env(h, None),
             cwd=str(h["home"] / "cwd"),
             pass_fds=(fd,),
@@ -884,9 +1203,29 @@ def test_a_blocked_event_reader_cannot_hang_the_shell(tmp_path: Path) -> None:
             timeout=15,
             check=False,
         )
+        elapsed = time.monotonic() - started
         os.close(fd)
-        _drain(read_fd)
+        _drain_until(read_fd)
     assert completed.returncode != 0
+    assert b"not writable" in completed.stderr
+    assert elapsed < 15
+    assert "curl" not in _trace(h)
+
+
+def test_an_unexpected_abort_before_handover_reports_failed(tmp_path: Path) -> None:
+    h = _native_harness(tmp_path)
+    # A command the shell never expects to fail: under `set -e` it aborts the run
+    # between the argument checks and the dispatch, with no fixed-code `fail`.
+    _rewrite_script(
+        h,
+        'if [ "$native_install" -eq 1 ]; then\n    native_main\nfi\n',
+        'false\nif [ "$native_install" -eq 1 ]; then\n    native_main\nfi\n',
+    )
+    completed, payload = _run(h)
+    assert completed.returncode != 0
+    events = _events(payload)
+    assert [e["type"] for e in events] == ["phase", "failed"]
+    assert events[-1]["code"] == "install_failed"
     assert "curl" not in _trace(h)
 
 
@@ -900,6 +1239,8 @@ def test_shell_and_coordinator_share_their_contract_constants() -> None:
     assert f"PYTHON_VERSION={native.ENGINE_PYTHON_VERSION}" in lines
     assert "NATIVE_WRITE_TIMEOUT=5" in lines
     assert "NATIVE_TIMER=/bin/sleep" in lines
+    assert UNAME_LINE in lines
+    assert "NATIVE_RELEASE_SCHEME=https" in lines
     codes = set(re.findall(r"native_code=([a-z_]+)", SCRIPT_TEXT))
     assert codes
     assert codes <= set(native.FAILURE_CODES)
