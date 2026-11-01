@@ -127,6 +127,9 @@ Each run is one JSON object per line:
 | `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run. OpenCode's camelCase usage keys (`inputTokens` and so on) are read too; a field present in both spellings counts the snake_case one. For a `transcript` task the synthetic chat has no tokens, so `tokens` is the memory pass's cost; a pass that archived cleanly adds its tokens but no tool calls or cost |
 | `memory_pass_status`, `memory_pass_chat_id`, `memory_pass_tokens` | `transcript` tasks only: how the pass ended (`ok`, `attention`, `timeout`), the pass's chat id, and the pass's own tokens in the `tokens` shape. A `not_queued` pass is an error row. Null on `prompt` and `delegate` rows |
 | `tool_calls`, `tool_errors` | from the turns' tool-call lists |
+| `trace` | the ordered tool calls of every measured chat, one entry per call: `{"chat_id", "name", "input", "error"}`. Built from the engine transcripts' `tool_events` (both providers). For a Claude run, `input` is replaced by the real input from the Claude session log (`command`, `file_path`, `pattern` or `skill`, else the input's JSON) for the same tool use. Each string is capped at 200 characters and the list keeps its first 200 calls. Empty on skipped and error rows that never reached the grader |
+| `trace_truncated` | `true` when the trace had more than 200 calls and the rest were dropped |
+| `model_calls` | model round-trips in the run, counted as the distinct assistant message ids in the Claude session log (every chat of the run). `null` when no Claude session log was read, which is every OpenCode run |
 | `ciao_calls`, `ciao_errors` | from `mcp_tool_calls.jsonl`; an error is any status other than `ok` |
 | `cost_usd` | the engine's recorded cost, or null |
 | `provider_errors` | the number of transcript turns the provider failed (`is_error`), summed over every chat; 0 on skipped and error rows that never reached the grader |
@@ -137,7 +140,7 @@ so two runs that differ only in mode appear as separate rows (`Mode` column).
 Reports written before the `mode` field group under `-`. Its pass rate and
 medians (context, output, wall time, cost) exclude skipped and error runs, so a
 provider outage neither counts against the model nor drags the medians toward
-zero; the `Errors` column counts the error runs of each group. `compare` joins two reports by task id and reports
+zero; the `Errors` column counts the error runs of each group. The `Median model calls` column uses the scored runs whose `model_calls` is not null. `compare` joins two reports by task id and reports
 the pass-rate difference and the percentage change in context, wall time and
 cost; its table shows each side's mode.
 
