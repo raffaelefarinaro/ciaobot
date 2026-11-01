@@ -85,6 +85,8 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   going green is not proof those will. Path handling is the usual Windows
   break (`ciao\x` vs `ciao/x`): compare paths with `Path`/`as_posix()`, not
   string literals.
+  A test that hands a path to code that checks it is absolute builds it from
+  `tmp_path`: `/nonexistent/x` has no drive and is relative on Windows.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running; it just will not fail the build for you.
 - Run one full backend suite and one frontend run at a time, here and in any
@@ -203,6 +205,10 @@ this file; the gates are the ones under Verification.
   (`backup <ts>Z`, `<branch> session commit <ts>`) to the branch. Compare
   `git ls-remote origin <branch>` with the reported sha and drop strays with
   `--force-with-lease`.
+- Live `ciao eval tasks` runs (`docs/TASK_EVAL.md`) import the checkout under
+  test through an editable venv. Run them from a detached worktree with its own
+  venv, never from an issue worktree: the merge queue removes that worktree and
+  every later run in the batch errors.
 
 ## Reporting issues
 When you find a bug, test failure or worthwhile enhancement, explain it to the
