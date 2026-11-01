@@ -1504,3 +1504,520 @@ def test_claude_project_cleanup_needs_an_eval_workdir_component(
 
     assert te._claude_project_dirs(root) == []
     assert folder.is_dir()
+
+
+# --- Memory pass: transcript entries and the proposals check -----------------------
+
+
+def _transcript_body(task_id: str, turns: Any) -> dict[str, Any]:
+    body = _valid_body(task_id)
+    body["category"] = "memory_pass"
+    body["prompt"] = ""
+    body["entry"] = {"kind": "transcript", "turns": turns}
+    return body
+
+
+def test_catalog_accepts_transcript_entry(tmp_path: Path) -> None:
+    turns = [{"user": "hi", "assistant": "hello"}]
+    _write_task(tmp_path, "transcript-ok", _transcript_body("transcript-ok", turns))
+
+    (task,) = te.load_tasks(tmp_path)
+
+    assert task.entry["kind"] == "transcript"
+    assert task.entry["turns"][0]["user"] == "hi"
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        None,
+        [],
+        [{"user": ""}],
+        [{"user": "x", "assistant": 1}],
+        ["not an object"],
+        [{"user": "x", "assistant": "y"}] * (te.MAX_TRANSCRIPT_TURNS + 1),
+    ],
+)
+def test_catalog_rejects_bad_transcript_turns(tmp_path: Path, turns: Any) -> None:
+    _write_task(tmp_path, "bad-entry", _transcript_body("bad-entry", turns))
+
+    with pytest.raises(te.TaskCatalogError, match=r"entry\.turns"):
+        te.load_tasks(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("spec", "fragment"),
+    [
+        ({"kind": "gws_calls", "must": ["("]}, "regex"),
+        ({"kind": "proposals", "must": ["("]}, "regex"),
+        ({"kind": "proposals", "must": ["x"], "include_files": "AGENTS.md"}, "include_files"),
+        ({"kind": "proposals", "must": ["x"], "include_files": [""]}, "include_files"),
+        ({"kind": "proposals", "max_new": -1}, "max_new"),
+        ({"kind": "proposals", "max_new": True}, "max_new"),
+        ({"kind": "proposals", "must": ["x"], "path": ""}, "path"),
+        ({"kind": "proposals"}, "nothing to check"),
+    ],
+)
+def test_catalog_rejects_bad_regex_and_proposals_specs(
+    tmp_path: Path, spec: dict[str, Any], fragment: str
+) -> None:
+    body = _valid_body("bad-spec")
+    body["checks"] = [spec]
+    _write_task(tmp_path, "bad-spec", body)
+
+    with pytest.raises(te.TaskCatalogError, match=fragment):
+        te.load_tasks(tmp_path)
+
+
+def test_proposals_check_counts_only_new_bullets(tmp_path: Path) -> None:
+    old = "- [memory] Old fact about Sunday  _(from: x)_\n"
+    queue = tmp_path / te.PROPOSALS_PATH
+    queue.parent.mkdir(parents=True)
+    queue.write_text(old + "- [memory] Uses kilometres for distances  _(from: y)_\n", encoding="utf-8", newline="")
+    ctx = _ctx(tmp_path, snapshot=_snapshot(saved={te.PROPOSALS_PATH: old.encode("utf-8")}))
+
+    assert te._check_proposals(ctx, {"kind": "proposals", "must": ["kilomet"]}).ok
+    assert te._check_proposals(ctx, {"kind": "proposals", "must_not": ["sunday"]}).ok
+    refused = te._check_proposals(ctx, {"kind": "proposals", "must_not": ["kilomet"]})
+    assert not refused.ok
+    assert "kilometres" in refused.detail
+    assert not te._check_proposals(ctx, {"kind": "proposals", "max_new": 0}).ok
+    assert te._check_proposals(ctx, {"kind": "proposals", "max_new": 1}).ok
+
+
+def test_proposals_check_reads_added_lines_of_include_files(tmp_path: Path) -> None:
+    before = "a\nkm rule old\n"
+    (tmp_path / "AGENTS.md").write_text(before + "- Prefers kilometres\n", encoding="utf-8", newline="")
+    ctx = _ctx(tmp_path, snapshot=_snapshot(saved={"AGENTS.md": before.encode("utf-8")}))
+
+    spec = {"kind": "proposals", "include_files": ["AGENTS.md"]}
+    assert te._check_proposals(ctx, {**spec, "must": ["kilometres"]}).ok
+    assert not te._check_proposals(ctx, {**spec, "must": ["km rule"]}).ok
+
+
+def test_proposals_check_missing_queue_is_empty(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+
+    missing = te._check_proposals(ctx, {"kind": "proposals", "must": ["x"]})
+    assert not missing.ok
+    assert "nothing new matches" in missing.detail
+    assert te._check_proposals(ctx, {"kind": "proposals", "must_not": ["x"]}).ok
+
+
+def test_snapshot_paths_include_proposal_targets() -> None:
+    task = _insurance_task(
+        checks=[
+            {"kind": "unchanged", "path": "a.md"},
+            {"kind": "proposals", "include_files": ["AGENTS.md"], "must": ["x"]},
+            {"kind": "proposals", "must_not": ["y"]},
+        ]
+    )
+
+    assert te._snapshot_paths(task) == ["a.md", te.PROPOSALS_PATH, "AGENTS.md"]
+
+
+def _write_runtime_transcript(ws: Path, chat_id: str, turns: list[dict[str, Any]]) -> None:
+    path = ws / ".runtime" / "transcripts" / chat_id / "claude.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"provider": "claude", "context_key": chat_id, "turns": turns}
+    path.write_text(json.dumps(payload), encoding="utf-8", newline="")
+
+
+def test_memory_pass_usage_reads_archive_frontmatter(tmp_path: Path) -> None:
+    from ciao.models import ChatContext
+    from ciao.transcripts import TranscriptStore
+
+    usage = {
+        "input_tokens": "10",
+        "output_tokens": "5",
+        "cache_read_input_tokens": "3",
+        "cache_creation_input_tokens": "2",
+    }
+    _write_runtime_transcript(
+        tmp_path,
+        "pass-1",
+        [{"prompt": "p", "response": "Queued 1 fact.", "usage": usage, "is_error": False}],
+    )
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "Logs")
+    md = store.archive_session(
+        ctx=ChatContext.for_web("pass-1"),
+        active_model="haiku",
+        last_effective_model="haiku",
+        session_id="",
+        provider="claude",
+    )
+    assert md is not None
+
+    tokens, response = te.memory_pass_usage(tmp_path, "pass-1", str(md.relative_to(tmp_path)))
+
+    assert tokens == {"input": 10, "output": 5, "cache_read": 3, "cache_write": 2}
+    assert response == "Queued 1 fact."
+
+
+def test_memory_pass_usage_prefers_live_runtime_transcript(tmp_path: Path) -> None:
+    _write_runtime_transcript(
+        tmp_path,
+        "pass-2",
+        [
+            {"response": "first", "usage": {"input_tokens": 7, "output_tokens": "2"}},
+            {"response": "", "usage": {"input_tokens": 1}},
+        ],
+    )
+
+    tokens, response = te.memory_pass_usage(tmp_path, "pass-2", None)
+
+    assert tokens == {"input": 8, "output": 2, "cache_read": 0, "cache_write": 0}
+    assert response == "first"
+
+
+def test_memory_pass_usage_without_any_record_is_zero(tmp_path: Path) -> None:
+    assert te.memory_pass_usage(tmp_path, "gone", None) == (
+        {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+        "",
+    )
+
+
+def test_memory_pass_step_tolerates_missing_levels() -> None:
+    full = {"steps": {"memory_pass": {"status": "ok", "extra": {"chat_id": "pass-1"}}}}
+
+    assert te._memory_pass_step(None) == {}
+    assert te._memory_pass_step({}) == {}
+    assert te._memory_pass_step({"steps": []}) == {}
+    assert te._memory_pass_step(full) == {"status": "ok", "extra": {"chat_id": "pass-1"}}
+
+
+def test_synthetic_transcript_round_trips_through_archive(tmp_path: Path) -> None:
+    from ciao.models import ChatContext
+    from ciao.transcripts import TranscriptStore, parse_archive_turns, transcript_has_human_turn
+
+    turns = [
+        {"user": "Use kilometres for distances.", "assistant": "Noted."},
+        {"user": "Thanks, that's all.", "assistant": "Good evening."},
+    ]
+    payload = te.synthetic_transcript(
+        "chat-x", turns, provider="claude", model="haiku", mode="auto", title="Task eval"
+    )
+    path = te.transcript_path(tmp_path, "chat-x", "claude")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8", newline="")
+
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "arch")
+    ctx = ChatContext.for_web("chat-x")
+    assert store.peek_turn_count(ctx, "claude") == len(turns)
+    md = store.archive_session(
+        ctx=ctx, active_model="haiku", last_effective_model="haiku", session_id="", provider="claude"
+    )
+    assert md is not None
+
+    archived = parse_archive_turns(md.read_text(encoding="utf-8"))
+    assert [t["user"].strip() for t in archived] == [t["user"] for t in turns]
+    assert [t["assistant"].strip() for t in archived] == [t["assistant"] for t in turns]
+    assert transcript_has_human_turn(md)
+    # Archiving deletes the runtime file, which is why usage is read before the archive.
+    assert not path.exists()
+
+
+def _scripted_api(calls: list[tuple[str, str]], replies: dict[tuple[str, str], list[Any]]) -> Any:
+    """An ``api`` stand-in: each route answers its queued replies in order, the last one sticking."""
+
+    def api(method: str, path: str, body: Any = None) -> Any:
+        calls.append((method, path))
+        queue = replies[(method, path)]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    return api
+
+
+def _pass_step(status: str, pass_id: str = "pass-1") -> dict[str, Any]:
+    return {"steps": {"memory_pass": {"status": status, "extra": {"chat_id": pass_id}}}}
+
+
+def test_run_memory_pass_polls_until_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+    calls: list[tuple[str, str]] = []
+    replies = {
+        ("POST", "/api/chats/src/archive"): [{"ok": True, "postprocess": _pass_step("queued")}],
+        ("GET", "/api/chats/src"): [{"postprocess": _pass_step("running")}, {"postprocess": _pass_step("ok")}],
+        ("GET", "/api/chats/pass-1"): [{"archived": True, "archive_path": "Logs/p.md"}],
+    }
+    monkeypatch.setattr(engine, "api", _scripted_api(calls, replies))
+    monkeypatch.setattr(te, "MEMORY_PASS_POLL_S", 0)
+    seen: dict[str, Any] = {}
+
+    def fake_usage(ws: Path, chat_id: str, archive_path: str | None) -> tuple[dict[str, int], str]:
+        seen.update(ws=ws, chat_id=chat_id, archive_path=archive_path)
+        return {"input": 7, "output": 0, "cache_read": 0, "cache_write": 0}, "done"
+
+    monkeypatch.setattr(te, "memory_pass_usage", fake_usage)
+
+    outcome = engine.run_memory_pass("src", 60.0)
+
+    assert outcome == te.MemoryPassOutcome(
+        status="ok",
+        chat_id="pass-1",
+        tokens={"input": 7, "output": 0, "cache_read": 0, "cache_write": 0},
+        response="done",
+    )
+    assert calls == [
+        ("POST", "/api/chats/src/archive"),
+        ("GET", "/api/chats/src"),
+        ("GET", "/api/chats/src"),
+        ("GET", "/api/chats/pass-1"),
+    ]
+    assert seen == {"ws": engine.ws, "chat_id": "pass-1", "archive_path": "Logs/p.md"}
+
+
+def test_run_memory_pass_timeout_stops_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+    calls: list[tuple[str, str]] = []
+    replies = {
+        ("POST", "/api/chats/src/archive"): [{"postprocess": _pass_step("queued")}],
+        ("GET", "/api/chats/src"): [{"postprocess": _pass_step("running")}],
+        ("POST", "/api/chats/pass-1/stop"): [None],
+    }
+    monkeypatch.setattr(engine, "api", _scripted_api(calls, replies))
+
+    outcome = engine.run_memory_pass("src", 0.0)
+
+    assert outcome.status == "timeout"
+    assert outcome.chat_id == "pass-1"
+    assert ("POST", "/api/chats/pass-1/stop") in calls
+
+
+def test_run_memory_pass_not_queued(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+    calls: list[tuple[str, str]] = []
+    replies = {("POST", "/api/chats/src/archive"): [{"ok": True, "postprocess": None}]}
+    monkeypatch.setattr(engine, "api", _scripted_api(calls, replies))
+
+    outcome = engine.run_memory_pass("src", 60.0)
+
+    assert outcome.status == "not_queued"
+    assert outcome.chat_id is None
+    assert outcome.response == ""
+    assert calls == [("POST", "/api/chats/src/archive")]
+
+
+def test_start_transcript_writes_the_normalized_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+    engine._host_project_id = "proj-1"
+    calls: list[tuple[str, str]] = []
+    replies = {("POST", "/api/projects/proj-1/chats"): [{"chat_id": "chat-9"}]}
+    monkeypatch.setattr(engine, "api", _scripted_api(calls, replies))
+
+    chat_id = engine.start_transcript([{"user": "Hi", "assistant": "Hello"}], provider="claude", model="haiku")
+
+    assert chat_id == "chat-9"
+    assert calls == [("POST", "/api/projects/proj-1/chats")]
+    payload = json.loads(te.transcript_path(engine.ws, "chat-9", "claude").read_text(encoding="utf-8"))
+    assert [turn["prompt"] for turn in payload["turns"]] == ["Hi"]
+    assert payload["turns"][0]["response"] == "Hello"
+    assert payload["turns"][0]["mode"] == "auto"
+
+
+class FakeTranscriptSession(FakeSession):
+    """A transcript-entry session: the pass outcome is canned, and the queue write is optional."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        outcome: te.MemoryPassOutcome,
+        pass_bullet: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(root, **kwargs)
+        self.outcome = outcome
+        self.pass_bullet = pass_bullet
+        self.started: list[dict[str, str]] = []
+        self.pass_calls: list[tuple[str, float]] = []
+        self.ran_pass = False
+
+    def start_transcript(self, turns: list[dict[str, str]], *, provider: str, model: str) -> str:
+        self.started = list(turns)
+        return "chat-1"
+
+    def run_memory_pass(self, chat_id: str, timeout_s: float) -> te.MemoryPassOutcome:
+        self.pass_calls.append((chat_id, timeout_s))
+        self.ran_pass = True
+        if self.pass_bullet is not None:
+            queue = self.agent_root / te.PROPOSALS_PATH
+            queue.parent.mkdir(parents=True, exist_ok=True)
+            queue.write_text(f"- [memory] {self.pass_bullet}  _(from: {chat_id})_\n", encoding="utf-8", newline="")
+        return self.outcome
+
+    def usage(self) -> dict[str, Any]:
+        # The synthetic chat carries no tokens; the pass's own tokens come from the outcome.
+        # Provider errors belong to the pass, so they show only once it has run.
+        return {
+            "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+            "tool_calls": 0,
+            "tool_errors": 0,
+            "ciao_calls": 0,
+            "ciao_errors": 0,
+            "cost_usd": None,
+            "chat_ids": [],
+            "provider_errors": self.provider_errors if self.ran_pass else 0,
+            "provider_error": self.provider_error if self.ran_pass else None,
+        }
+
+
+def _transcript_task(**overrides: Any) -> te.EvalTask:
+    fields: dict[str, Any] = {
+        "id": "X-memory",
+        "tier": "medium",
+        "category": "memory_pass",
+        "prompt": "",
+        "entry": {"kind": "transcript", "turns": [{"user": "Use kilometres.", "assistant": "Noted."}]},
+        "setup": [],
+        "requires": [],
+        "timeout_s": 60.0,
+        "checks": [{"kind": "proposals", "must": ["kilomet"]}],
+        "overlay": None,
+    }
+    fields.update(overrides)
+    return te.EvalTask(**fields)
+
+
+_ZERO_TOKENS = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+_PASS_TOKENS = {"input": 40, "output": 8, "cache_read": 0, "cache_write": 2}
+
+
+def test_run_task_transcript_entry_records_memory_pass_tokens(
+    tmp_path: Path, stable_provenance: None
+) -> None:
+    outcome = te.MemoryPassOutcome("ok", "pass-1", dict(_PASS_TOKENS), "Queued 1 fact.")
+    session = FakeTranscriptSession(tmp_path, outcome=outcome, pass_bullet="Uses kilometres for distances")
+
+    record = te.run_task(
+        _transcript_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert session.started == [{"user": "Use kilometres.", "assistant": "Noted."}]
+    assert session.pass_calls == [("chat-1", 60.0)]
+    assert record["status"] == "passed", record
+    assert record["memory_pass_tokens"] == {**_PASS_TOKENS, "context_total": 42}
+    assert record["tokens"] == record["memory_pass_tokens"]
+    assert record["memory_pass_status"] == "ok"
+    assert record["memory_pass_chat_id"] == "pass-1"
+    assert record["answer"] == "Queued 1 fact."
+    assert record["timed_out"] is False
+
+
+@pytest.mark.parametrize(("status", "timed_out"), [("attention", False), ("timeout", True)])
+def test_run_task_transcript_attention_and_timeout_fail(
+    tmp_path: Path, stable_provenance: None, status: str, timed_out: bool
+) -> None:
+    outcome = te.MemoryPassOutcome(status, "pass-1", dict(_ZERO_TOKENS), "")
+    session = FakeTranscriptSession(tmp_path, outcome=outcome, pass_bullet="Uses kilometres for distances")
+
+    record = te.run_task(
+        _transcript_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "failed"
+    assert record["timed_out"] is timed_out
+    assert record["memory_pass_status"] == status
+
+
+def test_run_task_transcript_not_queued_is_error(tmp_path: Path, stable_provenance: None) -> None:
+    outcome = te.MemoryPassOutcome("not_queued", None, dict(_ZERO_TOKENS), "")
+    session = FakeTranscriptSession(tmp_path, outcome=outcome)
+
+    record = te.run_task(
+        _transcript_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "error"
+    assert "not queued" in record["error"]
+
+
+def test_run_task_transcript_provider_error_in_pass_follows_error_rule(
+    tmp_path: Path, stable_provenance: None
+) -> None:
+    outcome = te.MemoryPassOutcome("attention", "pass-1", dict(_ZERO_TOKENS), "")
+    session = FakeTranscriptSession(
+        tmp_path,
+        outcome=outcome,
+        provider_errors=1,
+        provider_error="weekly usage limit reached",
+    )
+
+    record = te.run_task(
+        _transcript_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "error"
+    assert record["error"].startswith("provider error:")
+    assert "weekly usage limit reached" in record["error"]
+    assert record["provider_errors"] == 1
+
+
+def test_prompt_record_has_null_memory_pass_fields(tmp_path: Path, stable_provenance: None) -> None:
+    session = FakeSession(tmp_path)
+
+    record = te.run_task(
+        _insurance_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["memory_pass_status"] is None
+    assert record["memory_pass_chat_id"] is None
+    assert record["memory_pass_tokens"] is None
+
+
+# --- Memory pass: the M5 and M6 catalog tasks --------------------------------------
+
+M5_ID = "M5-memory-pass-keep-drop"
+M6_ID = "M6-memory-pass-decided-paraphrase"
+
+
+def test_memory_pass_tasks_plant_facts() -> None:
+    from ciao import memory_proposals
+
+    by_id = {task.id: task for task in te.load_tasks()}
+    m5 = by_id[M5_ID]
+    m6 = by_id[M6_ID]
+    for task in (m5, m6):
+        assert task.entry["kind"] == "transcript", task.id
+        assert task.category == "memory_pass", task.id
+
+    m5_users = " ".join(turn["user"] for turn in m5.entry["turns"])
+    for needle in ("kilometres", "permit application", "max_span_cm"):
+        assert needle in m5_users
+    settings = te.TASKS_ROOT / M5_ID / "overlay" / "code" / "shed-planner" / "settings.toml"
+    assert "max_span_cm = 240" in settings.read_text(encoding="utf-8")
+
+    vault = te.TASKS_ROOT / M6_ID / "overlay" / "memory-vault"
+    dismissed = "Send the weekly round-up on Sunday evenings."
+    assert memory_proposals.was_dismissed(vault, dismissed)
+    assert memory_proposals.list_proposals(vault / "Workspace" / "Memory-Proposals.md") == []
+    sunday_turn = next(turn["user"] for turn in m6.entry["turns"] if "Sunday" in turn["user"])
+    # Code-level dedupe compares dedupe_key only, so a paraphrase must not share it.
+    assert memory_proposals.dedupe_key(sunday_turn) != memory_proposals.dedupe_key(dismissed)

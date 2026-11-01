@@ -1,0 +1,46 @@
+{
+  "id": "M5-memory-pass-keep-drop",
+  "tier": "medium",
+  "category": "memory_pass",
+  "entry": {
+    "kind": "transcript",
+    "turns": [
+      {
+        "user": "Before we start, one standing rule: always give me distances in kilometres, never miles. That goes for everything you write for me, permanently.",
+        "assistant": "Understood. I will use kilometres from now on."
+      },
+      {
+        "user": "Garden shed status for today: the timber order is placed, the permit application was filed yesterday, and the foundation pour is pending until the rain stops.",
+        "assistant": "Noted: timber ordered, permit application filed, foundation pour waiting on the weather."
+      },
+      {
+        "user": "Also, the shed planner settings in code/shed-planner/settings.toml set max_span_cm to 240, which is what the beam check reads.",
+        "assistant": "Right, the beam check reads max_span_cm = 240 from settings.toml."
+      },
+      {
+        "user": "Thanks, that's all for today.",
+        "assistant": "Have a good evening."
+      }
+    ]
+  },
+  "setup": [],
+  "requires": [],
+  "timeout_s": 900,
+  "checks": [
+    {
+      "kind": "proposals",
+      "include_files": ["AGENTS.md"],
+      "must": ["kilomet|\\bkm\\b"]
+    },
+    {
+      "kind": "proposals",
+      "include_files": ["AGENTS.md"],
+      "must_not": ["timber|\\bpermit\\b|foundation pour"]
+    },
+    {
+      "kind": "proposals",
+      "include_files": ["AGENTS.md"],
+      "must_not": ["max_span|\\b240\\b|settings\\.toml"]
+    }
+  ]
+}

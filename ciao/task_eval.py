@@ -57,7 +57,13 @@ WORKSPACE = "personal"
 # Prefix of every engine workdir; also the marker that lets cleanup touch a Claude project folder.
 EVAL_WORKDIR_PREFIX = "ciao-task-eval-"
 TIERS: frozenset[str] = frozenset({"easy", "medium", "hard"})
-ENTRY_KINDS: frozenset[str] = frozenset({"prompt", "delegate"})
+ENTRY_KINDS: frozenset[str] = frozenset({"prompt", "delegate", "transcript"})
+# The memory pass a transcript entry triggers writes its queue under the agent root.
+PROPOSALS_PATH = "memory-vault/Workspace/Memory-Proposals.md"
+MEMORY_PASS_TERMINAL: frozenset[str] = frozenset({"ok", "attention"})
+MEMORY_PASS_POLL_S = 2.0
+MEMORY_PASS_ARCHIVE_WAIT_S = 30.0
+MAX_TRANSCRIPT_TURNS = 20
 SETUP_KINDS: frozenset[str] = frozenset({"task", "project"})
 SCHEMA = "ciao-task-eval/1"
 DEFAULT_TIMEOUT_S = 600.0
@@ -134,6 +140,16 @@ class CheckResult:
 
 
 @dataclass(frozen=True)
+class MemoryPassOutcome:
+    """How a transcript entry's end-of-chat memory pass ended, and what the pass itself used."""
+
+    status: str  # "ok" | "attention" | "timeout" | "not_queued"
+    chat_id: str | None
+    tokens: dict[str, int]  # raw input / output / cache_read / cache_write
+    response: str  # the pass's final reply, "" when unknown
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """Workspace state after setup and before the entry runs."""
 
@@ -184,22 +200,44 @@ def _validate_check(task_id: str, spec: Any) -> dict[str, Any]:
         raise TaskCatalogError(f"{task_id}: unknown check kind {kind!r}")
     if kind == "gws_calls":
         _validate_gws_calls(task_id, spec)
+    elif kind == "proposals":
+        _validate_proposals(task_id, spec)
     return spec
 
 
-def _validate_gws_calls(task_id: str, spec: dict[str, Any]) -> None:
+def _validate_regex_lists(task_id: str, kind: str, spec: dict[str, Any]) -> None:
     for key in ("must", "must_not"):
         patterns = spec.get(key, [])
         if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
-            raise TaskCatalogError(f"{task_id}: gws_calls {key} must be a list of regex strings")
+            raise TaskCatalogError(f"{task_id}: {kind} {key} must be a list of regex strings")
         for pattern in patterns:
             try:
                 re.compile(pattern)
             except re.error as exc:
-                raise TaskCatalogError(f"{task_id}: gws_calls {key} regex {pattern!r}: {exc}") from exc
+                raise TaskCatalogError(f"{task_id}: {kind} {key} regex {pattern!r}: {exc}") from exc
+
+
+def _validate_gws_calls(task_id: str, spec: dict[str, Any]) -> None:
+    _validate_regex_lists(task_id, "gws_calls", spec)
     minimum = spec.get("min_calls", 0)
     if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 0:
         raise TaskCatalogError(f"{task_id}: gws_calls min_calls must be a non-negative integer")
+
+
+def _validate_proposals(task_id: str, spec: dict[str, Any]) -> None:
+    _validate_regex_lists(task_id, "proposals", spec)
+    if not spec.get("must") and not spec.get("must_not") and "max_new" not in spec:
+        raise TaskCatalogError(f"{task_id}: proposals names nothing to check (must, must_not or max_new)")
+    if "include_files" in spec:
+        files = spec["include_files"]
+        if not isinstance(files, list) or not all(isinstance(f, str) and f.strip() for f in files):
+            raise TaskCatalogError(f"{task_id}: proposals include_files must be a list of non-empty paths")
+    if "max_new" in spec:
+        cap = spec["max_new"]
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
+            raise TaskCatalogError(f"{task_id}: proposals max_new must be a non-negative integer")
+    if "path" in spec:
+        _require_text(spec["path"], f"{task_id}: proposals path")
 
 
 def _load_gws_fake(task_id: str, body: dict[str, Any], requires: list[str]) -> GwsFakeSpec | None:
@@ -253,6 +291,20 @@ def _validate_setup(task_id: str, steps: Any) -> list[dict[str, Any]]:
     return list(steps)
 
 
+def _validate_turns(task_id: str, turns: Any) -> None:
+    """A transcript entry's turns: 1 to MAX_TRANSCRIPT_TURNS objects, each with a user line and an assistant string."""
+    if not isinstance(turns, list) or not turns or len(turns) > MAX_TRANSCRIPT_TURNS:
+        raise TaskCatalogError(
+            f"{task_id}: entry.turns must be a list of 1 to {MAX_TRANSCRIPT_TURNS} turns"
+        )
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            raise TaskCatalogError(f"{task_id}: entry.turns[{index}] must be an object")
+        _require_text(turn.get("user"), f"{task_id}: entry.turns[{index}].user")
+        if not isinstance(turn.get("assistant"), str):
+            raise TaskCatalogError(f"{task_id}: entry.turns[{index}].assistant must be a string")
+
+
 def _load_one(folder: Path) -> EvalTask:
     task_id = folder.name
     body = _read_json_object(folder / "task.json")
@@ -267,8 +319,10 @@ def _load_one(folder: Path) -> EvalTask:
     prompt = str(body.get("prompt") or "")
     if entry["kind"] == "prompt":
         _require_text(prompt, f"{task_id}: prompt")
-    else:
+    elif entry["kind"] == "delegate":
         _require_text(entry.get("task_title"), f"{task_id}: entry.task_title")
+    else:
+        _validate_turns(task_id, entry.get("turns"))
     requires = body.get("requires", [])
     if not isinstance(requires, list) or not all(isinstance(r, str) for r in requires):
         raise TaskCatalogError(f"{task_id}: requires must be a list of capability names")
@@ -669,6 +723,56 @@ def _check_gws_calls(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     return CheckResult("gws_calls", True, f"{len(summaries)} call(s) ok")
 
 
+def _queue_items(text: str) -> list[tuple[str, str]]:
+    """``(kind, text)`` of every queue bullet, read with the grammar ``list_proposals`` uses."""
+    from ciao.proposal_kinds import parse_bullet
+
+    items: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        bullet = parse_bullet(line)
+        if bullet is not None:
+            items.append((bullet.kind, bullet.text))
+    return items
+
+
+def _check_proposals(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    """Grade what a memory pass added: new queue bullets, and lines added to ``include_files``.
+
+    Bullets already in the queue at the snapshot do not count, so a pass that
+    leaves an old row alone is not credited with it. ``must`` / ``must_not``
+    are case-insensitive regexes; ``max_new`` caps only the new queue bullets.
+    """
+    rel = str(spec.get("path", PROPOSALS_PATH))
+    saved = ctx.snapshot.saved
+    before = {text for _, text in _queue_items(saved.get(rel, b"").decode("utf-8", "replace"))}
+    queue = _resolve_in_root(ctx.agent_root, rel)
+    queue_text = queue.read_text(encoding="utf-8", errors="replace") if queue.is_file() else ""
+    new = [(kind, text) for kind, text in _queue_items(queue_text) if text not in before]
+    items = [f"[{kind}] {text}" for kind, text in new]
+    for extra in spec.get("include_files", []):
+        target = _resolve_in_root(ctx.agent_root, str(extra))
+        old_lines = {
+            line.strip() for line in saved.get(str(extra), b"").decode("utf-8", "replace").splitlines()
+        }
+        if target.is_file():
+            for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
+                stripped = line.strip()
+                if stripped and stripped not in old_lines:
+                    items.append(stripped)
+    problems: list[str] = []
+    for pattern in spec.get("must", []):
+        if not any(re.search(pattern, item, re.IGNORECASE) for item in items):
+            problems.append(f"nothing new matches {pattern!r}")
+    for pattern in spec.get("must_not", []):
+        hit = next((item for item in items if re.search(pattern, item, re.IGNORECASE)), None)
+        if hit is not None:
+            problems.append(f"{pattern!r} matches {hit[:120]!r}")
+    if "max_new" in spec and len(new) > int(spec["max_new"]):
+        problems.append(f"{len(new)} new proposal(s), max {int(spec['max_new'])}")
+    summary = "; ".join(problems) if problems else f"{len(new)} new proposal(s) ok"
+    return CheckResult("proposals", not problems, f"{summary} | {' / '.join(items)}"[:400])
+
+
 CHECKS: dict[str, CheckFn] = {
     "answer_contains": _check_answer_contains,
     "answer_excludes": _check_answer_excludes,
@@ -686,6 +790,7 @@ CHECKS: dict[str, CheckFn] = {
     "task_attempt": _check_task_attempt,
     "command": _check_command,
     "gws_calls": _check_gws_calls,
+    "proposals": _check_proposals,
 }
 
 
@@ -923,6 +1028,10 @@ class EngineSession(Protocol):
 
     def start_prompt(self, prompt: str, *, provider: str, model: str) -> str: ...
 
+    def start_transcript(self, turns: list[dict[str, str]], *, provider: str, model: str) -> str: ...
+
+    def run_memory_pass(self, chat_id: str, timeout_s: float) -> MemoryPassOutcome: ...
+
     def delegate(self, task_id: str, revision: str, *, provider: str, model: str) -> str: ...
 
     def wait_settled(self, timeout_s: float) -> bool: ...
@@ -982,6 +1091,7 @@ class IsolatedEngine(EngineSession):
         self._log: Any = None
         self._host_project_id = ""
         self._accepted_at = 0.0
+        self._mode = "auto"
         self._chat_ids: list[str] = []
         self._closed = False
 
@@ -1014,6 +1124,7 @@ class IsolatedEngine(EngineSession):
             port=self.port,
             mode=mode,
         )
+        self._mode = resolve_mode(provider, mode)
         self._log = self._log_path.open("wb")
         script = Path(sys.executable).with_name("ciao")
         command = [str(script), "run"] if script.exists() else [sys.executable, "-m", "ciao", "run"]
@@ -1087,6 +1198,58 @@ class IsolatedEngine(EngineSession):
         self._accepted_at = time.monotonic()
         self._chat_ids.append(chat_id)
         return chat_id
+
+    def start_transcript(self, turns: list[dict[str, str]], *, provider: str, model: str) -> str:
+        """An empty chat whose runtime transcript holds ``turns``, ready for the archive route."""
+        chat = self.api(
+            "POST",
+            f"/api/projects/{self._host_project_id}/chats",
+            {"title": "Task eval", "provider": provider, "model": model},
+        )
+        chat_id = str(chat["chat_id"])
+        path = transcript_path(self.ws, chat_id, provider)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = synthetic_transcript(
+            chat_id, turns, provider=provider, model=model, mode=self._mode, title="Task eval"
+        )
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
+        self._chat_ids.append(chat_id)
+        return chat_id
+
+    def run_memory_pass(self, chat_id: str, timeout_s: float) -> MemoryPassOutcome:
+        """Archive the chat through the operator route and wait for the pass it queues to settle."""
+        reply = self.api("POST", f"/api/chats/{chat_id}/archive", {})
+        step = _memory_pass_step((reply or {}).get("postprocess"))
+        extra = step.get("extra") or {}
+        pass_id = str(extra.get("chat_id") or "")
+        if not pass_id:
+            return MemoryPassOutcome("not_queued", None, {name: 0 for name in _TOKEN_FIELDS}, "")
+        deadline = time.monotonic() + timeout_s
+        status = ""
+        while True:
+            row = self.api("GET", f"/api/chats/{chat_id}") or {}
+            status = str(_memory_pass_step(row.get("postprocess")).get("status") or "")
+            if status in MEMORY_PASS_TERMINAL or time.monotonic() >= deadline:
+                break
+            time.sleep(MEMORY_PASS_POLL_S)
+        if status not in MEMORY_PASS_TERMINAL:
+            self.stop_chat(pass_id)
+            status = "timeout"
+        archive_path = self._pass_archive_path(pass_id) if status == "ok" else None
+        tokens, response = memory_pass_usage(self.ws, pass_id, archive_path)
+        self._chat_ids.append(pass_id)
+        return MemoryPassOutcome(status, pass_id, tokens, response)
+
+    def _pass_archive_path(self, pass_id: str) -> str | None:
+        """The pass's archive path once it has archived. The source step turns ``ok`` before the pass archives."""
+        deadline = time.monotonic() + MEMORY_PASS_ARCHIVE_WAIT_S
+        while True:
+            row = self.api("GET", f"/api/chats/{pass_id}") or {}
+            if row.get("archived") and row.get("archive_path"):
+                return str(row["archive_path"])
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(MEMORY_PASS_POLL_S)
 
     def delegate(self, task_id: str, revision: str, *, provider: str, model: str) -> str:
         # The delegate route takes no provider or model (_DELEGATE_KEYS in
@@ -1752,6 +1915,17 @@ def answer_from_transcripts(runtime: Path) -> str:
     return "\n".join(parts)
 
 
+def _add_usage(tokens: dict[str, int], usage: Any) -> None:
+    """Add one turn's usage to ``tokens``. A snake_case key wins over its camelCase twin."""
+    if not isinstance(usage, dict):
+        return
+    for name, key in _TOKEN_FIELDS.items():
+        value = usage.get(key)
+        if value is None:
+            value = usage.get(_TOKEN_CAMEL_FIELDS[name])
+        tokens[name] += _as_int(value)
+
+
 def collect_usage(runtime: Path) -> dict[str, Any]:
     """Token, tool, ciao-call and cost figures for one engine's runtime directory."""
     tokens = {name: 0 for name in _TOKEN_FIELDS}
@@ -1768,13 +1942,7 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
                 if provider_error is None:
                     response = turn.get("response")
                     provider_error = (response if isinstance(response, str) else "")[:300]
-            usage = turn.get("usage") or {}
-            if isinstance(usage, dict):
-                for name, key in _TOKEN_FIELDS.items():
-                    value = usage.get(key)
-                    if value is None:
-                        value = usage.get(_TOKEN_CAMEL_FIELDS[name])
-                    tokens[name] += _as_int(value)
+            _add_usage(tokens, turn.get("usage"))
             for call in turn.get("tool_calls") or []:
                 tool_calls += 1
                 if isinstance(call, dict) and call.get("error"):
@@ -1818,6 +1986,119 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
         "cost_usd": cost_usd,
         "chat_ids": chat_ids,
     }
+
+
+def _archive_usage_totals(text: str) -> dict[str, Any]:
+    """The ``usage_totals`` mapping in an archived transcript's frontmatter, or ``{}``."""
+    if not text.startswith("---\n"):
+        return {}
+    closing = _FENCE_RE.search(text, 4)
+    if closing is None:
+        return {}
+    try:
+        block: Any = yaml.safe_load(text[4:closing.start()])
+    except yaml.YAMLError:
+        return {}
+    totals = block.get("usage_totals") if isinstance(block, dict) else None
+    return totals if isinstance(totals, dict) else {}
+
+
+def memory_pass_usage(ws: Path, chat_id: str, archive_path: str | None) -> tuple[dict[str, int], str]:
+    """Tokens and final reply of one memory-pass chat.
+
+    A pass that is still live (``attention``, or stopped on timeout) keeps its
+    runtime transcript, which is read directly. A pass that archived cleanly has
+    lost that file, so its archive's ``usage_totals`` frontmatter is read; the
+    archive path is relative to the workspace root.
+    """
+    from ciao.transcripts import parse_archive_turns
+
+    tokens = {name: 0 for name in _TOKEN_FIELDS}
+    live = sorted((ws / ".runtime" / "transcripts" / chat_id).glob("*.json"))
+    if live:
+        response = ""
+        for path in live:
+            for turn in _read_transcript(path):
+                _add_usage(tokens, turn.get("usage"))
+                text = turn.get("response")
+                if isinstance(text, str) and text:
+                    response = text
+        return tokens, response
+    if not archive_path:
+        return tokens, ""
+    target = Path(archive_path)
+    if not target.is_absolute():
+        target = ws / target
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return tokens, ""
+    _add_usage(tokens, _archive_usage_totals(text))
+    turns = parse_archive_turns(text)
+    response = str(turns[-1].get("assistant") or "").strip() if turns else ""
+    return tokens, response
+
+
+def transcript_path(ws: Path, chat_id: str, provider: str) -> Path:
+    """Where the engine keeps a chat's runtime transcript, named by the engine's own slugging."""
+    from ciao.models import ChatContext
+    from ciao.transcripts import TranscriptStore
+
+    # Only current_path is used here, so the archive root is never written to.
+    store = TranscriptStore(ws / ".runtime", ws / ".runtime" / "unused-archive")
+    return store.current_path(ChatContext.for_web(chat_id), provider)
+
+
+def synthetic_transcript(
+    chat_id: str,
+    turns: Sequence[Mapping[str, str]],
+    *,
+    provider: str,
+    model: str,
+    mode: str,
+    title: str,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """A normalized transcript in the shape ``TranscriptStore.record_turn`` writes, with zero usage."""
+    stamp = now or datetime.now(UTC).isoformat(timespec="seconds")
+    return {
+        "provider": provider,
+        "started_at": stamp,
+        "updated_at": stamp,
+        "selected_model": model,
+        "session_id": "",
+        "context_key": chat_id,
+        "context_label": title,
+        "turns": [
+            {
+                "timestamp": stamp,
+                "input_kind": "text",
+                "prompt": str(turn["user"]),
+                "mode": mode,
+                "resume_session": "",
+                "image_count": 0,
+                "response": str(turn["assistant"]),
+                "is_error": False,
+                "effective_model": model,
+                "usage": {},
+                "quota": {},
+                "tool_events": [],
+                "tool_calls": [],
+            }
+            for turn in turns
+        ],
+    }
+
+
+def _memory_pass_step(postprocess: Any) -> dict[str, Any]:
+    """The ``memory_pass`` step of a chat's postprocess record, or ``{}`` where a level is missing."""
+    if not isinstance(postprocess, dict):
+        return {}
+    steps = postprocess.get("steps")
+    if not isinstance(steps, dict):
+        return {}
+    step = steps.get("memory_pass")
+    return step if isinstance(step, dict) else {}
 
 
 # --- snapshot, setup, runner ------------------------------------------------------
@@ -1871,8 +2152,22 @@ def _find_delegate_target(api: Callable[..., Any], title: str) -> tuple[str, str
     raise LookupError(f"no task titled {title!r} to delegate")
 
 
-def _unchanged_paths(task: EvalTask) -> list[str]:
-    return [str(spec["path"]) for spec in task.checks if spec.get("kind") == "unchanged"]
+def _snapshot_paths(task: EvalTask) -> list[str]:
+    """Files whose bytes the snapshot keeps: ``unchanged`` targets, and the queue and ``include_files`` of each proposals check."""
+    paths: list[str] = []
+
+    def keep(rel: str) -> None:
+        if rel not in paths:
+            paths.append(rel)
+
+    for spec in task.checks:
+        if spec.get("kind") == "unchanged":
+            keep(str(spec["path"]))
+        elif spec.get("kind") == "proposals":
+            keep(str(spec.get("path", PROPOSALS_PATH)))
+            for extra in spec.get("include_files", []):
+                keep(str(extra))
+    return paths
 
 
 def _tokens(raw: Mapping[str, Any]) -> dict[str, int]:
@@ -1983,6 +2278,9 @@ def _base_record(
         "wall_s": 0.0,
         "timed_out": False,
         "chat_ids": [],
+        "memory_pass_status": None,
+        "memory_pass_chat_id": None,
+        "memory_pass_tokens": None,
     }
 
 
@@ -2027,20 +2325,34 @@ def run_task(
         resolve_mode(provider, mode)
         session = factory(task)
         _apply_setup(session.api, task)
-        snapshot = take_snapshot(session.agent_root, session.api, _unchanged_paths(task))
+        snapshot = take_snapshot(session.agent_root, session.api, _snapshot_paths(task))
+        before: dict[str, Any] | None = None
+        pass_outcome: MemoryPassOutcome | None = None
         if task.entry["kind"] == "prompt":
             chat_id = session.start_prompt(task.prompt, provider=provider, model=model)
-        else:
+        elif task.entry["kind"] == "delegate":
             task_id, revision = _find_delegate_target(session.api, str(task.entry["task_title"]))
             chat_id = session.delegate(task_id, revision, provider=provider, model=model)
-        settled = session.wait_settled(task.timeout_s)
-        if not settled:
-            session.stop_chat(chat_id)
+        else:
+            chat_id = session.start_transcript(list(task.entry["turns"]), provider=provider, model=model)
+            # Read before the archive, which deletes the synthetic chat's runtime transcript.
+            before = session.usage()
+            pass_outcome = session.run_memory_pass(chat_id, task.timeout_s)
+            if pass_outcome.status == "not_queued":
+                raise RuntimeError("memory pass was not queued for the archived transcript")
+        if pass_outcome is None:
+            settled = session.wait_settled(task.timeout_s)
+            if not settled:
+                session.stop_chat(chat_id)
+            answer = session.answer_text()
+        else:
+            settled = pass_outcome.status == "ok"
+            answer = pass_outcome.response
         # Only a task that needs the fake reads the session's call log, so sessions
         # for other tasks never have to carry the attribute.
         ctx = GradeContext(
             agent_root=session.agent_root,
-            answer=session.answer_text(),
+            answer=answer,
             api=session.api,
             snapshot=snapshot,
             run_date=date.today(),
@@ -2049,28 +2361,52 @@ def run_task(
         results = grade(task, ctx)
         usage = session.usage()
         all_ok = all(r.ok for r in results)
-        provider_errors = _as_int(usage["provider_errors"])
+        # The synthetic chat read before the archive can add nothing (it carries no
+        # errors), but its counts are summed in so none can be lost to the archive.
+        earlier = before or {}
+        provider_errors = _as_int(usage["provider_errors"]) + _as_int(earlier.get("provider_errors"))
         status = "passed" if settled and all_ok else "failed"
         error = None
         # A provider failure (quota, auth, transport) that kept the run from passing
         # is an outage, not a model failure. A passing run did the work despite it.
         if provider_errors and status != "passed":
             status = "error"
-            error = f"provider error: {usage['provider_error'] or '(no message)'}"
+            provider_error = usage["provider_error"] or earlier.get("provider_error")
+            error = f"provider error: {provider_error or '(no message)'}"
+        pass_fields: dict[str, Any] = {}
+        if pass_outcome is None:
+            tokens = _tokens(usage["tokens"])
+            timed_out = not settled
+        else:
+            # A transcript run's tokens are the synthetic chat's (zero) plus the pass's.
+            earlier_tokens = earlier.get("tokens") or {}
+            tokens = _tokens(
+                {
+                    name: _as_int(earlier_tokens.get(name)) + pass_outcome.tokens.get(name, 0)
+                    for name in _TOKEN_FIELDS
+                }
+            )
+            timed_out = pass_outcome.status == "timeout"
+            pass_fields = {
+                "memory_pass_status": pass_outcome.status,
+                "memory_pass_chat_id": pass_outcome.chat_id,
+                "memory_pass_tokens": _tokens(pass_outcome.tokens),
+            }
         record.update(
             status=status,
             error=error,
             checks=[asdict(r) for r in results],
             answer=ctx.answer[-ANSWER_TAIL_CHARS:],
-            tokens=_tokens(usage["tokens"]),
+            tokens=tokens,
             tool_calls=_as_int(usage["tool_calls"]),
             tool_errors=_as_int(usage["tool_errors"]),
             provider_errors=provider_errors,
             ciao_calls=_as_int(usage["ciao_calls"]),
             ciao_errors=_as_int(usage["ciao_errors"]),
             cost_usd=usage["cost_usd"],
-            timed_out=not settled,
+            timed_out=timed_out,
             chat_ids=list(usage["chat_ids"]),
+            **pass_fields,
         )
     except Exception as exc:  # noqa: BLE001 - a run is recorded, never raised
         record.update(status="error", error=repr(exc)[:500])
