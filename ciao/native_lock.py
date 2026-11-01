@@ -232,6 +232,9 @@ class NativeStateDir:
         except OSError:
             _close_quietly(descriptor)
             raise NativeLockError("state_dir_unsafe") from None
+        except BaseException:
+            _close_quietly(descriptor)
+            raise
         if (
             not stat.S_ISDIR(held.st_mode)
             or stat.S_ISLNK(named.st_mode)
@@ -432,35 +435,37 @@ def _read_bounded_fd(fd: int, limit: int) -> bytes | None:
         chunks.append(chunk)
 
 
-def _record_state(data: bytes) -> str:
+def _record_state(data: bytes) -> tuple[str, tuple[str, int] | None]:
     """Classify record bytes as ``busy``, ``unknown`` or ``unsafe``.
 
     Empty, truncated or undecodable bytes are ``unknown`` (an interrupted
     write). A complete JSON value this schema cannot accept is ``unsafe``
-    (foreign or incompatible), never described as corruption.
+    (foreign or incompatible), never described as corruption. A ``busy``
+    answer carries the run id and pid parsed from these same bytes, so no
+    caller ever needs a second read.
     """
     try:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        return "unknown"
+        return "unknown", None
     if not isinstance(payload, dict) or set(payload) != {"schema", "run_id", "pid"}:
-        return "unsafe"
+        return "unsafe", None
     if type(payload["schema"]) is not int or payload["schema"] != LOCK_SCHEMA_VERSION:
-        return "unsafe"
+        return "unsafe", None
     run_id = payload["run_id"]
     if type(run_id) is not str:
-        return "unsafe"
+        return "unsafe", None
     try:
         _canonical_lock_run_id(run_id)
     except NativeLockError:
-        return "unsafe"
+        return "unsafe", None
     pid = payload["pid"]
     if type(pid) is not int or pid <= 0:
-        return "unsafe"
-    return "busy"
+        return "unsafe", None
+    return "busy", (run_id, pid)
 
 
-def _lock_record_state(dir_fd: int) -> str:
+def _lock_record_state(dir_fd: int) -> tuple[str, tuple[str, int] | None]:
     """Classify an existing record as ``busy``, ``unknown`` or ``unsafe``.
 
     A missing, empty, truncated or undecodable record in an otherwise private
@@ -472,11 +477,11 @@ def _lock_record_state(dir_fd: int) -> str:
     try:
         entry = os.stat(LOCK_RECORD_NAME, dir_fd=dir_fd, follow_symlinks=False)
     except OSError as exc:
-        return "unknown" if _is_missing(exc) else "unsafe"
+        return ("unknown" if _is_missing(exc) else "unsafe"), None
     if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
-        return "unsafe"
+        return "unsafe", None
     if entry.st_size > MAX_LOCK_RECORD_BYTES:
-        return "unsafe"
+        return "unsafe", None
     flags = (
         os.O_RDONLY
         | getattr(os, "O_NOFOLLOW", 0)
@@ -485,26 +490,26 @@ def _lock_record_state(dir_fd: int) -> str:
     try:
         descriptor = os.open(LOCK_RECORD_NAME, flags, dir_fd=dir_fd)
     except OSError as exc:
-        return "unknown" if _is_missing(exc) else "unsafe"
+        return ("unknown" if _is_missing(exc) else "unsafe"), None
     try:
         try:
             opened = _fstat(descriptor)
         except OSError as exc:
-            return "unknown" if _is_missing(exc) else "unsafe"
+            return ("unknown" if _is_missing(exc) else "unsafe"), None
         if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
-            return "unsafe"
+            return "unsafe", None
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-            return "unsafe"
+            return "unsafe", None
         try:
             if not is_private_descriptor_strict(descriptor):
-                return "unsafe"
+                return "unsafe", None
         except OSError:
-            return "unsafe"
+            return "unsafe", None
         if opened.st_size > MAX_LOCK_RECORD_BYTES:
-            return "unsafe"
+            return "unsafe", None
         data = _read_bounded_fd(descriptor, MAX_LOCK_RECORD_BYTES)
         if data is None:
-            return "unknown"
+            return "unknown", None
         return _record_state(data)
     finally:
         try:
@@ -513,7 +518,9 @@ def _lock_record_state(dir_fd: int) -> str:
             pass
 
 
-def _existing_lock_reason(parent_fd: int) -> str:
+def _existing_lock_reason(
+    parent_fd: int,
+) -> tuple[str, tuple[str, int] | None]:
     """Classify a pre-existing lock directory without changing it.
 
     A valid record is ``lock_busy``. An empty directory or a missing, empty,
@@ -526,9 +533,9 @@ def _existing_lock_reason(parent_fd: int) -> str:
     try:
         entry = os.stat(LOCK_DIR_NAME, dir_fd=parent_fd, follow_symlinks=False)
     except OSError as exc:
-        return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
+        return ("lock_unknown" if _is_missing(exc) else "lock_unsafe"), None
     if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
-        return "lock_unsafe"
+        return "lock_unsafe", None
     flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -537,31 +544,31 @@ def _existing_lock_reason(parent_fd: int) -> str:
     try:
         dir_fd = os.open(LOCK_DIR_NAME, flags, dir_fd=parent_fd)
     except OSError as exc:
-        return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
+        return ("lock_unknown" if _is_missing(exc) else "lock_unsafe"), None
     try:
         try:
             opened = _fstat(dir_fd)
         except OSError as exc:
-            return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
+            return ("lock_unknown" if _is_missing(exc) else "lock_unsafe"), None
         if (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino):
-            return "lock_unsafe"
+            return "lock_unsafe", None
         try:
             if not is_private_descriptor_strict(dir_fd):
-                return "lock_unsafe"
+                return "lock_unsafe", None
         except OSError as exc:
-            return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
+            return ("lock_unknown" if _is_missing(exc) else "lock_unsafe"), None
         try:
             names = sorted(os.listdir(dir_fd))
         except OSError as exc:
-            return "lock_unknown" if _is_missing(exc) else "lock_unsafe"
+            return ("lock_unknown" if _is_missing(exc) else "lock_unsafe"), None
         if not names:
-            return "lock_unknown"
+            return "lock_unknown", None
         if names != [LOCK_RECORD_NAME]:
-            return "lock_unsafe"
-        state = _lock_record_state(dir_fd)
+            return "lock_unsafe", None
+        state, identity = _lock_record_state(dir_fd)
         if state == "busy":
-            return "lock_busy"
-        return "lock_unknown" if state == "unknown" else "lock_unsafe"
+            return "lock_busy", identity
+        return ("lock_unknown" if state == "unknown" else "lock_unsafe"), None
     finally:
         try:
             os.close(dir_fd)
@@ -707,7 +714,7 @@ class NativeRunLock:
             try:
                 os.mkdir(LOCK_DIR_NAME, 0o700, dir_fd=parent_fd)
             except FileExistsError:
-                raise NativeLockError(_existing_lock_reason(parent_fd)) from None
+                raise NativeLockError(_existing_lock_reason(parent_fd)[0]) from None
             except OSError:
                 raise NativeLockError("lock_create_failed") from None
 
@@ -1162,52 +1169,15 @@ _STATUS_BY_REASON: Final[dict[str, str]] = {
 }
 
 
-def _read_record_bytes(dir_fd: int) -> bytes | None:
-    try:
-        descriptor = os.open(
-            LOCK_RECORD_NAME,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-            dir_fd=dir_fd,
-        )
-    except OSError:
-        return None
-    try:
-        return _read_bounded_fd(descriptor, MAX_LOCK_RECORD_BYTES)
-    finally:
-        _close_quietly(descriptor)
-
-
-def _read_lock_identity(parent_fd: int) -> tuple[str, int] | None:
-    """The run id and pid a lock already proved ``busy`` records, or ``None``."""
-    try:
-        dir_fd = os.open(
-            LOCK_DIR_NAME,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=parent_fd,
-        )
-    except OSError:
-        return None
-    try:
-        data = _read_record_bytes(dir_fd)
-    finally:
-        _close_quietly(dir_fd)
-    if data is None:
-        return None
-    try:
-        payload = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    run_id = payload.get("run_id")
-    pid = payload.get("pid")
-    if type(run_id) is not str or type(pid) is not int:
-        return None
-    return run_id, pid
-
 
 def _pid_alive(pid: int) -> bool | None:
-    """Whether ``pid`` exists, by signal 0; ``None`` when that cannot be answered."""
+    """Whether ``pid`` exists, by signal 0; ``None`` when that cannot be answered.
+
+    A non-positive pid is never probed: ``os.kill(0, 0)`` and ``os.kill(-1, 0)``
+    address whole process groups, not one process.
+    """
+    if pid <= 0:
+        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1222,12 +1192,20 @@ def _pid_alive(pid: int) -> bool | None:
 def inspect_native_lock(state_dir: Path) -> NativeLockStatus:
     """Report the run lock under ``state_dir``; never create, repair, adopt or delete.
 
-    The state directory is opened with the same private, descriptor-relative
-    checks acquisition uses, and the lock is classified by the same reasons.
-    A busy lock also reports its recorded run id and pid, and whether that pid
-    is alive. Nothing is raised for any state of the filesystem: a directory
-    that cannot be opened safely is ``unsafe``.
+    Windows has no supported liveness probe here, so every answer there is
+    ``unsafe`` without touching the filesystem or any pid.
+
+    The state directory's final components are opened no-follow with the same
+    private, descriptor-relative checks acquisition uses, and the lock is
+    classified by the same reasons. Unlike acquisition, this does not walk the
+    trusted-root chain above the state directory, so it does not prove that
+    those ancestors are safe. A busy lock reports the run id and pid parsed
+    from the same descriptor read that proved it busy, and whether that pid is
+    alive. Nothing is raised for any state of the filesystem: a directory that
+    cannot be opened safely is ``unsafe``.
     """
+    if sys.platform == "win32":
+        return NativeLockStatus("unsafe", None, None, None)
     try:
         os.lstat(state_dir)
     except FileNotFoundError:
@@ -1245,13 +1223,10 @@ def inspect_native_lock(state_dir: Path) -> NativeLockStatus:
             return NativeLockStatus("absent", None, None, None)
         except OSError:
             return NativeLockStatus("unsafe", None, None, None)
-        state = _STATUS_BY_REASON[_existing_lock_reason(parent_fd)]
-        if state != "busy":
-            return NativeLockStatus(state, None, None, None)
-        identity = _read_lock_identity(parent_fd)
+        reason, identity = _existing_lock_reason(parent_fd)
     finally:
         _close_quietly(parent_fd)
     if identity is None:
-        return NativeLockStatus("unknown", None, None, None)
+        return NativeLockStatus(_STATUS_BY_REASON[reason], None, None, None)
     run_id, pid = identity
     return NativeLockStatus("busy", run_id, pid, _pid_alive(pid))

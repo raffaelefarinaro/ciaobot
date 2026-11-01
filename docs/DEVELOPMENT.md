@@ -646,16 +646,23 @@ runs no cleanup and leaves the lock and child as evidence. Tests:
 **Recovering a native-install lock**
 
 A lock at `~/.local/state/ciaobot/native-install.lock` means a native install is
-running, or one was killed (SIGKILL or power loss) before it could clean up.
+running, or one was killed (SIGKILL or power loss) before it could clean up. That
+path is the default state directory the coordinator will use from #2404; the
+coordinator is not wired to it yet.
 
-1. Nothing in the tool removes, adopts or repairs the lock automatically. While it
-   exists, every native run refuses with `install_in_progress`.
+1. Nothing in the tool removes, adopts or repairs the lock automatically. A busy
+   or unknown lock refuses every native run with `install_in_progress`. An unsafe
+   lock, or an unsafe state directory, refuses with `unknown_state` instead,
+   because the tool cannot tell what wrote it.
 2. Read `run.json` in the lock directory. It holds `schema`, `run_id` and `pid`.
-3. Check whether that pid is still running with `ps -p <pid>`.
-4. Remove the lock directory by hand only when that pid is not running and no
-   Ciaobot installer window is open. A later native run still refuses a partial
-   install that the killed run left behind (receipt, tool environment or host).
-   Inspect or remove those separately: the native installer never repairs them.
+3. Check whether that pid is still running with `ps -p <pid>`. A live pid is not
+   proof that an installer is running: pids are reused, and a process owned by
+   another user can hold one. A dead pid does not by itself authorise removal.
+4. Remove the lock directory by hand only when you have confirmed that no
+   installer is running (the pid check alone is not enough) and no Ciaobot
+   installer window is open. A later native run still refuses a partial install
+   that the killed run left behind (receipt, tool environment or host). Inspect
+   or remove those separately: the native installer never repairs them.
 5. `ciao.native_lock.inspect_native_lock(state_dir)` returns the same
    classification read-only, including the recorded pid and whether it is alive.
    The coordinator does not print it yet.
