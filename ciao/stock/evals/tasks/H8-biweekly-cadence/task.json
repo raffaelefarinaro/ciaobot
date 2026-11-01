@@ -102,7 +102,19 @@
               "skip odd",
               "skip even",
               "skip this week",
-              "skip the off"
+              "skip the off",
+              "off week",
+              "off-week",
+              "on week",
+              "on-week",
+              "anchor",
+              "reminder week",
+              "weeks since",
+              "weeks after",
+              "since 2026-",
+              "first on 2026-",
+              "starting 2026-",
+              "alternating week"
             ]
           }
         ]
