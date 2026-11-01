@@ -942,8 +942,13 @@ def _claude_project_dirs(agent_root: Path) -> list[Path]:
     Claude names the folder after the path it was started in, and on macOS that is
     the resolved path (``/var`` becomes ``/private/var``), so both spellings are
     candidates. Only a folder whose name carries the eval workdir prefix qualifies,
-    so a misconfigured root can never remove a real project's history.
+    so a misconfigured root can never remove a real project's history: the root
+    itself must sit under a folder the harness created (its name starts with the
+    prefix), and the slug must still carry the prefix (a 200-character slug that
+    Claude truncated past it is left in place).
     """
+    if not any(part.startswith(EVAL_WORKDIR_PREFIX) for part in agent_root.parts):
+        return []
     candidates = {
         agent_paths.claude_projects_dir(agent_root),
         agent_paths.claude_projects_dir(agent_root.resolve()),
@@ -2051,7 +2056,7 @@ def run_task(
         # is an outage, not a model failure. A passing run did the work despite it.
         if provider_errors and status != "passed":
             status = "error"
-            error = f"provider error: {usage['provider_error']}"
+            error = f"provider error: {usage['provider_error'] or '(no message)'}"
         record.update(
             status=status,
             error=error,

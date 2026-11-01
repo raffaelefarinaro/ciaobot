@@ -1490,3 +1490,17 @@ def test_cli_eval_tasks_run_rejects_unknown_mode(capsys: pytest.CaptureFixture[s
     with pytest.raises(SystemExit):
         cli.main(["eval", "tasks", "run", "--model", "m", "--mode", "plan"])
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_claude_project_cleanup_needs_an_eval_workdir_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A path that merely contains the prefix mid-name is not an eval workdir.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    root = tmp_path / f"notes-{te.EVAL_WORKDIR_PREFIX}x" / "ws" / "personal"
+    root.mkdir(parents=True)
+    folder = te.agent_paths.claude_projects_dir(root)
+    folder.mkdir(parents=True)
+
+    assert te._claude_project_dirs(root) == []
+    assert folder.is_dir()
