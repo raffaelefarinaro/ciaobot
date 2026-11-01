@@ -5404,6 +5404,7 @@ class ProjectChatManager:
         ``_agent_fs_scope_for_chat``), with the account's ``client_secret.json``
         and ``credentials.json`` pinned here so they stay write-denied: an
         agent cannot plant a client secret with a hostile ``token_uri``.
+        A memory pass also gets its one source archive (``_memory_pass_archive_grant``).
         """
         if fs_scope != "workspace":
             return ()
@@ -5423,6 +5424,9 @@ class ProjectChatManager:
         gh_dir = gh_config_read_root(os.environ)
         if gh_dir is not None:
             granted.append(str(gh_dir))
+        archive = self._memory_pass_archive_grant(chat)
+        if archive is not None:
+            granted.append(str(archive))
         return tuple(granted)
 
     def _granted_gws_dir(self, chat: ChatInfo) -> Path | None:
@@ -5439,6 +5443,43 @@ class ProjectChatManager:
         ):
             return gws_dir.resolve()
         return None
+
+    def _memory_pass_archive_grant(self, chat: ChatInfo) -> Path | None:
+        """The one transcript archive a memory pass may read, or None (#2459).
+
+        The grant is read-only and limited to this single file, so the pass can
+        read the chat it distils without a folder of other transcripts. The
+        helper lives in the hand-editable registry, so it is validated here and
+        every failure grants nothing: the chat is a memory pass with a
+        ``memory_pass`` helper, the source chat id is one folder name under
+        ``Logs/Chats``, and the archive, resolved, is a regular file inside that
+        folder. A symlinked archive is refused before it is resolved.
+        """
+        project = self._projects.get(chat.project_id)
+        if not is_memory_pass_chat(chat, project):
+            return None
+        helper = chat_service._normalize_chat_helper(chat.helper)
+        source_chat_id = str(helper.get("source_chat_id") or "")
+        archive_path = str(helper.get("archive_path") or "")
+        if helper.get("kind") != "memory_pass" or not source_chat_id or not archive_path:
+            return None
+        workspace_root = Path(self._config.workspace_root)
+        try:
+            chats_root = (self._config.logs_root / "Chats").resolve()
+            source_dir = (chats_root / source_chat_id).resolve()
+            if source_dir.parent != chats_root:
+                return None
+            candidate = Path(archive_path)
+            if not candidate.is_absolute():
+                candidate = workspace_root / candidate
+            if os.path.islink(candidate):
+                return None
+            resolved = candidate.resolve(strict=True)
+        except (OSError, ValueError, RuntimeError):
+            return None
+        if not resolved.is_relative_to(source_dir) or not resolved.is_file():
+            return None
+        return resolved
 
     def _agent_denied_for_chat(
         self, chat: ChatInfo, fs_scope: str, fs_roots: tuple[str, ...]
@@ -5585,6 +5626,7 @@ class ProjectChatManager:
         # Only a workspace-scoped chat is confined, so only it is told where
         # it can write; a machine-scope chat gets no file-access line at all.
         fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
+        archive = self._memory_pass_archive_grant(chat) if fs_scope == "workspace" else None
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -5596,6 +5638,7 @@ class ProjectChatManager:
             handover=handover,
             include_stable=include_stable,
             file_roots=fs_roots if fs_scope == "workspace" else (),
+            file_read_only=(str(archive),) if archive is not None else (),
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
             permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),

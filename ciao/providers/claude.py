@@ -1089,6 +1089,7 @@ class ClaudeProvider(BaseSDKProvider):
                     roots=roots,
                     cli_tmp_base=cli_env.get("CLAUDE_CODE_TMPDIR")
                     or os.environ.get("CLAUDE_CODE_TMPDIR"),
+                    read_only=[Path(p) for p in request.agent_read_only],
                 )],
             )]
         # The linked repository is added in every scope: it is what loads the

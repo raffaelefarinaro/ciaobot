@@ -1621,3 +1621,139 @@ def test_claude_macos_settings_fail_closed_when_the_denied_folder_cannot_be_list
         claude_sandbox_settings(
             scope="workspace", mode="auto", roots=[root], denied=[secrets], regrant=[]
         )
+
+
+def _archive_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A workspace root, and a memory pass's source archive outside it (#2459)."""
+    base = tmp_path.resolve()
+    root = base / "personal"
+    root.mkdir()
+    chats = base / "Logs" / "Chats" / "src-1" / "claude"
+    chats.mkdir(parents=True)
+    archive = chats / "2026-11-01T10-00-00-s.md"
+    archive.write_text("transcript", encoding="utf-8")
+    return root, chats, archive
+
+
+def test_claude_file_tool_guard_reads_an_exact_read_only_file_and_never_writes_it(tmp_path):
+    root, chats, archive = _archive_tree(tmp_path)
+    sibling = chats / "other.md"
+    sibling.write_text("other", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[archive])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(archive)}) == "allow"
+    assert _guard_decision(guard, "Grep", {"pattern": "x", "path": str(archive)}) == "allow"
+    assert _guard_decision(guard, "Glob", {"pattern": str(archive)}) == "allow"
+    assert _guard_decision(guard, "Write", {"file_path": str(archive)}) == "deny"
+    assert _guard_decision(guard, "Edit", {"file_path": str(archive)}) == "deny"
+    assert _guard_decision(guard, "MultiEdit", {"file_path": str(archive)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(sibling)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(chats)}) == "deny"
+    assert _guard_decision(guard, "Glob", {"pattern": f"{chats}/*"}) == "deny"
+
+
+def test_a_read_only_directory_does_not_make_its_files_readable(tmp_path):
+    root, _, _ = _archive_tree(tmp_path)
+    config_dir = tmp_path.resolve() / "gh-config"
+    config_dir.mkdir()
+    (config_dir / "hosts.yml").write_text("token", encoding="utf-8")
+    inside = root / "gws"
+    inside.mkdir()
+    (inside / "token.json").write_text("{}", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[config_dir, inside])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(config_dir / "hosts.yml")}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(config_dir)}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(config_dir / "new.yml")}) == "deny"
+    # Inside the root a read-only folder stays readable, and its files stay write-denied.
+    assert _guard_decision(guard, "Read", {"file_path": str(inside / "token.json")}) == "allow"
+    assert _guard_decision(guard, "Edit", {"file_path": str(inside / "token.json")}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(inside / "new.json")}) == "deny"
+
+
+def test_claude_file_tool_guard_pins_a_read_only_file_inside_a_root(tmp_path):
+    root = (tmp_path / "root").resolve()
+    creds = root / "creds" / "client_secret.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text("{}", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[creds])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(creds)}) == "allow"
+    assert _guard_decision(guard, "Edit", {"file_path": str(creds)}) == "deny"
+    assert _guard_decision(guard, "MultiEdit", {"file_path": str(creds)}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(creds)}) == "deny"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege Windows lacks")
+def test_a_link_in_the_archive_folder_to_elsewhere_is_not_readable(tmp_path):
+    root, chats, archive = _archive_tree(tmp_path)
+    secret = tmp_path.resolve() / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    link = chats / "link.md"
+    link.symlink_to(secret)
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[archive])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(link)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(archive)}) == "allow"
+
+
+def test_claude_settings_grant_a_memory_pass_archive_read_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root, _, archive = _archive_tree(tmp_path)
+
+    settings = claude_sandbox_settings(
+        scope="workspace", mode="auto", roots=[root], read_only=[archive]
+    )
+
+    assert settings is not None
+    filesystem = settings["filesystem"]
+    assert str(archive) in filesystem["allowRead"]
+    assert str(archive) not in filesystem["allowWrite"]
+    assert str(archive) not in filesystem["denyWrite"]
+    # Only the file is granted: no folder above it is readable through the grant.
+    assert not {str(parent) for parent in archive.parents} & set(filesystem["allowRead"])
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file(),
+    reason="needs macOS sandbox-exec",
+)
+def test_darwin_seatbelt_reads_a_memory_pass_archive_only(tmp_path):
+    root, _, archive = _archive_tree(tmp_path)
+    prefix = opencode_sandbox_prefix(roots=[root], read_only=[archive])
+
+    allowed = subprocess.run([*prefix, "/bin/cat", str(archive)], capture_output=True, timeout=30)
+    assert allowed.returncode == 0
+    assert allowed.stdout == b"transcript"
+    profile = prefix[2]
+    assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(archive))}"))' in profile
+    assert not any(
+        "file-write*" in line and str(archive) in line for line in profile.splitlines()
+    )
+    ok = root / "ok.txt"
+    control = subprocess.run(
+        [*prefix, "/bin/sh", "-c", f"echo ok > '{ok}'"], capture_output=True, timeout=30
+    )
+    assert control.returncode == 0
+    written = subprocess.run(
+        [*prefix, "/bin/sh", "-c", f"echo x > '{archive}'"], capture_output=True, timeout=30
+    )
+    assert written.returncode != 0
+    assert archive.read_text(encoding="utf-8") == "transcript"
+
+
+def test_bwrap_ro_binds_a_memory_pass_archive_outside_the_roots(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # bwrap does not run on Windows.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+    root, _, archive = _archive_tree(tmp_path)
+
+    argv = opencode_sandbox_prefix(roots=[root], read_only=[archive])
+
+    triples = _bwrap_triples(argv)
+    assert ["--ro-bind", str(archive), str(archive)] in triples
+    assert not any(str(archive) in triple and triple[0] == "--bind" for triple in triples)
