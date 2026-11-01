@@ -390,7 +390,7 @@ export interface ChatRetryInfo {
 /** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
 export type TurnOrigin =
   | 'background_run' | 'cli_task_wake' | 'retry' | 'schedule' | 'task_delegation'
-  | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume'
+  | 'task_resume' | 'webhook' | 'update_task' | 'compaction' | 'restart_resume' | 'handover'
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -410,6 +410,8 @@ export interface ChatMessage {
   steered?: boolean
   // Set when the engine wrote this user turn (wake, automation, webhook, ...); drawn as a notice card.
   origin?: TurnOrigin
+  // Engine-recorded context pack a provider handover sent; on the handover marker only.
+  sent_context?: string
   // Monotonic per-chat user-turn index. Server-assigned; used to dedup
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.

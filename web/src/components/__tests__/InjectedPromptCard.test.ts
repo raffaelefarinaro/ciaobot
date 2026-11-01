@@ -342,3 +342,51 @@ describe('InjectedPromptCard', () => {
     expect(run.get('.injected-card-hint').attributes('role')).toBeUndefined()
   })
 })
+
+describe('InjectedPromptCard handover', () => {
+  const handover: InjectedPrompt = {
+    kind: 'handover',
+    from: 'opencode',
+    to: 'Claude',
+    sent: '<provider-handover>\nUser: hi\n</provider-handover>',
+  }
+
+  it('renders the handover collapsed with its label and route', async () => {
+    const wrapper = mountCard({ prompt: handover, raw: 'Handed over from opencode to Claude.' })
+    const card = wrapper.get('.injected-card')
+    expect(card.classes()).toContain('injected-card--handover')
+    expect(card.attributes('aria-label')).toBe('Handed over')
+    const toggle = wrapper.get('.injected-card-toggle')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.text()).toContain('Handed over')
+    expect(toggle.text()).toContain('· opencode → Claude')
+    expect(wrapper.find('.injected-card-body').exists()).toBe(false)
+  })
+
+  it('shows a note and the sent pack behind a named disclosure when expanded', async () => {
+    const wrapper = mountCard({ prompt: handover, raw: '' })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toContain('fresh session')
+    const details = wrapper.get('details.injected-card-original')
+    expect(details.attributes('open')).toBeUndefined()
+    expect(wrapper.get('details.injected-card-original summary').text()).toBe('Show what the agent received')
+    const region = wrapper.get('details.injected-card-original pre.injected-card-raw')
+    expect(region.text()).toBe(handover.kind === 'handover' ? handover.sent : '')
+    expect(region.attributes('tabindex')).toBe('0')
+    expect(region.attributes('role')).toBe('region')
+    expect(region.attributes('aria-label')).toBe('What the agent received')
+  })
+
+  it('says so and shows no disclosure when no pack was recorded', async () => {
+    const wrapper = mountCard({ prompt: { ...handover, sent: '' }, raw: '' })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-note').text()).toBe('This handover recorded no copy of what was sent.')
+    expect(wrapper.find('details.injected-card-original').exists()).toBe(false)
+  })
+
+  it('draws no full-prompt toggle', async () => {
+    const wrapper = mountCard({ prompt: handover, raw: 'Handed over from opencode to Claude.' })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+  })
+})
