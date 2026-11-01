@@ -32,8 +32,8 @@
       "kind": "file_excludes",
       "path": "memory-vault/projects/active/summer-party/summer-party.md",
       "any": [
-        "CHF 45 per head",
         "price: CHF 45",
+        "price:** CHF 45",
         "price is CHF 45",
         "costs CHF 45"
       ]

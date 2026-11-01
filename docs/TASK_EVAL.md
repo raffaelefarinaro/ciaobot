@@ -157,7 +157,7 @@ tasks; `_fixture/` is the base vault.
 | `E2-recall-guest-count` | easy | `recall` | the guest count of the summer party is read from the vault |
 | `E2-recall-abstain` | easy | `abstention` | an unknown person's phone number is declined, not invented |
 | `E3-schedule-create` | easy | `schedule_create` | a weekly schedule is created at the requested day and time |
-| `H1-multi-source-synthesis` | hard | `synthesis` | three inbox notes (Slack, call, email) are merged into the summer party doc, and the superseded 45 quote is gone |
+| `H1-multi-source-synthesis` | hard | `synthesis` | three inbox notes (Slack, call, email) are merged into the summer party doc, and the superseded 45 quote is not stated as the current price (mentioning it as history is fine) |
 | `H2-code-bugfix` | hard | `coding` | the seeded bug in `code/invoice_tool/invoice.py` is fixed and the unittest suite passes without touching the tests |
 | `H3-doc-revision` | hard | `doc_revision` | four review comments are applied to `house-rules.md`, and the review file itself is left unchanged |
 
