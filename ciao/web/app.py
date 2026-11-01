@@ -8,6 +8,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -257,6 +258,9 @@ from ciao.web.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from ciao.native_installer import NativeBootstrapContext
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 
@@ -400,17 +404,23 @@ def _spa_catchall(request):
     return FileResponse(STATIC_DIR / "index.html", status_code=404, headers=headers)
 
 
-def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None) -> Starlette:
+def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstrap: bool = False, installer_run_id: str | None = None, native_bootstrap: "NativeBootstrapContext | None" = None) -> Starlette:
     import uuid
     if installer_bootstrap and not config.bootstrap_mode:
         raise ValueError("installer bootstrap requires bootstrap-mode config")
+    canonical_run_id: str | None = None
     if installer_bootstrap:
         try:
-            uuid.UUID(installer_run_id or "")
+            canonical_run_id = str(uuid.UUID(installer_run_id or ""))
         except ValueError as exc:
             raise ValueError("installer bootstrap requires a valid run id") from exc
     elif installer_run_id is not None:
         raise ValueError("installer run id requires installer bootstrap mode")
+    if native_bootstrap is not None:
+        if not installer_bootstrap:
+            raise ValueError("native bootstrap requires installer bootstrap mode")
+        if native_bootstrap.run_id != canonical_run_id:
+            raise ValueError("native bootstrap run id does not match the server run id")
     serializer = make_serializer(config.pwa_auth_token)
 
     routes = [
@@ -875,6 +885,7 @@ def create_app(config, app_settings=None, mcp_service=None, *, installer_bootstr
     app.state.config = config
     app.state.installer_bootstrap = installer_bootstrap
     app.state.installer_run_id = installer_run_id
+    app.state.native_bootstrap = native_bootstrap
     app.state.terminal_clock = time.monotonic
     app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
     # The one owner of every terminal shell the browser opens. It is built

@@ -38,6 +38,22 @@ def test_supervised_watchdog_exits_with_the_restart_code_and_never_execs() -> No
     assert exits == [75]
 
 
+def test_installer_bootstrap_watchdog_exits_without_re_execing() -> None:
+    """The installer parent reads the child's exit code; an exec would detach it."""
+    exits: list[int] = []
+
+    _restart_watchdog(
+        1,
+        supervised=False,
+        installer_bootstrap=True,
+        sleep=lambda s: None,
+        execv=_NeverExec(),
+        exit_now=exits.append,
+    )
+
+    assert exits == [1]
+
+
 def test_unsupervised_watchdog_re_execs_as_before() -> None:
     """A plain `ciao run` under launchd has no supervisor to relaunch it, so
     the watchdog re-execs a fresh interpreter under the same pid."""
