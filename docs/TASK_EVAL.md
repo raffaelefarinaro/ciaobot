@@ -84,11 +84,25 @@ on every row.
    check names. The snapshot is taken after the host project exists, so its
    scaffold files are never reported as new.
 5. The entry runs: `prompt` sends the task's prompt in a new chat, `delegate`
-   hands an existing task to the agent.
+   hands an existing task to the agent, and `transcript` writes the task's turns
+   into a new chat as a finished transcript (nothing is sent to the model) and
+   archives that chat through `POST /api/chats/{id}/archive`, which starts the
+   end-of-chat memory pass exactly as an operator's archive does. The run then
+   waits on the pass's `postprocess.steps.memory_pass.status` until it is `ok`
+   or `attention` within `timeout_s`; on timeout the pass is stopped, the
+   harness waits briefly for the engine to flush the pass's last turn, and the
+   run is marked `timed_out`. Only `ok` counts as settled. The pass's tokens come
+   from its runtime transcript while it is live, or from the `usage_totals`
+   frontmatter of its archive once it has archived. When neither is found (an
+   `ok` pass whose archive does not appear within 30 s, or a pass with no
+   transcript at all), the run is an error with the message `memory pass usage
+   unavailable (archive not found)` and no pass tokens are recorded: zero would
+   read as a pass that cost nothing.
 6. The run is settled when `/api/admin/restart-blockers` is empty on two
    consecutive polls two seconds apart, at least five seconds after the prompt
    was accepted. This also covers chats spawned by a delegation. On timeout the
-   chat is stopped, the run is marked `timed_out`, and it is still graded.
+   chat is stopped, the run is marked `timed_out`, and it is still graded. A
+   `transcript` run skips this step: the pass's status settles it instead.
 7. Checks grade the state. The engine receives SIGTERM (after 20 s, a kill),
    and `T` is deleted unless `--keep-workdir` is given. Claude Code's session
    folder for the run's agent root (`~/.claude/projects/<slug>`, under both the
@@ -115,8 +129,12 @@ Each run is one JSON object per line:
 | `status` | `passed`, `failed`, `skipped` or `error`. `error` is also set when a provider error (quota, auth, transport) hit the run and the run did not pass, so a settle timeout or a failed check counts as an error too; the record's `error` then starts with `provider error:` and carries the provider's message. A run that passed despite a provider error stays `passed` |
 | `answer` | the last 2000 characters of the answer text (all turns of all chats, most recent last) |
 | `checks` | per check: `kind`, `ok`, `detail` |
-| `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run. OpenCode's camelCase usage keys (`inputTokens` and so on) are read too; a field present in both spellings counts the snake_case one |
+| `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run. OpenCode's camelCase usage keys (`inputTokens` and so on) are read too; a field present in both spellings counts the snake_case one. For a `transcript` task the synthetic chat has no tokens, so `tokens` is the memory pass's cost; a pass that archived cleanly adds its tokens but no tool calls or cost |
+| `memory_pass_status`, `memory_pass_chat_id`, `memory_pass_tokens` | `transcript` tasks only: how the pass ended (`ok`, `attention`, `timeout`), the pass's chat id, and the pass's own tokens in the `tokens` shape. A `not_queued` pass, or one whose usage cannot be found, is an error row, and its `memory_pass_tokens` is null. Null on `prompt` and `delegate` rows |
 | `tool_calls`, `tool_errors` | from the turns' tool-call lists |
+| `trace` | the ordered tool calls of every measured chat, one entry per call: `{"chat_id", "name", "input", "error"}`. The transcript's `tool_events` come first (both providers), each with `chat_id` set. For a Claude run, `input` is replaced by the real input from the Claude session log (`command`, `file_path`, `pattern` or `skill`, else the input's JSON) for the same tool use. Session-log calls with no transcript entry follow, in log order, with `chat_id: ""` and `error: false`: a memory pass's calls land here, since its archived transcript is deleted. Each string is capped at 200 characters and the list keeps its first 200 calls. Empty on skipped rows, and on error rows where the session could not be read at all; an error row that reached the session still carries its trace |
+| `trace_truncated` | `true` when the trace had more than 200 calls and the rest were dropped |
+| `model_calls` | model round-trips in the run, counted as the distinct assistant message ids in the Claude session log (every chat of the run). `null` when no Claude session log was read, which is every OpenCode run |
 | `ciao_calls`, `ciao_errors` | from `mcp_tool_calls.jsonl`; an error is any status other than `ok` |
 | `cost_usd` | the engine's recorded cost, or null |
 | `provider_errors` | the number of transcript turns the provider failed (`is_error`), summed over every chat; 0 on skipped and error rows that never reached the grader |
@@ -127,7 +145,9 @@ so two runs that differ only in mode appear as separate rows (`Mode` column).
 Reports written before the `mode` field group under `-`. Its pass rate and
 medians (context, output, wall time, cost) exclude skipped and error runs, so a
 provider outage neither counts against the model nor drags the medians toward
-zero; the `Errors` column counts the error runs of each group. `compare` joins two reports by task id and reports
+zero; the `Errors` column counts the error runs of each group.
+The `Median model calls` column uses the scored runs whose `model_calls` is not null.
+`compare` joins two reports by task id and reports
 the pass-rate difference and the percentage change in context, wall time and
 cost; its table shows each side's mode.
 
@@ -172,7 +192,10 @@ Each task is `ciao/stock/evals/tasks/<task_id>/task.json`:
 - `id` must equal the directory name. `tier` is `easy`, `medium` or `hard`.
 - `entry` is `{"kind": "prompt"}`, which needs `prompt`, or
   `{"kind": "delegate", "task_title": "..."}`, which needs a setup task with
-  that exact title.
+  that exact title, or `{"kind": "transcript", "turns": [...]}`. A transcript
+  needs 1 to 20 turns, each with a non-empty `user` and an `assistant` string
+  (which may be empty). The turns are written as a finished chat rather than
+  sent to the model, so the memory pass always reads the same input.
 - `setup` steps are `{"kind": "task", "title", "body"?, "due"?}` and
   `{"kind": "project", "name", "context"?}`.
 - `requires` lists capability names. `gws_fake` is the only one (see
@@ -200,6 +223,8 @@ tasks; `_fixture/` is the base vault.
 | `M2-project-missing` | medium | `project_create` | prompt | exactly one project is created, and nothing else |
 | `M3-delegated-task` | medium | `delegated_task` | delegate, with a `task` setup step | the delegated chat reports the task done once, with the answer |
 | `M4-email-draft` | medium | `email_draft` | prompt; requires `gws_fake` (see [Capabilities](#capabilities)) | a reply-only draft lands in the right Gmail thread and nothing is sent |
+| `M5-memory-pass-keep-drop` | medium | `memory_pass` | transcript: a standing unit rule, a status snapshot, a fact that lives in `overlay/code/shed-planner/settings.toml`, a sign-off | the unit rule (kilometres) is queued or promoted to `AGENTS.md`; the status snapshot (timber, permit, foundation) and the code-derivable setting (`max_span_cm`) are not |
+| `M6-memory-pass-decided-paraphrase` | medium | `memory_pass` | transcript: a hazelnut allergy, a Sunday round-up that paraphrases a row already dismissed in `overlay/`, a sign-off | the allergy is queued or promoted; the paraphrase of the dismissed row is not, and `Memory-Proposals.dismissed.jsonl` is unchanged. This task may fail at baseline: the pass prompt does not point at the decision sidecar, and that gap is what it measures |
 | `H1-multi-source-synthesis` | hard | `synthesis` | prompt, with inbox notes in `overlay/` | three inbox notes (Slack, call, email) are merged into the summer party doc, and the superseded 45 quote is not stated as the current price (mentioning it as history is fine) |
 | `H2-code-bugfix` | hard | `coding` | prompt, with a toy package in `overlay/` | the seeded bug in `code/invoice_tool/invoice.py` is fixed and the unittest suite passes without touching the tests |
 | `H3-doc-revision` | hard | `doc_revision` | prompt, with the doc and its review in `overlay/` | four review comments are applied to `house-rules.md`, untouched sections survive, and the review file itself is left unchanged |
@@ -228,6 +253,7 @@ matching is case-insensitive.
 | `task_attempt` | `title_contains`, `outcome`, `count` | the matching task has exactly `count` attempts with that outcome (`done`, `blocked`, `needs_input`) |
 | `command` | `argv`, `cwd`, `timeout_s` | the command exits 0; `{python}` in argv is `sys.executable` |
 | `gws_calls` | `must`, `must_not`, `min_calls` | over the fake gws call log (see [Capabilities](#capabilities)): every `must` regex matches at least one call summary, no `must_not` regex matches any, and there are at least `min_calls` calls. Fails with "no gws fake in this run" when the task has no fake |
+| `proposals` | `path`, `must`, `must_not`, `include_files`, `max_new` | the queue bullets added since the snapshot (default `memory-vault/Workspace/Memory-Proposals.md`) and the lines added to each `include_files` file are the items. An `include_files` entry ending in `/` is a directory: every file under it is diffed line by line against the snapshot, and a file that did not exist then counts as all new lines. Every `must` regex matches an item, no `must_not` regex matches one, and at most `max_new` queue bullets are new. Regexes are case-insensitive. Bullets are read with the grammar `list_proposals` uses. A missing queue is empty. At least one of `must`, `must_not` or `max_new` is required |
 
 A check that raises is a failed check with the exception in its detail. It does
 not stop grading of the other checks.

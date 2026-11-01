@@ -442,7 +442,11 @@ class _FakeGwsSession:
             "chat_ids": ["chat-1"],
             "provider_errors": 0,
             "provider_error": None,
+            "trace": [],
         }
+
+    def session_trace(self) -> tuple[list[dict[str, Any]], int | None]:
+        return [], None
 
     def close(self) -> None:
         self.closed = True
