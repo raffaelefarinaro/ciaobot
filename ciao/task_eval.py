@@ -211,7 +211,54 @@ def _validate_check(task_id: str, spec: Any) -> dict[str, Any]:
         _validate_gws_calls(task_id, spec)
     elif kind == "proposals":
         _validate_proposals(task_id, spec)
+    elif kind == "new_tasks":
+        _validate_new_tasks(task_id, spec)
+    elif kind == "new_schedules":
+        _validate_new_schedules(task_id, spec)
+    elif kind == "any_of":
+        _validate_any_of(task_id, spec)
     return spec
+
+
+# A nested check that could itself pick a branch, or that compares against a snapshot of the whole
+# agent root, does not belong inside an any_of option.
+_NOT_NESTABLE: frozenset[str] = frozenset({"any_of", "unchanged"})
+
+
+def _validate_any_of(task_id: str, spec: dict[str, Any]) -> None:
+    options = spec.get("options")
+    if not isinstance(options, list) or len(options) < 2:
+        raise TaskCatalogError(f"{task_id}: any_of needs at least 2 options")
+    for option in options:
+        if not isinstance(option, list) or not option:
+            raise TaskCatalogError(f"{task_id}: each any_of option must be a non-empty list of checks")
+        for nested in option:
+            if isinstance(nested, dict) and nested.get("kind") in _NOT_NESTABLE:
+                raise TaskCatalogError(f"{task_id}: any_of cannot nest {nested.get('kind')!r}")
+            _validate_check(task_id, nested)
+
+
+def _validate_new_tasks(task_id: str, spec: dict[str, Any]) -> None:
+    if "project_name_contains" in spec:
+        names = spec["project_name_contains"]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise TaskCatalogError(f"{task_id}: new_tasks project_name_contains must be a list of strings")
+    if "titles_cover" in spec:
+        groups = spec["titles_cover"]
+        valid = (
+            isinstance(groups, list)
+            and bool(groups)
+            and all(isinstance(g, list) and bool(g) and all(isinstance(n, str) for n in g) for g in groups)
+        )
+        if not valid:
+            raise TaskCatalogError(f"{task_id}: new_tasks titles_cover must be a list of non-empty string lists")
+
+
+def _validate_new_schedules(task_id: str, spec: dict[str, Any]) -> None:
+    if "prompt_any" in spec:
+        needles = spec["prompt_any"]
+        if not isinstance(needles, list) or not needles or not all(isinstance(n, str) for n in needles):
+            raise TaskCatalogError(f"{task_id}: new_schedules prompt_any must be a non-empty list of strings")
 
 
 def _validate_regex_lists(task_id: str, kind: str, spec: dict[str, Any]) -> None:
@@ -460,6 +507,8 @@ def _check_new_tasks(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
         problems.append(f"expected {count} new task(s), found {len(new)}")
     needles = [str(n).lower() for n in spec.get("title_contains", [])]
     due_spec = spec.get("due")
+    project_needles = [str(n).lower() for n in spec.get("project_name_contains", [])]
+    names = _project_names(ctx) if project_needles else {}
     for row in new:
         title = str(row.get("title") or "")
         for needle in needles:
@@ -467,7 +516,39 @@ def _check_new_tasks(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
                 problems.append(f"title {title!r} lacks {needle!r}")
         if due_spec is not None and not _due_matches(row.get("due"), str(due_spec), ctx.run_date):
             problems.append(f"task {title!r} due {row.get('due')!r} != {due_spec!r}")
+        if project_needles:
+            pid = row.get("project_id")
+            pname = names.get(str(pid), str(pid)) if pid else ""
+            missing = [n for n in project_needles if n not in pname.lower()]
+            if missing:
+                problems.append(f"task {title!r} project {pname!r} lacks {missing}")
+    if "titles_cover" in spec:
+        problems.extend(_titles_cover_problems(new, spec["titles_cover"]))
     return CheckResult("new_tasks", not problems, "; ".join(problems) or f"{len(new)} new task(s) ok")
+
+
+def _project_names(ctx: GradeContext) -> dict[str, str]:
+    """Project id to display name, from ``GET /api/projects``."""
+    payload = ctx.api("GET", "/api/projects")
+    return {str(row["project_id"]): str(row.get("name") or "") for row in payload if row.get("project_id")}
+
+
+def _titles_cover_problems(new: list[dict[str, Any]], groups: list[list[str]]) -> list[str]:
+    """Each title group is matched by exactly one new task, and every new task matches some group."""
+    titles = [str(row.get("title") or "") for row in new]
+
+    def hits(title: str, group: list[str]) -> bool:
+        return any(str(needle).lower() in title.lower() for needle in group)
+
+    problems: list[str] = []
+    for group in groups:
+        matched = [title for title in titles if hits(title, group)]
+        if len(matched) != 1:
+            problems.append(f"titles {group} matched {len(matched)} task(s), want 1")
+    for title in titles:
+        if not any(hits(title, group) for group in groups):
+            problems.append(f"task {title!r} matches no title group")
+    return problems
 
 
 def _due_matches(due: Any, spec: str, run_date: date) -> bool:
@@ -511,6 +592,9 @@ def _check_new_schedules(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult
         for needle in spec.get("prompt_contains", []):
             if str(needle).lower() not in prompt:
                 problems.append(f"prompt lacks {needle!r}")
+        any_needles = [str(n) for n in spec.get("prompt_any", [])]
+        if any_needles and not any(n.lower() in prompt for n in any_needles):
+            problems.append(f"prompt lacks any of {any_needles}")
     return CheckResult("new_schedules", not problems, "; ".join(problems) or f"{len(new)} new schedule(s) ok")
 
 
@@ -794,6 +878,17 @@ def _check_proposals(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     return CheckResult("proposals", not problems, f"{summary} | {' / '.join(items)}"[:400])
 
 
+def _check_any_of(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    """Passes when every check of at least one option passes. Nested checks run under the same guard as grade."""
+    reports: list[str] = []
+    for index, option in enumerate(spec["options"], start=1):
+        results = [_run_check(ctx, nested) for nested in option]
+        if all(r.ok for r in results):
+            return CheckResult("any_of", True, f"option {index} passed")
+        reports.append(f"option {index}: " + "; ".join(f"{r.kind}={'ok' if r.ok else 'FAIL'} {r.detail}" for r in results))
+    return CheckResult("any_of", False, " | ".join(reports)[:800])
+
+
 CHECKS: dict[str, CheckFn] = {
     "answer_contains": _check_answer_contains,
     "answer_excludes": _check_answer_excludes,
@@ -812,19 +907,22 @@ CHECKS: dict[str, CheckFn] = {
     "command": _check_command,
     "gws_calls": _check_gws_calls,
     "proposals": _check_proposals,
+    "any_of": _check_any_of,
 }
+
+
+def _run_check(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    """One check. A check that raises is a failed check, never a crash."""
+    kind = str(spec.get("kind"))
+    try:
+        return CHECKS[kind](ctx, spec)
+    except Exception as exc:  # noqa: BLE001 - a broken check must not abort grading
+        return _fail(kind, f"check raised {exc!r}"[:400])
 
 
 def grade(task: EvalTask, ctx: GradeContext) -> list[CheckResult]:
     """Run every check of a task. A check that raises is a failed check, never a crash."""
-    results: list[CheckResult] = []
-    for spec in task.checks:
-        kind = str(spec.get("kind"))
-        try:
-            results.append(CHECKS[kind](ctx, spec))
-        except Exception as exc:  # noqa: BLE001 - a broken check must not abort grading
-            results.append(_fail(kind, f"check raised {exc!r}"[:400]))
-    return results
+    return [_run_check(ctx, spec) for spec in task.checks]
 
 
 # --- isolation --------------------------------------------------------------------

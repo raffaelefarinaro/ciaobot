@@ -226,6 +226,9 @@ tasks; `_fixture/` is the base vault.
 | `H1-multi-source-synthesis` | hard | `synthesis` | prompt, with inbox notes in `overlay/` | three inbox notes (Slack, call, email) are merged into the summer party doc, and the superseded 45 quote is not stated as the current price (mentioning it as history is fine) |
 | `H2-code-bugfix` | hard | `coding` | prompt, with a toy package in `overlay/` | the seeded bug in `code/invoice_tool/invoice.py` is fixed and the unittest suite passes without touching the tests |
 | `H3-doc-revision` | hard | `doc_revision` | prompt, with the doc and its review in `overlay/` | four review comments are applied to `house-rules.md`, untouched sections survive, and the review file itself is left unchanged |
+| `H7-shed-task-breakdown` | hard | `task_breakdown` | prompt, with the garden shed project doc in `overlay/` | the three open checklist items that are not on the board become tasks in the Garden shed project, each due on the Friday; the item already on the board is not duplicated, and the ticked and "maybe later" items are skipped |
+| `H8-biweekly-cadence` | hard | `cadence_limits` | prompt | an every-other-Monday request is either declined with an honest explanation, or set up as a weekly Monday 08:00 schedule whose prompt guards on ISO-week parity. A plain weekly schedule, or an interval schedule (which has no anchor), fails |
+| `H10-namesake-recall` | hard | `namesake_recall` | prompt, with a climbing note in `overlay/` that names a different Tomas | the birthday is declined, or the 3 May date is given only with the namesake flagged. Stating 3 May as Tomas Berg's birthday fails |
 
 ### Check kinds
 
@@ -238,8 +241,9 @@ matching is case-insensitive.
 | `answer_contains` | `all`, `any` | the final answer contains every `all` needle and at least one `any` needle |
 | `answer_excludes` | `any` | the answer contains none of the needles |
 | `abstains` | | the answer matches a clean refusal (`don't know`, `not recorded`, `could not find`, ...) |
-| `new_tasks` | `count`, `title_contains`, `due` | exactly `count` tasks are new; every new task has the needles in its title and the due date. `weekday:friday` means that weekday, 1 to 7 days after the run date |
-| `new_schedules` | `count`, `frequency`, `days_of_week`, `time`, `prompt_contains` | exactly `count` new non-system schedules match; days compare as 3-letter sets; `time` is the wall-clock `daily_time_utc` |
+| `new_tasks` | `count`, `title_contains`, `due`, `project_name_contains`, `titles_cover` | exactly `count` tasks are new; every new task has the needles in its title and the due date. `weekday:friday` means that weekday, 1 to 7 days after the run date. `project_name_contains` resolves each new task's `project_id` to a name through `GET /api/projects` (an id not in that list is used as its own name; no project is an empty name), and every needle must be in that name. `titles_cover` is a list of needle groups: exactly one new task matches each group, and every new task matches some group |
+| `new_schedules` | `count`, `frequency`, `days_of_week`, `time`, `prompt_contains`, `prompt_any` | exactly `count` new non-system schedules match; days compare as 3-letter sets; `time` is the wall-clock `daily_time_utc`. `prompt_contains` needs every needle in the prompt; `prompt_any` needs at least one |
+| `any_of` | `options` | at least one option passes. An option is a list of at least one check, and it passes when every check in it passes. Nested checks are validated like top-level ones, but `any_of` and `unchanged` cannot be nested. The detail reads `option 1 passed`, or on failure each option's checks as `kind=ok\|FAIL detail`. A nested check that raises is a failed check, as at top level |
 | `new_projects` | `count`, `name_contains` | exactly `count` new projects match the name needles |
 | `file_contains` | `path`, `all`, `any` | the file holds the needles |
 | `file_excludes` | `path`, `any` | the file holds none of the needles |
@@ -354,6 +358,8 @@ match the fixture exactly.
 
 1. Add `ciao/stock/evals/tasks/<task_id>/task.json`. Keep its checks specific:
    a fact the answer must contain, a file that must change, a count.
+   Checks are ANDed. Use `any_of` only when two different end states are both
+   correct, as in H8 (decline, or a guarded schedule).
 2. If the task needs fixture facts that do not exist, add them under
    `_fixture/` only when every task can share them. Otherwise add an
    `overlay/` tree to the task.
