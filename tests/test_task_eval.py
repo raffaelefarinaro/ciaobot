@@ -731,7 +731,9 @@ def test_cli_package_mismatch_names_both_packages(monkeypatch: pytest.MonkeyPatc
     message = te.cli_package_mismatch()
 
     assert message is not None
-    assert "/Users/someone/repos/ciaobot/ciao" in message
+    # The message names the resolved package directory, which is drive-qualified
+    # with backslashes on Windows; compare the platform's own spelling.
+    assert str(Path("/Users/someone/repos/ciaobot/ciao/__init__.py").resolve().parent) in message
     assert str(Path(te.__file__).resolve().parent) in message
     assert "uv venv .venv-eval" in message
     assert ".venv-eval/bin/ciao eval tasks run" in message
