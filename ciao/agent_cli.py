@@ -25,6 +25,7 @@ from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.execution_modes import is_credential_adjacent
+from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
 from ciao.terminal_offer import (
     TERMINAL_OFFER_MAX_BYTES,
     TerminalOfferError,
@@ -50,6 +51,11 @@ _SKILL_PATH = Path(__file__).resolve().parent / "stock" / "skills" / "ciao-cli" 
 _SCHEDULE_FLAG_HELP: dict[str, str] = {
     "--command": "Shell command run before the prompt. Only a bypass-mode chat may set one; "
     "otherwise ask the user to add it in the schedule's Prompt card.",
+    "--days-of-week": "Comma-separated days: mon,tue,wed,thu,fri,sat,sun; full names accepted; "
+    "for --frequency weekly.",
+    "--daily-time": "HH:MM wall-clock time in --timezone.",
+    "--timezone": f"IANA zone name; default {DEFAULT_TIMEZONE}.",
+    "--frequency": f"One of {', '.join(sorted(FREQUENCIES))}.",
 }
 
 _SCHEDULE_FLAGS: tuple[tuple[str, str, Any], ...] = (

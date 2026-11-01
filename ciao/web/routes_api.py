@@ -104,6 +104,7 @@ from ciao.schedules import (
     compute_next_run,
     is_interval,
     normalize_archive_policy,
+    normalize_days_of_week,
     normalize_interval_minutes,
     publish_automations_changed,
     run_failed_since,
@@ -5603,6 +5604,7 @@ async def create_schedule(request: Request) -> JSONResponse:
     try:
         archive_policy = normalize_archive_policy(body.get("archive_policy"))
         command = normalize_schedule_command(body.get("command"))
+        days_of_week = normalize_days_of_week(body.get("days_of_week"))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     # Stamp the workspace from the target project so the schedule still routes
@@ -5635,7 +5637,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         mode=mode,
         chat_id=body.get("chat_id", 0),
         timezone_name=body.get("timezone", "Europe/Zurich"),
-        days_of_week=body.get("days_of_week"),
+        days_of_week=days_of_week,
         thread_id=body.get("thread_id"),
         frequency=frequency,
         interval_minutes=interval_minutes,
@@ -5746,7 +5748,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
     if "timezone" in body:
         entry.timezone_name = body["timezone"]
     if "days_of_week" in body:
-        entry.days_of_week = body["days_of_week"] or None
+        try:
+            entry.days_of_week = normalize_days_of_week(body["days_of_week"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
     if "thread_id" in body:
         entry.thread_id = body["thread_id"] or None
     if "chat_id" in body:

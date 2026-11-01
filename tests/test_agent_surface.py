@@ -2661,3 +2661,22 @@ def test_a_terminal_offer_crosses_from_the_file_to_the_chat(tmp_path: Path) -> N
     assert response.json()["data"]["terminal_offer"]["command"] == "npm install -g ciao"
     registry = (tmp_path / ".runtime" / "web_projects.json").read_text(encoding="utf-8")
     assert "npm install -g ciao" not in registry
+
+
+def test_schedule_create_help_documents_days_time_timezone_and_frequency(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An agent reads `--help` before it probes values; it must name them."""
+    from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
+
+    with pytest.raises(SystemExit) as excinfo:
+        agent_cli.build_parser().parse_args(["schedule", "create", "--help"])
+    assert excinfo.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+
+    assert "mon,tue,wed,thu,fri,sat,sun" in help_text
+    assert "full names accepted" in help_text
+    assert "HH:MM" in help_text
+    assert f"default {DEFAULT_TIMEZONE}" in help_text
+    for frequency in FREQUENCIES:
+        assert frequency in help_text

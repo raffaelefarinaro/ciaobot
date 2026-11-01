@@ -51,6 +51,45 @@ def _utc_stamp(when: datetime) -> str:
 
 
 WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_WEEKDAY_FULL_NAMES = {
+    "monday": "mon",
+    "tuesday": "tue",
+    "wednesday": "wed",
+    "thursday": "thu",
+    "friday": "fri",
+    "saturday": "sat",
+    "sunday": "sun",
+}
+
+
+def normalize_days_of_week(value: object) -> list[str] | None:
+    """Canonical ``WEEKDAY_NAMES`` days for a schedule, or None when none given.
+
+    Accepts a comma-separated string or a list of day names, in any case, with
+    full names ("Saturday") or the three-letter form ("sat"). The result is
+    deduplicated and in week order, so the stored list is always the one
+    ``_matches_frequency`` compares against. Anything else is refused with the
+    accepted names, rather than stored as a schedule that never fires.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        pieces = [piece for piece in value.split(",") if piece.strip()]
+    elif isinstance(value, list):
+        pieces = value
+    else:
+        raise ValueError("days_of_week must be a comma-separated string or a list of day names")
+    chosen: set[str] = set()
+    for raw in pieces:
+        name = raw.strip().lower() if isinstance(raw, str) else ""
+        day = _WEEKDAY_FULL_NAMES.get(name, name)
+        if day not in WEEKDAY_NAMES:
+            raise ValueError(
+                f"unknown day {raw!r}: use mon,tue,wed,thu,fri,sat,sun (full names accepted)"
+            )
+        chosen.add(day)
+    days = [day for day in WEEKDAY_NAMES if day in chosen]
+    return days or None
 
 ARCHIVE_POLICIES = {"manual", "auto"}
 

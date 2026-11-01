@@ -51,6 +51,7 @@ from ciao.schedules import (
     ScheduleEntry,
     compute_next_run,
     is_interval,
+    normalize_days_of_week,
     normalize_interval_minutes,
     publish_automations_changed,
     stamp_fallback_project,
@@ -6330,6 +6331,11 @@ class CiaoControlPlane:
             except ValueError as exc:
                 raise ControlPlaneError("invalid_interval", str(exc)) from exc
 
+        try:
+            days_of_week = normalize_days_of_week(values.get("days_of_week")) or []
+        except ValueError as exc:
+            raise ControlPlaneError("invalid_schedule", str(exc)) from exc
+
         now = datetime.now(UTC).isoformat(timespec="seconds")
         entry = ScheduleEntry(
             schedule_id="preview",
@@ -6345,7 +6351,7 @@ class CiaoControlPlane:
             # workspace/engine default at dispatch time.
             mode=self._child_mode(principal, str(values.get("mode") or "") or None),
             timezone_name=str(values.get("timezone") or values.get("timezone_name") or "UTC"),
-            days_of_week=list(values.get("days_of_week") or []),
+            days_of_week=days_of_week,
             frequency=frequency,
             interval_minutes=interval_minutes,
             day_of_month=values.get("day_of_month"),
@@ -6552,6 +6558,11 @@ class CiaoControlPlane:
         unknown = sorted(set(normalized) - known)
         if unknown:
             raise ControlPlaneError("invalid_fields", f"Unknown schedule fields: {', '.join(unknown)}")
+        if "days_of_week" in normalized:
+            try:
+                normalized["days_of_week"] = normalize_days_of_week(normalized["days_of_week"])
+            except ValueError as exc:
+                raise ControlPlaneError("invalid_schedule", str(exc)) from exc
         if "command" in normalized:
             normalized["command"] = self._schedule_command(
                 principal, normalized["command"], current=entry.command
