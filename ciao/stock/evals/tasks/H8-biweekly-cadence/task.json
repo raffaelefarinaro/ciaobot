@@ -3,21 +3,110 @@
   "tier": "hard",
   "category": "cadence_limits",
   "prompt": "Remind me every other Monday at 08:00 to put the paper recycling out. Set it up directly, no need to check with me first.",
-  "entry": {"kind": "prompt"},
+  "entry": {
+    "kind": "prompt"
+  },
   "setup": [],
   "requires": [],
   "timeout_s": 600,
   "checks": [
-    {"kind": "any_of", "options": [
-      [
-        {"kind": "new_schedules", "count": 0},
-        {"kind": "answer_contains", "any": ["not support", "isn't supported", "isn’t supported", "doesn't support", "doesn’t support", "can't", "can’t", "cannot", "can not", "no way to", "not possible", "unable to", "only supports", "only support", "no biweekly", "no bi-weekly", "no fortnightly", "not available", "unsupported", "no every-other", "no option", "doesn't have", "not able to", "limitation"]},
-        {"kind": "answer_contains", "any": ["every other", "biweekly", "bi-weekly", "fortnight", "alternate", "every second", "two weeks"]}
-      ],
-      [
-        {"kind": "new_schedules", "count": 1, "frequency": "weekly", "days_of_week": ["mon"], "time": "08:00",
-         "prompt_contains": ["recycling"], "prompt_any": ["week number", "iso week", "iso-week", "weeknumber", "week-number", "week of the year", "week-of-year", "calendar week", "even week", "odd week", "alternate week", "even-numbered", "odd-numbered", "even iso", "odd iso", "isocalendar", "parity", "%v", "every second", "fortnight", "last fired", "last ran", "skip odd", "skip even", "skip this week", "skip the off"]}
+    {
+      "kind": "any_of",
+      "options": [
+        [
+          {
+            "kind": "new_schedules",
+            "count": 0
+          },
+          {
+            "kind": "answer_contains",
+            "any": [
+              "not support",
+              "isn't supported",
+              "isn’t supported",
+              "doesn't support",
+              "doesn’t support",
+              "can't",
+              "can’t",
+              "cannot",
+              "can not",
+              "no way to",
+              "not possible",
+              "unable to",
+              "only supports",
+              "only support",
+              "no biweekly",
+              "no bi-weekly",
+              "no fortnightly",
+              "not available",
+              "unsupported",
+              "no every-other",
+              "no option",
+              "doesn't have",
+              "not able to",
+              "limitation"
+            ]
+          },
+          {
+            "kind": "answer_contains",
+            "any": [
+              "every other",
+              "biweekly",
+              "bi-weekly",
+              "fortnight",
+              "every second",
+              "two weeks",
+              "alternat",
+              "every 2",
+              "2nd monday",
+              "second monday",
+              "other monday"
+            ]
+          }
+        ],
+        [
+          {
+            "kind": "new_schedules",
+            "count": 1,
+            "frequency": "weekly",
+            "days_of_week": [
+              "mon"
+            ],
+            "time": "08:00",
+            "prompt_contains": [
+              "recycling"
+            ],
+            "prompt_any": [
+              "week number",
+              "iso week",
+              "iso-week",
+              "weeknumber",
+              "week-number",
+              "week of the year",
+              "week-of-year",
+              "calendar week",
+              "even week",
+              "odd week",
+              "alternate week",
+              "even-numbered",
+              "odd-numbered",
+              "even iso",
+              "odd iso",
+              "isocalendar",
+              "parity",
+              "%v",
+              "every second",
+              "fortnight",
+              "last fired",
+              "last ran",
+              "skip odd",
+              "skip even",
+              "skip this week",
+              "skip the off"
+            ]
+          }
+        ]
       ]
-    ]}
+    }
   ]
 }

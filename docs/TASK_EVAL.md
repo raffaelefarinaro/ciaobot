@@ -261,6 +261,8 @@ matching is case-insensitive.
 | `gws_calls` | `must`, `must_not`, `min_calls` | over the fake gws call log (see [Capabilities](#capabilities)): every `must` regex matches at least one call summary, no `must_not` regex matches any, and there are at least `min_calls` calls. Fails with "no gws fake in this run" when the task has no fake |
 | `proposals` | `path`, `must`, `must_not`, `include_files`, `max_new` | the queue bullets added since the snapshot (default `memory-vault/Workspace/Memory-Proposals.md`) and the lines added to each `include_files` file are the items. An `include_files` entry ending in `/` is a directory: every file under it is diffed line by line against the snapshot, and a file that did not exist then counts as all new lines. Every `must` regex matches an item, no `must_not` regex matches one, and at most `max_new` queue bullets are new. Regexes are case-insensitive. Bullets are read with the grammar `list_proposals` uses. A missing queue is empty. At least one of `must`, `must_not` or `max_new` is required |
 
+`normalize: true` removes `*`, `_` and backticks from both the text and the needles before matching, so a needle that needs a literal underscore cannot use it.
+
 `normalize: true` is accepted only by the five text checks above (`answer_contains`,
 `answer_excludes`, `file_contains`, `file_excludes`, `occurrences`), and it must be a
 boolean. It folds both the text and every needle the same way before matching:
