@@ -576,7 +576,7 @@ authenticated manifest bytes and signature, not a caller-selected entry, and cal
 `verify_manifest`, `select_server_host_artifact` and `verify_host_archive` itself.
 It fixes the host bundle and ownership record to the canonical home paths and the
 release public key; there is no caller-supplied path, key or pre-selected entry.
-It requires the run's `NativeRunLock.assert_held(run_id=…)` and refuses a bundle,
+It requires the run's `native_lock.NativeRunLock.assert_held(run_id=…)` and refuses a bundle,
 ownership record or host-upgrade journal that already exists, including terminal
 journal evidence it must not settle. Fresh mode also requires canonical absolute
 paths with no `.`, `..` or symlinked ancestor within the trusted home, a record
@@ -642,6 +642,23 @@ reloads, quiesces or rolls back an activated service, preserves partial
 artifacts, writes no onboarding or install receipt, and adds no route. `SIGKILL`
 runs no cleanup and leaves the lock and child as evidence. Tests:
 `tests/test_native_installer.py`.
+
+**Recovering a native-install lock**
+
+A lock at `~/.local/state/ciaobot/native-install.lock` means a native install is
+running, or one was killed (SIGKILL or power loss) before it could clean up.
+
+1. Nothing in the tool removes, adopts or repairs the lock automatically. While it
+   exists, every native run refuses with `install_in_progress`.
+2. Read `run.json` in the lock directory. It holds `schema`, `run_id` and `pid`.
+3. Check whether that pid is still running with `ps -p <pid>`.
+4. Remove the lock directory by hand only when that pid is not running and no
+   Ciaobot installer window is open. A later native run still refuses a partial
+   install that the killed run left behind (receipt, tool environment or host).
+   Inspect or remove those separately: the native installer never repairs them.
+5. `ciao.native_lock.inspect_native_lock(state_dir)` returns the same
+   classification read-only, including the recorded pid and whether it is alive.
+   The coordinator does not print it yet.
 
 The native bootstrap child side is now explicit but internal. When the native
 coordinator starts it with the private `--installer-native-fd` (hidden, and
