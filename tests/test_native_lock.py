@@ -207,6 +207,35 @@ def test_inspect_reports_absent_busy_unknown_unsafe_without_mutation(
     assert (status.state, status.run_id, status.pid, status.pid_alive) == expected
 
 
+@pytest.mark.parametrize(
+    ("pid", "expected"),
+    [
+        (0, ("unsafe", None, None, None)),
+        (-1, ("unsafe", None, None, None)),
+        (True, ("unsafe", None, None, None)),
+        (2**40, ("busy", RUN_ID, 2**40, None)),
+    ],
+    ids=["zero", "negative", "bool", "huge"],
+)
+def test_inspect_validates_the_recorded_pid(
+    tmp_path: Path, pid: int, expected: tuple[object, ...]
+) -> None:
+    # The record's own pid guard decides busy versus unsafe; _pid_alive refusing
+    # the same values is a second line, not the one under test.
+    state = _state_dir(tmp_path)
+    _lock_dir_with_pid(state, pid)
+    status = native_lock.inspect_native_lock(state)
+    assert (status.state, status.run_id, status.pid, status.pid_alive) == expected
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root may signal pid 1")
+def test_inspect_reports_a_foreign_live_pid_as_alive(tmp_path: Path) -> None:
+    state = _state_dir(tmp_path)
+    _lock_dir_with_pid(state, 1)
+    status = native_lock.inspect_native_lock(state)
+    assert (status.state, status.pid, status.pid_alive) == ("busy", 1, True)
+
+
 def _valid_record_bytes(pid: int, *, pad: int = 0) -> bytes:
     payload: dict[str, object] = {
         "schema": native_lock.LOCK_SCHEMA_VERSION,

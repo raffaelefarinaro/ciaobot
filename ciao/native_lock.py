@@ -1169,7 +1169,6 @@ _STATUS_BY_REASON: Final[dict[str, str]] = {
 }
 
 
-
 def _pid_alive(pid: int) -> bool | None:
     """Whether ``pid`` exists, by signal 0; ``None`` when that cannot be answered.
 
