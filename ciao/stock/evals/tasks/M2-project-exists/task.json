@@ -3,16 +3,31 @@
   "tier": "medium",
   "category": "project_create",
   "prompt": "Do I already have a project for building the garden shed? If not, create one.",
-  "entry": {"kind": "prompt"},
-  "setup": [
-    {"kind": "project", "name": "Garden shed", "context": "Build a garden shed; budget CHF 2,400."}
-  ],
+  "entry": {
+    "kind": "prompt"
+  },
+  "setup": [],
   "requires": [],
   "timeout_s": 600,
   "checks": [
-    {"kind": "new_projects", "count": 0},
-    {"kind": "answer_contains", "any": ["garden shed"]},
-    {"kind": "new_files", "glob": "memory-vault/projects/**", "max": 0},
-    {"kind": "new_tasks", "count": 0}
+    {
+      "kind": "new_projects",
+      "count": 0
+    },
+    {
+      "kind": "answer_contains",
+      "any": [
+        "garden shed"
+      ]
+    },
+    {
+      "kind": "new_files",
+      "glob": "memory-vault/projects/**",
+      "max": 0
+    },
+    {
+      "kind": "new_tasks",
+      "count": 0
+    }
   ]
 }
