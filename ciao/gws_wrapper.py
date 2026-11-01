@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Sequence
 
 from ciao.agent_surface import AGENT_TOKEN_ENV
-from ciao.gws_auth import GWS_SERVICE_NAMES, profile_config_dir
+from ciao.gws_auth import GWS_SERVICE_NAMES, gws_bin_override, profile_config_dir
 from ciao.os_support.processes import hand_off
 from ciao.tool_path import login_shell_path, resolve_command
 
@@ -105,6 +105,11 @@ def _split_profile_and_args(argv: Sequence[str]) -> tuple[str | None, list[str]]
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run ``gws`` for the chosen profile.
+
+    ``CIAO_GWS_BIN`` (test/eval isolation) replaces the lookup; a bad path fails
+    the call rather than falling back to the installed ``gws``.
+    """
     from ciao.config import CiaoConfig
 
     args = list(sys.argv[1:] if argv is None else argv)
@@ -153,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        gws = resolve_command("gws")
+        gws = gws_bin_override() or resolve_command("gws")
     except OSError as exc:
         print(f"ciao gws: {exc}", file=sys.stderr)
         return 1

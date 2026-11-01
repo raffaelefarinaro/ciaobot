@@ -99,6 +99,15 @@ _KEYRING_BANNER = re.compile(r"^\s*Using keyring backend:.*$", re.MULTILINE)
 
 HEALTH_CACHE_NAME = "gws_health.json"
 
+# Test/eval isolation: an absolute path that replaces the gws lookup everywhere.
+GWS_BIN_ENV = "CIAO_GWS_BIN"
+
+
+def gws_bin_override() -> list[str] | None:
+    """[path] when CIAO_GWS_BIN is set (test/eval isolation); never resolves or falls back."""
+    explicit = os.environ.get(GWS_BIN_ENV, "").strip()
+    return [str(Path(explicit).expanduser())] if explicit else None
+
 
 def fingerprint(value: str) -> str:
     """Short irreversible digest so client_secret.json contents never hit stdout."""
@@ -837,7 +846,7 @@ def auth_status(
     from ciao.tool_path import login_shell_path, resolve_command
 
     try:
-        gws = resolve_command("gws")
+        gws = gws_bin_override() or resolve_command("gws")
     except OSError as exc:
         return {"available": False, "reason": str(exc)}
     if not gws:

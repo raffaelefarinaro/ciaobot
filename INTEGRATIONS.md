@@ -469,6 +469,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_OPENCODE_BIN` (optional): absolute path to an OpenCode CLI installed
   outside the login-shell `PATH`. The path is used for provider startup and
   authentication; an invalid path is reported as unavailable.
+- `CIAO_GWS_BIN` (test isolation only): absolute path to an executable that `ciao gws` and the Google token health check run instead of `gws`. Set by `ciao eval tasks` for tasks requiring `gws_fake`, so evals never reach Google. When set it is used as-is, with no lookup and no fallback. POSIX only.
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
   CLI runs. It is still read by `ciao/cli.py`, and on Windows `ciao service start` uses it as the interpreter (`python.exe` or `pythonw.exe`) when it has to register the logon task, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
