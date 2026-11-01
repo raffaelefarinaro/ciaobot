@@ -150,8 +150,9 @@ inject the classifier, state/lock preparation, the real ``create_fresh_host``
 step, the engine install, the wizard command, the handoff reader and activation,
 so the order and the cleanup rules can be driven with fakes and real short-lived
 child processes. The public ``run_native_install`` exposes none of those seams
-and refuses before it touches the descriptor: the setup child cannot yet record
-a schema-2 handoff from native context, and the readiness proof in
+and still refuses before it touches the descriptor: the setup child now has an
+explicit :class:`NativeBootstrapContext` and can record schema 2 through it, but
+the parent side is not wired to start that child, and the readiness proof in
 ``ciao.native_readiness`` exists but is not wired into the coordinator, so the
 coordinator must not claim success. The lifecycle enforces the fresh-only
 preflight and the run lock before the engine install, creates the host through
@@ -164,6 +165,20 @@ quiesced or rolled back: a later failure or cancellation preserves it and the
 partial artifacts. ``SIGKILL`` runs no cleanup, so a held lock and a child are
 left as evidence. The coordinator never writes an onboarding or install-success
 receipt and adds no route.
+
+The bootstrap child side is :class:`NativeBootstrapContext` plus
+:func:`notify_native_bind`. ``capture`` binds the child to the already-created
+host's verified ownership snapshot, the private scratch chain, the absent live
+definition, handoff result and launchd job, and the bootstrap config/runtime
+directory identities. The context is threaded through ``create_app`` to the
+existing loopback-only, bootstrap-mode-only ``/api/setup/finish`` (no session
+cookie; see docs/REMOTE_BOUNDARY.md); ``notify_native_bind`` makes the private
+descriptor non-inheritable and writes one bounded record only when the server
+reports its bind. Neither is a public entry point: the hidden CLI handover is
+refused without installer bootstrap and run id, and the legacy schema-1 path
+passes neither. The child cannot prove the host record belongs to this run; the
+parent's :class:`FreshHostInstall` and activation remain the run binding, and
+the same-UID check-to-write races remain evidence checks, not proof.
 """
 
 from __future__ import annotations
@@ -181,11 +196,12 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, NoReturn
 
+from ciao import native_handoff
 from ciao.install_discovery import NativeInstallState
 from ciao.native_handoff import NativeHandoffError, NativeHandoffResult
 from ciao.os_support.private import (
@@ -207,6 +223,7 @@ from ciao.server_host import (
     UNSUPPORTED_SCHEMA,
     HostOwnership,
     Runner,
+    ServerHostError,
     default_bundle_path,
     default_ownership_path,
     verify_owned_host,
@@ -294,6 +311,8 @@ _ACCMODE: Final[int] = getattr(os, "O_ACCMODE", 3)
 #: Test seam: all lock inode checks go through this alias so a focused test
 #: can inject an fstat failure without changing the private-descriptor helper.
 _fstat = os.fstat
+#: Test seam for the owned-host check the native bootstrap child performs.
+_verify_owned_host = verify_owned_host
 
 _SIGPIPE = getattr(signal, "SIGPIPE", None)
 
@@ -2399,6 +2418,503 @@ def _read_bind_notification(
             continue
         if len(buffer) > MAX_BIND_NOTIFICATION_BYTES:
             raise NativeCoordinatorError("bind_record_invalid", "wizard_failed")
+
+
+# ── the native bootstrap child context (#2340) ───────────────────────────────
+
+#: The private bind notification's own schema. It is not the public event schema
+#: and not the schema-2 handoff document.
+NATIVE_BIND_SCHEMA_VERSION: Final[int] = 1
+#: The only bind addresses a native bootstrap may report as its loopback origin.
+_NATIVE_LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset(
+    {"127.0.0.1", "::1", "localhost"}
+)
+#: The exit code a native bootstrap child uses when it cannot establish the
+#: context the parent prepared. The installer parent only reads nonzero.
+NATIVE_BOOTSTRAP_REFUSED_EXIT_CODE: Final[int] = 65
+
+#: Every refusal reason this context can raise. Each is a fixed token: no path,
+#: port, password, environment value or exception text is interpolated.
+NATIVE_BOOTSTRAP_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "invalid_context",
+        "invalid_port",
+        "unsupported_platform",
+        "unsupported_backend",
+        "config_changed",
+        "scratch_changed",
+        "definition_changed",
+        "handoff_changed",
+        "service_changed",
+        "host_changed",
+        "workspace_changed",
+        "workspace_already_configured",
+        "startup_changed",
+        "engine_changed",
+        "already_notified",
+        "bind_notification_failed",
+    }
+)
+
+
+class NativeBootstrapError(RuntimeError):
+    """A native bootstrap refusal with a fixed reason and no interpolated data."""
+
+    def __init__(self, reason: str) -> None:
+        if reason not in NATIVE_BOOTSTRAP_REASONS:
+            raise ValueError("unknown native bootstrap reason")
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _bootstrap_platform() -> str:
+    """``sys.platform`` through a seam a focused test can force a branch on."""
+    return sys.platform
+
+
+def _server_job_absent() -> bool:
+    """The read-only launchd absence probe; a test can replace this seam."""
+    from ciao import macos_service
+
+    return macos_service.server_job_absent()
+
+
+def _canonical_bootstrap_run_id(value: object) -> str:
+    if type(value) is not str:
+        raise NativeBootstrapError("invalid_context")
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        raise NativeBootstrapError("invalid_context") from None
+    if str(parsed) != value:
+        raise NativeBootstrapError("invalid_context")
+    return value
+
+
+def _bootstrap_absolute_path(value: object) -> Path:
+    if not isinstance(value, Path) or not value.is_absolute():
+        raise NativeBootstrapError("invalid_context")
+    if any(part in {".", ".."} for part in value.parts):
+        raise NativeBootstrapError("invalid_context")
+    return value
+
+
+def _bootstrap_dir_identity(path: Path) -> tuple[int, int, int]:
+    """Device, inode and mode of a real directory; replacement is a refusal."""
+    try:
+        status = os.lstat(path)
+    except OSError:
+        raise NativeBootstrapError("config_changed") from None
+    if not stat.S_ISDIR(status.st_mode):
+        raise NativeBootstrapError("config_changed")
+    return (status.st_dev, status.st_ino, stat.S_IMODE(status.st_mode))
+
+
+def _require_bootstrap_absent(path: Path, reason: str) -> None:
+    """The name must not exist; a symlink, file or unreadable name refuses."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise NativeBootstrapError(reason) from None
+    raise NativeBootstrapError(reason)
+
+
+def _descriptor_access_mode(fd: int) -> int:
+    """The descriptor's access mode (``O_RDONLY``, ``O_WRONLY`` or ``O_RDWR``)."""
+    if sys.platform == "win32":  # pragma: no cover - the native path is macOS
+        raise NativeBootstrapError("invalid_context")
+    import fcntl
+
+    try:
+        return fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE
+    except OSError:
+        raise NativeBootstrapError("invalid_context") from None
+
+
+def notify_native_bind(fd: int, port: int) -> None:
+    """Write exactly one bounded private bind record, then close ``fd``.
+
+    The child calls this only after uvicorn has set ``Server.started`` and the
+    startup tracker has finished ``BIND_PHASE``, so the record reports the
+    loopback socket the server actually bound. The wire contract is one
+    ``{"schema":1,"port":N}`` line of at most
+    :data:`MAX_BIND_NOTIFICATION_BYTES`; the descriptor is made non-inheritable
+    and closed before returning, and a second call cannot reuse it. Refusals
+    are fixed reasons and never echo the descriptor number or the OS error.
+    """
+    if type(fd) is not int or fd < MIN_EVENT_FD:
+        raise NativeBootstrapError("bind_notification_failed")
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise NativeBootstrapError("invalid_port")
+    line = (
+        json.dumps(
+            {"schema": NATIVE_BIND_SCHEMA_VERSION, "port": port},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    if len(line) > MAX_BIND_NOTIFICATION_BYTES:
+        raise NativeBootstrapError("bind_notification_failed")
+    try:
+        os.set_inheritable(fd, False)
+        view = memoryview(line)
+        while view:
+            try:
+                written = os.write(fd, view)
+            except InterruptedError:
+                continue
+            if written <= 0:
+                raise NativeBootstrapError("bind_notification_failed")
+            view = view[written:]
+    except OSError:
+        raise NativeBootstrapError("bind_notification_failed") from None
+    finally:
+        _close_fd(fd)
+
+
+@dataclass(slots=True)
+class NativeBootstrapContext:
+    """The verified facts the native bootstrap child may rely on.
+
+    This is an internal value, not a public route, environment variable or
+    on-disk receipt. It is built once, after the installer parent has created
+    the host and before the wizard serves, by :meth:`capture`; the only
+    consumers are the bootstrap server and the existing loopback-only,
+    bootstrap-mode-only ``POST /api/setup/finish`` handler (no session cookie;
+    see docs/REMOTE_BOUNDARY.md). Nothing here starts, stops, reloads or
+    quiesces a service, and the context is never persisted.
+
+    The fields are snapshots, not proof. ``config_root`` and ``runtime_root``
+    are bound to the device/inode/mode they had when the child started; the
+    service definition and the handoff result must be absent then and again
+    immediately before setup writes; ``expected_host`` is the
+    :func:`ciao.server_host.verify_owned_host` snapshot at capture and is
+    re-verified and compared immediately before setup writes. A same-UID writer
+    can still interleave between a check and the write it guards, so these are
+    refusal points that narrow the window, not an atomic guarantee. Nor can
+    this child prove that the ownership record belongs to *this* installer run:
+    the record carries no run id, and the parent's :class:`FreshHostInstall` is
+    the only run binding. The child proves the host is this user's owned host
+    and has not changed while the wizard was open; activation re-establishes it
+    in the parent.
+    """
+
+    run_id: str
+    startup_id: str
+    expected_workspace: Path | None
+    engine_python: Path
+    config_root: Path
+    runtime_root: Path
+    bootstrap_host: str
+    bootstrap_port: int
+    definition_path: Path
+    handoff_path: Path
+    expected_host: HostOwnership
+    host_ownership_path: Path
+    _config_identity: tuple[int, int, int] = field(repr=False)
+    _runtime_identity: tuple[int, int, int] = field(repr=False)
+    _notification_fd: int = field(repr=False)
+    _notification_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False
+    )
+    _notified: bool = field(default=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _canonical_bootstrap_run_id(self.run_id)
+        if type(self.startup_id) is not str or not self.startup_id.strip():
+            raise NativeBootstrapError("invalid_context")
+        for value in (
+            self.config_root,
+            self.runtime_root,
+            self.definition_path,
+            self.handoff_path,
+            self.host_ownership_path,
+            self.engine_python,
+        ):
+            _bootstrap_absolute_path(value)
+        if self.expected_workspace is not None:
+            _bootstrap_absolute_path(self.expected_workspace)
+        if type(self.bootstrap_host) is not str or not self.bootstrap_host:
+            raise NativeBootstrapError("invalid_context")
+        if self.bootstrap_host not in _NATIVE_LOOPBACK_HOSTS:
+            raise NativeBootstrapError("invalid_context")
+        if type(self.bootstrap_port) is not int or not 1 <= self.bootstrap_port <= 65535:
+            raise NativeBootstrapError("invalid_context")
+        if type(self._notification_fd) is not int or self._notification_fd < MIN_EVENT_FD:
+            raise NativeBootstrapError("invalid_context")
+        if (
+            type(self._config_identity) is not tuple
+            or len(self._config_identity) != 3
+            or type(self._runtime_identity) is not tuple
+            or len(self._runtime_identity) != 3
+        ):
+            raise NativeBootstrapError("invalid_context")
+        if Path(self.expected_host.bundle_path) != default_bundle_path():
+            raise NativeBootstrapError("host_changed")
+
+    @classmethod
+    def capture(
+        cls,
+        *,
+        run_id: str,
+        startup_id: str,
+        notification_fd: int,
+        config_root: Path,
+        runtime_root: Path,
+        bootstrap_host: str,
+        bootstrap_port: int,
+        expected_workspace: Path | None,
+        engine_python: Path,
+    ) -> NativeBootstrapContext:
+        """Bind this child to the state the native installer parent prepared.
+
+        The platform must be macOS, the service backend must be the native
+        ``macos`` one, the private scratch chain must already be the parent's
+        validated chain, the live service definition and the schema-2 handoff
+        must both be absent, and the installed host must verify against its
+        owner-only record. Any other answer is a fixed refusal; nothing is
+        created, chmod'ed or repaired here.
+        """
+        if _bootstrap_platform() != "darwin":
+            raise NativeBootstrapError("unsupported_platform")
+        run_id = _canonical_bootstrap_run_id(run_id)
+        if type(startup_id) is not str or not startup_id.strip():
+            raise NativeBootstrapError("invalid_context")
+        if type(notification_fd) is not int or notification_fd < MIN_EVENT_FD:
+            raise NativeBootstrapError("invalid_context")
+        try:
+            notification_status = os.fstat(notification_fd)
+        except OSError:
+            raise NativeBootstrapError("invalid_context") from None
+        if not (
+            stat.S_ISFIFO(notification_status.st_mode)
+            or stat.S_ISSOCK(notification_status.st_mode)
+        ):
+            raise NativeBootstrapError("invalid_context")
+        # The child only writes the record, so a read-only end is no channel.
+        if _descriptor_access_mode(notification_fd) not in (os.O_WRONLY, os.O_RDWR):
+            raise NativeBootstrapError("invalid_context")
+        try:
+            # This is the child's descriptor entry. Mark it now so no provider,
+            # uvicorn or other descendant started before the bind can inherit
+            # the private channel; notify_native_bind sets it again and closes
+            # it after the one record.
+            os.set_inheritable(notification_fd, False)
+        except OSError:
+            raise NativeBootstrapError("invalid_context") from None
+        config_root = _bootstrap_absolute_path(config_root)
+        runtime_root = _bootstrap_absolute_path(runtime_root)
+        engine_python = _bootstrap_absolute_path(engine_python)
+        if expected_workspace is not None:
+            expected_workspace = _bootstrap_absolute_path(expected_workspace)
+        if type(bootstrap_host) is not str or not bootstrap_host:
+            raise NativeBootstrapError("invalid_context")
+        if bootstrap_host not in _NATIVE_LOOPBACK_HOSTS:
+            raise NativeBootstrapError("invalid_context")
+        if type(bootstrap_port) is not int or not 1 <= bootstrap_port <= 65535:
+            raise NativeBootstrapError("invalid_context")
+
+        from ciao import service_backend
+
+        try:
+            backend = service_backend.current_backend()
+        except service_backend.UnsupportedPlatformError:
+            raise NativeBootstrapError("unsupported_backend") from None
+        if backend.name != "macos":
+            raise NativeBootstrapError("unsupported_backend")
+        try:
+            live_directory = backend.live_agents_dir()
+        except (OSError, RuntimeError, ValueError):
+            raise NativeBootstrapError("unsupported_backend") from None
+        from ciao import macos_service
+
+        definition_path = live_directory.expanduser() / (
+            f"{macos_service.SERVER_LABEL}.plist"
+        )
+        definition_path = _bootstrap_absolute_path(definition_path)
+
+        try:
+            scratch = native_handoff.require_bootstrap_scratch()
+        except NativeHandoffError:
+            raise NativeBootstrapError("scratch_changed") from None
+        try:
+            config_matches_scratch = config_root.resolve() == scratch.resolve()
+        except OSError:
+            raise NativeBootstrapError("scratch_changed") from None
+        if not config_matches_scratch:
+            raise NativeBootstrapError("scratch_changed")
+        handoff_path = native_handoff.result_path()
+        try:
+            handoff_is_in_config = handoff_path.parent.resolve() == config_root.resolve()
+        except OSError:
+            raise NativeBootstrapError("handoff_changed") from None
+        if not handoff_is_in_config:
+            raise NativeBootstrapError("handoff_changed")
+        _require_bootstrap_absent(definition_path, "definition_changed")
+        _require_bootstrap_absent(handoff_path, "handoff_changed")
+        try:
+            if not _server_job_absent():
+                raise NativeBootstrapError("service_changed")
+        except NativeBootstrapError:
+            raise
+        except RuntimeError:
+            raise NativeBootstrapError("service_changed") from None
+
+        config_identity = _bootstrap_dir_identity(config_root)
+        runtime_identity = _bootstrap_dir_identity(runtime_root)
+
+        try:
+            ownership = _verify_owned_host(
+                default_bundle_path(), ownership_path=default_ownership_path()
+            )
+        except (ServerHostError, OSError):
+            raise NativeBootstrapError("host_changed") from None
+        if Path(ownership.bundle_path) != default_bundle_path():
+            raise NativeBootstrapError("host_changed")
+        return cls(
+            run_id=run_id,
+            startup_id=startup_id,
+            expected_workspace=expected_workspace,
+            engine_python=engine_python,
+            config_root=config_root,
+            runtime_root=runtime_root,
+            bootstrap_host=bootstrap_host,
+            bootstrap_port=bootstrap_port,
+            definition_path=definition_path,
+            handoff_path=handoff_path,
+            expected_host=ownership,
+            host_ownership_path=default_ownership_path(),
+            _config_identity=config_identity,
+            _runtime_identity=runtime_identity,
+            _notification_fd=notification_fd,
+        )
+
+    def assert_ready_to_write(
+        self,
+        *,
+        startup_id: str,
+        workspace: Path,
+        port: int,
+        engine_python: str,
+        config_host: str,
+        config_port: int,
+    ) -> Path:
+        """Re-establish every snapshot immediately before setup mutates anything.
+
+        Returns the resolved workspace. A changed bootstrap config, scratch
+        chain, live definition, handoff result, engine interpreter, host
+        snapshot or already-configured chosen workspace is a fixed refusal, as
+        is an explicit expected workspace the request does not match. The only
+        service operation is the read-only launchd absence probe; nothing is
+        started, stopped, loaded, unloaded or reloaded.
+        """
+        if type(startup_id) is not str or startup_id != self.startup_id:
+            raise NativeBootstrapError("startup_changed")
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise NativeBootstrapError("invalid_port")
+        if type(config_host) is not str or config_host != self.bootstrap_host:
+            raise NativeBootstrapError("config_changed")
+        if type(config_port) is not int or config_port != self.bootstrap_port:
+            raise NativeBootstrapError("config_changed")
+        # The installer bootstrap clears these; a later value would move the
+        # definition directory or the engine interpreter away from the ones
+        # this context verified. Refuse before setup can read them.
+        if (
+            os.environ.get("CIAO_LAUNCH_AGENTS_DIR", "").strip()
+            or os.environ.get("CIAO_ENGINE_PATH", "").strip()
+        ):
+            raise NativeBootstrapError("config_changed")
+        try:
+            resolved_workspace = Path(os.path.realpath(workspace))
+        except OSError:
+            raise NativeBootstrapError("workspace_changed") from None
+        if not resolved_workspace.is_absolute():
+            raise NativeBootstrapError("workspace_changed")
+        if self.expected_workspace is not None:
+            try:
+                expected = Path(os.path.realpath(self.expected_workspace))
+            except OSError:
+                raise NativeBootstrapError("workspace_changed") from None
+            if resolved_workspace != expected:
+                raise NativeBootstrapError("workspace_changed")
+        try:
+            if resolved_workspace == self.config_root.resolve():
+                raise NativeBootstrapError("workspace_changed")
+        except OSError:
+            raise NativeBootstrapError("workspace_changed") from None
+
+        if _bootstrap_dir_identity(self.config_root) != self._config_identity:
+            raise NativeBootstrapError("config_changed")
+        if _bootstrap_dir_identity(self.runtime_root) != self._runtime_identity:
+            raise NativeBootstrapError("config_changed")
+        try:
+            native_handoff.require_bootstrap_scratch()
+        except NativeHandoffError:
+            raise NativeBootstrapError("scratch_changed") from None
+
+        try:
+            if native_handoff.workspace_is_set_up(resolved_workspace):
+                raise NativeBootstrapError("workspace_already_configured")
+        except NativeHandoffError:
+            raise NativeBootstrapError("workspace_changed") from None
+
+        _require_bootstrap_absent(self.definition_path, "definition_changed")
+        _require_bootstrap_absent(self.handoff_path, "handoff_changed")
+        try:
+            if not _server_job_absent():
+                raise NativeBootstrapError("service_changed")
+        except NativeBootstrapError:
+            raise
+        except RuntimeError:
+            raise NativeBootstrapError("service_changed") from None
+
+        from ciao import service_backend
+
+        try:
+            backend = service_backend.current_backend()
+        except service_backend.UnsupportedPlatformError:
+            raise NativeBootstrapError("unsupported_backend") from None
+        if backend.name != "macos":
+            raise NativeBootstrapError("unsupported_backend")
+        try:
+            definition_parent = self.definition_path.parent.resolve()
+            live_directory = backend.live_agents_dir().expanduser().resolve()
+        except OSError:
+            raise NativeBootstrapError("config_changed") from None
+        if definition_parent != live_directory:
+            raise NativeBootstrapError("config_changed")
+
+        try:
+            resolved_engine = Path(os.path.realpath(engine_python))
+            expected_engine = Path(os.path.realpath(self.engine_python))
+        except OSError:
+            raise NativeBootstrapError("engine_changed") from None
+        if resolved_engine != expected_engine:
+            raise NativeBootstrapError("engine_changed")
+
+        try:
+            live = _verify_owned_host(
+                default_bundle_path(),
+                ownership_path=self.host_ownership_path,
+            )
+        except (ServerHostError, OSError):
+            raise NativeBootstrapError("host_changed") from None
+        if live != self.expected_host:
+            raise NativeBootstrapError("host_changed")
+        return resolved_workspace
+
+    def notify_bound(self, port: int) -> None:
+        """Report the bound loopback port exactly once on the private pipe."""
+        with self._notification_lock:
+            if self._notified:
+                raise NativeBootstrapError("already_notified")
+            self._notified = True
+            fd = self._notification_fd
+            self._notification_fd = -1
+        notify_native_bind(fd, port)
 
 
 def _check_stage(

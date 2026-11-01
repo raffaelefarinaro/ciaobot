@@ -276,10 +276,12 @@ uncertain and starts nothing.
 
 That legacy schema-1 path is unchanged. #2339 isolates a native handoff in
 `ciao/native_handoff.py`, using the same `~/.ciao/installer-bootstrap/handoff.json`
-file but **schema 2 only**; it is not imported by the CLI, routes, legacy
-installer or any production caller until #2340 supplies an explicit native
-context and wires both sides of it — the setup child's schema-2 recording and
-the installer parent's activation. Its result additionally records the
+file but **schema 2 only**. The legacy CLI, routes and installer paths never
+import it; the setup child's native branch and the existing loopback-only,
+bootstrap-mode-only `/api/setup/finish` (no session cookie; see
+docs/REMOTE_BOUNDARY.md) do, through the explicit `NativeBootstrapContext` described
+below, while the installer parent's activation wiring still waits for the
+shell/readiness integration. Its result additionally records the
 definition's sha256, the program the definition actually executes and the
 interpreter it runs with both device/inode/size/mtime identities, and the
 definition's environment. The native path implements macOS only: a Windows
@@ -640,6 +642,40 @@ reloads, quiesces or rolls back an activated service, preserves partial
 artifacts, writes no onboarding or install receipt, and adds no route. `SIGKILL`
 runs no cleanup and leaves the lock and child as evidence. Tests:
 `tests/test_native_installer.py`.
+
+The native bootstrap child side is now explicit but internal. When the native
+coordinator starts it with the private `--installer-native-fd` (hidden, and
+refused without `--installer-bootstrap`/`--installer-run-id`),
+`_run_server_locked` builds a `NativeBootstrapContext` in a worker thread and
+threads it through `create_app` to `app.state.native_bootstrap`. `capture`
+requires macOS, the `macos` backend, the already-private scratch chain, an
+absent live definition and handoff result, a launchd-proven absent server job,
+the device/inode/mode identity of the bootstrap root and runtime, and a
+`verify_owned_host` snapshot. The legacy bootstrap passes no descriptor and
+keeps its exact schema-1 path, call shapes and browser auto-open. A native child
+opens no browser. `_mark_bound_when_serving` calls the context only after
+`uvicorn.Server.started` and `tracker.done(BIND_PHASE)`, writes exactly one
+bounded `{"schema":1,"port":N}` line, makes the private descriptor
+non-inheritable and closes it; a refused or failed write stops the child instead
+of serving invisibly. The existing loopback-only, bootstrap-mode-only
+`POST /api/setup/finish` (no session cookie; see docs/REMOTE_BOUNDARY.md) is
+the only native route: it refuses unknown body fields and any non-empty
+`python`, `launch_agents_dir` or `app_dir` override, re-runs
+`assert_ready_to_write` in a worker thread before the first write (config
+identities, scratch, definition/handoff absence, launchd absence, host snapshot,
+engine interpreter, an explicit expected workspace, and a chosen workspace that
+is not already a Ciaobot workspace), calls `setup_workspace(...,
+exclusive_service_definition=True)` so the definition is created `O_EXCL`/
+`O_NOFOLLOW` at `0o600` instead of overwritten, records schema 2 through
+`native_handoff.record_setup_completion` in `asyncio.to_thread`, and reads the
+result back to require this run's id, this child's startup id, the chosen
+workspace, port, live definition path and interpreter. It adds no route, no
+environment variable and no second onboarding or install receipt, and never
+starts, stops or reloads a service. Remaining limits are real: a same-UID writer
+can interleave between a check and the write it guards; the child can prove the
+host is owned, not that this run created its record; and the public
+`run_native_install` still refuses until shell/readiness integration. Tests:
+`tests/test_native_bootstrap.py`.
 
 Replacing an owned legacy host with the signed one is the one host change that is
 a *transaction*, because the previous app and its exact ownership record have to

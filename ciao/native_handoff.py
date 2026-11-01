@@ -1,12 +1,16 @@
-"""The native installer handoff: schema 2, same storage, not wired yet.
+"""The native installer handoff: schema 2, wired only through the native context.
 
 Ciaobot has two installer generations, and they must not share a result
 schema. The legacy ``ciao.installer_handoff`` remains the production bootstrap
 and activation path: it writes schema 1 and verifies exactly what it did
-before. This module is the native handoff the new installer will use once
-#2340 supplies an explicit native context. It is deliberately **not imported by
-the CLI, the routes, the legacy installer or any other production caller** in
-this issue; importing it has no effect.
+before. This module is the native handoff. The legacy CLI, routes and installer
+paths never import it; the native bootstrap child imports it through
+:class:`ciao.native_installer.NativeBootstrapContext`, the existing loopback-only,
+bootstrap-mode-only ``POST /api/setup/finish`` (no session cookie; see
+docs/REMOTE_BOUNDARY.md) handler's native branch, and
+:func:`ciao.native_installer._run_native_install`'s activation dep. The public
+``run_native_install`` still refuses until the shell/readiness integration
+completes, so nothing here runs without that explicit native context.
 
 What it shares with the legacy path is the storage location: one owner-only
 ``~/.ciao/installer-bootstrap/handoff.json``. What it does not share is the
@@ -467,6 +471,19 @@ def prepare_bootstrap_scratch() -> Path:
     calls this in production in this issue; #2340 wires it.
     """
     _require_private_scratch(create=True)
+    return scratch_root()
+
+
+def require_bootstrap_scratch() -> Path:
+    """Validate the private scratch chain read-only and return its directory.
+
+    The native bootstrap child uses this before it relies on
+    ``~/.ciao/installer-bootstrap/handoff.json``: the chain has to be the one
+    the parent prepared, so a missing, symlinked, foreign-owned,
+    group/other-writable or non-``0o700`` scratch directory is a refusal. Unlike
+    :func:`prepare_bootstrap_scratch` this never creates or chmods anything.
+    """
+    _require_private_scratch(create=False)
     return scratch_root()
 
 
@@ -1526,6 +1543,18 @@ def _native_set_up_workspace(workspace: Path) -> bool:
     from ciao.macos_service import parse_dotenv
 
     return bool(parse_dotenv(text).get("CIAO_WORKSPACES", "").strip())
+
+
+def workspace_is_set_up(workspace: Path) -> bool:
+    """The native bounded "is this already a Ciaobot workspace?" answer.
+
+    The same facts as :func:`ciao.setup_marker.is_set_up_workspace` — the
+    workspace registry, or a legacy ``.env`` whose ``CIAO_WORKSPACES`` is
+    non-empty — through the bounded, non-blocking reader. A FIFO, symlink,
+    special file, oversize file or unreadable path is
+    :class:`NativeHandoffError`, never a hang and never "not set up".
+    """
+    return _native_set_up_workspace(workspace)
 
 
 def activate(
