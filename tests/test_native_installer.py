@@ -4722,9 +4722,21 @@ def test_the_wizard_child_that_exited_before_the_listener_check_is_wizard_failed
     exited: list[int] = []
 
     def listener(port: int, child_pid: int) -> frozenset[int]:
-        # WNOWAIT observes the exit without reaping, so the coordinator's own
-        # liveness check still sees a child that has exited.
-        os.waitid(os.P_PID, child_pid, os.WEXITED | os.WNOWAIT)
+        # Wait for the child to become a zombie without reaping it, so the
+        # coordinator's own liveness check still sees a child that has exited.
+        # (os.waitid is missing on macOS before Python 3.13; `ps` works on both.)
+        give_up = time.monotonic() + 10
+        while time.monotonic() < give_up:
+            state = subprocess.run(
+                ["/bin/ps", "-o", "stat=", "-p", str(child_pid)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            ).stdout.strip()
+            if not state or state.startswith("Z"):
+                break
+            time.sleep(0.01)
         exited.append(child_pid)
         return frozenset({child_pid})
 
