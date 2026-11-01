@@ -52,8 +52,9 @@ unreadable, duplicated, changed or over a bound is a fixed failure code; no
 failure reason interpolates a path, exception string, process name, URL, token
 or startup id.
 
-This module is deliberately **not wired** into the coordinator, CLI, routes or
-service layer. It never starts, stops, bootstraps, reloads, quiesces or
+The native coordinator (``ciao.native_installer``) calls this proof after
+activation, and nothing else calls it. No CLI, route or service-layer caller
+exists. It never starts, stops, bootstraps, reloads, quiesces or
 rolls back a service, and it writes nothing: the lock is opened ``O_RDONLY`` and
 the only subprocesses a production adapter may run are read-only queries
 (``lsof`` for the listener, ``ps`` and ``launchctl print``), the bounded
@@ -91,7 +92,7 @@ What this is not:
 
 Tests inject :class:`NativeReadinessDeps`; host verification is injectable only
 through the private ``_prove_native_readiness`` seam. :func:`make_native_readiness_deps`
-builds the real read-only adapters for the eventual wiring. The module imports
+builds the real read-only adapters the native coordinator uses. The module imports
 on every platform, but the default adapters use macOS paths and are only useful
 on macOS.
 """
@@ -341,7 +342,7 @@ class NativeReadinessPolicy:
 
 @dataclass(frozen=True, slots=True)
 class NativeReadinessDeps:
-    """Every external observation, injected by tests and by the eventual wiring.
+    """Every external observation, injected by tests and bound by the native coordinator.
 
     ``listener_pid`` answers the one pid holding the listening socket, or
     ``None`` for no listener, more than one, or a lookup that could not answer.
@@ -1091,7 +1092,7 @@ def _prove_native_readiness(
     )
 
 
-# ── read-only production adapters (no caller until the wiring slice) ─────────
+# ── read-only production adapters (called by the native coordinator) ────────
 
 
 def parse_listener_pid(stdout: str) -> int | None:
@@ -1269,7 +1270,8 @@ def _run_adapter(
         return None
 
 
-def _listener_pid(port: int, runner: BoundedRunner) -> int | None:
+def _lsof_listeners(port: int, runner: BoundedRunner) -> str | None:
+    """The bounded ``lsof`` listener query's stdout, or ``None`` when it failed."""
     if type(port) is not int or not (1 <= port <= 65535):
         return None
     completed = _run_adapter(
@@ -1279,7 +1281,44 @@ def _listener_pid(port: int, runner: BoundedRunner) -> int | None:
     )
     if completed is None or completed.returncode != 0:
         return None
-    return parse_listener_pid(completed.stdout or "")
+    return completed.stdout or ""
+
+
+def _listener_pid(port: int, runner: BoundedRunner) -> int | None:
+    stdout = _lsof_listeners(port, runner)
+    return None if stdout is None else parse_listener_pid(stdout)
+
+
+def parse_listener_pids(stdout: str) -> frozenset[int] | None:
+    """Every distinct ``lsof -t`` pid, or ``None`` for junk or no listener at all.
+
+    Unlike :func:`parse_listener_pid`, several different pids are all returned:
+    the caller decides which of them it owns.
+    """
+    pids: set[int] = set()
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        pid = _decimal_pid(text)
+        if pid is None:
+            return None
+        pids.add(pid)
+    if not pids:
+        return None
+    return frozenset(pids)
+
+
+def wizard_listener_pids(port: int) -> frozenset[int]:
+    """Every pid with a listening TCP socket on ``port``, IPv4 and IPv6.
+
+    The production lookup for the wizard child's reported port. It is bounded
+    and read-only like the rest of this module. An empty set means the query
+    failed or found nothing, and the coordinator refuses an empty answer.
+    """
+    stdout = _lsof_listeners(port, _bounded_run)
+    pids = None if stdout is None else parse_listener_pids(stdout)
+    return frozenset() if pids is None else pids
 
 
 def _launchd_job(label: str, runner: BoundedRunner) -> LaunchdJob | None:
@@ -1621,7 +1660,7 @@ def make_native_readiness_deps(
     http: Callable[[int, float], bytes | None] | None = None,
     executable_path: Callable[[int], str | None] | None = None,
 ) -> NativeReadinessDeps:
-    """Build the real read-only adapters. No caller in this issue.
+    """Build the real read-only adapters the native coordinator uses.
 
     The subprocess adapters use absolute macOS binaries and fixed argv, a
     sanitized environment and a bounded read and never use a shell. ``runner``,

@@ -9,8 +9,8 @@ paths never import it; the native bootstrap child imports it through
 bootstrap-mode-only ``POST /api/setup/finish`` (no session cookie; see
 docs/REMOTE_BOUNDARY.md) handler's native branch, and
 :func:`ciao.native_installer._run_native_install`'s activation dep. The public
-``run_native_install`` still refuses until the shell/readiness integration
-completes, so nothing here runs without that explicit native context.
+``run_native_install`` binds it to :func:`activate` for the native coordinator,
+which starts the setup child only with that explicit native context.
 
 What it shares with the legacy path is the storage location: one owner-only
 ``~/.ciao/installer-bootstrap/handoff.json``. What it does not share is the
@@ -64,7 +64,8 @@ a pre-existing symlinked, foreign-owned, group/other-writable or non-``0o700``
 scratch directory, without chmod'ing it. The legacy config is unchanged. #2340
 must call it after the parent's read-only fresh-install preflight and before
 spawning that child — not before the preflight, and not to repair an existing
-installation. Nothing calls it in production in this issue.
+installation. The native coordinator (``ciao.native_installer``) calls it before
+its first mutation.
 
 The native path implements macOS only. Windows remains on the legacy
 installer: its task XML carries no port, and its only registration call uses
@@ -467,8 +468,8 @@ def prepare_bootstrap_scratch() -> Path:
     — never before the preflight and never to repair an existing installation.
     A freshly created private directory is not proof that this run created it: a
     same-UID writer can create an owner-only name first, so #2340 still has to
-    establish current-run ownership from its own run-bound evidence. Nothing
-    calls this in production in this issue; #2340 wires it.
+    establish current-run ownership from its own run-bound evidence. The native
+    coordinator (``ciao.native_installer``) calls this in production.
     """
     _require_private_scratch(create=True)
     return scratch_root()
@@ -1584,7 +1585,8 @@ def activate(
     its mtime, so identity equality is evidence, not proof.
 
     The caller is the installer parent, and it must already have observed the
-    child exit 0; this function cannot see that. Nothing in this issue calls it.
+    child exit 0; this function cannot see that. The native coordinator calls it
+    after the wizard child exited 0.
 
     A ``ciao`` console's shebang target and the result document are read with
     the same bounded descriptor reader, and the completed-workspace check is
