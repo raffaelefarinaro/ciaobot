@@ -725,6 +725,8 @@ def test_schedule_update_refuses_a_payload_with_nothing_to_change(tmp_path: Path
 
 def test_schedule_create_still_applies_the_documented_defaults(tmp_path: Path) -> None:
     """The signature defaults moved to None, so create has to materialize them."""
+    from ciao.schedules import DEFAULT_TIMEZONE
+
     service, control_plane = _service(tmp_path)
 
     result = _dispatcher_call(service, "schedule", {"action": "create", "prompt": "do a thing"})
@@ -732,7 +734,7 @@ def test_schedule_create_still_applies_the_documented_defaults(tmp_path: Path) -
     assert result["envelope"]["ok"] is True
     assert control_plane.schedule_create_values is not None
     assert control_plane.schedule_create_values["daily_time"] == "09:00"
-    assert control_plane.schedule_create_values["timezone"] == "UTC"
+    assert control_plane.schedule_create_values["timezone"] == DEFAULT_TIMEZONE
     assert control_plane.schedule_create_values["frequency"] == "weekly"
     assert control_plane.schedule_create_values["archive_policy"] == "manual"
     assert control_plane.schedule_create_values["workspace"] == ""
@@ -1022,6 +1024,42 @@ def test_schedule_create_defaults_to_callers_project_and_workspace(tmp_path: Pat
     assert stored.web_project_id == "project-work"
     assert stored.web_project_name == "AI-NATIVE-SDK"
     assert stored.workspace == "work"
+
+
+def test_schedule_create_without_timezone_uses_the_pwa_default(tmp_path: Path) -> None:
+    from ciao.schedules import DEFAULT_TIMEZONE
+
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    principal = _chat_create_principal(project_id="project-work", workspace="work")
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Saturday digest.",
+        daily_time="09:00",
+        frequency="weekly",
+        days_of_week=["sat"],
+    )
+
+    assert result["data"]["timezone_name"] == DEFAULT_TIMEZONE
+    assert schedules.list_entries()[0].timezone_name == DEFAULT_TIMEZONE
+
+    preview = control_plane.schedule_preview(
+        principal,
+        prompt="Saturday digest.",
+        daily_time="09:00",
+        frequency="weekly",
+        days_of_week=["sat"],
+        timezone="",
+    )
+    assert preview["data"]["timezone_name"] == DEFAULT_TIMEZONE
+
+
+def test_schedule_docstring_names_the_default_timezone() -> None:
+    from ciao.schedules import DEFAULT_TIMEZONE
+
+    doc = mcp_server._op_schedule.__doc__ or ""
+    assert f'default "{DEFAULT_TIMEZONE}"' in doc
+    assert 'default "UTC"' not in doc
 
 
 def test_schedule_create_rejects_chat_binding(tmp_path: Path) -> None:

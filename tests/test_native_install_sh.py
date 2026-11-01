@@ -1046,7 +1046,10 @@ def test_the_uv_environment_is_cleared_and_pinned(tmp_path: Path) -> None:
         "UV_INDEX_URL": "https://evil.test/simple",
         "UV_PYTHON": "/evil/python",
         "PYTHONPATH": "/evil/lib",
-        "DYLD_INSERT_LIBRARIES": "/evil/hook.dylib",
+        # A DYLD_* variable that cannot abort a process if it leaked: an
+        # inserted dylib that does not exist makes dyld kill any non-system
+        # binary, which on a runner is the test harness rather than the scrub.
+        "DYLD_FALLBACK_LIBRARY_PATH": "/evil/lib",
         "UV_CONFIG_FILE": "/evil/uv.toml",
         "PATH": f"{planted}:{h['env']['PATH']}",
     }
@@ -1058,7 +1061,7 @@ def test_the_uv_environment_is_cleared_and_pinned(tmp_path: Path) -> None:
     assert [b["argv"].split()[0] for b in blocks] == ["run", "venv", "pip"]
     for block in blocks:
         assert set(block["env"]) <= {"PATH", "HOME", "TMPDIR", "LANG", "PWD", "SHLVL", "_"}, block["env"]
-        for forbidden in ("UV_INDEX_URL", "UV_PYTHON", "PYTHONPATH", "DYLD_INSERT_LIBRARIES", "UV_CONFIG_FILE"):
+        for forbidden in ("UV_INDEX_URL", "UV_PYTHON", "PYTHONPATH", "DYLD_FALLBACK_LIBRARY_PATH", "UV_CONFIG_FILE"):
             assert forbidden not in block["env"]
         assert block["env"]["PATH"] == f"{h['fakebin']}:{PINNED_PATH}"
         assert str(planted) not in block["env"]["PATH"]
