@@ -717,13 +717,14 @@ def _seatbelt_profile(
     # and `(deny default)` needs `(allow file-read* (literal "/"))` or every
     # child aborts (SIGABRT) resolving any path. The literal matches only `/`
     # itself, so traversal works and nothing extra becomes readable.
-    # `/var` and `/tmp` are symlinks into `/private`. A path spelled through
-    # one (`$TMPDIR` is `/var/folders/...`) needs the link itself readable, or
-    # every access under it is refused even where the target is allowed.
+    # `/var`, `/tmp` and `/etc` are symlinks into `/private`. A path spelled
+    # through one (`$TMPDIR` is `/var/folders/...`, and `ciao gws`'s PATH probe
+    # reads `/etc/paths.d`, #2448) needs the link itself readable, or every
+    # access under it is refused even where the target is allowed.
     lines = [
         "(version 1)",
         "(deny default)",
-        '(allow file-read* (literal "/") (literal "/var") (literal "/tmp"))',
+        '(allow file-read* (literal "/") (literal "/var") (literal "/tmp") (literal "/etc"))',
     ]
     # Tools resolve every directory above where they run (a realpath walk, a
     # search for project files), so each ancestor of a granted path is

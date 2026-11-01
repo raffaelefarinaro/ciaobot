@@ -92,9 +92,13 @@ def test_opencode_prefix_is_sandbox_exec_on_darwin(tmp_path, monkeypatch):
     assert _writable_rules(profile) == 1
     # Traversal of `/` itself is allowed (without it every child aborts under
     # `deny default`), and process rules carry no `*` suffix (a parse error).
-    # The /var and /tmp symlinks are readable too, so a path spelled through
-    # them (as $TMPDIR is) still resolves (#1174).
-    assert '(allow file-read* (literal "/") (literal "/var") (literal "/tmp"))' in profile
+    # The /var, /tmp and /etc symlinks are readable too, so a path spelled
+    # through them (as $TMPDIR is, or /etc/paths.d in the PATH probe) still
+    # resolves (#1174, #2448).
+    assert (
+        '(allow file-read* (literal "/") (literal "/var") (literal "/tmp") (literal "/etc"))'
+        in profile
+    )
     assert "(allow process-exec)" in profile
     assert "(allow process-fork)" in profile
 
@@ -153,16 +157,17 @@ def test_darwin_sandbox_exec_refuses_a_file_outside_the_root(tmp_path):
     resolved = root.resolve()
     inside = resolved / "inside.txt"
     inside.write_text("inside", encoding="utf-8")
-    # The outside file must live somewhere the profile does not allow for
+    # The outside probe must live somewhere the profile does not allow for
     # reading: /private (and the rest of the system list) is readable by
     # design, so a second tmp file would be the wrong probe — and the suite's
-    # conftest fakes $HOME into tmp, so $HOME is out too. /etc is outside
-    # every allowed subpath and /etc/hosts always exists on macOS.
-    outside = Path("/etc/hosts")
-    assert outside.is_file()
+    # conftest fakes $HOME into tmp, so $HOME is out too. /etc is readable by
+    # design now (its link is granted, #2448), so it is no longer a probe.
+    # /Volumes is outside every allowed subpath and is never an engine ancestor.
+    outside = Path("/Volumes")
+    assert outside.is_dir()
     prefix = opencode_sandbox_prefix(roots=[resolved])
     denied = subprocess.run(
-        [*prefix, "/bin/cat", str(outside)], capture_output=True, timeout=30
+        [*prefix, "/bin/ls", str(outside)], capture_output=True, timeout=30
     )
     assert denied.returncode != 0
     allowed = subprocess.run(
@@ -245,6 +250,23 @@ def test_read_only_dirs_are_readable_and_never_writable(tmp_path, monkeypatch):
     at = argv.index(str(config))
     assert argv[at - 1] == "--ro-bind"
     assert ["--bind", str(config), str(config)] not in [argv[i : i + 3] for i in range(len(argv))]
+
+
+def test_darwin_seatbelt_reads_etc_through_its_symlink(tmp_path):
+    if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
+        assert '(literal "/etc")' in _seatbelt_profile([tmp_path])
+        return
+    # /etc is a symlink to /private/etc. `ciao gws` probes /etc/paths.d from
+    # every OpenCode workspace-scope chat; a refused link fails it before gws
+    # starts (#2448). The target is already readable through /private.
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    prefix = opencode_sandbox_prefix(roots=[root])
+    for flag, probe in (("-d", "/etc/paths.d"), ("-f", "/etc/paths")):
+        result = subprocess.run(
+            [*prefix, "/bin/test", flag, probe], capture_output=True, timeout=30
+        )
+        assert result.returncode == 0, (probe, result.stderr)
 
 
 def test_darwin_seatbelt_reaches_a_root_spelled_through_var(tmp_path):
