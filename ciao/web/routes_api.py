@@ -97,6 +97,7 @@ from ciao.subprocess_step import run_step
 from ciao.schedule_command import normalize_schedule_command
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
+    DEFAULT_TIMEZONE,
     FREQUENCIES,
     INTERVAL_FREQUENCY,
     ScheduleEntry,
@@ -5576,7 +5577,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         try:
             target_date = datetime.fromisoformat(run_at_date).date()
             hh, mm = body["time"].split(":")
-            tz = ZoneInfo(body.get("timezone", "Europe/Zurich"))
+            tz = ZoneInfo(body.get("timezone", DEFAULT_TIMEZONE))
             target_dt = datetime(
                 target_date.year, target_date.month, target_date.day,
                 int(hh), int(mm), tzinfo=tz,
@@ -5636,7 +5637,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         provider=provider,
         mode=mode,
         chat_id=body.get("chat_id", 0),
-        timezone_name=body.get("timezone", "Europe/Zurich"),
+        timezone_name=body.get("timezone", DEFAULT_TIMEZONE),
         days_of_week=days_of_week,
         thread_id=body.get("thread_id"),
         frequency=frequency,

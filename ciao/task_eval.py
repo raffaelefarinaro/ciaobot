@@ -46,7 +46,7 @@ from typing import Any, Protocol
 import yaml
 
 import ciao
-from ciao import behavioral_eval, gws_auth
+from ciao import agent_paths, behavioral_eval, gws_auth
 from ciao.config import PERMISSION_MODES
 from ciao.os_support.tool_path import dedupe_path
 from ciao.tool_path import common_tool_dirs
@@ -54,12 +54,28 @@ from ciao.tool_path import common_tool_dirs
 TASKS_ROOT: Path = Path(__file__).resolve().parent / "stock" / "evals" / "tasks"
 FIXTURE_DIRNAME = "_fixture"
 WORKSPACE = "personal"
+# Prefix of every engine workdir; also the marker that lets cleanup touch a Claude project folder.
+EVAL_WORKDIR_PREFIX = "ciao-task-eval-"
 TIERS: frozenset[str] = frozenset({"easy", "medium", "hard"})
-ENTRY_KINDS: frozenset[str] = frozenset({"prompt", "delegate"})
+ENTRY_KINDS: frozenset[str] = frozenset({"prompt", "delegate", "transcript"})
+# The memory pass a transcript entry triggers writes its queue under the agent root.
+PROPOSALS_PATH = "memory-vault/Workspace/Memory-Proposals.md"
+MEMORY_PASS_TERMINAL: frozenset[str] = frozenset({"ok", "attention"})
+MEMORY_PASS_POLL_S = 2.0
+MEMORY_PASS_ARCHIVE_WAIT_S = 30.0
+# After a stop, the engine flushes the pass's last turn only once the stop has landed.
+MEMORY_PASS_STOP_SETTLE_S = 2.0
+MAX_TRANSCRIPT_TURNS = 20
 SETUP_KINDS: frozenset[str] = frozenset({"task", "project"})
 SCHEMA = "ciao-task-eval/1"
 DEFAULT_TIMEOUT_S = 600.0
 ANSWER_TAIL_CHARS = 2000
+# A record's tool trace: every string in an entry is cut to TRACE_TEXT_CHARS and the
+# list keeps its first TRACE_MAX_ENTRIES calls (``trace_truncated`` says when it cut).
+TRACE_TEXT_CHARS = 200
+TRACE_MAX_ENTRIES = 200
+# The Claude session log's tool_use inputs that stand for the call, in priority order.
+_CLAUDE_INPUT_KEYS: tuple[str, ...] = ("command", "file_path", "pattern", "skill")
 # The permission mode a run's chats start in, per provider, unless the caller
 # asks for another (`--mode`). Mirrors a typical operator install. OpenCode's
 # `auto` puts every shell call behind an approval card that nobody answers in an
@@ -132,6 +148,17 @@ class CheckResult:
 
 
 @dataclass(frozen=True)
+class MemoryPassOutcome:
+    """How a transcript entry's end-of-chat memory pass ended, and what the pass itself used."""
+
+    status: str  # "ok" | "attention" | "timeout" | "not_queued"
+    chat_id: str | None
+    tokens: dict[str, int]  # raw input / output / cache_read / cache_write
+    response: str  # the pass's final reply, "" when unknown
+    usage_known: bool  # False when no record of the pass was found, so tokens are not a measurement
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """Workspace state after setup and before the entry runs."""
 
@@ -180,24 +207,102 @@ def _validate_check(task_id: str, spec: Any) -> dict[str, Any]:
     kind = spec.get("kind")
     if kind not in CHECKS:
         raise TaskCatalogError(f"{task_id}: unknown check kind {kind!r}")
+    if "normalize" in spec:
+        if kind not in NORMALIZABLE_KINDS:
+            raise TaskCatalogError(f"{task_id}: normalize applies only to {sorted(NORMALIZABLE_KINDS)}, not {kind!r}")
+        if not isinstance(spec["normalize"], bool):
+            raise TaskCatalogError(f"{task_id}: {kind} normalize must be true or false")
     if kind == "gws_calls":
         _validate_gws_calls(task_id, spec)
+    elif kind == "proposals":
+        _validate_proposals(task_id, spec)
+    elif kind == "new_tasks":
+        _validate_new_tasks(task_id, spec)
+    elif kind == "new_schedules":
+        _validate_new_schedules(task_id, spec)
+    elif kind == "any_of":
+        _validate_any_of(task_id, spec)
     return spec
 
 
-def _validate_gws_calls(task_id: str, spec: dict[str, Any]) -> None:
+# A nested check that could itself pick a branch, or that compares against a snapshot of the whole
+# agent root, does not belong inside an any_of option.
+_NOT_NESTABLE: frozenset[str] = frozenset({"any_of", "unchanged"})
+
+
+def _validate_any_of(task_id: str, spec: dict[str, Any]) -> None:
+    options = spec.get("options")
+    if not isinstance(options, list) or len(options) < 2:
+        raise TaskCatalogError(f"{task_id}: any_of needs at least 2 options")
+    for option in options:
+        if not isinstance(option, list) or not option:
+            raise TaskCatalogError(f"{task_id}: each any_of option must be a non-empty list of checks")
+        for nested in option:
+            if isinstance(nested, dict) and nested.get("kind") in _NOT_NESTABLE:
+                raise TaskCatalogError(f"{task_id}: any_of cannot nest {nested.get('kind')!r}")
+            _validate_check(task_id, nested)
+
+
+def _validate_new_tasks(task_id: str, spec: dict[str, Any]) -> None:
+    if "project_name_contains" in spec:
+        names = spec["project_name_contains"]
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise TaskCatalogError(f"{task_id}: new_tasks project_name_contains must be a list of strings")
+    if "titles_cover" in spec:
+        groups = spec["titles_cover"]
+        valid = (
+            isinstance(groups, list)
+            and bool(groups)
+            and all(isinstance(g, list) and bool(g) and all(isinstance(n, str) for n in g) for g in groups)
+        )
+        if not valid:
+            raise TaskCatalogError(f"{task_id}: new_tasks titles_cover must be a list of non-empty string lists")
+        if spec.get("count", 1) != len(groups):
+            raise TaskCatalogError(
+                f"{task_id}: new_tasks count {spec.get('count', 1)!r} must equal the {len(groups)} titles_cover groups"
+            )
+
+
+def _validate_new_schedules(task_id: str, spec: dict[str, Any]) -> None:
+    if "prompt_any" in spec:
+        needles = spec["prompt_any"]
+        if not isinstance(needles, list) or not needles or not all(isinstance(n, str) for n in needles):
+            raise TaskCatalogError(f"{task_id}: new_schedules prompt_any must be a non-empty list of strings")
+
+
+def _validate_regex_lists(task_id: str, kind: str, spec: dict[str, Any]) -> None:
     for key in ("must", "must_not"):
         patterns = spec.get(key, [])
         if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
-            raise TaskCatalogError(f"{task_id}: gws_calls {key} must be a list of regex strings")
+            raise TaskCatalogError(f"{task_id}: {kind} {key} must be a list of regex strings")
         for pattern in patterns:
             try:
                 re.compile(pattern)
             except re.error as exc:
-                raise TaskCatalogError(f"{task_id}: gws_calls {key} regex {pattern!r}: {exc}") from exc
+                raise TaskCatalogError(f"{task_id}: {kind} {key} regex {pattern!r}: {exc}") from exc
+
+
+def _validate_gws_calls(task_id: str, spec: dict[str, Any]) -> None:
+    _validate_regex_lists(task_id, "gws_calls", spec)
     minimum = spec.get("min_calls", 0)
     if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 0:
         raise TaskCatalogError(f"{task_id}: gws_calls min_calls must be a non-negative integer")
+
+
+def _validate_proposals(task_id: str, spec: dict[str, Any]) -> None:
+    _validate_regex_lists(task_id, "proposals", spec)
+    if not spec.get("must") and not spec.get("must_not") and "max_new" not in spec:
+        raise TaskCatalogError(f"{task_id}: proposals names nothing to check (must, must_not or max_new)")
+    if "include_files" in spec:
+        files = spec["include_files"]
+        if not isinstance(files, list) or not all(isinstance(f, str) and f.rstrip("/").strip() for f in files):
+            raise TaskCatalogError(f"{task_id}: proposals include_files must be a list of non-empty paths")
+    if "max_new" in spec:
+        cap = spec["max_new"]
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 0:
+            raise TaskCatalogError(f"{task_id}: proposals max_new must be a non-negative integer")
+    if "path" in spec:
+        _require_text(spec["path"], f"{task_id}: proposals path")
 
 
 def _load_gws_fake(task_id: str, body: dict[str, Any], requires: list[str]) -> GwsFakeSpec | None:
@@ -251,6 +356,20 @@ def _validate_setup(task_id: str, steps: Any) -> list[dict[str, Any]]:
     return list(steps)
 
 
+def _validate_turns(task_id: str, turns: Any) -> None:
+    """A transcript entry's turns: 1 to MAX_TRANSCRIPT_TURNS objects, each with a user line and an assistant string."""
+    if not isinstance(turns, list) or not turns or len(turns) > MAX_TRANSCRIPT_TURNS:
+        raise TaskCatalogError(
+            f"{task_id}: entry.turns must be a list of 1 to {MAX_TRANSCRIPT_TURNS} turns"
+        )
+    for index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            raise TaskCatalogError(f"{task_id}: entry.turns[{index}] must be an object")
+        _require_text(turn.get("user"), f"{task_id}: entry.turns[{index}].user")
+        if not isinstance(turn.get("assistant"), str):
+            raise TaskCatalogError(f"{task_id}: entry.turns[{index}].assistant must be a string")
+
+
 def _load_one(folder: Path) -> EvalTask:
     task_id = folder.name
     body = _read_json_object(folder / "task.json")
@@ -265,8 +384,10 @@ def _load_one(folder: Path) -> EvalTask:
     prompt = str(body.get("prompt") or "")
     if entry["kind"] == "prompt":
         _require_text(prompt, f"{task_id}: prompt")
-    else:
+    elif entry["kind"] == "delegate":
         _require_text(entry.get("task_title"), f"{task_id}: entry.task_title")
+    else:
+        _validate_turns(task_id, entry.get("turns"))
     requires = body.get("requires", [])
     if not isinstance(requires, list) or not all(isinstance(r, str) for r in requires):
         raise TaskCatalogError(f"{task_id}: requires must be a list of capability names")
@@ -330,9 +451,28 @@ def _fail(kind: str, detail: str) -> CheckResult:
     return CheckResult(kind=kind, ok=False, detail=detail)
 
 
-def _text_has(text: str, needles: list[str], *, all_of: bool) -> bool:
+# Checks that accept ``"normalize": true``, and the folding that option applies.
+NORMALIZABLE_KINDS: frozenset[str] = frozenset(
+    {"answer_contains", "answer_excludes", "file_contains", "file_excludes", "occurrences"}
+)
+_NORMALIZE_DROP_RE = re.compile(r"[*_`]")
+_NORMALIZE_TRANSLATE = str.maketrans({" ": " ", " ": " ", " ": " ", "’": "'"})
+_SPACE_RUN_RE = re.compile(r" {2,}")
+
+
+def _fold(text: str, normalize: bool) -> str:
+    """Lowercased text. With ``normalize``, markup (``*``, ``_``, backticks) is dropped, no-break and thin
+    spaces and curly apostrophes become plain ones, and runs of spaces collapse. Needles fold the same way."""
     lowered = text.lower()
-    hits = [needle.lower() in lowered for needle in needles]
+    if not normalize:
+        return lowered
+    folded = _NORMALIZE_DROP_RE.sub("", lowered).translate(_NORMALIZE_TRANSLATE)
+    return _SPACE_RUN_RE.sub(" ", folded)
+
+
+def _text_has(text: str, needles: list[str], *, all_of: bool, normalize: bool = False) -> bool:
+    lowered = _fold(text, normalize)
+    hits = [_fold(needle, normalize) in lowered for needle in needles]
     return all(hits) if all_of else any(hits)
 
 
@@ -342,11 +482,12 @@ def _contains_spec(text: str, spec: dict[str, Any]) -> tuple[bool, str]:
     any_needles = [str(n) for n in spec.get("any", [])]
     if not all_needles and not any_needles:
         return False, "check names no needles (all/any)"
+    normalize = bool(spec.get("normalize", False))
     ok = True
     if all_needles:
-        ok = ok and _text_has(text, all_needles, all_of=True)
+        ok = ok and _text_has(text, all_needles, all_of=True, normalize=normalize)
     if any_needles:
-        ok = ok and _text_has(text, any_needles, all_of=False)
+        ok = ok and _text_has(text, any_needles, all_of=False, normalize=normalize)
     return ok, f"all={all_needles} any={any_needles}"
 
 
@@ -369,7 +510,9 @@ def _check_answer_excludes(ctx: GradeContext, spec: dict[str, Any]) -> CheckResu
     needles = [str(n) for n in spec.get("any", [])]
     if not needles:
         return _fail("answer_excludes", "check names no needles (any)")
-    present = [n for n in needles if n.lower() in ctx.answer.lower()]
+    normalize = bool(spec.get("normalize", False))
+    haystack = _fold(ctx.answer, normalize)
+    present = [n for n in needles if _fold(n, normalize) in haystack]
     return CheckResult("answer_excludes", not present, f"present={present}")
 
 
@@ -395,6 +538,8 @@ def _check_new_tasks(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
         problems.append(f"expected {count} new task(s), found {len(new)}")
     needles = [str(n).lower() for n in spec.get("title_contains", [])]
     due_spec = spec.get("due")
+    project_needles = [str(n).lower() for n in spec.get("project_name_contains", [])]
+    names = _project_names(ctx) if project_needles else {}
     for row in new:
         title = str(row.get("title") or "")
         for needle in needles:
@@ -402,7 +547,39 @@ def _check_new_tasks(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
                 problems.append(f"title {title!r} lacks {needle!r}")
         if due_spec is not None and not _due_matches(row.get("due"), str(due_spec), ctx.run_date):
             problems.append(f"task {title!r} due {row.get('due')!r} != {due_spec!r}")
+        if project_needles:
+            pid = row.get("project_id")
+            pname = names.get(str(pid), str(pid)) if pid else ""
+            missing = [n for n in project_needles if n not in pname.lower()]
+            if missing:
+                problems.append(f"task {title!r} project {pname!r} lacks {missing}")
+    if "titles_cover" in spec:
+        problems.extend(_titles_cover_problems(new, spec["titles_cover"]))
     return CheckResult("new_tasks", not problems, "; ".join(problems) or f"{len(new)} new task(s) ok")
+
+
+def _project_names(ctx: GradeContext) -> dict[str, str]:
+    """Project id to display name, from ``GET /api/projects``."""
+    payload = ctx.api("GET", "/api/projects")
+    return {str(row["project_id"]): str(row.get("name") or "") for row in payload if row.get("project_id")}
+
+
+def _titles_cover_problems(new: list[dict[str, Any]], groups: list[list[str]]) -> list[str]:
+    """Each title group is matched by exactly one new task, and every new task matches some group."""
+    titles = [str(row.get("title") or "") for row in new]
+
+    def hits(title: str, group: list[str]) -> bool:
+        return any(str(needle).lower() in title.lower() for needle in group)
+
+    problems: list[str] = []
+    for group in groups:
+        matched = [title for title in titles if hits(title, group)]
+        if len(matched) != 1:
+            problems.append(f"titles {group} matched {len(matched)} task(s), want 1")
+    for title in titles:
+        if not any(hits(title, group) for group in groups):
+            problems.append(f"task {title!r} matches no title group")
+    return problems
 
 
 def _due_matches(due: Any, spec: str, run_date: date) -> bool:
@@ -446,6 +623,9 @@ def _check_new_schedules(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult
         for needle in spec.get("prompt_contains", []):
             if str(needle).lower() not in prompt:
                 problems.append(f"prompt lacks {needle!r}")
+        any_needles = [str(n) for n in spec.get("prompt_any", [])]
+        if any_needles and not any(n.lower() in prompt for n in any_needles):
+            problems.append(f"prompt lacks any of {any_needles}")
     return CheckResult("new_schedules", not problems, "; ".join(problems) or f"{len(new)} new schedule(s) ok")
 
 
@@ -467,7 +647,9 @@ def _check_file_excludes(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult
         text = _read_note(ctx, str(spec["path"]))
     except (OSError, ValueError) as exc:
         return _fail("file_excludes", f"cannot read {spec.get('path')!r}: {exc}")
-    present = [n for n in spec.get("any", []) if str(n).lower() in text.lower()]
+    normalize = bool(spec.get("normalize", False))
+    haystack = _fold(text, normalize)
+    present = [n for n in spec.get("any", []) if _fold(str(n), normalize) in haystack]
     return CheckResult("file_excludes", not present, f"present={present}")
 
 
@@ -476,8 +658,9 @@ def _check_occurrences(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
         text = _read_note(ctx, str(spec["path"]))
     except (OSError, ValueError) as exc:
         return _fail("occurrences", f"cannot read {spec.get('path')!r}: {exc}")
-    needle = str(spec["text"]).lower()
-    found = text.lower().count(needle)
+    normalize = bool(spec.get("normalize", False))
+    needle = _fold(str(spec["text"]), normalize)
+    found = _fold(text, normalize).count(needle)
     want = int(spec["count"])
     return CheckResult("occurrences", found == want, f"found {found}, want {want}")
 
@@ -667,6 +850,79 @@ def _check_gws_calls(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     return CheckResult("gws_calls", True, f"{len(summaries)} call(s) ok")
 
 
+def _queue_items(text: str) -> list[tuple[str, str]]:
+    """``(kind, text)`` of every queue bullet, read with the grammar ``list_proposals`` uses."""
+    from ciao.proposal_kinds import parse_bullet
+
+    items: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        bullet = parse_bullet(line)
+        if bullet is not None:
+            items.append((bullet.kind, bullet.text))
+    return items
+
+
+def _added_lines(saved: dict[str, bytes], key: str, target: Path) -> list[str]:
+    """The non-blank lines of ``target`` that were not lines of ``key`` at the snapshot (a new file: all of them)."""
+    if not target.is_file():
+        return []
+    old = {line.strip() for line in saved.get(key, b"").decode("utf-8", "replace").splitlines()}
+    added: list[str] = []
+    for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and stripped not in old:
+            added.append(stripped)
+    return added
+
+
+def _check_proposals(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    """Grade what a memory pass added: new queue bullets, and lines added to ``include_files``.
+
+    Bullets already in the queue at the snapshot do not count, so a pass that
+    leaves an old row alone is not credited with it. ``must`` / ``must_not``
+    are case-insensitive regexes; ``max_new`` caps only the new queue bullets.
+    """
+    rel = str(spec.get("path", PROPOSALS_PATH))
+    saved = ctx.snapshot.saved
+    before = {text for _, text in _queue_items(saved.get(rel, b"").decode("utf-8", "replace"))}
+    queue = _resolve_in_root(ctx.agent_root, rel)
+    queue_text = queue.read_text(encoding="utf-8", errors="replace") if queue.is_file() else ""
+    new = [(kind, text) for kind, text in _queue_items(queue_text) if text not in before]
+    items = [f"[{kind}] {text}" for kind, text in new]
+    for extra in spec.get("include_files", []):
+        rel_extra = str(extra)
+        if rel_extra.endswith("/"):
+            base = rel_extra.rstrip("/")
+            folder = _resolve_in_root(ctx.agent_root, base)
+            for inner in _list_files(folder):
+                items.extend(_added_lines(saved, f"{base}/{inner}", folder / inner))
+        else:
+            items.extend(_added_lines(saved, rel_extra, _resolve_in_root(ctx.agent_root, rel_extra)))
+    problems: list[str] = []
+    for pattern in spec.get("must", []):
+        if not any(re.search(pattern, item, re.IGNORECASE) for item in items):
+            problems.append(f"nothing new matches {pattern!r}")
+    for pattern in spec.get("must_not", []):
+        hit = next((item for item in items if re.search(pattern, item, re.IGNORECASE)), None)
+        if hit is not None:
+            problems.append(f"{pattern!r} matches {hit[:120]!r}")
+    if "max_new" in spec and len(new) > int(spec["max_new"]):
+        problems.append(f"{len(new)} new proposal(s), max {int(spec['max_new'])}")
+    summary = "; ".join(problems) if problems else f"{len(new)} new proposal(s) ok"
+    return CheckResult("proposals", not problems, f"{summary} | {' / '.join(items)}"[:400])
+
+
+def _check_any_of(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    """Passes when every check of at least one option passes. Nested checks run under the same guard as grade."""
+    reports: list[str] = []
+    for index, option in enumerate(spec["options"], start=1):
+        results = [_run_check(ctx, nested) for nested in option]
+        if all(r.ok for r in results):
+            return CheckResult("any_of", True, f"option {index} passed")
+        reports.append(f"option {index}: " + "; ".join(f"{r.kind}={'ok' if r.ok else 'FAIL'} {r.detail}" for r in results))
+    return CheckResult("any_of", False, " | ".join(reports)[:800])
+
+
 CHECKS: dict[str, CheckFn] = {
     "answer_contains": _check_answer_contains,
     "answer_excludes": _check_answer_excludes,
@@ -684,19 +940,23 @@ CHECKS: dict[str, CheckFn] = {
     "task_attempt": _check_task_attempt,
     "command": _check_command,
     "gws_calls": _check_gws_calls,
+    "proposals": _check_proposals,
+    "any_of": _check_any_of,
 }
+
+
+def _run_check(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
+    """One check. A check that raises is a failed check, never a crash."""
+    kind = str(spec.get("kind"))
+    try:
+        return CHECKS[kind](ctx, spec)
+    except Exception as exc:  # noqa: BLE001 - a broken check must not abort grading
+        return _fail(kind, f"check raised {exc!r}"[:400])
 
 
 def grade(task: EvalTask, ctx: GradeContext) -> list[CheckResult]:
     """Run every check of a task. A check that raises is a failed check, never a crash."""
-    results: list[CheckResult] = []
-    for spec in task.checks:
-        kind = str(spec.get("kind"))
-        try:
-            results.append(CHECKS[kind](ctx, spec))
-        except Exception as exc:  # noqa: BLE001 - a broken check must not abort grading
-            results.append(_fail(kind, f"check raised {exc!r}"[:400]))
-    return results
+    return [_run_check(ctx, spec) for spec in task.checks]
 
 
 # --- isolation --------------------------------------------------------------------
@@ -921,6 +1181,10 @@ class EngineSession(Protocol):
 
     def start_prompt(self, prompt: str, *, provider: str, model: str) -> str: ...
 
+    def start_transcript(self, turns: list[dict[str, str]], *, provider: str, model: str) -> str: ...
+
+    def run_memory_pass(self, chat_id: str, timeout_s: float) -> MemoryPassOutcome: ...
+
     def delegate(self, task_id: str, revision: str, *, provider: str, model: str) -> str: ...
 
     def wait_settled(self, timeout_s: float) -> bool: ...
@@ -931,7 +1195,31 @@ class EngineSession(Protocol):
 
     def usage(self) -> dict[str, Any]: ...
 
+    def session_trace(self) -> tuple[list[dict[str, Any]], int | None]: ...
+
     def close(self) -> None: ...
+
+
+def _claude_project_dirs(agent_root: Path) -> list[Path]:
+    """Claude Code's project folders for an eval agent root, as they exist now.
+
+    Claude names the folder after the path it was started in, and on macOS that is
+    the resolved path (``/var`` becomes ``/private/var``), so both spellings are
+    candidates. Only a folder whose name carries the eval workdir prefix qualifies,
+    so a misconfigured root can never remove a real project's history: the root
+    itself must sit under a folder the harness created (its name starts with the
+    prefix), and the slug must still carry the prefix (a 200-character slug that
+    Claude truncated past it is left in place).
+    """
+    if not any(part.startswith(EVAL_WORKDIR_PREFIX) for part in agent_root.parts):
+        return []
+    candidates = {
+        agent_paths.claude_projects_dir(agent_root),
+        agent_paths.claude_projects_dir(agent_root.resolve()),
+    }
+    return sorted(
+        folder for folder in candidates if folder.is_dir() and EVAL_WORKDIR_PREFIX in folder.name
+    )
 
 
 class IsolatedEngine(EngineSession):
@@ -958,6 +1246,7 @@ class IsolatedEngine(EngineSession):
         self._log: Any = None
         self._host_project_id = ""
         self._accepted_at = 0.0
+        self._mode = "auto"
         self._chat_ids: list[str] = []
         self._closed = False
 
@@ -971,7 +1260,7 @@ class IsolatedEngine(EngineSession):
         keep_workdir: bool = False,
         mode: str | None = None,
     ) -> "IsolatedEngine":
-        workdir = Path(tempfile.mkdtemp(prefix="ciao-task-eval-"))
+        workdir = Path(tempfile.mkdtemp(prefix=EVAL_WORKDIR_PREFIX))
         engine = cls(workdir, keep_workdir=keep_workdir)
         try:
             engine._start(task, provider, model, mode)
@@ -990,6 +1279,7 @@ class IsolatedEngine(EngineSession):
             port=self.port,
             mode=mode,
         )
+        self._mode = resolve_mode(provider, mode)
         self._log = self._log_path.open("wb")
         script = Path(sys.executable).with_name("ciao")
         command = [str(script), "run"] if script.exists() else [sys.executable, "-m", "ciao", "run"]
@@ -1064,6 +1354,59 @@ class IsolatedEngine(EngineSession):
         self._chat_ids.append(chat_id)
         return chat_id
 
+    def start_transcript(self, turns: list[dict[str, str]], *, provider: str, model: str) -> str:
+        """An empty chat whose runtime transcript holds ``turns``, ready for the archive route."""
+        chat = self.api(
+            "POST",
+            f"/api/projects/{self._host_project_id}/chats",
+            {"title": "Task eval", "provider": provider, "model": model},
+        )
+        chat_id = str(chat["chat_id"])
+        path = transcript_path(self.ws, chat_id, provider)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = synthetic_transcript(
+            chat_id, turns, provider=provider, model=model, mode=self._mode, title="Task eval"
+        )
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8", newline="")
+        self._chat_ids.append(chat_id)
+        return chat_id
+
+    def run_memory_pass(self, chat_id: str, timeout_s: float) -> MemoryPassOutcome:
+        """Archive the chat through the operator route and wait for the pass it queues to settle."""
+        reply = self.api("POST", f"/api/chats/{chat_id}/archive", {})
+        step = _memory_pass_step((reply or {}).get("postprocess"))
+        extra = step.get("extra") or {}
+        pass_id = str(extra.get("chat_id") or "")
+        if not pass_id:
+            return MemoryPassOutcome("not_queued", None, {name: 0 for name in _TOKEN_FIELDS}, "", usage_known=False)
+        deadline = time.monotonic() + timeout_s
+        status = ""
+        while True:
+            row = self.api("GET", f"/api/chats/{chat_id}") or {}
+            status = str(_memory_pass_step(row.get("postprocess")).get("status") or "")
+            if status in MEMORY_PASS_TERMINAL or time.monotonic() >= deadline:
+                break
+            time.sleep(MEMORY_PASS_POLL_S)
+        if status not in MEMORY_PASS_TERMINAL:
+            self.stop_chat(pass_id)
+            time.sleep(MEMORY_PASS_STOP_SETTLE_S)
+            status = "timeout"
+        archive_path = self._pass_archive_path(pass_id) if status == "ok" else None
+        tokens, response, usage_known = memory_pass_usage(self.ws, pass_id, archive_path)
+        self._chat_ids.append(pass_id)
+        return MemoryPassOutcome(status, pass_id, tokens, response, usage_known=usage_known)
+
+    def _pass_archive_path(self, pass_id: str) -> str | None:
+        """The pass's archive path once it has archived. The source step turns ``ok`` before the pass archives."""
+        deadline = time.monotonic() + MEMORY_PASS_ARCHIVE_WAIT_S
+        while True:
+            row = self.api("GET", f"/api/chats/{pass_id}") or {}
+            if row.get("archived") and row.get("archive_path"):
+                return str(row["archive_path"])
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(MEMORY_PASS_POLL_S)
+
     def delegate(self, task_id: str, revision: str, *, provider: str, model: str) -> str:
         # The delegate route takes no provider or model (_DELEGATE_KEYS in
         # ciao/web/routes_tasks.py). The spawned chat takes the workspace's
@@ -1102,6 +1445,49 @@ class IsolatedEngine(EngineSession):
         usage["chat_ids"] = sorted(set(usage["chat_ids"]) | set(self._chat_ids))
         return usage
 
+    def session_trace(self) -> tuple[list[dict[str, Any]], int | None]:
+        """The Claude session log's tool calls and model round-trips. Call it before :meth:`close`.
+
+        Each call is ``{"id", "name", "input"}``, with the real input and the tool_use
+        id that the transcript's tool event carries too. ``model_calls`` counts the
+        distinct message ids of the assistant lines. With no Claude session log (every
+        OpenCode run) both are unknown: ``([], None)``.
+        """
+        calls: list[dict[str, Any]] = []
+        message_ids: set[str] = set()
+        read_any = False
+        for folder in _claude_project_dirs(self.agent_root):
+            for path in sorted(folder.glob("*.jsonl")):
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue  # removed or unreadable: this log counts as not read
+                read_any = True
+                for line in text.splitlines():
+                    try:
+                        row: Any = json.loads(line)
+                    except ValueError:
+                        continue  # a line the session is still writing
+                    if not isinstance(row, dict) or row.get("type") != "assistant":
+                        continue
+                    message = row.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    message_id = message.get("id")
+                    if isinstance(message_id, str) and message_id:
+                        message_ids.add(message_id)
+                    content = message.get("content")
+                    for item in content if isinstance(content, list) else []:
+                        if isinstance(item, dict) and item.get("type") == "tool_use":
+                            calls.append(
+                                {
+                                    "id": str(item.get("id") or ""),
+                                    "name": _clip(str(item.get("name") or "tool")),
+                                    "input": _claude_tool_input(item.get("input")),
+                                }
+                            )
+        return calls, len(message_ids) if read_any else None
+
     def close(self) -> None:
         if self._closed:
             return
@@ -1115,7 +1501,10 @@ class IsolatedEngine(EngineSession):
             if self._keep_workdir:
                 print(f"kept task eval workdir: {self.workdir}", file=sys.stderr)
             else:
+                claude_dirs = _claude_project_dirs(self.agent_root)
                 shutil.rmtree(self.workdir, ignore_errors=True)
+                for folder in claude_dirs:
+                    shutil.rmtree(folder, ignore_errors=True)
 
 
 # --- gws fake: a stand-in ``gws`` that logs every call and never reaches Google -----
@@ -1725,26 +2114,116 @@ def answer_from_transcripts(runtime: Path) -> str:
     return "\n".join(parts)
 
 
+def _add_usage(tokens: dict[str, int], usage: Any) -> None:
+    """Add one turn's usage to ``tokens``. A snake_case key wins over its camelCase twin."""
+    if not isinstance(usage, dict):
+        return
+    for name, key in _TOKEN_FIELDS.items():
+        value = usage.get(key)
+        if value is None:
+            value = usage.get(_TOKEN_CAMEL_FIELDS[name])
+        tokens[name] += _as_int(value)
+
+
+def _clip(text: str) -> str:
+    return text[:TRACE_TEXT_CHARS]
+
+
+def _claude_tool_input(raw: Any) -> str:
+    """The input of a Claude tool call as one short line: its command, path, pattern or skill, else its JSON."""
+    if isinstance(raw, dict):
+        for key in _CLAUDE_INPUT_KEYS:
+            value = raw.get(key)
+            if isinstance(value, str) and value:
+                return _clip(value)
+    return _clip(json.dumps(raw, ensure_ascii=False))
+
+
+def _trace_entry(chat_id: str, event: Mapping[str, Any]) -> dict[str, Any]:
+    """One transcript tool event as a trace entry. ``id`` joins it to the Claude session log."""
+    summary = event.get("input")
+    text = summary.get("summary") if isinstance(summary, dict) else None
+    return {
+        "id": str(event.get("id") or ""),
+        "chat_id": _clip(chat_id),
+        "name": _clip(str(event.get("name") or "tool")),
+        "input": _clip(text) if isinstance(text, str) else "",
+        "error": event.get("error") is True,
+    }
+
+
+def _record_trace(
+    transcript: Sequence[Mapping[str, Any]], session_calls: Sequence[Mapping[str, Any]]
+) -> tuple[list[dict[str, Any]], bool]:
+    """The record's ``trace``, cut to ``TRACE_MAX_ENTRIES``.
+
+    The transcript's tool calls come first, in order, each input replaced by the
+    Claude session log's real input for the same tool_use id. Session calls with no
+    transcript entry follow in log order, with no chat and no error flag: a memory
+    pass's own calls land here once its transcript is gone.
+    """
+    real_inputs = {str(call["id"]): str(call["input"]) for call in session_calls if call["id"]}
+    matched = {str(call["id"]) for call in transcript if call["id"]}
+    entries = [
+        {
+            "chat_id": call["chat_id"],
+            "name": call["name"],
+            "input": real_inputs.get(str(call["id"]), call["input"]),
+            "error": call["error"],
+        }
+        for call in transcript
+    ]
+    entries += [
+        {"chat_id": "", "name": call["name"], "input": call["input"], "error": False}
+        for call in session_calls
+        if str(call["id"]) not in matched
+    ]
+    return entries[:TRACE_MAX_ENTRIES], len(entries) > TRACE_MAX_ENTRIES
+
+
+def _trace_fields(session: EngineSession, usage: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The record's trace fields, read from the session before it is closed.
+
+    ``usage`` is a transcript read the caller already has; without it the session is
+    read again. Never raises: a trace that cannot be read is reported on stderr and the
+    fields stay at the record's defaults, so it can never change a run's status.
+    """
+    try:
+        transcript = (session.usage() if usage is None else usage)["trace"]
+        session_calls, model_calls = session.session_trace()
+        trace, truncated = _record_trace(transcript, session_calls)
+    except Exception as exc:  # noqa: BLE001 - the trace is evidence, never a reason to fail a run
+        print(f"task eval: trace not recorded: {exc!r}", file=sys.stderr)
+        return {}
+    return {"trace": trace, "trace_truncated": truncated, "model_calls": model_calls}
+
+
 def collect_usage(runtime: Path) -> dict[str, Any]:
     """Token, tool, ciao-call and cost figures for one engine's runtime directory."""
     tokens = {name: 0 for name in _TOKEN_FIELDS}
     tool_calls = 0
     tool_errors = 0
+    provider_errors = 0
+    provider_error: str | None = None
     chat_ids: list[str] = []
+    trace: list[dict[str, Any]] = []
     for path in _transcripts(runtime):
-        chat_ids.append(path.parent.name)
+        chat_id = path.parent.name
+        chat_ids.append(chat_id)
         for turn in _read_transcript(path):
-            usage = turn.get("usage") or {}
-            if isinstance(usage, dict):
-                for name, key in _TOKEN_FIELDS.items():
-                    value = usage.get(key)
-                    if value is None:
-                        value = usage.get(_TOKEN_CAMEL_FIELDS[name])
-                    tokens[name] += _as_int(value)
+            if turn.get("is_error"):
+                provider_errors += 1
+                if provider_error is None:
+                    response = turn.get("response")
+                    provider_error = (response if isinstance(response, str) else "")[:300]
+            _add_usage(tokens, turn.get("usage"))
             for call in turn.get("tool_calls") or []:
                 tool_calls += 1
                 if isinstance(call, dict) and call.get("error"):
                     tool_errors += 1
+            for event in turn.get("tool_events") or []:
+                if isinstance(event, dict):
+                    trace.append(_trace_entry(chat_id, event))
 
     ciao_calls = 0
     ciao_errors = 0
@@ -1777,11 +2256,128 @@ def collect_usage(runtime: Path) -> dict[str, Any]:
         "tokens": tokens,
         "tool_calls": tool_calls,
         "tool_errors": tool_errors,
+        "provider_errors": provider_errors,
+        "provider_error": provider_error,
         "ciao_calls": ciao_calls,
         "ciao_errors": ciao_errors,
         "cost_usd": cost_usd,
         "chat_ids": chat_ids,
+        "trace": trace,
     }
+
+
+def _archive_usage_totals(text: str) -> dict[str, Any]:
+    """The ``usage_totals`` mapping in an archived transcript's frontmatter, or ``{}``."""
+    if not text.startswith("---\n"):
+        return {}
+    closing = _FENCE_RE.search(text, 4)
+    if closing is None:
+        return {}
+    try:
+        block: Any = yaml.safe_load(text[4:closing.start()])
+    except yaml.YAMLError:
+        return {}
+    totals = block.get("usage_totals") if isinstance(block, dict) else None
+    return totals if isinstance(totals, dict) else {}
+
+
+def memory_pass_usage(ws: Path, chat_id: str, archive_path: str | None) -> tuple[dict[str, int], str, bool]:
+    """Tokens, final reply and whether either was found, for one memory-pass chat.
+
+    A pass that is still live (``attention``, or stopped on timeout) keeps its
+    runtime transcript, which is read directly. A pass that archived cleanly has
+    lost that file, so its archive's ``usage_totals`` frontmatter is read; the
+    archive path is relative to the workspace root. With neither, the tokens are
+    zero and the flag is False: zero would be a measurement that was never made.
+    """
+    from ciao.transcripts import parse_archive_turns
+
+    tokens = {name: 0 for name in _TOKEN_FIELDS}
+    live = sorted((ws / ".runtime" / "transcripts" / chat_id).glob("*.json"))
+    if live:
+        response = ""
+        for path in live:
+            for turn in _read_transcript(path):
+                _add_usage(tokens, turn.get("usage"))
+                text = turn.get("response")
+                if isinstance(text, str) and text:
+                    response = text
+        return tokens, response, True
+    if not archive_path:
+        return tokens, "", False
+    target = Path(archive_path)
+    if not target.is_absolute():
+        target = ws / target
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return tokens, "", False
+    _add_usage(tokens, _archive_usage_totals(text))
+    turns = parse_archive_turns(text)
+    response = str(turns[-1].get("assistant") or "").strip() if turns else ""
+    return tokens, response, True
+
+
+def transcript_path(ws: Path, chat_id: str, provider: str) -> Path:
+    """Where the engine keeps a chat's runtime transcript, named by the engine's own slugging."""
+    from ciao.models import ChatContext
+    from ciao.transcripts import TranscriptStore
+
+    # Only current_path is used here, so the archive root is never written to.
+    store = TranscriptStore(ws / ".runtime", ws / ".runtime" / "unused-archive")
+    return store.current_path(ChatContext.for_web(chat_id), provider)
+
+
+def synthetic_transcript(
+    chat_id: str,
+    turns: Sequence[Mapping[str, str]],
+    *,
+    provider: str,
+    model: str,
+    mode: str,
+    title: str,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """A normalized transcript in the shape ``TranscriptStore.record_turn`` writes, with zero usage."""
+    stamp = now or datetime.now(UTC).isoformat(timespec="seconds")
+    return {
+        "provider": provider,
+        "started_at": stamp,
+        "updated_at": stamp,
+        "selected_model": model,
+        "session_id": "",
+        "context_key": chat_id,
+        "context_label": title,
+        "turns": [
+            {
+                "timestamp": stamp,
+                "input_kind": "text",
+                "prompt": str(turn["user"]),
+                "mode": mode,
+                "resume_session": "",
+                "image_count": 0,
+                "response": str(turn["assistant"]),
+                "is_error": False,
+                "effective_model": model,
+                "usage": {},
+                "quota": {},
+                "tool_events": [],
+                "tool_calls": [],
+            }
+            for turn in turns
+        ],
+    }
+
+
+def _memory_pass_step(postprocess: Any) -> dict[str, Any]:
+    """The ``memory_pass`` step of a chat's postprocess record, or ``{}`` where a level is missing."""
+    if not isinstance(postprocess, dict):
+        return {}
+    steps = postprocess.get("steps")
+    if not isinstance(steps, dict):
+        return {}
+    step = steps.get("memory_pass")
+    return step if isinstance(step, dict) else {}
 
 
 # --- snapshot, setup, runner ------------------------------------------------------
@@ -1794,6 +2390,13 @@ def take_snapshot(agent_root: Path, api: Callable[..., Any], keep: Iterable[str]
     projects = api("GET", "/api/projects")
     saved: dict[str, bytes] = {}
     for rel in keep:
+        if rel.endswith("/"):
+            # A directory keeps every file under it, so a later diff can see each one's old lines.
+            base = rel.rstrip("/")
+            folder = _resolve_in_root(agent_root, base)
+            for inner in _list_files(folder):
+                saved[f"{base}/{inner}"] = (folder / inner).read_bytes()
+            continue
         path = _resolve_in_root(agent_root, rel)
         if path.is_file():
             saved[rel] = path.read_bytes()
@@ -1835,8 +2438,22 @@ def _find_delegate_target(api: Callable[..., Any], title: str) -> tuple[str, str
     raise LookupError(f"no task titled {title!r} to delegate")
 
 
-def _unchanged_paths(task: EvalTask) -> list[str]:
-    return [str(spec["path"]) for spec in task.checks if spec.get("kind") == "unchanged"]
+def _snapshot_paths(task: EvalTask) -> list[str]:
+    """Files whose bytes the snapshot keeps: ``unchanged`` targets, and the queue and ``include_files`` of each proposals check."""
+    paths: list[str] = []
+
+    def keep(rel: str) -> None:
+        if rel not in paths:
+            paths.append(rel)
+
+    for spec in task.checks:
+        if spec.get("kind") == "unchanged":
+            keep(str(spec["path"]))
+        elif spec.get("kind") == "proposals":
+            keep(str(spec.get("path", PROPOSALS_PATH)))
+            for extra in spec.get("include_files", []):
+                keep(str(extra))
+    return paths
 
 
 def _tokens(raw: Mapping[str, Any]) -> dict[str, int]:
@@ -1943,9 +2560,16 @@ def _base_record(
         "ciao_calls": 0,
         "ciao_errors": 0,
         "cost_usd": None,
+        "provider_errors": 0,
+        "trace": [],
+        "trace_truncated": False,
+        "model_calls": None,
         "wall_s": 0.0,
         "timed_out": False,
         "chat_ids": [],
+        "memory_pass_status": None,
+        "memory_pass_chat_id": None,
+        "memory_pass_tokens": None,
     }
 
 
@@ -1985,25 +2609,40 @@ def run_task(
     )
     started = time.monotonic()
     session: EngineSession | None = None
+    trace_read = False
     try:
         # Validated before any engine boots: an unknown mode is an error record.
         resolve_mode(provider, mode)
         session = factory(task)
         _apply_setup(session.api, task)
-        snapshot = take_snapshot(session.agent_root, session.api, _unchanged_paths(task))
+        snapshot = take_snapshot(session.agent_root, session.api, _snapshot_paths(task))
+        before: dict[str, Any] | None = None
+        pass_outcome: MemoryPassOutcome | None = None
         if task.entry["kind"] == "prompt":
             chat_id = session.start_prompt(task.prompt, provider=provider, model=model)
-        else:
+        elif task.entry["kind"] == "delegate":
             task_id, revision = _find_delegate_target(session.api, str(task.entry["task_title"]))
             chat_id = session.delegate(task_id, revision, provider=provider, model=model)
-        settled = session.wait_settled(task.timeout_s)
-        if not settled:
-            session.stop_chat(chat_id)
+        else:
+            chat_id = session.start_transcript(list(task.entry["turns"]), provider=provider, model=model)
+            # Read before the archive, which deletes the synthetic chat's runtime transcript.
+            before = session.usage()
+            pass_outcome = session.run_memory_pass(chat_id, task.timeout_s)
+            if pass_outcome.status == "not_queued":
+                raise RuntimeError("memory pass was not queued for the archived transcript")
+        if pass_outcome is None:
+            settled = session.wait_settled(task.timeout_s)
+            if not settled:
+                session.stop_chat(chat_id)
+            answer = session.answer_text()
+        else:
+            settled = pass_outcome.status == "ok"
+            answer = pass_outcome.response
         # Only a task that needs the fake reads the session's call log, so sessions
         # for other tasks never have to carry the attribute.
         ctx = GradeContext(
             agent_root=session.agent_root,
-            answer=session.answer_text(),
+            answer=answer,
             api=session.api,
             snapshot=snapshot,
             run_date=date.today(),
@@ -2011,23 +2650,68 @@ def run_task(
         )
         results = grade(task, ctx)
         usage = session.usage()
+        # Read before close(), which deletes the Claude session log.
+        record.update(_trace_fields(session, usage))
+        trace_read = True
+        all_ok = all(r.ok for r in results)
+        # The synthetic chat read before the archive can add nothing (it carries no
+        # errors), but its counts are summed in so none can be lost to the archive.
+        earlier = before or {}
+        provider_errors = _as_int(usage["provider_errors"]) + _as_int(earlier.get("provider_errors"))
+        status = "passed" if settled and all_ok else "failed"
+        error = None
+        # A provider failure (quota, auth, transport) that kept the run from passing
+        # is an outage, not a model failure. A passing run did the work despite it.
+        if provider_errors and status != "passed":
+            status = "error"
+            provider_error = usage["provider_error"] or earlier.get("provider_error")
+            error = f"provider error: {provider_error or '(no message)'}"
+        pass_fields: dict[str, Any] = {}
+        if pass_outcome is None:
+            tokens = _tokens(usage["tokens"])
+            timed_out = not settled
+        else:
+            # A transcript run's tokens are the synthetic chat's (zero) plus the pass's.
+            earlier_tokens = earlier.get("tokens") or {}
+            tokens = _tokens(
+                {
+                    name: _as_int(earlier_tokens.get(name)) + pass_outcome.tokens.get(name, 0)
+                    for name in _TOKEN_FIELDS
+                }
+            )
+            timed_out = pass_outcome.status == "timeout"
+            pass_fields = {
+                "memory_pass_status": pass_outcome.status,
+                "memory_pass_chat_id": pass_outcome.chat_id,
+                "memory_pass_tokens": _tokens(pass_outcome.tokens) if pass_outcome.usage_known else None,
+            }
+            if not pass_outcome.usage_known:
+                # Zero tokens here would read as a free pass; the record must not claim a cost it lacks.
+                status = "error"
+                error = "memory pass usage unavailable (archive not found)"
         record.update(
-            status="passed" if settled and all(r.ok for r in results) else "failed",
+            status=status,
+            error=error,
             checks=[asdict(r) for r in results],
             answer=ctx.answer[-ANSWER_TAIL_CHARS:],
-            tokens=_tokens(usage["tokens"]),
+            tokens=tokens,
             tool_calls=_as_int(usage["tool_calls"]),
             tool_errors=_as_int(usage["tool_errors"]),
+            provider_errors=provider_errors,
             ciao_calls=_as_int(usage["ciao_calls"]),
             ciao_errors=_as_int(usage["ciao_errors"]),
             cost_usd=usage["cost_usd"],
-            timed_out=not settled,
+            timed_out=timed_out,
             chat_ids=list(usage["chat_ids"]),
+            **pass_fields,
         )
     except Exception as exc:  # noqa: BLE001 - a run is recorded, never raised
         record.update(status="error", error=repr(exc)[:500])
     finally:
         if session is not None:
+            if not trace_read:
+                # The run ended before the grader read the session; the log lasts until close().
+                record.update(_trace_fields(session))
             try:
                 session.close()
             except Exception as exc:  # noqa: BLE001 - cleanup failure is noted, not raised
@@ -2106,8 +2790,9 @@ def _median(values: Sequence[float | None]) -> float | None:
 def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Per (label, provider, model, mode, code revision, task): counts, pass rate and medians.
 
-    A report from before the ``mode`` field has no mode to group by, so those rows
-    fall into the ``-`` group.
+    The pass rate and the medians are over runs that neither skipped nor errored;
+    ``errors`` counts the runs whose provider failed. A report from before the ``mode`` field has no
+    mode to group by, so those rows fall into the ``-`` group.
     """
     groups: dict[tuple[str, str, str, str, str, str], list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -2126,7 +2811,8 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         label, provider, model, mode, revision, task_id = key
         items = groups[key]
         ran = [r for r in items if r.get("status") != "skipped"]
-        passed = sum(1 for r in ran if r.get("status") == "passed")
+        scored = [r for r in ran if r.get("status") != "error"]
+        passed = sum(1 for r in scored if r.get("status") == "passed")
         summary.append(
             {
                 "label": label,
@@ -2138,11 +2824,13 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "n": len(items),
                 "ran": len(ran),
                 "skipped": len(items) - len(ran),
-                "pass_rate": passed / len(ran) if ran else None,
-                "median_context_total": _median([r["tokens"]["context_total"] for r in ran]),
-                "median_output": _median([r["tokens"]["output"] for r in ran]),
-                "median_wall_s": _median([r.get("wall_s") for r in ran]),
-                "median_cost_usd": _median([r.get("cost_usd") for r in ran]),
+                "errors": len(ran) - len(scored),
+                "pass_rate": passed / len(scored) if scored else None,
+                "median_context_total": _median([r["tokens"]["context_total"] for r in scored]),
+                "median_output": _median([r["tokens"]["output"] for r in scored]),
+                "median_wall_s": _median([r.get("wall_s") for r in scored]),
+                "median_cost_usd": _median([r.get("cost_usd") for r in scored]),
+                "median_model_calls": _median([r.get("model_calls") for r in scored]),
                 "tool_errors": sum(int(r.get("tool_errors") or 0) for r in items),
                 "timeouts": sum(1 for r in items if r.get("timed_out")),
             }
@@ -2210,14 +2898,14 @@ def _fmt(value: Any, digits: int = 2) -> str:
 
 def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
     lines = [
-        "| Task | Label | Provider | Model | Mode | Revision | n | Ran | Pass rate | Median context | Median output | Median wall s | Median cost USD | Tool errors | Timeouts |",
-        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Task | Label | Provider | Model | Mode | Revision | n | Ran | Errors | Pass rate | Median context | Median output | Median wall s | Median cost USD | Median model calls | Tool errors | Timeouts |",
+        "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in summary:
         pass_rate = item["pass_rate"]
         lines.append(
-            "| {task} | {label} | {provider} | {model} | {mode} | {rev} | {n} | {ran} | {pass_rate} | "
-            "{ctx} | {out} | {wall} | {cost} | {terr} | {timeouts} |".format(
+            "| {task} | {label} | {provider} | {model} | {mode} | {rev} | {n} | {ran} | {errors} | {pass_rate} | "
+            "{ctx} | {out} | {wall} | {cost} | {calls} | {terr} | {timeouts} |".format(
                 task=item["task_id"],
                 label=item["label"],
                 provider=item["provider"],
@@ -2226,11 +2914,13 @@ def render_summary(summary: Sequence[Mapping[str, Any]]) -> str:
                 rev=item["code_revision"],
                 n=item["n"],
                 ran=item["ran"],
+                errors=item["errors"],
                 pass_rate="-" if pass_rate is None else f"{pass_rate:.2f}",
                 ctx=_fmt(item["median_context_total"], 0),
                 out=_fmt(item["median_output"], 0),
                 wall=_fmt(item["median_wall_s"], 1),
                 cost=_fmt(item["median_cost_usd"], 4),
+                calls=_fmt(item["median_model_calls"], 0),
                 terr=item["tool_errors"],
                 timeouts=item["timeouts"],
             )
