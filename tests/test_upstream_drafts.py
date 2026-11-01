@@ -365,6 +365,27 @@ def test_same_as_must_name_a_draft_of_the_same_skill(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("same_as", ["../x", "a/b", ".hidden", "a\x00b"])
+def test_same_as_refuses_names_outside_the_sidecar_directory(
+    tmp_path: Path, same_as: str
+) -> None:
+    """A `same_as` that is not one plain file name is refused before any file is touched."""
+    config = _config(tmp_path, "work")
+    file_draft(config, "work", **_stock_draft())
+    sidecar = upstream_drafts.sidecar_dir(config, "work")
+    before = sorted(p.relative_to(sidecar) for p in sidecar.rglob("*"))
+
+    with pytest.raises(DraftRefused):
+        file_draft(
+            config,
+            "work",
+            **_stock_draft(change="Retry a timed-out fetch once, then report it."),
+            same_as=same_as,
+        )
+
+    assert sorted(p.relative_to(sidecar) for p in sidecar.rglob("*")) == before
+
+
 def test_skill_draft_input_type_checks_same_as_and_distinct_from(tmp_path: Path) -> None:
     """A mistyped `same_as` or `distinct_from` is refused by field name, not coerced."""
     from ciao import cli

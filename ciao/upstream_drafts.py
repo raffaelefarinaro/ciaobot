@@ -1630,5 +1630,5 @@ def _check_draft_name(draft: str) -> None:
     """One plain file name, or refuse before it reaches the filesystem."""
     if not draft or draft in {".", ".."} or draft.startswith("."):
         raise DraftRefused(f"{draft!r} is not a draft id")
-    if "/" in draft or "\\" in draft:
+    if "/" in draft or "\\" in draft or "\x00" in draft:
         raise DraftRefused(f"{draft!r} is not one file under the sidecar directory")
