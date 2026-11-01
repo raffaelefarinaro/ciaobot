@@ -25,7 +25,7 @@ from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.execution_modes import is_credential_adjacent
-from ciao.schedules import DEFAULT_TIMEZONE, FREQUENCIES
+from ciao.schedules import FREQUENCIES
 from ciao.terminal_offer import (
     TERMINAL_OFFER_MAX_BYTES,
     TerminalOfferError,
@@ -54,7 +54,7 @@ _SCHEDULE_FLAG_HELP: dict[str, str] = {
     "--days-of-week": "Comma-separated days: mon,tue,wed,thu,fri,sat,sun; full names accepted; "
     "for --frequency weekly.",
     "--daily-time": "HH:MM wall-clock time in --timezone.",
-    "--timezone": f"IANA zone name; default {DEFAULT_TIMEZONE}.",
+    "--timezone": "IANA zone name for --daily-time; default UTC, so pass the user's zone.",
     "--frequency": f"One of {', '.join(sorted(FREQUENCIES))}.",
 }
 
