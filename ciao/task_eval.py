@@ -611,7 +611,10 @@ def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str
 
     Every ``CIAO_``/``PWA_``/``GWS_`` variable from the caller is dropped, so a
     run started inside a live Ciaobot chat cannot reach the live install. The
-    storage roots are pointed into the throwaway ``workdir``.
+    storage roots are pointed into the throwaway ``workdir``. The queue-lock
+    directory is left at its per-user temp default: the lock key hashes the
+    (throwaway) vault path, so it cannot collide with the live install, and the
+    agent's sandbox can write there but not into ``workdir``.
     """
     env = _without_live_vars(base_env)
     env.update(
@@ -620,7 +623,6 @@ def engine_env(base_env: Mapping[str, str], workdir: Path, ws: Path) -> dict[str
             "CIAO_NO_BROWSER": "1",
             "CIAO_MEMORY_DIR": str(workdir / "dotciao"),
             "CIAO_LAUNCH_AGENTS_DIR": str(workdir / "LA"),
-            "CIAO_QUEUE_LOCK_DIR": str(workdir / "locks"),
             "PWA_HOST": "127.0.0.1",
         }
     )

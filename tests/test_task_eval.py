@@ -367,6 +367,9 @@ def test_isolated_engine_env_strips_live_vars(tmp_path: Path) -> None:
     assert env["PWA_HOST"] == "127.0.0.1"
     assert env["CIAO_NO_BROWSER"] == "1"
     assert env["PATH"] == "/usr/bin"
+    # The agent's sandbox cannot write into the workdir; the per-user temp default
+    # is where `ciao memory-proposal-dismiss` takes its queue lock.
+    assert "CIAO_QUEUE_LOCK_DIR" not in env
     assert base["CIAO_WORKSPACE"] == "/live/workspace"  # the input is not mutated
 
 
