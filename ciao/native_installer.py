@@ -3417,12 +3417,15 @@ def _run_native_install(
                         policy.poll_interval,
                     )
             except _Refusal as refusal:
+                import traceback as _dbg; _dbg.print_exc()
                 failure = refusal.code
             except _Cancelled:
                 failure = "cancelled"
             except _TimedOut:
+                import traceback as _dbg; _dbg.print_exc()
                 failure = "cancelled" if cancellation.cancelled else "internal_error"
             except NativeCoordinatorError as exc:
+                import sys as _dsys, traceback as _dbg; _dbg.print_exc(); print("DBG reason", exc.reason, file=_dsys.stderr)
                 failure = exc.failure_code
             except NativeLockError as exc:
                 failure = _map_lock_failure(exc)
@@ -3438,8 +3441,10 @@ def _run_native_install(
                 failure = "event_channel_failed"
                 channel_dead = True
             except OSError:
+                import traceback as _dbg; _dbg.print_exc()
                 failure = "internal_error"
             except Exception:
+                import traceback as _dbg; _dbg.print_exc()
                 failure = "internal_error"
         finally:
             cleanup_failed = False

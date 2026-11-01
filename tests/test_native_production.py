@@ -1307,7 +1307,7 @@ def test_the_wizard_spawns_the_verified_target_not_the_link(
     assert argv[0] == str(tool_python)
     assert Path(argv[1]) == verified_target
     assert not marker.exists()
-    assert outcome.terminal == "service_ready"
+    assert outcome.terminal == "service_ready", outcome
 
 
 def test_the_interpreter_replaced_after_the_probe_is_install_failed(

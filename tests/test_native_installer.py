@@ -4730,7 +4730,7 @@ def test_the_wizard_child_that_exited_before_the_listener_check_is_wizard_failed
 
     outcome, events, raw = _run_coordinator(tmp_path, wizard_listener=listener)
 
-    assert exited
+    assert exited, (outcome, events, raw)
     assert outcome.failure_code == "wizard_failed"
     assert outcome.activation_attempted is False
     assert [event["type"] for event in events] == ["phase", "phase", "failed"]
