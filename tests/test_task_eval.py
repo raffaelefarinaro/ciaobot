@@ -819,6 +819,8 @@ def test_m1_overlay_has_one_queued_proposal() -> None:
 def test_medium_fixture_facts_consistent() -> None:
     assert "Bologna" in (FIXTURE / "People" / "lena-moretti.md").read_text(encoding="utf-8")
     assert "November" in (FIXTURE / "Documents" / "insurance-overview.md").read_text(encoding="utf-8")
+
+
 # --- Fix round 2: env isolation, process groups, tolerant usage, symlinks, fences ---
 
 
