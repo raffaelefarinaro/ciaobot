@@ -2422,8 +2422,8 @@ def test_different_file_at_a_different_path_is_a_mismatch(
 def test_a_symlinked_expected_path_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The expected path must already be canonical. A symlink that resolves to the
-    # running file is still refused: the installer names the path it trusts.
+    # The executable itself must not be a symlink. A link that resolves to the
+    # running file is still refused: the installer names the file it trusts.
     host = _canonical_file(tmp_path, "Ciaobot Server")
     link = tmp_path / "Ciaobot Server link"
     os.symlink(host, link)
@@ -2434,8 +2434,29 @@ def test_a_symlinked_expected_path_is_refused(
         server_host_install.verify_process_executable(os.getpid(), link)
     assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
     assert str(caught.value) == (
-        "the installed host path is not canonical (it contains a symlink)"
+        "the installed host executable is a symlink, not the file it names"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_a_symlinked_parent_directory_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A relocated ~/Applications is a symlinked parent. The shell passes the
+    # non-canonical $HOME path; the parent is canonicalised and the real file
+    # matches, so the migration is not refused.
+    real_dir = Path(os.path.realpath(tmp_path)) / "Applications"
+    real_dir.mkdir()
+    host = _canonical_file(real_dir, "Ciaobot Server")
+    linked_dir = Path(os.path.realpath(tmp_path)) / "Applications link"
+    os.symlink(real_dir, linked_dir)
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(host)
+    )
+    proven = server_host_install.verify_process_executable(
+        os.getpid(), linked_dir / "Ciaobot Server"
+    )
+    assert proven == str(host)
 
 
 def test_executable_cli_prints_only_the_canonical_path_on_success(

@@ -594,9 +594,11 @@ process instance this run started, bound to objects rather than strings:
    through the verified wheel's `server_host_install executable` subcommand).
    `ps -o comm=` only prints a name and `lsof -d txt` lists every mapped
    executable segment (a signed host has many), so neither is executable
-   identity. The kernel path and the expected host must be the same canonical path,
-   which must be a regular file; the expected host may not contain a symlink. This
-   is path equality, not byte or inode identity after an in-place replacement. An
+   identity. The executable itself must not be a symlink; its parent directories are
+   canonicalised, so a relocated `Applications` folder still matches. The kernel path
+   and that canonical expected path must be the same string, which must be a regular
+   file. This is path equality, not byte or inode identity after an in-place
+   replacement. An
    unreadable pid, a pid outside the 32-bit range, a truncated path or any other
    executable is a refusal. A pid can be recycled
    after the listener/lock captures and before this probe; if the replacement is

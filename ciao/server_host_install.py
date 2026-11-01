@@ -853,14 +853,27 @@ def _kernel_executable_path(pid: int) -> str:
     return os.fsdecode(raw)
 
 
+def _canonical_executable_path(expected: Path) -> str:
+    """``expected`` with its parent directories canonicalised, its file name kept.
+
+    A symlinked parent (a relocated ``~/Applications``) resolves to the real
+    directory, so the shell's non-canonical ``$HOME`` path still names the file.
+    The final component is not resolved: the caller refuses it when it is a
+    symlink.
+    """
+    raw = os.fspath(expected)
+    parent = os.path.realpath(os.path.dirname(os.path.abspath(raw)), strict=True)
+    return os.path.join(parent, os.path.basename(raw))
+
+
 def verify_process_executable(pid: int, expected: Path) -> str:
     """Prove ``pid`` runs the kernel-named ``expected`` executable.
 
-    The kernel's path and ``expected``, each canonicalised, must be the same
-    canonical path, and that path must be a regular file. ``expected`` must
-    already be canonical: a path containing a symlink is refused rather than
-    resolved. This is path equality, not byte or inode identity after an in-place
-    replacement. A pid outside the 32-bit range, a pid the kernel cannot name, a
+    The executable itself must not be a symlink; its parent directories are
+    canonicalised, so a symlinked parent still matches. The kernel's path and
+    that canonical expected path must be the same string, and it must be a
+    regular file. This is path equality, not byte or inode identity after an
+    in-place replacement. A pid outside the 32-bit range, a pid the kernel cannot name, a
     path that no longer resolves, a non-regular target and any other executable
     are refusals. ``proc_pidpath``
     reports a path, not a descriptor for the process's executable vnode: these
@@ -877,19 +890,19 @@ def verify_process_executable(pid: int, expected: Path) -> str:
     """
     _require_kernel_pid(pid)
     actual = _kernel_executable_path(pid)
+    if os.path.islink(expected):
+        raise ServerHostInstallError(
+            "the installed host executable is a symlink, not the file it names",
+            code=EXECUTABLE_MISMATCH,
+        )
     try:
         actual_path = os.path.realpath(actual, strict=True)
-        expected_path = os.path.realpath(expected, strict=True)
+        expected_path = _canonical_executable_path(expected)
     except OSError as exc:
         raise ServerHostInstallError(
             f"the executable named for pid {pid} cannot be resolved: {exc}",
             code=EXECUTABLE_UNREADABLE,
         ) from exc
-    if os.path.abspath(expected) != expected_path:
-        raise ServerHostInstallError(
-            "the installed host path is not canonical (it contains a symlink)",
-            code=EXECUTABLE_MISMATCH,
-        )
     try:
         actual_info = os.stat(actual_path)
         expected_info = os.stat(expected_path)
