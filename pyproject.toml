@@ -119,6 +119,8 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 explicit_package_bases = true
+# Eval fixture code (hyphenated task dirs) is not engine code and is not a package.
+exclude = ['^ciao/stock/evals/tasks/']
 
 [tool.coverage.run]
 source = ["ciao"]

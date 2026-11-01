@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -787,6 +788,99 @@ def test_prepare_workspace_pins_requested_provider_and_model(tmp_path: Path) -> 
     assert config.default_model_for_workspace("personal", "claude") == "haiku"
 
 
+# --- Hard tier: H1 synthesis, H2 code bug fix, H3 doc revision ---------------------
+
+H1_ID = "H1-multi-source-synthesis"
+H2_ID = "H2-code-bugfix"
+H3_ID = "H3-doc-revision"
+HARD_IDS = (H1_ID, H2_ID, H3_ID)
+
+
+def _task(task_id: str) -> te.EvalTask:
+    return next(task for task in te.load_tasks() if task.id == task_id)
+
+
+def _overlay(task_id: str) -> Path:
+    return te.TASKS_ROOT / task_id / "overlay"
+
+
+def test_hard_tasks_load() -> None:
+    tasks = {task.id: task for task in te.load_tasks()}
+
+    for task_id in HARD_IDS:
+        assert task_id in tasks, task_id
+        assert tasks[task_id].tier == "hard", task_id
+
+
+def test_h1_inbox_plants_facts() -> None:
+    inbox = _overlay(H1_ID) / "memory-vault" / "Documents" / "inbox"
+    texts = {path.name: path.read_text(encoding="utf-8") for path in sorted(inbox.glob("*.md"))}
+    assert set(texts) == {"slack-thread.md", "call-transcript.md", "caterer-email.md"}
+
+    joined = "\n".join(texts.values())
+    assert "Forno Rosso" in joined
+    assert "38" in joined
+    assert "30%" in joined
+    assert "2027-03-12" in joined or "12 March 2027" in joined
+    assert [name for name, text in texts.items() if "45" in text] == ["slack-thread.md"]
+
+
+def test_h2_seeded_bug_fails_and_fix_passes(tmp_path: Path) -> None:
+    project = tmp_path / "code" / "invoice_tool"
+    shutil.copytree(_overlay(H2_ID) / "code" / "invoice_tool", project)
+    run = [sys.executable, "-m", "unittest", "-q", "test_invoice"]
+
+    broken = subprocess.run(run, cwd=project, capture_output=True, text=True, check=False)
+    assert broken.returncode != 0, broken.stderr
+
+    source = project / "invoice.py"
+    head, marker, _ = source.read_text(encoding="utf-8").partition("def total(")
+    assert marker, "invoice.py must define total()"
+    fixed = (
+        "def total(lines: list[tuple[float, int]], discount_pct: float = 0.0, vat_pct: float = 8.1) -> float:\n"
+        "    subtotal = sum(price * qty for price, qty in lines)\n"
+        "    return round(subtotal * (1 - discount_pct / 100) * (1 + vat_pct / 100), 2)\n"
+    )
+    source.write_text(head + fixed, encoding="utf-8")
+
+    fixed_run = subprocess.run(run, cwd=project, capture_output=True, text=True, check=False)
+    assert fixed_run.returncode == 0, fixed_run.stderr
+
+
+def test_h3_fixture_starts_failing(tmp_path: Path) -> None:
+    root = tmp_path / "personal"
+    shutil.copytree(te.TASKS_ROOT / te.FIXTURE_DIRNAME, root / "memory-vault")
+    shutil.copytree(_overlay(H3_ID), root, dirs_exist_ok=True)
+    ctx = _ctx(root)
+
+    for spec in _task(H3_ID).checks:
+        kind = str(spec["kind"])
+        result = te.CHECKS[kind](ctx, spec)
+        preserves_untouched_text = "Wash your dishes" in spec.get("all", [])
+        if kind in ("file_contains", "file_excludes") and not preserves_untouched_text:
+            assert not result.ok, f"{kind} should fail on the untouched overlay: {result.detail}"
+        if kind == "links_resolve":
+            assert result.ok, result.detail
+
+
+def test_h3_correct_revision_passes_file_checks(tmp_path: Path) -> None:
+    root = tmp_path / "personal"
+    shutil.copytree(te.TASKS_ROOT / te.FIXTURE_DIRNAME, root / "memory-vault")
+    shutil.copytree(_overlay(H3_ID), root, dirs_exist_ok=True)
+    note = root / "memory-vault" / "Documents" / "house-rules.md"
+    text = note.read_text(encoding="utf-8")
+    text = text.replace("start at 23:00", "start at 22:00").replace("recieve", "receive")
+    text = text.replace("Smoking on the balcony is allowed after 20:00.\n", "")
+    text += "\n## Guests\n\nGuests may stay at most 3 nights.\n"
+    note.write_text(text, encoding="utf-8", newline="")
+    ctx = _ctx(root)
+
+    for spec in _task(H3_ID).checks:
+        kind = str(spec["kind"])
+        if kind in ("new_files", "unchanged"):
+            continue  # need a pre-prompt snapshot
+        result = te.CHECKS[kind](ctx, spec)
+        assert result.ok, f"{kind} should pass on a correct revision: {result.detail}"
 # --- Medium tier catalog ------------------------------------------------------------
 
 MEDIUM_TASK_IDS = (

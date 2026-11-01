@@ -155,16 +155,19 @@ tasks; `_fixture/` is the base vault.
 
 ### Tasks
 
-| Id | Tier | Category | Entry |
-| --- | --- | --- | --- |
-| `E1-task-capture` | easy | `task_capture` | prompt |
-| `E2-recall-abstain` | easy | `abstention` | prompt |
-| `E2-recall-guest-count` | easy | `recall` | prompt |
-| `E3-schedule-create` | easy | `schedule_create` | prompt |
-| `M1-proposal-merge` | medium | `curation` | prompt, with a queued proposal in `overlay/` |
-| `M2-project-exists` | medium | `project_create` | prompt; the fixture's `projects/active/garden-shed/` folder registers itself as a project at boot |
-| `M2-project-missing` | medium | `project_create` | prompt |
-| `M3-delegated-task` | medium | `delegated_task` | delegate, with a `task` setup step |
+| Id | Tier | Category | Entry | What it grades |
+| --- | --- | --- | --- | --- |
+| `E1-task-capture` | easy | `task_capture` | prompt | a task is created with the right title and due day |
+| `E2-recall-abstain` | easy | `abstention` | prompt | an unknown person's phone number is declined, not invented |
+| `E2-recall-guest-count` | easy | `recall` | prompt | the guest count of the summer party is read from the vault |
+| `E3-schedule-create` | easy | `schedule_create` | prompt | a weekly schedule is created at the requested day and time |
+| `M1-proposal-merge` | medium | `curation` | prompt, with a queued proposal in `overlay/` | the fact lands in the person note, the stale line goes, the proposal is resolved |
+| `M2-project-exists` | medium | `project_create` | prompt; the fixture's `projects/active/garden-shed/` folder registers itself as a project at boot | no duplicate project or scaffolding is created |
+| `M2-project-missing` | medium | `project_create` | prompt | exactly one project is created, and nothing else |
+| `M3-delegated-task` | medium | `delegated_task` | delegate, with a `task` setup step | the delegated chat reports the task done once, with the answer |
+| `H1-multi-source-synthesis` | hard | `synthesis` | prompt, with inbox notes in `overlay/` | three inbox notes (Slack, call, email) are merged into the summer party doc, and the superseded 45 quote is not stated as the current price (mentioning it as history is fine) |
+| `H2-code-bugfix` | hard | `coding` | prompt, with a toy package in `overlay/` | the seeded bug in `code/invoice_tool/invoice.py` is fixed and the unittest suite passes without touching the tests |
+| `H3-doc-revision` | hard | `doc_revision` | prompt, with the doc and its review in `overlay/` | four review comments are applied to `house-rules.md`, untouched sections survive, and the review file itself is left unchanged |
 
 ### Check kinds
 
