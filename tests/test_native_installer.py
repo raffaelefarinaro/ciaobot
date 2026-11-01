@@ -1202,11 +1202,15 @@ def test_prepare_refuses_a_symlinked_trusted_root(tmp_path: Path) -> None:
     assert not (real / "state").exists()
 
 
-def test_prepare_defaults_to_home_as_trusted_root() -> None:
-    home = Path.home()
-    if home == Path("/"):
-        pytest.skip("the home directory is the filesystem root")
-    target = home.parent / f"caobot-outside-{uuid.uuid4().hex}"
+def test_prepare_defaults_to_home_as_trusted_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # A sibling of home, so it lies outside the default trusted root.
+    target = home.parent / f"ciaobot-outside-{uuid.uuid4().hex}"
     assert (
         _lock_reason(native.prepare_native_state_dir, target)
         == "state_dir_unsafe"

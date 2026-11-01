@@ -607,8 +607,9 @@ fresh attempt wrote (the existing `keep_record` path) while the run reports
 The first coordinator lifecycle slice is now in `ciao.native_installer`, but it
 has **no production caller and no public run path**: `run_native_install`
 refuses with `coordinator_unavailable` until the setup child can write its
-schema-2 handoff from a native context and a Python readiness proof equivalent
-to the shell's fresh startup check exists. The testable private seam,
+schema-2 handoff from a native context and the readiness proof in
+`ciao.native_readiness` is wired in. That proof exists but is not wired into the
+coordinator, so the coordinator still ends with `service_not_ready`. The testable private seam,
 `_run_native_install`, takes injected callables for every external effect. Its
 `NativeInstallOutcome` records attempted and completed flags separately, so a
 host or activation step that mutates and then raises is never reported as

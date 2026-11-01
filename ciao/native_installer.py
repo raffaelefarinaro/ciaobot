@@ -152,8 +152,9 @@ so the order and the cleanup rules can be driven with fakes and real short-lived
 child processes. The public ``run_native_install`` exposes none of those seams
 and still refuses before it touches the descriptor: the setup child now has an
 explicit :class:`NativeBootstrapContext` and can record schema 2 through it, but
-the parent side is not wired to start that child or prove Python readiness, so
-the coordinator must not claim success. The lifecycle enforces the fresh-only
+the parent side is not wired to start that child, and the readiness proof in
+``ciao.native_readiness`` exists but is not wired into the coordinator, so the
+coordinator must not claim success. The lifecycle enforces the fresh-only
 preflight and the run lock before the engine install, creates the host through
 the real fresh-host helper, rechecks the lock and host immediately before each
 mutation, never passes the public event descriptor to a child, and terminates
@@ -3019,8 +3020,9 @@ def run_native_install(request: NativeInstallRequest) -> NativeInstallOutcome:
 
     This is the production entry point. It deliberately exposes no injection
     seams: the next slice must supply the native bootstrap context and schema-2
-    handoff recording in the setup child, and a real readiness proof equivalent
-    to the shell's fresh startup check, before this can start a run. Invalid
+    handoff recording in the setup child, and wiring the readiness proof in
+    ``ciao.native_readiness`` (it exists but is not wired into this coordinator)
+    before this can start a run. Invalid
     inputs are refused first with ``invalid_arguments``; a valid request then
     fails with ``coordinator_unavailable`` before reading the descriptor,
     acquiring the lock, touching the host or starting a child.
@@ -3046,7 +3048,8 @@ def _run_native_install(
     engine, then start the wizard. Every mutation is preceded by a cancellation
     and deadline check and (after acquisition) by ``assert_held``. The engine
     install cannot begin on ``configured``, ``partial``, ``unknown`` or a held
-    lock. Readiness proof is not implemented, so this slice always ends with
+    lock. The readiness proof in ``ciao.native_readiness`` exists but is not
+    wired into the coordinator, so this slice still ends with
     ``failed("service_not_ready")``; it never emits ``service_ready``.
 
     The injected synchronous steps cannot be preempted by this module: the
@@ -3262,8 +3265,9 @@ def _run_native_install(
                 _check_stage(deadline, cancellation)
 
                 writer.phase("readiness")
-                # Readiness proof is not implemented in this slice. A truthful
-                # service_not_ready failure is the only terminal this slice may emit;
+                # The readiness proof (ciao.native_readiness) exists but is not wired
+                # in here. A truthful service_not_ready failure is the only terminal
+                # this slice may emit;
                 # there is deliberately no service_ready call in the coordinator.
                 raise _Refusal("service_not_ready")
             except _Refusal as refusal:

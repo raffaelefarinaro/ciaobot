@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 
 import pytest
 
@@ -469,9 +469,10 @@ def test_invalid_deps_are_refused_before_any_read(tmp_path: Path) -> None:
         {"timeout": 0},
         {"timeout": -1},
         {"timeout": float("inf")},
+        {"timeout": 61},
         {"timeout": 301},
         {"probe_timeout": 0},
-        {"probe_timeout": 11},
+        {"probe_timeout": 6},
         {"listener_attempts": 0},
         {"listener_attempts": 11},
         {"listener_attempts": True},
@@ -1103,6 +1104,173 @@ def test_probe_timeout_is_clamped_to_what_is_left(tmp_path: Path) -> None:
     assert seen == [0.5]
 
 
+_SEAMS: tuple[str, ...] = ("startup_status", "job", "ancestor_pids", "executable_path")
+_Answer = TypeVar("_Answer")
+
+
+def _traced_deps(
+    request: NativeReadinessRequest,
+    *,
+    seam: str,
+    action: Callable[[], None],
+    clock: object | None = None,
+) -> tuple[NativeReadinessDeps, list[str]]:
+    """The default doubles, recording every seam call in order.
+
+    ``action`` runs inside ``seam`` before it answers, so a test can set the
+    cancel flag or advance the clock at exactly that point.
+    """
+    base = _deps(request, clock=clock)
+    trace: list[str] = []
+
+    def record(name: str, answer: _Answer) -> _Answer:
+        trace.append(name)
+        if name == seam:
+            action()
+        return answer
+
+    deps = dataclasses.replace(
+        base,
+        listener_pid=lambda port: record("listener_pid", base.listener_pid(port)),
+        startup_status=lambda port, timeout: record(
+            "startup_status", base.startup_status(port, timeout)
+        ),
+        job=lambda label: record("job", base.job(label)),
+        ancestor_pids=lambda pid: record("ancestor_pids", base.ancestor_pids(pid)),
+        executable_path=lambda pid: record(
+            "executable_path", base.executable_path(pid)
+        ),
+    )
+    return deps, trace
+
+
+@pytest.mark.parametrize("seam", _SEAMS)
+def test_cancellation_is_observed_at_every_seam(tmp_path: Path, seam: str) -> None:
+    request = _request(tmp_path)
+    _write_lock(request.workspace)
+    flag = {"cancelled": False}
+
+    def cancel() -> None:
+        flag["cancelled"] = True
+
+    deps, trace = _traced_deps(request, seam=seam, action=cancel)
+    proof = _prove(request, deps=deps, cancelled=lambda: flag["cancelled"])
+
+    assert proof.failure == "cancelled"
+    # The flag is observed before the next seam: nothing was called after it.
+    assert trace[-1] == seam
+
+
+@pytest.mark.parametrize("seam", _SEAMS)
+def test_timeout_is_observed_at_every_seam(tmp_path: Path, seam: str) -> None:
+    request = _request(tmp_path)
+    _write_lock(request.workspace)
+    clock = _FakeClock()
+
+    def pass_the_deadline() -> None:
+        clock.advance(NativeReadinessPolicy().timeout + 1)
+
+    deps, trace = _traced_deps(
+        request, seam=seam, action=pass_the_deadline, clock=clock
+    )
+    proof = _prove(request, deps=deps)
+
+    assert proof.failure == "timeout"
+    assert trace[-1] == seam
+
+
+def test_a_lock_rewritten_during_the_ancestry_check_is_refused(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    _write_lock(request.workspace)
+
+    def rewrite_startup_id(_pid: int) -> tuple[int, ...]:
+        _write_lock(request.workspace, startup_id="f" * 32)
+        return (LISTENER, HOST_PID)
+
+    proof = _prove(request, deps=_deps(request, chain=rewrite_startup_id))
+
+    assert proof.failure == "lock_changed"
+
+
+def test_a_lock_whose_pid_changes_during_the_ancestry_check_is_refused(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    _write_lock(request.workspace)
+
+    def rewrite_pid(_pid: int) -> tuple[int, ...]:
+        _write_lock(request.workspace, pid=HOST_PID)
+        return (LISTENER, HOST_PID)
+
+    proof = _prove(request, deps=_deps(request, chain=rewrite_pid))
+
+    assert proof.failure == "lock_changed"
+
+
+def test_a_lock_that_vanishes_before_the_final_reread_is_refused(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    lock = _write_lock(request.workspace)
+
+    def remove_lock(_pid: int) -> tuple[int, ...]:
+        lock.unlink()
+        return (LISTENER, HOST_PID)
+
+    proof = _prove(request, deps=_deps(request, chain=remove_lock))
+
+    # The final re-read's lstat raises FileNotFoundError, which the reader maps
+    # to lock_missing (a vanished lock is never treated as unsafe or as ready).
+    assert proof.failure == "lock_missing"
+
+
+def test_a_listener_that_changes_during_the_final_revalidation_is_refused(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    _write_lock(request.workspace)
+    listener_calls: list[int] = []
+
+    proof = _prove(
+        request,
+        deps=_deps(
+            request,
+            listener_values=[LISTENER, LISTENER, LISTENER + 1],
+            listener_calls=listener_calls,
+        ),
+    )
+
+    assert proof.failure == "listener_changed"
+    # Before the request, after it, and the final revalidation.
+    assert len(listener_calls) == 3
+
+
+def test_a_utf16_startup_status_body_is_refused(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    _write_lock(request.workspace)
+    body = json.dumps(_payload(request)).encode("utf-16")
+
+    proof = _prove(request, deps=_deps(request, startup_status=lambda _p, _t: body))
+
+    assert proof.failure == "startup_status_invalid"
+
+
+def test_a_utf16_runtime_lock_is_refused(tmp_path: Path) -> None:
+    request = _request(tmp_path)
+    document = {
+        "pid": LISTENER,
+        "port": PORT,
+        "workspace": str(request.workspace),
+        "runtime": str(request.workspace / ".runtime"),
+        "started_at": "2026-11-01T00:00:00Z",
+        "status": "running",
+        "startup_id": STARTUP_ID,
+    }
+    _write_lock(request.workspace, raw=json.dumps(document).encode("utf-16"))
+
+    proof = _prove(request, deps=_deps(request))
+
+    assert proof.failure == "lock_invalid"
+
+
 def test_every_failure_is_a_fixed_code(tmp_path: Path) -> None:
     request = _request(tmp_path)
     _write_lock(request.workspace, mode=0o644)
@@ -1438,12 +1606,15 @@ def test_http_adapter_enforces_an_absolute_deadline_on_a_body_drip() -> None:
     stop = threading.Event()
 
     def handler(connection: socket.socket) -> None:
+        # 200 bytes at 50 ms apiece is a ~10 s drip against a 0.5 s deadline. A
+        # per-byte timeout would never fire here, so only the absolute deadline
+        # stops it; the 4 s bound leaves slack for a loaded machine.
         connection.sendall(
             b"HTTP/1.1 200 OK\r\n"
-            b"Content-Length: 40\r\n"
+            b"Content-Length: 200\r\n"
             b"Connection: close\r\n\r\n"
         )
-        for _ in range(40):
+        for _ in range(200):
             if stop.is_set():
                 return
             try:
@@ -1456,7 +1627,7 @@ def test_http_adapter_enforces_an_absolute_deadline_on_a_body_drip() -> None:
     start = time.monotonic()
     try:
         assert readiness.http_startup_status(port, 0.5) is None
-        assert time.monotonic() - start < 1.5
+        assert time.monotonic() - start < 4.0
     finally:
         stop.set()
         thread.join(timeout=2.0)
