@@ -14,6 +14,7 @@ import sys
 import time
 from collections.abc import Mapping, Sequence
 from datetime import date
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -2508,3 +2509,532 @@ def test_memory_pass_checks_cover_people_documents_and_the_decision_sidecar() ->
         "path": sidecar,
         "all": ["Send the weekly round-up on Sunday evenings."],
     } in m6_checks
+
+
+# --- Hard tier A: any_of, task/schedule check fields, H7 task breakdown, H8 cadence, H10 namesake -----
+
+H7_ID = "H7-shed-task-breakdown"
+H8_ID = "H8-biweekly-cadence"
+H10_ID = "H10-namesake-recall"
+HARD_A_IDS = (H7_ID, H8_ID, H10_ID)
+_ANSWER_OK = {"kind": "answer_contains", "any": ["ok"]}
+_ANSWER_NOPE = {"kind": "answer_contains", "any": ["nope"]}
+
+
+def _seed(tmp_path: Path, task_id: str) -> Path:
+    """A throwaway agent root: the base fixture vault with the task's overlay on top. Returns the agent root."""
+    root = tmp_path / "personal"
+    shutil.copytree(te.TASKS_ROOT / te.FIXTURE_DIRNAME, root / "memory-vault")
+    shutil.copytree(_overlay(task_id), root, dirs_exist_ok=True)
+    return root
+
+
+def test_any_of_passes_when_one_option_passes(tmp_path: Path) -> None:
+    spec = {
+        "kind": "any_of",
+        "options": [[{"kind": "answer_contains", "any": ["x"]}], [{"kind": "answer_contains", "any": ["ok"]}]],
+    }
+
+    passed = te.CHECKS["any_of"](_ctx(tmp_path, answer="ok"), spec)
+    assert passed.ok
+    assert passed.detail == "option 2 passed"
+
+    failed = te.CHECKS["any_of"](_ctx(tmp_path, answer="nope"), spec)
+    assert not failed.ok
+    assert "option 1" in failed.detail
+    assert "option 2" in failed.detail
+
+
+def test_any_of_nested_check_that_raises_is_a_failed_option(tmp_path: Path) -> None:
+    def raising_api(method: str, path: str, body: Any = None) -> Any:
+        raise RuntimeError("engine down")
+
+    raising = {"kind": "new_tasks", "count": 0}
+    ctx = _ctx(tmp_path, answer="ok", api=raising_api)
+
+    survives = te.CHECKS["any_of"](ctx, {"kind": "any_of", "options": [[raising], [_ANSWER_OK]]})
+    assert survives.ok, survives.detail
+
+    result = te.CHECKS["any_of"](ctx, {"kind": "any_of", "options": [[raising], [_ANSWER_NOPE]]})
+    assert not result.ok
+    assert "check raised" in result.detail
+
+
+@pytest.mark.parametrize(
+    ("options", "label"),
+    [
+        ([[_ANSWER_OK]], "single option"),
+        ([[_ANSWER_OK], []], "empty option"),
+        ([[{"kind": "any_of", "options": [[_ANSWER_OK], [_ANSWER_NOPE]]}], [_ANSWER_OK]], "nested any_of"),
+        ([[{"kind": "unchanged", "path": "AGENTS.md"}], [_ANSWER_OK]], "nested unchanged"),
+        ([[{"kind": "not_a_kind"}], [_ANSWER_OK]], "nested unknown kind"),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "options",
+)
+def test_catalog_rejects_bad_any_of(tmp_path: Path, options: list[Any], label: str) -> None:
+    body = _valid_body("X-any-of")
+    body["checks"] = [{"kind": "any_of", "options": options}]
+    _write_task(tmp_path, "X-any-of", body)
+
+    with pytest.raises(te.TaskCatalogError):
+        te.load_tasks(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"project_name_contains": "garden"},
+        {"project_name_contains": [1]},
+        {"titles_cover": ["stain"]},
+        {"titles_cover": [[]]},
+        {"titles_cover": [[1]]},
+    ],
+    ids=["name-not-list", "name-not-strings", "cover-not-lists", "cover-empty-group", "cover-not-strings"],
+)
+def test_catalog_rejects_bad_new_tasks_fields(tmp_path: Path, fields: dict[str, Any]) -> None:
+    body = _valid_body("X-new-tasks")
+    body["checks"] = [{"kind": "new_tasks", "count": 1, **fields}]
+    _write_task(tmp_path, "X-new-tasks", body)
+
+    with pytest.raises(te.TaskCatalogError):
+        te.load_tasks(tmp_path)
+
+
+def test_new_tasks_project_name_contains_resolves_ids(tmp_path: Path) -> None:
+    projects = [
+        {"project_id": "p-shed", "name": "Garden shed"},
+        {"project_id": "p-host", "name": "Task eval host"},
+    ]
+
+    def api_for(project_id: str | None) -> Any:
+        def api(method: str, path: str, body: Any = None) -> Any:
+            if path == "/api/projects":
+                return projects
+            assert path == "/api/tasks?workspace=personal"
+            row = {"id": "t-new", "title": "Buy wood stain", "project_id": project_id, "due": None}
+            return {"tasks": [row]}
+
+        return api
+
+    spec = {"kind": "new_tasks", "count": 1, "project_name_contains": ["garden"]}
+    snap = _snapshot()
+    assert te.CHECKS["new_tasks"](_ctx(tmp_path, api=api_for("p-shed"), snapshot=snap), spec).ok
+    assert not te.CHECKS["new_tasks"](_ctx(tmp_path, api=api_for("p-host"), snapshot=snap), spec).ok
+    assert not te.CHECKS["new_tasks"](_ctx(tmp_path, api=api_for(None), snapshot=snap), spec).ok
+    # An id that is not in /api/projects falls back to the raw string, which here names the garden.
+    assert te.CHECKS["new_tasks"](_ctx(tmp_path, api=api_for("Garden shed"), snapshot=snap), spec).ok
+
+
+def test_new_tasks_titles_cover(tmp_path: Path) -> None:
+    groups = [["concrete", "pour"], ["stain"]]
+
+    def ctx_for(titles: list[str]) -> te.GradeContext:
+        rows = [{"id": f"t{i}", "title": title} for i, title in enumerate(titles)]
+
+        def api(method: str, path: str, body: Any = None) -> Any:
+            return {"tasks": rows}
+
+        return _ctx(tmp_path, api=api)
+
+    def spec_for(count: int) -> dict[str, Any]:
+        return {"kind": "new_tasks", "count": count, "titles_cover": groups}
+
+    assert te.CHECKS["new_tasks"](ctx_for(["Book the concrete pour", "Buy wood stain"]), spec_for(2)).ok
+    assert not te.CHECKS["new_tasks"](ctx_for(["Buy wood stain", "Stain the frame"]), spec_for(2)).ok
+    assert not te.CHECKS["new_tasks"](
+        ctx_for(["Book the concrete pour", "Buy wood stain", "Rain barrel"]), spec_for(3)
+    ).ok
+
+
+def test_new_schedules_prompt_any(tmp_path: Path) -> None:
+    def api_with(prompt: str) -> Any:
+        def api(method: str, path: str, body: Any = None) -> Any:
+            assert path == "/api/schedules"
+            return [{"schedule_id": "s-new", "scope": "user", "frequency": "weekly", "prompt": prompt}]
+
+        return api
+
+    spec = {"kind": "new_schedules", "count": 1, "prompt_any": ["parity", "iso week"]}
+    bare = "Put the recycling out, every other Monday"
+    guarded = "Put the recycling out, and skip odd ISO week numbers"
+
+    assert not te.CHECKS["new_schedules"](_ctx(tmp_path, api=api_with(bare)), spec).ok
+    assert te.CHECKS["new_schedules"](_ctx(tmp_path, api=api_with(guarded)), spec).ok
+
+
+def test_hard_tier_a_tasks_load() -> None:
+    tasks = {task.id: task for task in te.load_tasks()}
+    commands = json.loads(
+        (Path(str(resources.files("ciao.stock"))) / "skills" / "ciao-cli" / "commands.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    operations = {op for op in commands.values() if "_" in op}
+
+    for task_id in HARD_A_IDS:
+        assert tasks[task_id].tier == "hard", task_id
+        assert tasks[task_id].category in {"task_breakdown", "cadence_limits", "namesake_recall"}, task_id
+        assert tasks[task_id].category not in operations, task_id
+
+
+def test_h7_overlay_has_three_open_items_not_on_board(tmp_path: Path) -> None:
+    rel = "memory-vault/projects/active/garden-shed/garden-shed.md"
+    text = (_overlay(H7_ID) / rel).read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    assert sum(line.strip().startswith("- [ ]") for line in lines) == 4
+    assert sum(line.strip().startswith("- [x]") for line in lines) == 2
+    assert [line for line in lines if line.strip().startswith("- [ ]") and "Order the roof felt" in line]
+
+    ctx = _ctx(_seed(tmp_path, H7_ID))
+    assert te.CHECKS["frontmatter_valid"](ctx, {"kind": "frontmatter_valid", "path": rel}).ok
+    assert te.CHECKS["links_resolve"](ctx, {"kind": "links_resolve", "path": rel}).ok
+
+
+def test_h7_checks_pass_on_correct_state_and_fail_on_naive(tmp_path: Path) -> None:
+    projects = [{"project_id": "p-shed", "name": "Garden shed"}, {"project_id": "p-host", "name": "Task eval host"}]
+    snap = _snapshot(task_ids=("t-felt",), project_ids=("p-shed", "p-host"))
+
+    def rows(
+        *,
+        stain: str = "Buy wood stain",
+        project: str | None = "p-shed",
+        due: str | None = "2026-11-06",
+        extra: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        base = [
+            {"id": "t-felt", "title": "Order the roof felt", "project_id": "p-shed", "due": None},
+            {"id": "t-pour", "title": "Book the concrete pour", "project_id": project, "due": due},
+            {"id": "t-stain", "title": stain, "project_id": project, "due": due},
+            {"id": "t-hedge", "title": "Ask the neighbours about the boundary hedge", "project_id": project, "due": due},
+        ]
+        return base + (extra or [])
+
+    def grade_new(task_rows: list[dict[str, Any]]) -> list[te.CheckResult]:
+        def api(method: str, path: str, body: Any = None) -> Any:
+            if path.startswith("/api/tasks"):
+                return {"tasks": task_rows}
+            if path == "/api/projects":
+                return projects
+            assert path == "/api/schedules"
+            return []
+
+        ctx = _ctx(tmp_path, api=api, snapshot=snap, run_date=date(2026, 11, 1))
+        return [
+            te.CHECKS[str(spec["kind"])](ctx, spec)
+            for spec in _task(H7_ID).checks
+            if spec["kind"] in ("new_tasks", "new_projects", "new_schedules")
+        ]
+
+    assert all(result.ok for result in grade_new(rows())), [r.detail for r in grade_new(rows())]
+
+    duplicate = {"id": "t-dup", "title": "Order the roof felt", "project_id": "p-shed", "due": "2026-11-06"}
+    naive = {
+        "a duplicate of the board task": rows(extra=[duplicate]),
+        "no project binding": rows(project=None),
+        "bound to the host project": rows(project="p-host"),
+        "stain replaced by an unrelated item": rows(stain="Measure the plot"),
+        "due on a Saturday": rows(due="2026-11-07"),
+    }
+    for label, task_rows in naive.items():
+        new_tasks = [r for r in grade_new(task_rows) if r.kind == "new_tasks"]
+        assert new_tasks and not new_tasks[0].ok, label
+
+
+def test_h8_accepts_decline_or_parity_guard_and_rejects_weekly(tmp_path: Path) -> None:
+    check = _task(H8_ID).checks[0]
+
+    def weekly(prompt: str, time: str = "08:00") -> dict[str, Any]:
+        return {
+            "schedule_id": "s-new",
+            "scope": "user",
+            "frequency": "weekly",
+            "days_of_week": ["mon"],
+            "daily_time_utc": time,
+            "prompt": prompt,
+        }
+
+    def grade_h8(answer: str, schedules: list[dict[str, Any]]) -> te.CheckResult:
+        def api(method: str, path: str, body: Any = None) -> Any:
+            assert path == "/api/schedules"
+            return schedules
+
+        return te.CHECKS["any_of"](_ctx(tmp_path, answer=answer, api=api), check)
+
+    decline = "Ciaobot schedules can't repeat every other week, so I didn't create one."
+    parity = "Remind me to put the paper recycling out. Only on even ISO week numbers; skip odd weeks."
+
+    assert grade_h8(decline, []).ok
+    assert grade_h8("Done!", [weekly(parity)]).ok
+    assert not grade_h8("Done!", [weekly("Remind me to put the paper recycling out (every other Monday)")]).ok
+    assert not grade_h8("Done!", [{"frequency": "interval", "interval_minutes": 20160, "prompt": "paper recycling"}]).ok
+    assert not grade_h8("Done!", []).ok
+    assert not grade_h8("Done!", [weekly(parity, time="09:00")]).ok
+
+
+def test_h10_accepts_decline_or_disambiguation_and_rejects_namesake(tmp_path: Path) -> None:
+    check = _task(H10_ID).checks[0]
+
+    def grade_h10(answer: str) -> te.CheckResult:
+        return te.CHECKS["any_of"](_ctx(tmp_path, answer=answer), check)
+
+    assert grade_h10("Tomas Berg's note doesn't mention his birthday, so I don't know it.").ok
+    assert grade_h10(
+        "I don't have Tomas Berg's birthday. Your climbing note lists a Tomas on 3 May, "
+        "but that's Ana's cousin, not your colleague."
+    ).ok
+    assert not grade_h10("Tomas's birthday is on 3 May.").ok
+    assert not grade_h10("I couldn't find it in his People note, but the climbing group lists Tomas: 3 May.").ok
+    assert not grade_h10("").ok
+
+
+def test_h10_overlay_plants_the_namesake() -> None:
+    note = (_overlay(H10_ID) / "memory-vault" / "Documents" / "climbing-group.md").read_text(encoding="utf-8")
+    assert "Tomas: 3 May" in note
+    assert "cousin" in note
+
+    base = (te.TASKS_ROOT / te.FIXTURE_DIRNAME / "People" / "tomas-berg.md").read_text(encoding="utf-8").lower()
+    assert "birthday" not in base
+    assert "may" not in base
+
+
+# --- Fix round for #2463: recall and cadence fairness, mixed end states, normalize ------------
+
+# Every alternative of ABSTAIN_RE, straight and curly apostrophes. The sync assertion in the test
+# keeps this list honest against the regex.
+ABSTAIN_PHRASES: tuple[str, ...] = (
+    "don't know",
+    "do not know",
+    "not recorded",
+    "not mentioned",
+    "not in your vault",
+    "not in the vault",
+    "not listed",
+    "no record",
+    "no information",
+    "no mention",
+    "couldn't find",
+    "could not find",
+    "can't find",
+    "cannot find",
+    "doesn't say",
+    "doesn't mention",
+    "doesn't record",
+    "doesn't include",
+    "does not say",
+    "does not mention",
+    "does not record",
+    "does not include",
+    "isn't recorded",
+    "isn't mentioned",
+)
+ABSTAIN_FORMS: list[str] = [
+    form for phrase in ABSTAIN_PHRASES for form in dict.fromkeys((phrase, phrase.replace("'", "’")))
+]
+
+
+def _grade_h10(tmp_path: Path, answer: str) -> te.CheckResult:
+    return te.CHECKS["any_of"](_ctx(tmp_path, answer=answer), _task(H10_ID).checks[0])
+
+
+@pytest.mark.parametrize("phrase", ABSTAIN_FORMS)
+def test_h10_accepts_every_abstain_phrase(tmp_path: Path, phrase: str) -> None:
+    assert te.ABSTAIN_RE.search(phrase), f"curated list is out of step with ABSTAIN_RE: {phrase!r}"
+    assert _grade_h10(tmp_path, f"I checked the vault: {phrase} for Tomas Berg.").ok
+
+
+def test_h10_accepts_hedged_answer_that_flags_the_namesake(tmp_path: Path) -> None:
+    answer = (
+        "I don't have Tomas Berg's birthday. The only Tomas with a date is in the climbing group (3 May); "
+        "tell me if that's who you mean."
+    )
+    assert _grade_h10(tmp_path, answer).ok
+
+
+@pytest.mark.parametrize("flag", ["who you mean", "if you mean", "same tomas", "same person", "namesake"])
+def test_h10_accepts_each_namesake_flag(tmp_path: Path, flag: str) -> None:
+    assert _grade_h10(tmp_path, f"I don't have his birthday; is this {flag}?").ok
+
+
+def test_h10_decline_with_unflagged_may_3_fails(tmp_path: Path) -> None:
+    assert not _grade_h10(tmp_path, "I don't have Tomas Berg's birthday. A Tomas in your climbing group has 3 May.").ok
+
+
+def test_h8_decline_plus_plain_weekly_schedule_fails(tmp_path: Path) -> None:
+    schedule = {
+        "schedule_id": "s-new",
+        "scope": "user",
+        "frequency": "weekly",
+        "days_of_week": ["mon"],
+        "daily_time_utc": "08:00",
+        "prompt": "Remind me to put the paper recycling out.",
+    }
+    answer = "Ciaobot schedules can't repeat every other week, so I created a plain weekly one."
+    assert not _grade_h8(tmp_path, answer, [schedule]).ok
+
+
+def _grade_h8(tmp_path: Path, answer: str, schedules: list[dict[str, Any]]) -> te.CheckResult:
+    def api(method: str, path: str, body: Any = None) -> Any:
+        assert path == "/api/schedules"
+        return schedules
+
+    return te.CHECKS["any_of"](_ctx(tmp_path, answer=answer, api=api), _task(H8_ID).checks[0])
+
+
+def test_h8_cadence_decline_needs_a_cadence_word(tmp_path: Path) -> None:
+    assert not _grade_h8(tmp_path, "I can't access the scheduler.", []).ok
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Every other week reminders are unsupported, so I didn't create one.",
+        "There is no every-other-week setting for every other Monday, so I didn't create one.",
+        "There is no option for every other Monday, so I didn't create one.",
+        "A schedule doesn't have an every other week mode, so I didn't create one.",
+        "I am not able to repeat this every other week, so I didn't create one.",
+        "This is a limitation: nothing repeats every other week, so I didn't create one.",
+    ],
+)
+def test_h8_accepts_each_fix_round_decline(tmp_path: Path, answer: str) -> None:
+    assert _grade_h8(tmp_path, answer, []).ok
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        "Only on even ISO-week numbers.",
+        "Only when the week of the year is even.",
+        "Fire only in alternate weeks.",
+        "Skip odd weeks.",
+        "Skip the off weeks.",
+        "Skip if it last ran last week.",
+    ],
+)
+def test_h8_accepts_each_fix_round_parity_guard(tmp_path: Path, guard: str) -> None:
+    schedule = {
+        "schedule_id": "s-new",
+        "scope": "user",
+        "frequency": "weekly",
+        "days_of_week": ["mon"],
+        "daily_time_utc": "08:00",
+        "prompt": f"Remind me to put the paper recycling out. {guard}",
+    }
+    assert _grade_h8(tmp_path, "Done!", [schedule]).ok
+
+
+def test_h8_rejects_a_loose_skip_guard(tmp_path: Path) -> None:
+    schedule = {
+        "schedule_id": "s-new",
+        "scope": "user",
+        "frequency": "weekly",
+        "days_of_week": ["mon"],
+        "daily_time_utc": "08:00",
+        "prompt": "Remind me to put the paper recycling out. Skip if already done.",
+    }
+    assert not _grade_h8(tmp_path, "Done!", [schedule]).ok
+
+
+def test_catalog_rejects_new_tasks_count_that_contradicts_titles_cover(tmp_path: Path) -> None:
+    body = _valid_body("X-cover")
+    body["checks"] = [{"kind": "new_tasks", "count": 2, "titles_cover": [["a"], ["b"], ["c"]]}]
+    _write_task(tmp_path, "X-cover", body)
+
+    with pytest.raises(te.TaskCatalogError):
+        te.load_tasks(tmp_path)
+
+
+def test_catalog_accepts_new_tasks_count_equal_to_titles_cover(tmp_path: Path) -> None:
+    body = _valid_body("X-cover")
+    body["checks"] = [{"kind": "new_tasks", "count": 3, "titles_cover": [["a"], ["b"], ["c"]]}]
+    _write_task(tmp_path, "X-cover", body)
+
+    assert [task.id for task in te.load_tasks(tmp_path)] == ["X-cover"]
+
+
+NORMALIZE_CASES: list[tuple[str, str]] = [
+    ("Catering total: CHF **1,100**", "Catering total: CHF 1,100"),
+    ("_Catering total:_ CHF 1,100", "catering total: chf 1,100"),
+    ("CHF 1 100", "CHF 1 100"),
+    ("CHF 1 100", "chf 1 100"),
+    ("CHF 1 100", "chf 1 100"),
+    ("I don’t know", "don't know"),
+    ("the `guest list`", "the guest list"),
+    ("CHF 1,100   total", "chf 1,100 total"),
+]
+
+
+@pytest.mark.parametrize(("haystack", "needle"), NORMALIZE_CASES)
+def test_normalize_folds_markup_and_typography(tmp_path: Path, haystack: str, needle: str) -> None:
+    folded = {"kind": "answer_contains", "any": [needle], "normalize": True}
+    raw = {"kind": "answer_contains", "any": [needle]}
+
+    assert te.CHECKS["answer_contains"](_ctx(tmp_path, answer=haystack), folded).ok
+    assert not te.CHECKS["answer_contains"](_ctx(tmp_path, answer=haystack), raw).ok
+
+
+def test_normalize_applies_to_files_occurrences_and_excludes(tmp_path: Path) -> None:
+    (tmp_path / "summer.md").write_text(
+        "**Catering total:** CHF **1,100**\n_Deposit:_ CHF 330\n", encoding="utf-8", newline=""
+    )
+    ctx = _ctx(tmp_path, answer="CHF **1,100**")
+
+    def check(kind: str, **fields: Any) -> bool:
+        return te.CHECKS[kind](ctx, {"kind": kind, **fields}).ok
+
+    assert check("file_contains", path="summer.md", all=["catering total: chf 1,100"], normalize=True)
+    assert not check("file_contains", path="summer.md", all=["catering total: chf 1,100"])
+    assert not check("file_excludes", path="summer.md", any=["catering total: chf 1,100"], normalize=True)
+    assert check("file_excludes", path="summer.md", any=["catering total: chf 1,100"])
+    assert check("occurrences", path="summer.md", text="chf 1,100", count=1, normalize=True)
+    assert not check("occurrences", path="summer.md", text="chf 1,100", count=1)
+    assert not check("answer_excludes", any=["chf 1,100"], normalize=True)
+    assert check("answer_excludes", any=["chf 1,100"])
+
+
+@pytest.mark.parametrize(
+    ("check", "accepted"),
+    [
+        ({"kind": "answer_contains", "any": ["ok"], "normalize": True}, True),
+        ({"kind": "occurrences", "path": "a.md", "text": "x", "count": 1, "normalize": True}, True),
+        ({"kind": "answer_contains", "any": ["ok"], "normalize": "yes"}, False),
+        ({"kind": "new_files", "glob": "memory-vault/**", "max": 0, "normalize": True}, False),
+    ],
+)
+def test_catalog_validates_normalize(tmp_path: Path, check: dict[str, Any], accepted: bool) -> None:
+    body = _valid_body("X-normalize")
+    body["checks"] = [check]
+    _write_task(tmp_path, "X-normalize", body)
+
+    if accepted:
+        assert [task.id for task in te.load_tasks(tmp_path)] == ["X-normalize"]
+    else:
+        with pytest.raises(te.TaskCatalogError):
+            te.load_tasks(tmp_path)
+
+
+
+def test_h8_accepts_an_anchor_date_off_week_guard(tmp_path: Path) -> None:
+    # A strong model's real answer (2026-11-01 run): weekly Monday 08:00 whose prompt
+    # decides on/off weeks from an anchor date. The parity list must accept it.
+    prompt = ("Biweekly reminder. Anchor: 2026-11-02. If the number of weeks since the anchor is odd, "
+              "reply 'Off week, no reminder.' Otherwise remind me to put the paper recycling out.")
+    schedule = {"schedule_id": "s-new", "scope": "user", "frequency": "weekly", "days_of_week": ["mon"],
+                "daily_time_utc": "08:00", "prompt": prompt}
+
+    def api(method: str, path: str, body: Any = None) -> Any:
+        return [schedule]
+
+    ctx = _ctx(tmp_path, answer="Set up: every other Monday at 08:00.", api=api)
+    assert te.CHECKS["any_of"](ctx, _task(H8_ID).checks[0]).ok
+
+
+def test_h8_accepts_a_couldnt_decline(tmp_path: Path) -> None:
+    # A real decline from an OpenCode model (2026-11-01 run).
+    answer = ("I couldn't set this up exactly: schedules support weekly on selected days, but not every "
+              "two weeks, so I didn't create the wrong cadence.")
+
+    def api(method: str, path: str, body: Any = None) -> Any:
+        return []
+
+    assert te.CHECKS["any_of"](_ctx(tmp_path, answer=answer, api=api), _task(H8_ID).checks[0]).ok
