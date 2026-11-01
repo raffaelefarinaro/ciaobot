@@ -1,0 +1,15 @@
+{
+  "id": "E2-recall-guest-count",
+  "tier": "easy",
+  "category": "recall",
+  "prompt": "How many guests have said yes to the summer party so far?",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "answer_contains", "any": ["23", "twenty-three"]},
+    {"kind": "answer_excludes", "any": ["40"]},
+    {"kind": "new_files", "glob": "**/*.md", "max": 0}
+  ]
+}

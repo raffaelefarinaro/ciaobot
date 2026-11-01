@@ -1,0 +1,14 @@
+{
+  "id": "E1-task-capture",
+  "tier": "easy",
+  "category": "task_capture",
+  "prompt": "Add a task: renew the bike insurance by Friday",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "new_tasks", "count": 1, "title_contains": ["insurance"], "due": "weekday:friday"},
+    {"kind": "new_files", "glob": "projects/**", "max": 0}
+  ]
+}

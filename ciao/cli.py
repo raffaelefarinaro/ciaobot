@@ -5629,6 +5629,75 @@ def _label_hygiene_command(args: argparse.Namespace) -> int:
     return label_hygiene.main(module_args)
 
 
+def _eval_tasks_command(args: argparse.Namespace) -> int:
+    """``ciao eval tasks``: the agentic task eval (catalog, isolated runs, report, compare)."""
+    from functools import partial
+
+    from ciao import task_eval
+
+    action = getattr(args, "tasks_action", "")
+    if action == "list":
+        tasks = task_eval.load_tasks()
+        rows = [
+            {
+                "id": task.id,
+                "tier": task.tier,
+                "category": task.category,
+                "entry": task.entry["kind"],
+                "requires": task.requires,
+            }
+            for task in tasks
+        ]
+        if args.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+        else:
+            for row in rows:
+                print(f"{row['id']}\t{row['tier']}\t{row['category']}\t{','.join(row['requires']) or '-'}")
+        return 0
+    if action == "run":
+        tiers = {item.strip() for item in args.tier.split(",") if item.strip()}
+        include = {item.strip() for item in args.include.split(",") if item.strip()}
+        selected = [
+            task
+            for task in task_eval.load_tasks()
+            if (not tiers or task.tier in tiers) and (not include or task.id in include)
+        ]
+        if not selected:
+            print("no tasks selected", file=sys.stderr)
+            return 2
+        out = args.out or task_eval.default_report_path(args.label)
+        rows = task_eval.run_suite(
+            selected,
+            provider=args.provider,
+            model=args.model,
+            label=args.label,
+            repeats=args.repeats,
+            jobs=args.jobs,
+            out=out,
+            session_factory=partial(task_eval.IsolatedEngine.boot, keep_workdir=args.keep_workdir),
+        )
+        print(task_eval.render_summary(task_eval.summarize(rows)))
+        print(f"wrote {len(rows)} run(s) to {out}")
+        return 1 if rows and all(row["status"] == "error" for row in rows) else 0
+    if action == "report":
+        summary = task_eval.summarize(task_eval.read_jsonl(args.files))
+        if args.json:
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+        else:
+            print(task_eval.render_summary(summary))
+        return 0
+    if action == "compare":
+        comparison = task_eval.compare(
+            task_eval.read_jsonl([args.baseline]), task_eval.read_jsonl([args.candidate])
+        )
+        if args.json:
+            print(json.dumps(comparison, indent=2, ensure_ascii=False))
+        else:
+            print(task_eval.render_comparison(comparison))
+        return 0
+    raise SystemExit(f"unknown eval tasks action: {action!r}")
+
+
 def _eval_command(args: argparse.Namespace) -> int:
     """Versioned behavioral evaluations for prompts, providers, and guides.
 
@@ -5640,6 +5709,8 @@ def _eval_command(args: argparse.Namespace) -> int:
     from ciao import behavioral_eval
 
     action = getattr(args, "eval_action", "")
+    if action == "tasks":
+        return _eval_tasks_command(args)
     if action == "contracts":
         contract_report = behavioral_eval.run_contract_checks()
         if args.json:
@@ -9751,6 +9822,70 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the structured comparison as JSON."
     )
     eval_compare.set_defaults(func=_eval_command)
+
+    eval_tasks = eval_sub.add_parser(
+        "tasks",
+        help=(
+            "Agentic task eval: boot an isolated engine per run, let Ciaobot act on a "
+            "synthetic vault, grade the workspace, and record usage. 'run' makes real model calls."
+        ),
+    )
+    tasks_sub = eval_tasks.add_subparsers(dest="tasks_action", required=True)
+    tasks_list = tasks_sub.add_parser("list", help="List the task catalog.")
+    tasks_list.add_argument("--json", action="store_true", help="Emit the catalog as JSON.")
+    tasks_list.set_defaults(func=_eval_command)
+
+    tasks_run = tasks_sub.add_parser(
+        "run",
+        help="Run catalog tasks on isolated engines (explicit; makes real model calls).",
+    )
+    tasks_run.add_argument("--provider", default="claude", choices=["claude", "opencode"])
+    tasks_run.add_argument(
+        "--model",
+        required=True,
+        help="Provider model id to run. Required; the runner never defaults it.",
+    )
+    tasks_run.add_argument(
+        "--label", default="candidate", help="Run label recorded on every row."
+    )
+    tasks_run.add_argument(
+        "--repeats", type=int, default=3, help="Runs per task; the summary shows medians."
+    )
+    tasks_run.add_argument(
+        "--jobs", type=int, default=1, help="Engines booted concurrently (each is a full engine)."
+    )
+    tasks_run.add_argument(
+        "--include", default="", help="Comma-separated task ids (default: the whole catalog)."
+    )
+    tasks_run.add_argument(
+        "--tier", default="", help="Comma-separated tiers: easy, medium, hard (default: all)."
+    )
+    tasks_run.add_argument(
+        "--out", type=Path, default=None,
+        help="JSONL report path (default: .runtime/evals/tasks/<stamp>-<label>.jsonl).",
+    )
+    tasks_run.add_argument(
+        "--keep-workdir", action="store_true",
+        help="Keep each run's throwaway workspace on disk for debugging.",
+    )
+    tasks_run.set_defaults(func=_eval_command)
+
+    tasks_report = tasks_sub.add_parser(
+        "report", help="Summarize one or more task-eval JSONL reports."
+    )
+    tasks_report.add_argument("files", nargs="+", type=Path)
+    tasks_report.add_argument("--json", action="store_true", help="Emit the summary as JSON.")
+    tasks_report.set_defaults(func=_eval_command)
+
+    tasks_compare = tasks_sub.add_parser(
+        "compare", help="Compare a baseline and a candidate task-eval JSONL report."
+    )
+    tasks_compare.add_argument("--baseline", type=Path, required=True)
+    tasks_compare.add_argument("--candidate", type=Path, required=True)
+    tasks_compare.add_argument(
+        "--json", action="store_true", help="Emit the comparison as JSON."
+    )
+    tasks_compare.set_defaults(func=_eval_command)
 
     skills_parser = subparsers.add_parser(
         "skills",
