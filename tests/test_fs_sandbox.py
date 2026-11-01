@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import pwd
 import shutil
 import subprocess
 import sys
@@ -1748,6 +1747,8 @@ def test_darwin_seatbelt_reads_a_memory_pass_archive_only():
     # /private, so a probe under pytest's tmp dir passes with or without the
     # grant (#2459). conftest points Path.home() at an isolated folder, so the
     # real one comes from the passwd entry.
+    import pwd  # POSIX only; a module-level import breaks collection on Windows
+
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
     if not os.access(real_home, os.W_OK):
         pytest.skip("home folder is not writable")
