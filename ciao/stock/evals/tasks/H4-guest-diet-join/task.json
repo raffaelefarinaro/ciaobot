@@ -15,12 +15,9 @@
       "path": "memory-vault/projects/active/summer-party/summer-party.md",
       "any": [
         "vegetarian meals: 4",
-        "vegetarian meals:** 4",
-        "vegetarian meals**: 4",
-        "vegetarian meals: **4",
-        "vegetarian meals: four",
-        "vegetarian meals:** four"
-      ]
+        "vegetarian meals: four"
+      ],
+      "normalize": true
     },
     {
       "kind": "file_contains",
@@ -40,16 +37,12 @@
         "vegetarian meals: 5",
         "vegetarian meals: 6",
         "vegetarian meals: 7",
-        "vegetarian meals:** 3",
-        "vegetarian meals:** 5",
-        "vegetarian meals:** 6",
-        "vegetarian meals:** 7",
-        "vegetarian meals**: 5",
-        "vegetarian meals: **5",
+        "vegetarian meals: three",
         "vegetarian meals: five",
         "vegetarian meals: six",
         "vegetarian meals: seven"
-      ]
+      ],
+      "normalize": true
     },
     {
       "kind": "answer_contains",

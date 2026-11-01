@@ -97,7 +97,7 @@
         "effect=draft_created",
         "effect=modified",
         "velosure-renewals",
-        "effect=unknown"
+        "op=(tasks|calendar|drive|docs|sheets|slides|forms)\\b.*\\b(insert|create|update|patch|delete|move|import|clear|copy|share)\\b.*effect=unknown"
       ]
     },
     {

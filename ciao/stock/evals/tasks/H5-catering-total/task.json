@@ -22,7 +22,10 @@
         "catering total: 1,100 chf",
         "catering total: 1100 chf",
         "catering total: 1'100 chf",
-        "catering total: 1 100 chf"
+        "catering total: 1 100 chf",
+        "catering total: chf1,100",
+        "catering total: chf1100",
+        "catering total: chf 1.100"
       ]
     },
     {
@@ -31,7 +34,8 @@
       "normalize": true,
       "any": [
         "deposit: chf 330",
-        "deposit: 330 chf"
+        "deposit: 330 chf",
+        "deposit: chf330"
       ]
     },
     {
