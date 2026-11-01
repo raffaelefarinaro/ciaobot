@@ -1,0 +1,17 @@
+{
+  "id": "M1-proposal-merge",
+  "tier": "medium",
+  "category": "curation",
+  "prompt": "Process the queued memory proposal about Lena Moretti: file the fact where it belongs and resolve the proposal.",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "file_contains", "path": "memory-vault/People/lena-moretti.md", "all": ["Turin"]},
+    {"kind": "frontmatter_valid", "path": "memory-vault/People/lena-moretti.md"},
+    {"kind": "new_files", "glob": "memory-vault/People/*", "max": 0},
+    {"kind": "file_excludes", "path": "memory-vault/Workspace/Memory-Proposals.md", "any": ["moved from Bologna to Turin"]},
+    {"kind": "occurrences", "path": "memory-vault/People/lena-moretti.md", "text": "Turin", "count": 1}
+  ]
+}

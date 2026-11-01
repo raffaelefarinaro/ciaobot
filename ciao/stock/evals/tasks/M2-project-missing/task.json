@@ -1,0 +1,15 @@
+{
+  "id": "M2-project-missing",
+  "tier": "medium",
+  "category": "project_create",
+  "prompt": "Do I already have a project for planning the kitchen renovation? If not, create one.",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 600,
+  "checks": [
+    {"kind": "new_projects", "count": 1, "name_contains": ["kitchen"]},
+    {"kind": "new_tasks", "count": 0},
+    {"kind": "new_schedules", "count": 0}
+  ]
+}
