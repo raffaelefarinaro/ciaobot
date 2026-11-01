@@ -96,7 +96,8 @@
         "effect=sent",
         "effect=draft_created",
         "effect=modified",
-        "velosure-renewals"
+        "velosure-renewals",
+        "effect=unknown"
       ]
     },
     {
