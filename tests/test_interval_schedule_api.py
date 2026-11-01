@@ -496,6 +496,15 @@ def _create_weekly(client: TestClient, days: list[str]):
     })
 
 
+def test_create_without_timezone_uses_the_shared_default(client: TestClient) -> None:
+    from ciao.schedules import DEFAULT_TIMEZONE
+
+    resp = _create_weekly(client, ["sat"])
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["timezone_name"] == DEFAULT_TIMEZONE
+
+
 def test_create_refuses_an_unknown_day_naming_the_accepted_ones(client: TestClient) -> None:
     resp = _create_weekly(client, ["Funday"])
 

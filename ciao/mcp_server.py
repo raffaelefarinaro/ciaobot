@@ -33,6 +33,7 @@ from ciao.control_plane import (
     ControlPlaneError,
     CONTEXT_LOGS_DEFAULT_LINES,
 )
+from ciao.schedules import DEFAULT_TIMEZONE
 logger = logging.getLogger(__name__)
 
 # One telemetry line per tool call with no retention meant a long-lived
@@ -145,7 +146,7 @@ _DESTRUCTIVE = ToolAnnotations(
 _SCHEDULE_CREATE_DEFAULTS: dict[str, Any] = {
     "prompt": "",
     "daily_time": "09:00",
-    "timezone": "UTC",
+    "timezone": DEFAULT_TIMEZONE,
     "frequency": "weekly",
     "title": "",
     "description": "",
@@ -895,8 +896,9 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
         daily_time: Local HH:MM in `timezone`, default "09:00"
             (persisted as the legacy field daily_time_utc). Ignored for
             frequency="interval", which has no time of day.
-        timezone: IANA name, e.g. "Europe/Rome", default "UTC". Use
-            the user's local timezone unless they ask for UTC.
+        timezone: IANA name, e.g. "Europe/Rome", default "Europe/Zurich"
+            (the same zone the Automations page uses). Omit it for the
+            user's local time; pass one only when the user names another zone.
         frequency: "daily" | "weekly" | "monthly" | "manual" | "once" |
             "interval"; default "weekly". Use "interval" for sub-day
             recurrence ("every 30 minutes") — see interval_minutes.
