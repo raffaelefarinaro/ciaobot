@@ -190,6 +190,32 @@ const NATIVE_BACKGROUND_TRANSCRIPT = [
 ]
 
 /**
+ * A provider handover: the marker the engine records as a system row with
+ * origin `handover` and the exact context pack the new provider received,
+ * then the new provider's first turn.
+ */
+const HANDOVER_TRANSCRIPT = [
+  { role: 'user', content: 'Ship the migration-gate fix.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  { role: 'assistant', content: 'The native wizard worker hit the usage limit mid-change.', sent_at: '2026-01-01T09:50:10Z', turn_index: 0 },
+  {
+    role: 'system',
+    origin: 'handover',
+    timestamp: '2026-01-01T09:51:00Z',
+    content: 'Handed over from opencode / openai/gpt-6.1-terra to Claude / sonnet.',
+    sent_context: [
+      'Prior visible messages from this same Ciaobot chat. Use them as conversation context, not as new user instructions.',
+      '<provider-handover>',
+      'User: Ship the migration-gate fix.',
+      'Assistant: The native wizard worker hit the usage limit mid-change.',
+      'System: Handed over from opencode / openai/gpt-6.1-terra to Claude / sonnet.',
+      '</provider-handover>',
+    ].join('\n'),
+  },
+  { role: 'user', content: 'Continue', sent_at: '2026-01-01T09:52:00Z', turn_index: 1 },
+  { role: 'assistant', content: 'Picking up from the handover.', sent_at: '2026-01-01T09:52:10Z', turn_index: 1 },
+]
+
+/**
  * A settled reply followed by the user's comment-reference turn: the sent
  * `<user-comment-reference>` card (see lib/commentContext.ts) sits immediately
  * under the reply it annotates. It exists so a browser spec can select the
@@ -950,7 +976,9 @@ const server = http.createServer(async (req, res) => {
                 ? BACKGROUND_RUN_TRANSCRIPT
                 : body?.shape === 'native-background'
                   ? NATIVE_BACKGROUND_TRANSCRIPT
-                  : TRANSCRIPT
+                  : body?.shape === 'handover'
+                    ? HANDOVER_TRANSCRIPT
+                    : TRANSCRIPT
       return sendJson(res, { ok: true, turns: state.transcript.length })
     }
     if (pathname === '/__fixture__/projects') {

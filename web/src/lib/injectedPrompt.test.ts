@@ -455,3 +455,34 @@ describe('summarizeInjectedPrompt', () => {
     expect(hint).toBe(`${'x'.repeat(200)}…`)
   })
 })
+
+describe('handover', () => {
+  const marker = 'Handed over from opencode / openai/gpt-6.1-terra to Claude / sonnet.'
+  const sent = '<provider-handover>\nUser: hi\n</provider-handover>'
+
+  it('parses from, to and the sent pack with origin handover', () => {
+    expect(parseInjectedPrompt(marker, 'handover', sent)).toEqual({
+      kind: 'handover',
+      from: 'opencode / openai/gpt-6.1-terra',
+      to: 'Claude / sonnet',
+      sent,
+    })
+  })
+
+  it('returns null for text that is not a handover marker, even with origin handover', () => {
+    expect(parseInjectedPrompt('just a chat message', 'handover', sent)).toBeNull()
+  })
+
+  it('is not a card without the handover origin', () => {
+    expect(parseInjectedPrompt(marker)).toBeNull()
+  })
+
+  it('summarises the handover with its route as facts', () => {
+    const prompt = parseInjectedPrompt(marker, 'handover', sent)!
+    expect(summarizeInjectedPrompt(prompt)).toEqual({
+      label: 'Handed over',
+      facts: 'opencode / openai/gpt-6.1-terra → Claude / sonnet',
+      tone: null,
+    })
+  })
+})

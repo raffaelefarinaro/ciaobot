@@ -11,6 +11,7 @@ here touches the real ``~/Applications``, ``launchctl``, a running engine or TCC
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import importlib.util
@@ -24,12 +25,14 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 from types import ModuleType
 from typing import Any
 
 import pytest
 
 from ciao import server_host, server_host_install
+from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.release_manifest import (
     SERVER_HOST_FILENAME,
     artifact_entry,
@@ -965,6 +968,192 @@ def test_install_is_a_noop_when_the_same_host_is_already_verified(
     # The bundle was not replaced and the record was not rewritten.
     assert target.stat().st_ino == inode
     assert record.read_bytes() == record_bytes
+
+
+@requires_posix_uid
+def test_require_absent_refuses_a_current_host_and_never_returns_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The legacy no-op is a feature, not a fresh-install answer. With the opt-in
+    # flag the same host is a refusal: a native run must never return a host it
+    # did not create. The record check refuses first; the classify-time check is
+    # the second line of defence when the record appears after that check.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    first = server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=_FakeRunner()
+    )
+    inode = target.stat().st_ino
+    record_bytes = record.read_bytes()
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert target.stat().st_ino == inode
+    assert record.read_bytes() == record_bytes
+
+    # A record/bundle that appeared after the name check reaches ``_classify_host``
+    # as a current host; the flag still turns that into a refusal.
+    monkeypatch.setattr(server_host_install, "_refuse_present_record", lambda _path: None)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert target.stat().st_ino == inode
+    assert record.read_bytes() == record_bytes
+    assert first.bundle_path == os.path.realpath(target)
+
+
+@requires_posix_uid
+def test_require_absent_refuses_an_orphan_record_and_preserves_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A record with no bundle is the partial state a retry must not silently
+    # replace. It is refused before any staging or record write.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=_FakeRunner()
+    )
+    record_bytes = record.read_bytes()
+    shutil.rmtree(target)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert not os.path.lexists(target)
+    assert record.read_bytes() == record_bytes
+
+
+@requires_posix_uid
+def test_require_absent_rechecks_a_record_that_appears_while_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The caller's preflight and the install's first check both saw no record.
+    # A same-UID writer creates one after the staging inspection; the pre-write
+    # check must refuse instead of replacing it, and the stage is removed.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    record.parent.mkdir(parents=True)
+    os.chmod(record.parent, 0o700)
+    real_fsync_tree = server_host_install._fsync_tree
+
+    def interleave(root: Path) -> None:
+        real_fsync_tree(root)
+        record.write_bytes(b"a record that appeared during staging")
+
+    monkeypatch.setattr(server_host_install, "_fsync_tree", interleave)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert not os.path.lexists(target)
+    assert record.read_bytes() == b"a record that appeared during staging"
+    assert sorted(item.name for item in target.parent.iterdir()) == []
+
+
+@requires_posix_uid
+def test_require_absent_refuses_an_unsafe_bundle_or_record_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+
+    target.parent.mkdir(parents=True)
+    elsewhere = tmp_path / "not-a-host"
+    elsewhere.mkdir()
+    target.symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.TARGET_UNSAFE
+    assert target.is_symlink()
+    assert not record.exists()
+
+    target.unlink()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.symlink_to(elsewhere / "record.json")
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert record.is_symlink()
+    assert not os.path.lexists(target)
+
+
+@requires_posix_uid
+def test_require_absent_refuses_deferred_upgrade_flags_before_any_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=_target(tmp_path),
+            ownership_path=tmp_path / "records" / "server-host.json",
+            runner=_FakeRunner(),
+            defer_commit=True,
+            owner_pid=os.getpid(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
 
 
 @requires_posix_uid
@@ -2147,3 +2336,1214 @@ def test_real_build_killed_after_the_rename_is_verified_next_run(
     )
     assert again.bundle_path == os.path.realpath(bundle)
     assert bundle.stat().st_ino == inode
+
+
+@requires_posix_uid
+def test_require_absent_keeps_the_record_it_wrote_if_a_bundle_wins_the_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The last narrow window, with the real rename: after this call writes its
+    # record, another installer materializes an actual bundle at the target. The
+    # real os.rename then fails EEXIST/ENOTEMPTY; the run refuses with HOST_EXISTS
+    # and, like the legacy path, does not unlink the record it wrote. The caller
+    # never receives the winner's snapshot; the bundle and record are preserved.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, source_bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    real_write = server_host_install._write_ownership_record
+
+    def write_then_competing_bundle(
+        snapshot: server_host.HostOwnership, path: Path, **kwargs: object
+    ) -> object:
+        identity = real_write(snapshot, path, **kwargs)  # type: ignore[arg-type]
+        shutil.copytree(source_bundle, target)
+        return identity
+
+    monkeypatch.setattr(
+        server_host_install, "_write_ownership_record", write_then_competing_bundle
+    )
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert target.is_dir()
+    assert record.is_file()
+    # The preserved record is the one this call wrote, with the canonical target.
+    assert read_host_ownership(record).bundle_path == os.path.realpath(target)
+    assert not [
+        item.name
+        for item in target.parent.iterdir()
+        if item.name.startswith(server_host_install.STAGING_PREFIX)
+    ]
+
+
+@requires_posix_uid
+def test_require_absent_does_not_delete_a_record_replaced_during_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A failed fresh install cleans up only the record it wrote. If a same-UID
+    # writer replaces it before cleanup, the substitute is left in place and the
+    # failure is reported as an unproven cleanup, not as a successful removal.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    substitute = b"a record another writer put here"
+
+    def replace_record_then_fail(*args: object, **kwargs: object) -> object:
+        record.write_bytes(substitute)
+        raise server_host.ServerHostError(
+            "the host changed after it was installed", code=server_host.NOT_OWNED
+        )
+
+    monkeypatch.setattr(server_host_install, "verify_owned_host", replace_record_then_fail)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert record.read_bytes() == substitute
+    # The bundle this call created was still uniquely ours, so it was removed.
+    assert not os.path.lexists(target)
+
+
+@requires_posix_uid
+def test_require_absent_does_not_delete_a_bundle_replaced_during_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The same rule for the bundle: once its inode no longer matches what this
+    # call renamed into place, cleanup leaves the substitute and the record alone.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    ours = tmp_path / "our-installed-host"
+
+    def replace_bundle_then_fail(*args: object, **kwargs: object) -> object:
+        os.rename(target, ours)
+        target.mkdir()
+        (target / "marker").write_text("a substitute at the target")
+        raise server_host.ServerHostError(
+            "the host changed after it was installed", code=server_host.NOT_OWNED
+        )
+
+    monkeypatch.setattr(server_host_install, "verify_owned_host", replace_bundle_then_fail)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert (target / "marker").read_text() == "a substitute at the target"
+    assert ours.is_dir()
+    assert record.is_file()
+
+
+@requires_posix_uid
+def test_require_absent_rejects_dotdot_dot_and_relative_paths_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    cases: list[object] = [
+        tmp_path / "Applications" / ".." / "Applications" / APP_NAME,
+        f"{tmp_path}/./Applications/{APP_NAME}",
+        Path(".") / "Applications" / APP_NAME,
+    ]
+
+    for bundle_path in cases:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.install_server_host(
+                archive,
+                entry,
+                bundle_path=bundle_path,  # type: ignore[arg-type]
+                ownership_path=record,
+                runner=_FakeRunner(),
+                require_absent=True,
+                trusted_root=tmp_path,
+            )
+        assert caught.value.code == server_host_install.INSTALL_FAILED
+        assert not os.path.lexists(record)
+        assert not os.path.lexists(tmp_path / "Applications")
+
+
+@requires_posix_uid
+def test_require_absent_rejects_a_record_inside_the_bundle_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = target / "server-host.json"
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(record)
+
+
+@requires_posix_uid
+def test_require_absent_rejects_symlinked_bundle_or_record_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    real_apps = tmp_path / "real-apps"
+    real_apps.mkdir()
+    apps = tmp_path / "Applications"
+    apps.symlink_to(real_apps, target_is_directory=True)
+    record = tmp_path / "records" / "server-host.json"
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=apps / APP_NAME,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert not any(real_apps.iterdir())
+    assert not os.path.lexists(record)
+
+    apps.unlink()
+    apps.mkdir()
+    real_records = tmp_path / "real-records"
+    real_records.mkdir()
+    records = tmp_path / "records"
+    records.symlink_to(real_records, target_is_directory=True)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=apps / APP_NAME,
+            ownership_path=records / "server-host.json",
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert not any(real_records.iterdir())
+    assert not os.path.lexists(apps / APP_NAME)
+
+
+@requires_posix_uid
+def test_require_absent_leaves_preexisting_directory_modes_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    os.chmod(apps, 0o755)
+    records = tmp_path / "records"
+    records.mkdir()
+    os.chmod(records, 0o755)
+    record = records / "server-host.json"
+
+    # A pre-existing record parent that is not private is refused, not chmod'ed.
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=apps / APP_NAME,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert stat.S_IMODE(apps.stat().st_mode) == 0o755
+    assert stat.S_IMODE(records.stat().st_mode) == 0o755
+    assert not os.path.lexists(apps / APP_NAME)
+    assert not os.path.lexists(record)
+
+    # A private record parent is used as-is; neither pre-existing directory is
+    # chmod'ed by the fresh path.
+    os.chmod(records, 0o700)
+    snapshot = server_host_install.install_server_host(
+        archive,
+        entry,
+        bundle_path=apps / APP_NAME,
+        ownership_path=record,
+        runner=_FakeRunner(),
+        require_absent=True,
+        trusted_root=tmp_path,
+    )
+    assert snapshot.bundle_path == os.path.realpath(apps / APP_NAME)
+    assert stat.S_IMODE(apps.stat().st_mode) == 0o755
+    assert stat.S_IMODE(records.stat().st_mode) == 0o700
+    assert record.is_file()
+
+
+@requires_posix_uid
+def test_require_absent_rechecks_a_bundle_that_arrives_while_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, source_bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    real_fsync_tree = server_host_install._fsync_tree
+
+    def interleave(root: Path) -> None:
+        real_fsync_tree(root)
+        shutil.copytree(source_bundle, target)
+
+    monkeypatch.setattr(server_host_install, "_fsync_tree", interleave)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert target.is_dir()
+    assert not os.path.lexists(record)
+
+
+@requires_posix_uid
+def test_require_absent_rechecks_a_journal_that_arrives_while_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    journal = server_host_install.upgrade_journal_path()
+    real_fsync_tree = server_host_install._fsync_tree
+
+    def interleave(root: Path) -> None:
+        real_fsync_tree(root)
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(journal.parent, 0o700)
+        journal.write_bytes(b"journal evidence that arrived during staging")
+
+    monkeypatch.setattr(server_host_install, "_fsync_tree", interleave)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert journal.read_bytes() == b"journal evidence that arrived during staging"
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(record)
+
+
+def _upgrade_state() -> Path:
+    state = server_host_install.upgrade_lock_path().parent
+    state.mkdir(parents=True, exist_ok=True)
+    os.chmod(state, 0o700)
+    return state
+
+
+@requires_posix_uid
+def test_fresh_upgrade_lock_refuses_an_existing_nonprivate_file_without_chmod(
+    home_dir: Path,
+) -> None:
+    _upgrade_state()
+    lock = server_host_install.upgrade_lock_path()
+    lock.write_bytes(b"")
+    os.chmod(lock, 0o644)
+    inode = lock.stat().st_ino
+    before = lock.read_bytes()
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        with server_host_install._upgrade_lock(preserve_existing=True):
+            pass
+
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o644
+    assert lock.stat().st_ino == inode
+    assert lock.read_bytes() == before
+    assert lock.stat().st_nlink == 1
+
+
+@requires_posix_uid
+def test_fresh_upgrade_lock_refuses_an_existing_hard_link_without_chmod(
+    home_dir: Path,
+) -> None:
+    _upgrade_state()
+    lock = server_host_install.upgrade_lock_path()
+    lock.write_bytes(b"")
+    os.chmod(lock, 0o600)
+    alias = lock.parent / "lock-alias"
+    os.link(lock, alias)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        with server_host_install._upgrade_lock(preserve_existing=True):
+            pass
+
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert lock.stat().st_nlink == 2
+    assert alias.stat().st_nlink == 2
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    assert stat.S_IMODE(alias.stat().st_mode) == 0o600
+
+
+@requires_posix_uid
+def test_fresh_upgrade_lock_creates_exactly_0600_even_under_a_hostile_umask(
+    home_dir: Path,
+) -> None:
+    _upgrade_state()
+    lock = server_host_install.upgrade_lock_path()
+    previous = os.umask(0o777)
+    try:
+        with server_host_install._upgrade_lock(preserve_existing=True):
+            assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+            assert stat.S_IMODE(lock.parent.stat().st_mode) == 0o700
+            assert lock.stat().st_nlink == 1
+    finally:
+        os.umask(previous)
+
+
+@requires_posix_uid
+def test_fresh_upgrade_lock_refuses_acl_or_unavailable_acl_without_chmod(
+    home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _upgrade_state()
+    lock = server_host_install.upgrade_lock_path()
+    lock.write_bytes(b"")
+    os.chmod(lock, 0o600)
+    inode = lock.stat().st_ino
+    lock_ino = inode
+
+    def lock_not_private(fd: int) -> bool:
+        return os.fstat(fd).st_ino != lock_ino
+
+    monkeypatch.setattr(
+        server_host_install, "is_private_descriptor_strict", lock_not_private
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        with server_host_install._upgrade_lock(preserve_existing=True):
+            pass
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    assert lock.stat().st_ino == inode
+
+    def no_acl(fd: int) -> bool:
+        if os.fstat(fd).st_ino == lock_ino:
+            raise OSError("the extended ACL API is unavailable")
+        return True
+
+    monkeypatch.setattr(
+        server_host_install, "is_private_descriptor_strict", no_acl
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        with server_host_install._upgrade_lock(preserve_existing=True):
+            pass
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    assert lock.stat().st_ino == inode
+
+
+@requires_posix_uid
+def test_fresh_upgrade_lock_busy_refusal_preserves_mode(home_dir: Path) -> None:
+    _upgrade_state()
+    lock = server_host_install.upgrade_lock_path()
+    lock.write_bytes(b"")
+    os.chmod(lock, 0o600)
+    holder = os.open(lock, os.O_RDWR)
+    try:
+        lock_exclusive(holder, blocking=True)
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            with server_host_install._upgrade_lock(preserve_existing=True):
+                pass
+        assert caught.value.code == server_host_install.TRANSACTION_BUSY
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    finally:
+        unlock(holder)
+        os.close(holder)
+
+
+@requires_posix_uid
+def test_require_absent_refuses_group_writable_owner_ancestry_without_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    os.chmod(apps, 0o775)
+    records = tmp_path / "records"
+    records.mkdir()
+    os.chmod(records, 0o700)
+    record = records / "server-host.json"
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=apps / APP_NAME,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert stat.S_IMODE(apps.stat().st_mode) == 0o775
+    assert stat.S_IMODE(records.stat().st_mode) == 0o700
+    assert not os.path.lexists(apps / APP_NAME)
+    assert not os.path.lexists(record)
+
+
+@requires_posix_uid
+def test_require_absent_refuses_a_foreign_acl_or_missing_acl_api_without_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    os.chmod(apps, 0o755)
+    records = tmp_path / "records"
+    records.mkdir()
+    os.chmod(records, 0o700)
+    record = records / "server-host.json"
+    apps_ino = apps.stat().st_ino
+
+    def apps_grants(fd: int) -> bool:
+        return os.fstat(fd).st_ino == apps_ino
+
+    monkeypatch.setattr(
+        server_host_install, "descriptor_acl_grants_another_account", apps_grants
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=apps / APP_NAME,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert stat.S_IMODE(apps.stat().st_mode) == 0o755
+    assert stat.S_IMODE(records.stat().st_mode) == 0o700
+    assert not os.path.lexists(apps / APP_NAME)
+    assert not os.path.lexists(record)
+
+    def missing_acl(fd: int) -> bool:
+        raise OSError("the extended ACL API is unavailable")
+
+    records_ino = records.stat().st_ino
+
+    def records_grant(fd: int) -> bool:
+        return os.fstat(fd).st_ino == records_ino
+
+    monkeypatch.setattr(
+        server_host_install, "descriptor_acl_grants_another_account", records_grant
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=apps / APP_NAME,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert stat.S_IMODE(apps.stat().st_mode) == 0o755
+    assert stat.S_IMODE(records.stat().st_mode) == 0o700
+    assert not os.path.lexists(apps / APP_NAME)
+    assert not os.path.lexists(record)
+
+    monkeypatch.setattr(
+        server_host_install, "descriptor_acl_grants_another_account", missing_acl
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=apps / APP_NAME,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=tmp_path,
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert stat.S_IMODE(apps.stat().st_mode) == 0o755
+    assert stat.S_IMODE(records.stat().st_mode) == 0o700
+    assert not os.path.lexists(apps / APP_NAME)
+    assert not os.path.lexists(record)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS extended ACLs")
+def test_require_absent_refuses_a_real_macos_acl_grant_without_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    apps = tmp_path / "Applications"
+    apps.mkdir()
+    os.chmod(apps, 0o755)
+    records = tmp_path / "records"
+    records.mkdir()
+    os.chmod(records, 0o700)
+    record = records / "server-host.json"
+    added = subprocess.run(
+        ["chmod", "+a", "everyone allow write", str(apps)],
+        capture_output=True,
+        check=False,
+    )
+    if added.returncode != 0:
+        pytest.skip(f"cannot add a macOS ACL here: {added.stderr!r}")
+    try:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.install_server_host(
+                archive,
+                entry,
+                bundle_path=apps / APP_NAME,
+                ownership_path=record,
+                runner=_FakeRunner(),
+                require_absent=True,
+                trusted_root=tmp_path,
+            )
+        assert caught.value.code == server_host_install.INSTALL_FAILED
+        assert stat.S_IMODE(apps.stat().st_mode) == 0o755
+        assert stat.S_IMODE(records.stat().st_mode) == 0o700
+        assert not os.path.lexists(apps / APP_NAME)
+        assert not os.path.lexists(record)
+    finally:
+        subprocess.run(
+            ["chmod", "-a", "everyone allow write", str(apps)],
+            capture_output=True,
+            check=False,
+        )
+
+
+@requires_posix_uid
+def test_fresh_upgrade_lock_refuses_a_name_swapped_after_open(
+    home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _upgrade_state()
+    lock = server_host_install.upgrade_lock_path()
+    lock.write_bytes(b"")
+    os.chmod(lock, 0o600)
+    real_lock_exclusive = server_host_install.lock_exclusive
+
+    def swap_then_lock(fd: int, *, blocking: bool) -> None:
+        os.unlink(lock)
+        lock.write_bytes(b"a different lock")
+        os.chmod(lock, 0o600)
+        real_lock_exclusive(fd, blocking=blocking)
+
+    monkeypatch.setattr(server_host_install, "lock_exclusive", swap_then_lock)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        with server_host_install._upgrade_lock(preserve_existing=True):
+            pass
+
+    assert caught.value.code == server_host_install.TRANSACTION_FAILED
+    assert lock.read_bytes() == b"a different lock"
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS extended ACLs")
+def test_fresh_upgrade_lock_refuses_a_real_macos_acl_grant_without_chmod(
+    home_dir: Path,
+) -> None:
+    _upgrade_state()
+    lock = server_host_install.upgrade_lock_path()
+    lock.write_bytes(b"")
+    os.chmod(lock, 0o600)
+    added = subprocess.run(
+        ["chmod", "+a", "everyone allow read", str(lock)],
+        capture_output=True,
+        check=False,
+    )
+    if added.returncode != 0:
+        pytest.skip(f"cannot add a macOS ACL here: {added.stderr!r}")
+    try:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            with server_host_install._upgrade_lock(preserve_existing=True):
+                pass
+        assert caught.value.code == server_host_install.TRANSACTION_FAILED
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    finally:
+        subprocess.run(
+            ["chmod", "-a", "everyone allow read", str(lock)],
+            capture_output=True,
+            check=False,
+        )
+
+
+@requires_posix_uid
+def test_require_absent_creates_missing_private_components_under_umask_002(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real blocker: mkdir(parents=True) under umask 002 made .local/state and
+    # Applications 0775, then the fresh checks rejected this run's own dirs. The
+    # fresh path must create only the missing chain, descriptor-relative at 0700,
+    # and leave the pre-existing home alone.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = server_host.default_bundle_path()
+    record = server_host.default_ownership_path()
+    assert not os.path.lexists(home_dir / ".local")
+    assert not os.path.lexists(home_dir / "Applications")
+    home_mode = stat.S_IMODE(home_dir.stat().st_mode)
+
+    previous = os.umask(0o002)
+    try:
+        snapshot = server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+            require_absent=True,
+            trusted_root=home_dir,
+        )
+    finally:
+        os.umask(previous)
+
+    assert snapshot.bundle_path == os.path.realpath(target)
+    assert target.is_dir()
+    assert record.is_file()
+    assert (
+        server_host.verify_owned_host(target, ownership_path=record, runner=_FakeRunner())
+        == snapshot
+    )
+    for created in (
+        home_dir / ".local",
+        home_dir / ".local" / "state",
+        home_dir / ".local" / "state" / "ciaobot",
+        home_dir / "Applications",
+    ):
+        assert stat.S_IMODE(created.stat().st_mode) == 0o700
+    assert stat.S_IMODE(home_dir.stat().st_mode) == home_mode
+
+
+@requires_posix_uid
+def test_require_absent_leaves_legitimate_0755_parents_unchanged(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    local = home_dir / ".local"
+    local.mkdir()
+    os.chmod(local, 0o755)
+    state = local / "state"
+    state.mkdir()
+    os.chmod(state, 0o755)
+    apps = home_dir / "Applications"
+    apps.mkdir()
+    os.chmod(apps, 0o755)
+    target = server_host.default_bundle_path()
+    record = server_host.default_ownership_path()
+
+    snapshot = server_host_install.install_server_host(
+        archive,
+        entry,
+        bundle_path=target,
+        ownership_path=record,
+        runner=_FakeRunner(),
+        require_absent=True,
+        trusted_root=home_dir,
+    )
+
+    assert snapshot.bundle_path == os.path.realpath(target)
+    assert target.is_dir()
+    assert record.is_file()
+    assert stat.S_IMODE(local.stat().st_mode) == 0o755
+    assert stat.S_IMODE(state.stat().st_mode) == 0o755
+    assert stat.S_IMODE(apps.stat().st_mode) == 0o755
+    assert stat.S_IMODE((local / "state" / "ciaobot").stat().st_mode) == 0o700
+
+
+@requires_posix_uid
+def test_require_absent_refuses_unsafe_parents_before_any_host_or_lock(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    local = home_dir / ".local"
+    local.mkdir()
+    os.chmod(local, 0o775)
+    target = server_host.default_bundle_path()
+    record = server_host.default_ownership_path()
+    runner = _FakeRunner()
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=runner,
+            require_absent=True,
+            trusted_root=home_dir,
+        )
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(record)
+    assert not os.path.lexists(local / "state")
+    assert not os.path.lexists(home_dir / "Applications")
+    assert not os.path.lexists(server_host_install.upgrade_lock_path())
+    assert runner.commands == []
+
+
+@requires_posix_uid
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root can open a 0000 directory",
+)
+def test_require_absent_hostile_umask_fails_closed_with_evidence(
+    tmp_path: Path, home_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = server_host.default_bundle_path()
+    record = server_host.default_ownership_path()
+    local = home_dir / ".local"
+    previous = os.umask(0o777)
+    try:
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.install_server_host(
+                archive,
+                entry,
+                bundle_path=target,
+                ownership_path=record,
+                runner=_FakeRunner(),
+                require_absent=True,
+                trusted_root=home_dir,
+            )
+    finally:
+        os.umask(previous)
+
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    # The created component is left as evidence, not repaired with a path chmod.
+    assert stat.S_IMODE(local.stat().st_mode) == 0o000
+    assert not os.path.lexists(local / "state")
+    assert not os.path.lexists(target)
+    assert not os.path.lexists(record)
+    os.chmod(local, 0o700)
+
+
+def _spawn_with_spoofed_argv0(spoof: Path) -> subprocess.Popen[bytes]:
+    """A harmless child whose argv[0] names a different existing file.
+
+    It runs this interpreter, so the kernel executable must be the interpreter
+    even though every user-space string the process can choose says ``spoof``.
+    No service, signed host or real user file is involved.
+    """
+    return subprocess.Popen(
+        [str(spoof), "-c", "import time; time.sleep(60)"],
+        executable=sys.executable,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="proc_pidpath is a macOS libproc call"
+)
+def test_kernel_executable_identity_ignores_a_spoofed_argv0(tmp_path: Path) -> None:
+    # The process is really this interpreter, but its argv[0] is a different file
+    # that exists. `proc_pidpath` must name the interpreter; the expected host is
+    # compared as the same canonical path, and the spoofed name is refused. The
+    # expected path is canonical: a venv's `sys.executable` is a symlink, which
+    # the installer refuses as an expected path.
+    expected = Path(os.path.realpath(sys.executable))
+    spoof = tmp_path / "Ciaobot Server"
+    spoof.write_text("", encoding="utf-8")
+    child = _spawn_with_spoofed_argv0(spoof)
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                proven = server_host_install.verify_process_executable(
+                    child.pid, expected
+                )
+                break
+            except server_host_install.ServerHostInstallError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+        assert Path(proven) == Path(os.path.realpath(expected, strict=True))
+        assert proven != str(spoof)
+        with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+            server_host_install.verify_process_executable(child.pid, spoof)
+        assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
+    finally:
+        child.terminate()
+        child.wait(timeout=10)
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="proc_pidpath is a macOS libproc call"
+)
+def test_kernel_executable_identity_fails_closed_for_a_missing_pid() -> None:
+    # A pid the kernel cannot name is not a pass: a pid outside the kernel's
+    # range and a non-positive id may not authorize the host replacement.
+    canonical = Path(os.path.realpath(sys.executable))
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(2**31 - 1, canonical)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(0, canonical)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_executable_cli_prints_nothing_on_stdout_when_it_refuses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The shell treats a zero exit as the proof and a nonzero as "not proven", so
+    # a refusal must not put a path on stdout that another parser could mistake
+    # for an answer. stderr stays one bounded line.
+    status = server_host_install.main(
+        [
+            "executable",
+            "--pid",
+            "0",
+            "--expect",
+            str(tmp_path / "Ciaobot Server"),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("Error: ")
+
+
+# --- executable identity, platform-independent --------------------------------
+#
+# These run on every platform: `sys.platform` is patched to "darwin" where the
+# kernel path is read, and `ctypes.CDLL` is replaced by a fake libproc whose
+# `proc_pidpath` writes a chosen payload into the caller's buffer and returns a
+# chosen count. Nothing here loads the real libproc or needs a macOS host.
+
+
+class _FakeProcPidpath:
+    """A `proc_pidpath` stand-in: writes ``payload`` and returns ``written``."""
+
+    def __init__(self, payload: bytes, written: int) -> None:
+        self.payload = payload
+        self.written = written
+        self.argtypes: Any = None
+        self.restype: Any = None
+
+    def __call__(self, pid: int, buffer: Any, size: int) -> int:
+        data = self.payload[:size]
+        ctypes.memmove(buffer, data, len(data))
+        return self.written
+
+
+class _FakeLibproc:
+    def __init__(self, proc_pidpath: _FakeProcPidpath) -> None:
+        self.proc_pidpath = proc_pidpath
+
+
+def _kernel_reports(
+    monkeypatch: pytest.MonkeyPatch, payload: bytes, written: int | None = None
+) -> None:
+    """Make the kernel-path read see a libproc that returns ``payload``."""
+    proc = _FakeProcPidpath(payload, len(payload) if written is None else written)
+    libproc = _FakeLibproc(proc)
+    monkeypatch.setattr(
+        server_host_install.ctypes, "CDLL", lambda *args, **kwargs: libproc
+    )
+
+
+def _canonical_file(directory: Path, name: str) -> Path:
+    path = directory / name
+    path.write_text("", encoding="utf-8")
+    return Path(os.path.realpath(path))
+
+
+@pytest.mark.parametrize("platform_name", ["darwin", "linux", "win32"])
+@pytest.mark.parametrize(
+    "bad_pid", [2**32 + os.getpid(), 0, -1, True], ids=["overflow", "zero", "neg", "bool"]
+)
+def test_a_pid_outside_the_32_bit_range_is_refused_on_every_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform_name: str,
+    bad_pid: Any,
+) -> None:
+    # The range check runs before the platform check, so a non-darwin host with a
+    # hostile pid is refused for the pid, not reported as merely unsupported.
+    monkeypatch.setattr(sys, "platform", platform_name)
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(bad_pid, expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+    assert str(caught.value) == "process id is not a positive 32-bit integer"
+
+
+@pytest.mark.parametrize(
+    ("payload_size", "written_size"),
+    [
+        (server_host_install._KERNEL_PATH_LIMIT - 1, server_host_install._KERNEL_PATH_LIMIT - 1),
+        (server_host_install._KERNEL_PATH_LIMIT, server_host_install._KERNEL_PATH_LIMIT),
+    ],
+    ids=["limit_minus_one", "limit"],
+)
+def test_kernel_path_that_fills_the_buffer_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    payload_size: int,
+    written_size: int,
+) -> None:
+    # proc_pidpath truncates into the fixed buffer; a path that reaches the limit
+    # may be a prefix of the real one, so it is never read as complete.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    _kernel_reports(monkeypatch, b"/" * payload_size, written=written_size)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+@pytest.mark.parametrize(
+    ("payload", "written"),
+    [
+        (b"/a\n/b", 5),
+        (b"/a\x7f", 3),
+        (b"/a\x00/b", 5),
+        (b"/a/b", 2),
+    ],
+    ids=["newline", "del", "embedded_nul", "written_differs_from_length"],
+)
+def test_kernel_path_with_control_byte_or_embedded_nul_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    payload: bytes,
+    written: int,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    _kernel_reports(monkeypatch, payload, written=written)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_kernel_path_zero_return_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    _kernel_reports(monkeypatch, b"", written=0)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_unloadable_libproc_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+
+    def _missing(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("libproc is not installed")
+
+    monkeypatch.setattr(server_host_install.ctypes, "CDLL", _missing)
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_non_darwin_platform_is_unsupported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    expected = _canonical_file(tmp_path, "Ciaobot Server")
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.UNSUPPORTED_PLATFORM
+
+
+@pytest.mark.parametrize("kind", ["directory", "missing"])
+def test_directory_or_missing_expected_path_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    kernel_file = _canonical_file(tmp_path, "running")
+    _kernel_reports(monkeypatch, str(kernel_file).encode())
+    if kind == "directory":
+        expected = Path(os.path.realpath(tmp_path / "bundle"))
+        expected.mkdir()
+    else:
+        expected = Path(os.path.realpath(tmp_path)) / "missing"
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), expected)
+    assert caught.value.code == server_host_install.EXECUTABLE_UNREADABLE
+
+
+def test_different_file_at_a_different_path_is_a_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    other = _canonical_file(tmp_path, "other")
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(other)
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), host)
+    assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_a_symlinked_expected_path_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The executable itself must not be a symlink. A link that resolves to the
+    # running file is still refused: the installer names the file it trusts.
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    link = tmp_path / "Ciaobot Server link"
+    os.symlink(host, link)
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(host)
+    )
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.verify_process_executable(os.getpid(), link)
+    assert caught.value.code == server_host_install.EXECUTABLE_MISMATCH
+    assert str(caught.value) == (
+        "the installed host executable is a symlink, not the file it names"
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_a_symlinked_parent_directory_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A relocated ~/Applications is a symlinked parent. The shell passes the
+    # non-canonical $HOME path; the parent is canonicalised and the real file
+    # matches, so the migration is not refused.
+    real_dir = Path(os.path.realpath(tmp_path)) / "Applications"
+    real_dir.mkdir()
+    host = _canonical_file(real_dir, "Ciaobot Server")
+    linked_dir = Path(os.path.realpath(tmp_path)) / "Applications link"
+    os.symlink(real_dir, linked_dir)
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(host)
+    )
+    proven = server_host_install.verify_process_executable(
+        os.getpid(), linked_dir / "Ciaobot Server"
+    )
+    assert proven == str(host)
+
+
+def test_executable_cli_prints_only_the_canonical_path_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(host)
+    )
+    status = server_host_install.main(
+        ["executable", "--pid", str(os.getpid()), "--expect", str(host)]
+    )
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == f"{host}\n"
+
+
+def test_executable_cli_refuses_a_mismatch_with_empty_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    other = _canonical_file(tmp_path, "other")
+    monkeypatch.setattr(
+        server_host_install, "_kernel_executable_path", lambda pid: str(other)
+    )
+    status = server_host_install.main(
+        ["executable", "--pid", str(os.getpid()), "--expect", str(host)]
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert len(captured.err.splitlines()) == 1
+    assert captured.err.startswith("Error: ")
+
+
+def test_executable_cli_refuses_a_path_that_is_not_printable_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A non-UTF-8 path name is read as surrogate escapes; it cannot be written as
+    # text. That is a clean unreadable refusal with nothing on stdout, not a raw
+    # codec error.
+    host = _canonical_file(tmp_path, "Ciaobot Server")
+    monkeypatch.setattr(
+        server_host_install,
+        "verify_process_executable",
+        lambda pid, expected: "/tmp/caf\udce9",
+    )
+    status = server_host_install.main(
+        ["executable", "--pid", str(os.getpid()), "--expect", str(host)]
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "Error: the kernel executable path is not printable text\n"
+    )

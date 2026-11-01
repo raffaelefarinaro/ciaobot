@@ -1557,3 +1557,46 @@ def test_status_is_exactly_pending_false_without_a_journal(
 ) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
     assert server_host_install.transaction_status() == {"pending": False}
+
+
+# ── the native fresh-install refusal (#2340) ────────────────────────────────
+
+
+@requires_posix_uid
+@pytest.mark.parametrize("phase", ["installed", "committed"])
+def test_require_absent_refuses_any_journal_without_finishing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    # A fresh native host install must not settle another operation's journal.
+    # The legacy path finishes a terminal journal by deleting its before-images;
+    # require_absent refuses even that and leaves every byte in place. A pending
+    # journal is refused for the same reason.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _install_legacy(tmp_path, server_host.HOST_REVISION)
+    _start_upgrade(tmp_path, label=f"journal-{phase}")
+    if phase == "committed":
+        journal = server_host_install._read_upgrade_journal()
+        assert journal is not None
+        server_host_install._write_upgrade_journal(
+            server_host_install._journal_with_phase(journal, "committed")
+        )
+    journal_path = _journal_path()
+    journal_bytes = journal_path.read_bytes()
+    bundle_parent = _bundle_path().parent
+    tree_before = _tree(bundle_parent)
+    record_before = _record_path().read_bytes()
+    archive, _bundle, entry = _signed_fixture(tmp_path, label=f"probe-{phase}")
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            require_absent=True,
+            runner=_SignedRunner(),
+        )
+
+    assert caught.value.code == server_host_install.TRANSACTION_CONFLICT
+    assert journal_path.read_bytes() == journal_bytes
+    assert _tree(bundle_parent) == tree_before
+    assert _record_path().read_bytes() == record_before
+    assert _journal_path().exists()

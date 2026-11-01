@@ -276,10 +276,12 @@ uncertain and starts nothing.
 
 That legacy schema-1 path is unchanged. #2339 isolates a native handoff in
 `ciao/native_handoff.py`, using the same `~/.ciao/installer-bootstrap/handoff.json`
-file but **schema 2 only**; it is not imported by the CLI, routes, legacy
-installer or any production caller until #2340 supplies an explicit native
-context and wires both sides of it — the setup child's schema-2 recording and
-the installer parent's activation. Its result additionally records the
+file but **schema 2 only**. The legacy CLI, routes and installer paths never
+import it; the setup child's native branch and the existing loopback-only,
+bootstrap-mode-only `/api/setup/finish` (no session cookie; see
+docs/REMOTE_BOUNDARY.md) do, through the explicit `NativeBootstrapContext` described
+below, while the installer parent's activation wiring still waits for the
+shell/readiness integration. Its result additionally records the
 definition's sha256, the program the definition actually executes and the
 interpreter it runs with both device/inode/size/mtime identities, and the
 definition's environment. The native path implements macOS only: a Windows
@@ -568,6 +570,113 @@ run placed. The host install is inert: it writes no launchd job itself;
 activation is `ciao setup` registering the hosted plist when a verified host
 is installed. No step requests a permission prompt.
 
+The native fresh-install path (#2340) is a separate, opt-in entry point and has no
+production caller yet. `ciao.native_installer.create_fresh_host` takes the
+authenticated manifest bytes and signature, not a caller-selected entry, and calls
+`verify_manifest`, `select_server_host_artifact` and `verify_host_archive` itself.
+It fixes the host bundle and ownership record to the canonical home paths and the
+release public key; there is no caller-supplied path, key or pre-selected entry.
+It requires the run's `NativeRunLock.assert_held(run_id=…)` and refuses a bundle,
+ownership record or host-upgrade journal that already exists, including terminal
+journal evidence it must not settle. Fresh mode also requires canonical absolute
+paths with no `.`, `..` or symlinked ancestor within the trusted home, a record
+outside the bundle, and every existing ancestor to be a real directory owned by
+this user, not group/other writable and free of a foreign extended-ACL grant; an
+existing record or journal parent must already be private and is never chmod'ed.
+The sibling upgrade lock follows the same rule: an existing lock must be a
+regular single-link owner-only ACL-clean file and is never chmod'ed; only a lock
+this run creates with `O_EXCL`/`O_NOFOLLOW` is set exactly `0600` with `fchmod`
+on its descriptor, and the public name is re-bound after `flock`. A replaced,
+hard-linked, ACL-granting or unverifiable lock refuses. Missing controlled
+directories are created one component at a time relative to held no-follow
+parent descriptors and made exactly `0700` with `fchmod`; existing safe `0755`
+parents (for example `.local`/`state` or `Applications`) are validated and left
+unchanged. A umask that strips the owner bits fails closed and leaves the new
+name as evidence instead of using a path-based chmod. It then calls
+`install_server_host(..., require_absent=True, trusted_root=Path.home())`: under
+the host upgrade lock that
+mode refuses any `_CURRENT` same-policy host or superseded replacement instead of
+adopting or replacing it, and it never finishes a journal. The default `False`
+keeps every legacy no-op/replacement path unchanged. After the install the helper
+re-verifies the owned host and requires equality with the snapshot the installer
+returned; a changed host is refused and left in place, never rolled back. The
+checks are refusal points, not proof: a same-UID writer can still interleave
+between a check and the write it guards, and a lost rename may leave the record the
+fresh attempt wrote (the existing `keep_record` path) while the run reports
+`HOST_EXISTS` and never claims that host as its own.
+
+The first coordinator lifecycle slice is now in `ciao.native_installer`, but it
+has **no production caller and no public run path**: `run_native_install`
+refuses with `coordinator_unavailable` until the setup child can write its
+schema-2 handoff from a native context and the readiness proof in
+`ciao.native_readiness` is wired in. That proof exists but is not wired into the
+coordinator, so the coordinator still ends with `service_not_ready`. The testable private seam,
+`_run_native_install`, takes injected callables for every external effect. Its
+`NativeInstallOutcome` records attempted and completed flags separately, so a
+host or activation step that mutates and then raises is never reported as
+unattempted; `activation_attempted` means the service may be running. It
+classifies fresh, prepares the private state directory, takes the run lock,
+prepares the bootstrap scratch chain, classifies again immediately before the
+first host/engine mutation, creates the host through the real
+`create_fresh_host`, rechecks the host and lock before the engine install,
+installs the engine, starts the wizard with only a private bind-notification
+pipe, reads one bounded `{schema:1,port:N}` record **and waits for the producer
+to close the pipe** (so a delayed second record is a refusal), emits
+`wizard_ready`, validates the run-bound handoff, emits `setup_saved`, and calls
+activation. `workspace` is
+only the classifier suggestion; the selected directory is read from the handoff
+and reported, and an optional `expected_workspace` is the only exact-match
+check. Because its longest path is nine events, it refuses a handoff that leaves
+fewer than nine event slots instead of mutating with no room to report an
+outcome. The public event descriptor must be in the shell's 3–9 range at the
+coordinator boundary. It never emits `service_ready` in this slice: after
+activation it reports `failed("service_not_ready")`. Cancellation is a flag the
+normal loop observes; the loop sends SIGTERM, waits a finite grace, sends
+SIGKILL, and reaps only the child it started in that child's own session before
+releasing the lock, keeping the lock when reaping cannot be proven. The child
+waits are clamped to the whole-run budget, cleanup has its own bounded
+grace/reap deadlines, and injected synchronous steps are checked before and
+after but cannot be preempted by this module. It never passes the public event
+descriptor to a child (the wizard sees only the private pipe), never stops,
+reloads, quiesces or rolls back an activated service, preserves partial
+artifacts, writes no onboarding or install receipt, and adds no route. `SIGKILL`
+runs no cleanup and leaves the lock and child as evidence. Tests:
+`tests/test_native_installer.py`.
+
+The native bootstrap child side is now explicit but internal. When the native
+coordinator starts it with the private `--installer-native-fd` (hidden, and
+refused without `--installer-bootstrap`/`--installer-run-id`),
+`_run_server_locked` builds a `NativeBootstrapContext` in a worker thread and
+threads it through `create_app` to `app.state.native_bootstrap`. `capture`
+requires macOS, the `macos` backend, the already-private scratch chain, an
+absent live definition and handoff result, a launchd-proven absent server job,
+the device/inode/mode identity of the bootstrap root and runtime, and a
+`verify_owned_host` snapshot. The legacy bootstrap passes no descriptor and
+keeps its exact schema-1 path, call shapes and browser auto-open. A native child
+opens no browser. `_mark_bound_when_serving` calls the context only after
+`uvicorn.Server.started` and `tracker.done(BIND_PHASE)`, writes exactly one
+bounded `{"schema":1,"port":N}` line, makes the private descriptor
+non-inheritable and closes it; a refused or failed write stops the child instead
+of serving invisibly. The existing loopback-only, bootstrap-mode-only
+`POST /api/setup/finish` (no session cookie; see docs/REMOTE_BOUNDARY.md) is
+the only native route: it refuses unknown body fields and any non-empty
+`python`, `launch_agents_dir` or `app_dir` override, re-runs
+`assert_ready_to_write` in a worker thread before the first write (config
+identities, scratch, definition/handoff absence, launchd absence, host snapshot,
+engine interpreter, an explicit expected workspace, and a chosen workspace that
+is not already a Ciaobot workspace), calls `setup_workspace(...,
+exclusive_service_definition=True)` so the definition is created `O_EXCL`/
+`O_NOFOLLOW` at `0o600` instead of overwritten, records schema 2 through
+`native_handoff.record_setup_completion` in `asyncio.to_thread`, and reads the
+result back to require this run's id, this child's startup id, the chosen
+workspace, port, live definition path and interpreter. It adds no route, no
+environment variable and no second onboarding or install receipt, and never
+starts, stops or reloads a service. Remaining limits are real: a same-UID writer
+can interleave between a check and the write it guards; the child can prove the
+host is owned, not that this run created its record; and the public
+`run_native_install` still refuses until shell/readiness integration. Tests:
+`tests/test_native_bootstrap.py`.
+
 Replacing an owned legacy host with the signed one is the one host change that is
 a *transaction*, because the previous app and its exact ownership record have to
 survive until the engine this run installs has answered healthily — which is
@@ -589,10 +698,22 @@ process instance this run started, bound to objects rather than strings:
    with mode `0600`, opened without following a link, whose opened inode is the one
    the directory listed - readable lock metadata alone proves nothing;
 3. the listener's bounded ancestor chain (`ps -o ppid=`, four hops) reaches the pid
-   `launchctl print` reports for the job, and that job's executable text
-   (`lsof -a -p <pid> -d txt -Fn`, exactly one `n` record - `ps -o comm=` only ever
-   prints the name) is the installed `Ciaobot Server`, because launchd runs the host
-   and the host `posix_spawn`s Python.
+   `launchctl print` reports for the job, and the kernel says that job process'
+   executable is the installed `Ciaobot Server` (`libproc`'s `proc_pidpath`,
+   through the verified wheel's `server_host_install executable` subcommand).
+   `ps -o comm=` only prints a name and `lsof -d txt` lists every mapped
+   executable segment (a signed host has many), so neither is executable
+   identity. The executable itself must not be a symlink; its parent directories are
+   canonicalised, so a relocated `Applications` folder still matches. The kernel path
+   and that canonical expected path must be the same string, which must be a regular
+   file. This is path equality, not byte or inode identity after an in-place
+   replacement. An
+   unreadable pid, a pid outside the 32-bit range, a truncated path or any other
+   executable is a refusal. A pid can be recycled
+   after the listener/lock captures and before this probe; if the replacement is
+   the same installed host the check still passes, so this narrows the window
+   rather than eliminating it, and no PID-reuse proof is claimed beyond the
+   kernel's current answer.
 
 A missing, ambiguous, over-deep or unreadable answer is a failure, not a pass, and
 the timeout message names the step that could not be proven (version, lock,

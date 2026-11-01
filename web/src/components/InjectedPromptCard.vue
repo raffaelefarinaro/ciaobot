@@ -45,6 +45,7 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   retry: 'activity',
   restart_resume: 'activity',
   error: 'activity',
+  handover: 'activity',
 }
 
 const summary = computed(() => summarizeInjectedPrompt(props.prompt, props.chatTitle))
@@ -187,6 +188,16 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 
       <template v-else-if="prompt.kind === 'restart_resume'">
         <p class="injected-card-note">Ciaobot restarted while the previous turn was running, so it asked the agent to continue where it left off.</p>
+      </template>
+
+      <!-- The pack is the exact text the new provider received, kept one
+           disclosure away so the reader can check what it was given. -->
+      <template v-else-if="prompt.kind === 'handover'">
+        <p class="injected-card-note">{{ prompt.sent ? 'The new agent starts a fresh session with the recent messages above as context.' : 'This handover recorded no copy of what was sent.' }}</p>
+        <details v-if="prompt.sent" class="injected-card-original">
+          <summary>Show what the agent received</summary>
+          <pre class="injected-card-raw" tabindex="0" role="region" aria-label="What the agent received">{{ prompt.sent }}</pre>
+        </details>
       </template>
 
       <template v-else-if="prompt.kind === 'error'">
