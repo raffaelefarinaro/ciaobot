@@ -1538,3 +1538,60 @@ def test_a_cited_unstamped_entry_is_stamped_not_queued(tmp_path: Path) -> None:
     assert body["proposal"] is None
     assert _sidecars(vault) == []
     assert f"[verified: {date.today().isoformat()}]" in note.read_text(encoding="utf-8")
+
+
+def test_an_update_with_no_evidence_at_all_still_goes_to_review(tmp_path: Path) -> None:
+    """No evidence is not evidence about another note. An `update` with nothing
+    behind it is the uncited-edit case: a person decides, nothing is written."""
+    import asyncio
+
+    install, root, note = _install(tmp_path)
+    vault = install._vault
+    plane = _plane(install)
+    name = _payload(
+        root,
+        _verdict(
+            vault,
+            note,
+            outcome=nv.UPDATE,
+            before=PLAIN,
+            after=FOURTH,
+            evidence=[],
+        ),
+    )
+
+    data = asyncio.run(plane.verify_note(_principal(), payload_file=name))["data"]
+
+    assert data["status"] == nv.NEEDS_REVIEW
+    assert data["proposal"] is not None
+    assert len(_sidecars(vault)) == 1
+    assert _queue(vault).count("- [note_edit ") == 1
+    assert note.read_bytes() == PLAIN.encode("utf-8")
+
+
+def test_an_entry_update_with_no_evidence_at_all_still_goes_to_review(
+    tmp_path: Path,
+) -> None:
+    """The entry form of the same rule: no evidence at all is a person's decision,
+    filed as an entry replacement, not an `unverified` cooldown."""
+    install, root, note, entry = _entry_install(tmp_path)
+    plane = _plane(install)
+    replacement = "- Sofia runs the platform team [verified: 2024-01-05]"
+
+    body = _verify(
+        plane,
+        root,
+        _entry_verdict(
+            note,
+            entry,
+            outcome=nv.UPDATE,
+            before=entry.text,
+            after=replacement,
+            evidence=[],
+        ),
+    )
+
+    assert body["status"] == nv.NEEDS_REVIEW
+    assert body["proposal"] is not None
+    assert body["proposal"]["operation"] == nep.REPLACE_ENTRY
+    assert note.read_text(encoding="utf-8") == ENTRY_PLAIN

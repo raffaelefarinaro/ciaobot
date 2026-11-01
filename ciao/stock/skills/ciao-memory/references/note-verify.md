@@ -81,7 +81,7 @@ A `still_valid` on an entry with no `[verified:]` stamp adds one, on the same ev
 - `needs_review`: the rule refused to write it unattended and one typed proposal is queued for the user. Retirement, an edit whose citations, all about this note, are incomplete, or a `still_valid` on a note with no `updated:` to stamp all come back this way. An unattended run reports it under **What needs you** and does not route around it.
 - `already_checked`: a check for this exact revision is in its cooldown or waiting on a proposal.
 - `failed`: the note could not be used at all.
-- `unverified`: nothing was written, because no source was reached, coverage was partial, the input was too large to judge, the replacement equals the current text, or no evidence row names the note.
+- `unverified`: nothing was written, because no source was reached, coverage was partial, the input was too large to judge, the replacement equals the current text, or evidence was given but no row names the note.
 - `conflict`: nothing was written, because the note moved since you read it, or `before` is not the note's (or the entry's) exact current text. Re-read and judge the text that is there.
 - `payload_required` / `payload_invalid` / `payload_too_large`: the payload was missing, outside the workspace, malformed, over the cap, or named an `outcome` outside the four above.
 - `workspace_forbidden`: the payload named another workspace. Drop the `workspace` field or make it match.

@@ -720,9 +720,10 @@ def _plan_update(
     again, rather than having a verdict about old words pinned to new ones.
 
     Checked in this order: the conflict comes first; a replacement equal to the
-    entry's current text is ``unverified`` (nothing to change); evidence that names
-    no part of the note is ``unverified`` (nothing for a person to decide about
-    this entry from it); only then does an uncited replacement go to review.
+    entry's current text is ``unverified`` (nothing to change); evidence was given
+    but no row names the note is ``unverified`` (nothing for a person to decide
+    about this entry from it); only then does an uncited replacement go to review.
+    No evidence at all falls through to review, as an uncited replacement always has.
     """
     edit = request.edit
     if edit is None or not edit.after.strip():
@@ -755,7 +756,7 @@ def _plan_update(
         return EntryVerificationPlan(
             RECORD_ONLY, UNVERIFIED, UNVERIFIED, "", "", nv._NO_CHANGE_REASON
         )
-    if not nv._evidence_names_note(_as_note_request(request)):
+    if request.evidence and not nv._evidence_names_note(_as_note_request(request)):
         return EntryVerificationPlan(
             RECORD_ONLY,
             UNVERIFIED,

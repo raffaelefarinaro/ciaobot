@@ -25,8 +25,8 @@ writes nothing, so the worklist pass and the proposal writer can both ask what
   on the whole set, not on whether one row qualifies. An uncited edit is
   returned for a human, never written quietly. An edit planned against other
   text is a ``conflict``; an edit whose replacement is the note's own text, or
-  whose evidence names no part of the note, is ``unverified``, because there is
-  nothing for a person to decide.
+  whose evidence was given but no row names the note, is ``unverified``, because
+  there is nothing for a person to decide.
 * ``retire`` — **never** applied here. Retirement is a human decision, so it is
   returned as ``needs_review`` and nothing is written.
 * ``unverified`` — no mutation and no proposal. A missing, unavailable or
@@ -624,9 +624,11 @@ def _plan_update(request: VerificationRequest, *, note_text: str) -> Verificatio
 
     Checked in this order, so each refusal names the right gap: a ``before``
     that is not the note's text is a ``conflict``; a replacement that equals the
-    note's text is ``unverified`` (nothing to change); evidence that names no
-    part of the note is ``unverified`` (nobody can decide anything about this
+    note's text is ``unverified`` (nothing to change); evidence was given but no
+    row names the note is ``unverified`` (nobody can decide anything about this
     note from it); only then does an uncited edit about this note go to review.
+    No evidence at all is not "evidence about another note": it falls through to
+    review, as an uncited edit always has.
 
     The replacement is the caller's, verbatim. In particular it is **not**
     re-stamped here: the caller knows what it changed and what the note's
@@ -675,7 +677,7 @@ def _plan_update(request: VerificationRequest, *, note_text: str) -> Verificatio
             after_text="",
             reason=_NO_CHANGE_REASON,
         )
-    if not _evidence_names_note(request):
+    if request.evidence and not _evidence_names_note(request):
         return VerificationPlan(
             action=RECORD_ONLY,
             status=UNVERIFIED,
