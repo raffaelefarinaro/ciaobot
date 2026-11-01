@@ -557,6 +557,52 @@ def _resolved_tool_path(value: str, *, cwd: Path) -> Path | None:
         return None
 
 
+def _case_key(path: Path) -> tuple[str, ...]:
+    """The path's components, case-folded where the filesystem ignores case."""
+    if sys.platform in ("darwin", "win32"):
+        return tuple(part.casefold() for part in path.parts)
+    return path.parts
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """Inode identity: a case variant or a hardlink of the same file matches."""
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+def _is_read_only_target(target: Path, entries: Sequence[Path]) -> bool:
+    """Whether *target* is, or sits inside, one of the read-only *entries* (#2459).
+
+    An existing target is compared by identity, with each of its ancestors, so a
+    case variant of a pinned file or folder, or a hardlink to one, still matches.
+    A target that does not exist has no identity yet, so it is compared by its
+    components, case-folded on macOS and Windows.
+    """
+    if target.exists():
+        chain = [target, *target.parents]
+        return any(_same_file(node, entry) for entry in entries for node in chain)
+    key = _case_key(target)
+    return any(key[: len(entry_key)] == entry_key for entry_key in (_case_key(e) for e in entries))
+
+
+def _is_read_only_file(target: Path, entries: Sequence[Path]) -> bool:
+    """Whether *target* is exactly one of the read-only *entries* that is a file."""
+    return any(entry.is_file() and _same_file(target, entry) for entry in entries)
+
+
+def _resolved_read_only(paths: Sequence[Path]) -> list[Path]:
+    """The read-only entries, resolved. An entry that cannot resolve grants nothing."""
+    resolved: list[Path] = []
+    for path in paths:
+        try:
+            resolved.append(path.resolve())
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return resolved
+
+
 # Claude's file tools, split by what they do to the path. A read-only path is
 # readable by the read tools and writable by none of them.
 _CLAUDE_READ_TOOLS = frozenset({"Read", "Grep", "Glob", "LS"})
@@ -588,7 +634,7 @@ def claude_file_tool_guard(
     allowed = ", ".join(str(root) for root in roots)
     reachable = [*roots, Path.home() / ".claude" / "plans"]
     uid = getattr(os, "getuid", lambda: 0)()
-    read_only_paths = [path.resolve() for path in read_only]
+    read_only_paths = _resolved_read_only(read_only)
 
     async def on_pre_tool_use(
         input_data: dict[str, Any], tool_use_id: str | None, context: Any
@@ -607,14 +653,14 @@ def claude_file_tool_guard(
                 if (
                     tool_name in _CLAUDE_WRITE_TOOLS
                     and resolved is not None
-                    and any(resolved.is_relative_to(path) for path in read_only_paths)
+                    and _is_read_only_target(resolved, read_only_paths)
                 ):
                     return _claude_guard_deny(f"{value} is read-only.")
                 if path_outside_roots(value, cwd=cwd, roots=reachable):
                     if (
                         tool_name in _CLAUDE_READ_TOOLS
                         and resolved is not None
-                        and any(resolved == path and path.is_file() for path in read_only_paths)
+                        and _is_read_only_file(resolved, read_only_paths)
                     ):
                         continue
                     if (

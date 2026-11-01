@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import pwd
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 import asyncio
@@ -1719,28 +1721,58 @@ def test_claude_settings_grant_a_memory_pass_archive_read_only(tmp_path, monkeyp
     sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file(),
     reason="needs macOS sandbox-exec",
 )
-def test_darwin_seatbelt_reads_a_memory_pass_archive_only(tmp_path):
-    root, _, archive = _archive_tree(tmp_path)
-    prefix = opencode_sandbox_prefix(roots=[root], read_only=[archive])
+def test_darwin_seatbelt_reads_a_memory_pass_archive_only():
+    # The real home, not tmp_path: the profile's system subpaths already read
+    # /private, so a probe under pytest's tmp dir passes with or without the
+    # grant (#2459). conftest points Path.home() at an isolated folder, so the
+    # real one comes from the passwd entry.
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    if not os.access(real_home, os.W_OK):
+        pytest.skip("home folder is not writable")
+    base = Path(tempfile.mkdtemp(dir=real_home, prefix="ciao-seatbelt-")).resolve()
+    try:
+        root = base / "personal"
+        root.mkdir()
+        chats = base / "Logs" / "Chats" / "src-1" / "claude"
+        chats.mkdir(parents=True)
+        archive = chats / "s.md"
+        archive.write_text("transcript", encoding="utf-8")
+        sibling = chats / "other.md"
+        sibling.write_text("other", encoding="utf-8")
 
-    allowed = subprocess.run([*prefix, "/bin/cat", str(archive)], capture_output=True, timeout=30)
-    assert allowed.returncode == 0
-    assert allowed.stdout == b"transcript"
-    profile = prefix[2]
-    assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(archive))}"))' in profile
-    assert not any(
-        "file-write*" in line and str(archive) in line for line in profile.splitlines()
-    )
-    ok = root / "ok.txt"
-    control = subprocess.run(
-        [*prefix, "/bin/sh", "-c", f"echo ok > '{ok}'"], capture_output=True, timeout=30
-    )
-    assert control.returncode == 0
-    written = subprocess.run(
-        [*prefix, "/bin/sh", "-c", f"echo x > '{archive}'"], capture_output=True, timeout=30
-    )
-    assert written.returncode != 0
-    assert archive.read_text(encoding="utf-8") == "transcript"
+        prefix = opencode_sandbox_prefix(roots=[root], read_only=[archive])
+        granted = subprocess.run(
+            [*prefix, "/bin/cat", str(archive)], capture_output=True, timeout=30
+        )
+        assert granted.returncode == 0
+        assert granted.stdout == b"transcript"
+        ungranted = subprocess.run(
+            [*prefix, "/bin/cat", str(sibling)], capture_output=True, timeout=30
+        )
+        assert ungranted.returncode != 0
+        bare = opencode_sandbox_prefix(roots=[root])
+        without_grant = subprocess.run(
+            [*bare, "/bin/cat", str(archive)], capture_output=True, timeout=30
+        )
+        assert without_grant.returncode != 0
+
+        profile = prefix[2]
+        assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(archive))}"))' in profile
+        assert not any(
+            "file-write*" in line and str(archive) in line for line in profile.splitlines()
+        )
+        ok = root / "ok.txt"
+        control = subprocess.run(
+            [*prefix, "/bin/sh", "-c", f"echo ok > '{ok}'"], capture_output=True, timeout=30
+        )
+        assert control.returncode == 0
+        written = subprocess.run(
+            [*prefix, "/bin/sh", "-c", f"echo x > '{archive}'"], capture_output=True, timeout=30
+        )
+        assert written.returncode != 0
+        assert archive.read_text(encoding="utf-8") == "transcript"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_bwrap_ro_binds_a_memory_pass_archive_outside_the_roots(tmp_path, monkeypatch):
@@ -1757,3 +1789,75 @@ def test_bwrap_ro_binds_a_memory_pass_archive_outside_the_roots(tmp_path, monkey
     triples = _bwrap_triples(argv)
     assert ["--ro-bind", str(archive), str(archive)] in triples
     assert not any(str(archive) in triple and triple[0] == "--bind" for triple in triples)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_a_case_variant_of_a_pinned_file_is_not_writable(tmp_path):
+    root = (tmp_path / "root").resolve()
+    creds = root / "creds"
+    creds.mkdir(parents=True)
+    pinned = creds / "credentials.json"
+    pinned.write_text("{}", encoding="utf-8")
+    variant = creds / "Credentials.json"
+    if not variant.exists():
+        pytest.skip("the filesystem is case-sensitive")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[pinned])
+
+    assert _guard_decision(guard, "Edit", {"file_path": str(variant)}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(variant)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(pinned)}) == "allow"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_a_hardlink_to_a_pinned_file_inside_a_root_is_not_writable(tmp_path):
+    root = (tmp_path / "root").resolve()
+    creds = root / "creds"
+    creds.mkdir(parents=True)
+    pinned = creds / "client_secret.json"
+    pinned.write_text("{}", encoding="utf-8")
+    alias = root / "elsewhere.json"
+    os.link(pinned, alias)
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[pinned])
+
+    assert _guard_decision(guard, "Edit", {"file_path": str(alias)}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(alias)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(alias)}) == "allow"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the guard only runs on POSIX")
+def test_a_hardlink_to_another_file_is_not_the_granted_file(tmp_path):
+    # Read matches by identity, so a link to the granted file reads the same bytes
+    # and nothing else: a hardlink to some other file is still refused.
+    root, _, archive = _archive_tree(tmp_path)
+    secret = tmp_path.resolve() / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    alias = archive.with_name("h.md")
+    os.link(secret, alias)
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[archive])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(secret)}) == "deny"
+    assert _guard_decision(guard, "Read", {"file_path": str(archive)}) == "allow"
+
+
+def test_a_read_only_entry_that_cannot_resolve_is_skipped_not_raised(tmp_path):
+    root, _, archive = _archive_tree(tmp_path)
+    broken = Path(str(archive) + "\x00")
+
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[broken, archive])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(archive)}) == "allow"
+    assert _guard_decision(guard, "Read", {"file_path": str(broken)}) == "deny"
+
+
+def test_a_non_pass_chat_may_read_the_read_only_receipt_by_design(tmp_path):
+    # Every workspace chat is granted the reroot receipt read-only (#1945), so
+    # the guard lets its file tools open that exact file, and nothing beside it.
+    root = (tmp_path / "root").resolve()
+    root.mkdir()
+    receipt = tmp_path.resolve() / "runtime" / "migration" / "workspace-rooting.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("{}", encoding="utf-8")
+    guard = claude_file_tool_guard(cwd=root, roots=[root], read_only=[receipt])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(receipt)}) == "allow"
+    assert _guard_decision(guard, "Read", {"file_path": str(receipt.parent / "x.json")}) == "deny"

@@ -5452,8 +5452,9 @@ class ProjectChatManager:
         helper lives in the hand-editable registry, so it is validated here and
         every failure grants nothing: the chat is a memory pass with a
         ``memory_pass`` helper, the source chat id is one folder name under
-        ``Logs/Chats``, and the archive, resolved, is a regular file inside that
-        folder. A symlinked archive is refused before it is resolved.
+        ``Logs/Chats`` (never a symlink), and the archive, resolved, is a regular
+        file with one link inside that folder. A symlinked leaf is refused before
+        it is resolved.
         """
         project = self._projects.get(chat.project_id)
         if not is_memory_pass_chat(chat, project):
@@ -5466,7 +5467,10 @@ class ProjectChatManager:
         workspace_root = Path(self._config.workspace_root)
         try:
             chats_root = (self._config.logs_root / "Chats").resolve()
-            source_dir = (chats_root / source_chat_id).resolve()
+            source_link = chats_root / source_chat_id
+            if source_link.is_symlink():
+                return None
+            source_dir = source_link.resolve()
             if source_dir.parent != chats_root:
                 return None
             candidate = Path(archive_path)
@@ -5475,6 +5479,9 @@ class ProjectChatManager:
             if os.path.islink(candidate):
                 return None
             resolved = candidate.resolve(strict=True)
+            # A second name for a file another process can read is not an archive.
+            if resolved.stat().st_nlink != 1:
+                return None
         except (OSError, ValueError, RuntimeError):
             return None
         if not resolved.is_relative_to(source_dir) or not resolved.is_file():

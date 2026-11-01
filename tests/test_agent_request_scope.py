@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -790,6 +791,9 @@ def archive_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         reset_reroot_cache()
 
 
+_NEEDS_SYMLINK = pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink privilege")
+
+
 def _write_archive(config, chat_id: str = "src-1") -> Path:
     archive = config.logs_root / "Chats" / chat_id / "claude" / "2026-11-01T10-00-00-s.md"
     archive.parent.mkdir(parents=True, exist_ok=True)
@@ -873,10 +877,10 @@ def test_a_memory_pass_in_machine_scope_gets_no_archive_grant(archive_install) -
     [
         "outside_logs",
         "another_chat",
-        pytest.param(
-            "symlink",
-            marks=pytest.mark.skipif(sys.platform == "win32", reason="needs a symlink privilege"),
-        ),
+        pytest.param("symlink", marks=_NEEDS_SYMLINK),
+        pytest.param("middle_symlink", marks=_NEEDS_SYMLINK),
+        pytest.param("symlinked_source_folder", marks=_NEEDS_SYMLINK),
+        "hardlink",
         "traversal",
         "missing",
         "directory",
@@ -891,6 +895,8 @@ def test_a_tampered_memory_pass_archive_path_is_not_granted(
     secret = tmp_path / "secret.txt"
     secret.write_text("secret", encoding="utf-8")
     other = _write_archive(config, chat_id="other")
+    chats = config.logs_root / "Chats"
+    forbidden = {secret.resolve(), archive.resolve(), other.resolve()}
     helper = _pass_helper(archive)
     if case == "outside_logs":
         helper["archive_path"] = str(secret)
@@ -900,6 +906,22 @@ def test_a_tampered_memory_pass_archive_path_is_not_granted(
         link = archive.with_name("link.md")
         link.symlink_to(secret)
         helper["archive_path"] = str(link)
+    elif case == "middle_symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "s.md"
+        target.write_text("outside", encoding="utf-8")
+        (archive.parent / "linkdir").symlink_to(outside, target_is_directory=True)
+        helper["archive_path"] = str(archive.parent / "linkdir" / "s.md")
+        forbidden.add(target.resolve())
+    elif case == "symlinked_source_folder":
+        (chats / "linked").symlink_to(chats / "src-1", target_is_directory=True)
+        helper["source_chat_id"] = "linked"
+    elif case == "hardlink":
+        alias = archive.with_name("h.md")
+        os.link(secret, alias)
+        helper["archive_path"] = str(alias)
+        forbidden.add(alias.resolve())
     elif case == "traversal":
         helper["source_chat_id"] = "../src-1"
     elif case == "missing":
@@ -911,7 +933,7 @@ def test_a_tampered_memory_pass_archive_path_is_not_granted(
     request = manager.build_agent_request(chat, prompt="hi")
 
     granted = {Path(p) for p in request.agent_read_only}
-    assert not granted & {secret.resolve(), archive.resolve(), other.resolve()}
+    assert not granted & forbidden
     assert not any(p.is_relative_to(config.logs_root.resolve()) for p in granted)
 
 
@@ -941,3 +963,21 @@ def test_a_task_completion_pass_gets_no_archive_grant(archive_install) -> None:
     assert not any(
         Path(p).is_relative_to(config.logs_root.resolve()) for p in request.agent_read_only
     )
+
+
+def test_a_hardlink_in_the_source_folder_is_not_granted(archive_install, tmp_path: Path) -> None:
+    # A second name for a file another process can read is not a transcript
+    # archive: st_nlink must be 1, as the Claude task-output check requires (#2459).
+    manager = archive_install
+    config = manager._config
+    archive = _write_archive(config)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("secret", encoding="utf-8")
+    alias = archive.parent / "h.md"
+    os.link(secret, alias)
+    chat = _memory_pass_chat(manager, _pass_helper(alias))
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert str(alias.resolve()) not in request.agent_read_only
+    assert str(secret.resolve()) not in request.agent_read_only
