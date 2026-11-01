@@ -91,9 +91,12 @@ is a last resort, not a supported cancellation mechanism.
 The supported public descriptor range is 3–9 (the POSIX shell portable range);
 the shell and coordinator entry points own that check because they are the ones
 parsing the command line. This writer requires a non-stdio descriptor (``>= 3``)
-and refuses a read-only or closed one. It accepts any writable descriptor the
-platform can write to, including pipes and sockets; it never requires a
-regular file. The native path is macOS-only: on Windows the constructor refuses
+and refuses a read-only or closed one. It also refuses (``stdio_alias``) a
+descriptor whose open file description is stdout or stderr, so events and
+diagnostics never share one stream. ``after_phase`` pre-sets the last phase
+already announced by the shell, so the writer refuses to re-emit it. It accepts
+any writable descriptor the platform can write to, including pipes and sockets;
+it never requires a regular file. The native path is macOS-only: on Windows the constructor refuses
 rather than pretend a descriptor protocol the legacy installer does not
 implement.
 
@@ -107,12 +110,13 @@ so the order and the cleanup rules can be driven with fakes and real short-lived
 child processes. The public ``run_native_install`` exposes none of those seams
 and still refuses before it touches the descriptor: the setup child now has an
 explicit :class:`NativeBootstrapContext` and can record schema 2 through it, but
-the parent side is not wired to start that child, and the readiness proof in
-``ciao.native_readiness`` exists but is not wired into the coordinator, so the
-coordinator must not claim success. The lifecycle enforces the fresh-only
-preflight and the run lock before the engine install, creates the host through
-the real fresh-host helper, rechecks the lock and host immediately before each
-mutation, never passes the public event descriptor to a child, and terminates
+the parent side is not wired to start that child. The coordinator reaches
+``service_ready`` only through its injected readiness proof: a ``ready`` answer
+for the handoff port, reached after clean child and lock cleanup, and the
+production proof in ``ciao.native_readiness`` is supplied by the next slice. The
+lifecycle enforces the fresh-only preflight and the run lock before the engine
+install, creates the host through the real fresh-host helper, rechecks the lock
+and host immediately before each mutation, never passes the public event descriptor to a child, and terminates
 and reaps only the child it started before releasing the lock. Cancellation is
 a flag the caller sets (a signal handler may only set it); the normal loop emits
 ``failed("cancelled")``. An activated service is never stopped, reloaded,
@@ -159,6 +163,7 @@ from ciao import native_handoff
 from ciao.install_discovery import NativeInstallState
 from ciao.native_handoff import NativeHandoffError, NativeHandoffResult
 from ciao.native_lock import NativeLockError, NativeRunLock, NativeStateDir
+from ciao.native_readiness import NativeReadinessProof
 from ciao.release_manifest import (
     RELEASE_PUBLIC_KEY,
     select_server_host_artifact,
@@ -351,6 +356,7 @@ class EventWriter:
         first_seq: int = 1,
         prior_events: int = 0,
         write_timeout: float = WRITE_TIMEOUT_SECONDS,
+        after_phase: str | None = None,
     ) -> None:
         self._run_id = _canonical_run_id(run_id)
         if type(first_seq) is not int or first_seq < 1:
@@ -370,6 +376,7 @@ class EventWriter:
             or timeout > MAX_WRITE_TIMEOUT_SECONDS
         ):
             raise EventError("invalid_timeout")
+        last_phase = -1 if after_phase is None else _phase_index(after_phase)
         if type(fd) is not int or fd < MIN_EVENT_FD:
             raise EventError("invalid_fd")
         if not _sigpipe_is_ignored():
@@ -386,6 +393,16 @@ class EventWriter:
             raise EventError("invalid_fd") from None
         if stat.S_ISDIR(info.st_mode):
             raise EventError("invalid_fd")
+        # Diagnostics and events must never share one stream. Refuse before any
+        # flag change, because a shared open file description would share
+        # O_NONBLOCK with stdout or stderr.
+        for stdio in (1, 2):
+            try:
+                other = os.fstat(stdio)
+            except OSError:
+                continue
+            if (other.st_dev, other.st_ino) == (info.st_dev, info.st_ino):
+                raise EventError("stdio_alias")
         try:
             _set_descriptor_flags(fd, flags | _NONBLOCK)
         except EventError:
@@ -400,7 +417,7 @@ class EventWriter:
         self._next_seq = first_seq
         self._emitted = 0
         self._phases: set[str] = set()
-        self._last_phase = -1
+        self._last_phase = last_phase
         self._wizard_ready = False
         self._setup_saved = False
         self._terminal: str | None = None
@@ -862,11 +879,22 @@ COORDINATOR_REAP_TIMEOUT_SECONDS: Final[float] = 5.0
 COORDINATOR_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 #: Hard ceiling for every configurable coordinator deadline.
 COORDINATOR_MAX_TIMEOUT_SECONDS: Final[float] = 7200.0
-#: The most events this coordinator can write on its longest path: six phases,
-#: ``wizard_ready``, ``setup_saved`` and the terminal ``failed``. The run must
-#: have room for all of them or it could reach a mutation with no way to report
-#: an outcome.
-COORDINATOR_EVENT_BUDGET: Final[int] = 9
+#: The last phase the shell announces before handing the descriptor over. The
+#: coordinator's writer refuses it and every earlier phase.
+SHELL_LAST_PHASE: Final[str] = "download"
+#: How long the coordinator may wait for a live readiness proof after activation.
+COORDINATOR_READINESS_TIMEOUT_SECONDS: Final[float] = 60.0
+#: Pause between readiness proofs that answered with a transient failure.
+COORDINATOR_READINESS_INTERVAL_SECONDS: Final[float] = 1.0
+#: Readiness answers that may be retried. Every other failure is final.
+_READINESS_RETRYABLE: Final[frozenset[str]] = frozenset(
+    {"listener_missing", "startup_status_unavailable", "startup_not_ready"}
+)
+#: The most events this coordinator can write on its longest path: four phases
+#: (install, wizard, activation, readiness), ``wizard_ready``, ``setup_saved``
+#: and one terminal event. The run must have room for all of them or it could
+#: reach a mutation with no way to report an outcome.
+COORDINATOR_EVENT_BUDGET: Final[int] = 7
 
 _STATE_FAILURES: Final[dict[NativeInstallState, str]] = {
     NativeInstallState.configured: "existing_install",
@@ -1052,6 +1080,8 @@ class _CoordinatorPolicy:
     term_grace: float = COORDINATOR_TERM_GRACE_SECONDS
     reap_timeout: float = COORDINATOR_REAP_TIMEOUT_SECONDS
     poll_interval: float = COORDINATOR_POLL_INTERVAL_SECONDS
+    readiness_timeout: float = COORDINATOR_READINESS_TIMEOUT_SECONDS
+    readiness_interval: float = COORDINATOR_READINESS_INTERVAL_SECONDS
 
     def __post_init__(self) -> None:
         for name in (
@@ -1061,6 +1091,8 @@ class _CoordinatorPolicy:
             "term_grace",
             "reap_timeout",
             "poll_interval",
+            "readiness_timeout",
+            "readiness_interval",
         ):
             value = getattr(self, name)
             if type(value) not in (int, float):
@@ -1081,7 +1113,9 @@ class _CoordinatorDeps:
     The public entry point exposes none of this. The production wiring must
     supply the real classifier, the private state/lock helpers, the real
     :func:`create_fresh_host` step, the verified-wheel engine install, the
-    native bootstrap command and :func:`ciao.native_handoff.activate`.
+    native bootstrap command, :func:`ciao.native_handoff.activate`, the listener
+    lookup that proves the wizard child holds the reported port, and the
+    readiness proof :func:`ciao.native_readiness.prove_native_readiness`.
     """
 
     classify: Callable[[Path | None], NativeInstallState]
@@ -1094,6 +1128,10 @@ class _CoordinatorDeps:
     wizard_command: Callable[[int], tuple[str, ...]]
     read_handoff: Callable[[str], NativeHandoffResult]
     activate: Callable[[str, float], NativeHandoffResult]
+    wizard_listener: Callable[[int, int], int | None]
+    prove_ready: Callable[
+        [FreshHostInstall, NativeHandoffResult, float], NativeReadinessProof
+    ]
 
 
 class _OwnedChild:
@@ -1126,6 +1164,19 @@ class _OwnedChild:
 
     def poll(self) -> int | None:
         return self._process.poll()
+
+    def owns_process(self, pid: int) -> bool:
+        """Whether ``pid`` is this child or in the session group it leads."""
+        if type(pid) is not int or pid <= 0 or self._process.poll() is not None:
+            return False
+        if pid == self._process.pid:
+            return True
+        if _GETPGID is None:
+            return False
+        try:
+            return _GETPGID(pid) == self._process.pid
+        except OSError:
+            return False
 
     def wait_for_exit(
         self, deadline: _Deadline, cancellation: NativeCancellation
@@ -1889,6 +1940,20 @@ def _check_stage(
         raise _TimedOut
 
 
+def _wait_observing(
+    seconds: float, cancellation: NativeCancellation, poll_interval: float
+) -> None:
+    """Sleep for ``seconds`` in slices so a cancellation is seen promptly."""
+    end = time.monotonic() + seconds
+    while True:
+        if cancellation.cancelled:
+            raise _Cancelled
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(poll_interval, left))
+
+
 def _remaining(deadline: _Deadline) -> float:
     remaining = deadline.remaining()
     if remaining <= 0:
@@ -1984,9 +2049,8 @@ def run_native_install(request: NativeInstallRequest) -> NativeInstallOutcome:
 
     This is the production entry point. It deliberately exposes no injection
     seams: the next slice must supply the native bootstrap context and schema-2
-    handoff recording in the setup child, and wiring the readiness proof in
-    ``ciao.native_readiness`` (it exists but is not wired into this coordinator)
-    before this can start a run. Invalid
+    handoff recording in the setup child, and the production readiness and
+    listener deps before this can start a run. Invalid
     inputs are refused first with ``invalid_arguments``; a valid request then
     fails with ``coordinator_unavailable`` before reading the descriptor,
     acquiring the lock, touching the host or starting a child.
@@ -2012,9 +2076,11 @@ def _run_native_install(
     engine, then start the wizard. Every mutation is preceded by a cancellation
     and deadline check and (after acquisition) by ``assert_held``. The engine
     install cannot begin on ``configured``, ``partial``, ``unknown`` or a held
-    lock. The readiness proof in ``ciao.native_readiness`` exists but is not
-    wired into the coordinator, so this slice still ends with
-    ``failed("service_not_ready")``; it never emits ``service_ready``.
+    lock. After activation the injected ``prove_ready`` is polled within
+    ``readiness_timeout``: transient answers are retried every
+    ``readiness_interval``, any other answer is ``service_not_ready``, and
+    ``service_ready`` is emitted only for a ready proof on the handoff port
+    after the child and the lock were cleaned up successfully.
 
     The injected synchronous steps cannot be preempted by this module: the
     deadline is checked before and after each one and the real implementation
@@ -2041,6 +2107,7 @@ def _run_native_install(
             run_id=request.run_id,
             first_seq=request.first_seq,
             prior_events=request.prior_events,
+            after_phase=SHELL_LAST_PHASE,
         )
     except EventError:
         _close_fd(request.events_fd)
@@ -2053,6 +2120,7 @@ def _run_native_install(
     activation_attempted = False
     activation_completed = False
     selected_workspace: Path | None = None
+    ready_port: int | None = None
     failure: str | None = None
     channel_dead = False
     lock_retained = False
@@ -2065,7 +2133,6 @@ def _run_native_install(
                 deadline = _Deadline.after(policy.run_timeout)
                 _check_stage(deadline, cancellation)
 
-                writer.phase("preflight")
                 try:
                     classification = deps.classify(request.workspace)
                 except Exception:
@@ -2074,7 +2141,6 @@ def _run_native_install(
                 _map_classification(classification)
                 _check_stage(deadline, cancellation)
 
-                writer.phase("bootstrap")
                 state_dir = deps.prepare_state_dir()
                 try:
                     lock = deps.acquire_lock(state_dir, request.run_id)
@@ -2170,6 +2236,17 @@ def _run_native_install(
                 finally:
                     _close_fd(write_fd)
                     _close_fd(read_fd)
+                # The child's self-reported port is only a claim. The port must
+                # have a listener owned by this child or its session group.
+                try:
+                    listener = deps.wizard_listener(port, child.pid)
+                except (_Cancelled, _TimedOut):
+                    raise
+                except Exception:
+                    raise _Refusal("wizard_failed") from None
+                if listener is None or not child.owns_process(listener):
+                    raise _Refusal("wizard_failed")
+                _check_stage(deadline, cancellation)
                 writer.wizard_ready(port)
                 try:
                     code = child.wait_for_exit(
@@ -2232,11 +2309,39 @@ def _run_native_install(
                 _check_stage(deadline, cancellation)
 
                 writer.phase("readiness")
-                # The readiness proof (ciao.native_readiness) exists but is not wired
-                # in here. A truthful service_not_ready failure is the only terminal
-                # this slice may emit;
-                # there is deliberately no service_ready call in the coordinator.
-                raise _Refusal("service_not_ready")
+                readiness_deadline = _sub_deadline(
+                    deadline, policy.readiness_timeout
+                )
+                while True:
+                    _check_stage(deadline, cancellation)
+                    remaining = readiness_deadline.remaining()
+                    if remaining <= 0:
+                        raise _Refusal("service_not_ready")
+                    try:
+                        proof = deps.prove_ready(host, handoff, remaining)
+                    except (_Cancelled, _TimedOut):
+                        raise
+                    except Exception:
+                        raise _Refusal("service_not_ready") from None
+                    if not isinstance(proof, NativeReadinessProof):
+                        raise _Refusal("service_not_ready")
+                    if proof.ready:
+                        if proof.port != handoff.port:
+                            raise _Refusal("service_not_ready")
+                        ready_port = handoff.port
+                        break
+                    if proof.failure == "cancelled":
+                        raise _Cancelled
+                    if proof.failure not in _READINESS_RETRYABLE:
+                        raise _Refusal("service_not_ready")
+                    _wait_observing(
+                        min(
+                            policy.readiness_interval,
+                            max(readiness_deadline.remaining(), 0.0),
+                        ),
+                        cancellation,
+                        policy.poll_interval,
+                    )
             except _Refusal as refusal:
                 failure = refusal.code
             except _Cancelled:
@@ -2283,24 +2388,34 @@ def _run_native_install(
             if cleanup_failed and failure is None:
                 failure = "internal_error"
 
-        try:
+        terminal: str | None = None
+        if failure is None and ready_port is not None:
+            # Success is reported only here: no failure, and child and lock
+            # cleanup both succeeded in the finally above.
+            try:
+                writer.service_ready(ready_port)
+                terminal = "service_ready"
+            except EventError:
+                channel_dead = True
+                failure = "event_channel_failed"
+        else:
             if failure is None:
                 failure = "internal_error"
             if not channel_dead:
                 try:
                     writer.failed(failure)
+                    terminal = "failed"
                 except EventError:
                     channel_dead = True
                     failure = "event_channel_failed"
-        finally:
-            writer.close()
-
+        if channel_dead:
+            terminal = None
     finally:
         writer.close()
     return NativeInstallOutcome(
         run_id=request.run_id,
-        terminal=None if channel_dead else "failed",
-        failure_code=failure,
+        terminal=terminal,
+        failure_code=None if terminal == "service_ready" else failure,
         host_step_attempted=host_step_attempted,
         host_step_completed=host_step_completed,
         activation_attempted=activation_attempted,

@@ -36,6 +36,7 @@ from ciao import release_manifest, server_host, server_host_install
 from ciao.install_discovery import NativeInstallState
 from ciao.native_installer import EventError, EventWriter
 from ciao.native_lock import NativeLockError, NativeRunLock
+from ciao.native_readiness import NativeReadinessProof
 from tests.test_server_host_install import APP_NAME, _FakeRunner, _fixture
 
 #: A canonical run id: lowercase, hyphenated, exactly what ``--run-id`` accepts.
@@ -2730,10 +2731,14 @@ def _fresh_host_value(tmp_path: Path) -> native.FreshHostInstall:
 
 
 def _bind_script(port: int = 54321) -> str:
+    # The wizard stays alive briefly after its bind record: the coordinator
+    # proves the listener owner while the child is still running, and a child
+    # that exits first is refused. A fixed sleep here removes that race.
     return (
-        "import os, sys\n"
+        "import os, sys, time\n"
         "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":%d}\\n')\n"
-        "os.close(int(sys.argv[1]))\n" % port
+        "os.close(int(sys.argv[1]))\n"
+        "time.sleep(0.5)\n" % port
     )
 
 
@@ -2757,6 +2762,13 @@ def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
         ),
         "read_handoff": lambda run_id: _handoff(run_id),
         "activate": lambda run_id, remaining: _handoff(run_id),
+        "wizard_listener": lambda port, child_pid: child_pid,
+        "prove_ready": lambda host, handoff, remaining: NativeReadinessProof(
+            ready=False,
+            failure="startup_status_invalid",
+            port=handoff.port,
+            version="0",
+        ),
     }
     values.update(overrides)
     return native._CoordinatorDeps(**values)  # type: ignore[arg-type]
@@ -2901,26 +2913,24 @@ def test_coordinator_runs_the_fresh_lifecycle_without_claiming_service_ready(
     assert types == [
         "phase",
         "phase",
-        "phase",
-        "phase",
         "wizard_ready",
         "setup_saved",
         "phase",
         "phase",
         "failed",
     ]
-    assert [event["seq"] for event in events] == list(range(1, 10))
-    assert events[4]["origin"] == "http://127.0.0.1:54321"
+    assert [event["seq"] for event in events] == list(range(1, 8))
+    assert events[2]["origin"] == "http://127.0.0.1:54321"
     assert events[-1] == {
         "schema": 1,
         "run_id": RUN_ID,
-        "seq": 9,
+        "seq": 7,
         "type": "failed",
         "code": "service_not_ready",
     }
     assert [
         event["phase"] for event in events if event["type"] == "phase"
-    ] == ["preflight", "bootstrap", "install", "wizard", "activation", "readiness"]
+    ] == ["install", "wizard", "activation", "readiness"]
     assert all(
         len(line) + 1 <= native.MAX_EVENT_BYTES for line in raw.splitlines()
     )
@@ -2961,8 +2971,7 @@ def test_a_non_fresh_classification_refuses_before_any_mutation(
     assert outcome.host_step_completed is False
     assert outcome.activation_attempted is False
     assert outcome.activation_completed is False
-    assert [event["type"] for event in events] == ["phase", "failed"]
-    assert events[0]["phase"] == "preflight"
+    assert [event["type"] for event in events] == ["failed"]
     assert not (tmp_path / "state").exists()
 
 
@@ -2980,7 +2989,7 @@ def test_an_unreadable_classification_is_unknown_and_never_echoed(
     assert outcome.failure_code == "unknown_state"
     assert sentinel.encode() not in raw
     assert b"/Users/someone/private" not in raw
-    assert [event["type"] for event in events] == ["phase", "failed"]
+    assert [event["type"] for event in events] == ["failed"]
 
 
 def test_a_stale_lock_refuses_before_tool_install_and_preserves_partial_state(
@@ -3012,11 +3021,7 @@ def test_a_stale_lock_refuses_before_tool_install_and_preserves_partial_state(
         assert _lock_path(state).is_dir()
         assert _record_path(state).read_bytes() == before
         assert partial.read_text(encoding="utf-8") == "left by an earlier run"
-        assert [event["type"] for event in events] == [
-            "phase",
-            "phase",
-            "failed",
-        ]
+        assert [event["type"] for event in events] == ["failed"]
         assert events[-1]["code"] == "install_in_progress"
     finally:
         stale.release()
@@ -3047,12 +3052,7 @@ def test_a_changed_host_refuses_before_engine_install_and_is_preserved(
     assert engine_calls == []
     assert artifact.read_text(encoding="utf-8") == "partially installed host"
     assert not _lock_path(tmp_path / "state").exists()
-    assert [event["type"] for event in events] == [
-        "phase",
-        "phase",
-        "phase",
-        "failed",
-    ]
+    assert [event["type"] for event in events] == ["phase", "failed"]
     assert "wizard" not in [
         event.get("phase") for event in events if event["type"] == "phase"
     ]
@@ -3257,12 +3257,7 @@ def test_a_failed_engine_install_is_fixed_and_preserves_the_host(
     assert b"/Users/someone/private" not in raw
     assert host_marker.read_text(encoding="utf-8") == "present"
     assert not _lock_path(tmp_path / "state").exists()
-    assert [event["type"] for event in events] == [
-        "phase",
-        "phase",
-        "phase",
-        "failed",
-    ]
+    assert [event["type"] for event in events] == ["phase", "failed"]
     assert events[-1]["code"] == "install_failed"
 
 
@@ -3301,8 +3296,8 @@ def test_invalid_requests_are_refused_before_the_descriptor_is_used(
             native.NativeInstallRequest(
                 run_id=RUN_ID,
                 events_fd=event_fd,
-                first_seq=25,
-                prior_events=24,
+                first_seq=27,
+                prior_events=26,
             ),
             native.NativeInstallRequest(
                 run_id=RUN_ID,
@@ -3479,11 +3474,7 @@ def test_a_second_preflight_refuses_a_service_that_appeared_before_host_install(
     assert outcome.host_step_completed is False
     assert host_calls == []
     assert not _lock_path(tmp_path / "state").exists()
-    assert [event["type"] for event in events] == [
-        "phase",
-        "phase",
-        "failed",
-    ]
+    assert [event["type"] for event in events] == ["failed"]
     assert events[-1]["code"] == "existing_install"
 
 
@@ -3520,7 +3511,7 @@ def test_an_expired_run_deadline_refuses_before_any_mutation(
     assert outcome.host_step_attempted is False
     assert outcome.host_step_completed is False
     assert not (tmp_path / "state").exists()
-    assert [event["type"] for event in events] == ["phase", "failed"]
+    assert [event["type"] for event in events] == ["failed"]
 
 
 def test_the_public_coordinator_exposes_no_injection_seams() -> None:
@@ -4399,3 +4390,400 @@ def test_an_invalid_request_leaves_the_public_fd_to_the_caller(
         with pytest.raises(native.NativeCoordinatorError):
             native.run_native_install(bad)
         os.fstat(event_fd)
+
+
+def test_a_ready_proof_ends_the_run_with_service_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    proofs: list[native_handoff.NativeHandoffResult] = []
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        proofs.append(handoff)
+        return NativeReadinessProof(
+            ready=True, failure=None, port=handoff.port, version="1"
+        )
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=prove_ready)
+
+    assert len(proofs) == 1
+    assert outcome.terminal == "service_ready"
+    assert outcome.exit_code == 0
+    assert outcome.failure_code is None
+    assert outcome.activation_completed is True
+    assert outcome.lock_retained is False
+    assert not _lock_path(tmp_path / "state").exists()
+    assert [event["type"] for event in events] == [
+        "phase",
+        "phase",
+        "wizard_ready",
+        "setup_saved",
+        "phase",
+        "phase",
+        "service_ready",
+    ]
+    assert [event["seq"] for event in events] == list(range(1, 8))
+    assert [
+        event["phase"] for event in events if event["type"] == "phase"
+    ] == ["install", "wizard", "activation", "readiness"]
+    assert events[-1] == {
+        "schema": 1,
+        "run_id": RUN_ID,
+        "seq": 7,
+        "type": "service_ready",
+        "origin": "http://127.0.0.1:54321",
+    }
+    assert b"failed" not in raw
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param("listener_missing", id="listener"),
+        pytest.param("startup_status_unavailable", id="status"),
+        pytest.param("startup_not_ready", id="not-ready"),
+    ],
+)
+def test_readiness_retries_only_transient_answers_within_its_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    answers = [
+        NativeReadinessProof(ready=False, failure=failure, port=54321, version="1"),
+        NativeReadinessProof(ready=False, failure=failure, port=54321, version="1"),
+        NativeReadinessProof(ready=True, failure=None, port=54321, version="1"),
+    ]
+    calls: list[float] = []
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        calls.append(remaining)
+        return answers[len(calls) - 1]
+
+    outcome, events, _raw = _run_coordinator(
+        tmp_path,
+        prove_ready=prove_ready,
+        policy=native._CoordinatorPolicy(
+            readiness_interval=0.01, poll_interval=0.01
+        ),
+    )
+
+    assert len(calls) == 3
+    assert outcome.terminal == "service_ready"
+    assert events[-1]["type"] == "service_ready"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param("startup_pid_mismatch", id="pid"),
+        pytest.param("lock_missing", id="lock"),
+        pytest.param("executable_mismatch", id="exec"),
+        pytest.param("timeout", id="timeout"),
+    ],
+)
+def test_a_non_transient_readiness_answer_is_service_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls: list[float] = []
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        calls.append(remaining)
+        return NativeReadinessProof(
+            ready=False, failure=failure, port=54321, version="1"
+        )
+
+    outcome, events, raw = _run_coordinator(tmp_path, prove_ready=prove_ready)
+
+    assert len(calls) == 1
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "service_not_ready"
+    assert events[-1]["code"] == "service_not_ready"
+    assert b"service_ready" not in raw
+
+
+@pytest.mark.parametrize("case", ["budget", "non-proof", "port", "raises"])
+def test_readiness_budget_and_bad_answers_are_service_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    sentinel = "sk-live-READINESS-SECRET-0123456789"
+
+    def transient(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        return NativeReadinessProof(
+            ready=False, failure="listener_missing", port=handoff.port, version="1"
+        )
+
+    def not_a_proof(host: object, handoff: object, remaining: float) -> object:
+        return "ready"
+
+    def wrong_port(host: object, handoff: object, remaining: float) -> object:
+        return NativeReadinessProof(ready=True, failure=None, port=9999, version="1")
+
+    def explode(host: object, handoff: object, remaining: float) -> object:
+        raise RuntimeError(f"{sentinel} /Users/someone/private")
+
+    prove_ready = {
+        "budget": transient,
+        "non-proof": not_a_proof,
+        "port": wrong_port,
+        "raises": explode,
+    }[case]
+    policy = (
+        native._CoordinatorPolicy(
+            readiness_timeout=0.05, readiness_interval=0.01, poll_interval=0.01
+        )
+        if case == "budget"
+        else None
+    )
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path, prove_ready=prove_ready, policy=policy
+    )
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "service_not_ready"
+    assert events[-1]["code"] == "service_not_ready"
+    assert b"service_ready" not in raw
+    assert sentinel.encode() not in raw
+    assert b"/Users/someone/private" not in raw
+
+
+def test_cancellation_during_readiness_is_cancelled_and_never_stops_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cancellation = native.NativeCancellation()
+    activated: list[str] = []
+
+    def activate(run_id: str, remaining: float) -> native_handoff.NativeHandoffResult:
+        activated.append(run_id)
+        return _handoff(run_id)
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        cancellation.cancel()
+        return NativeReadinessProof(
+            ready=False, failure="listener_missing", port=handoff.port, version="1"
+        )
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path,
+        activate=activate,
+        prove_ready=prove_ready,
+        cancellation=cancellation,
+    )
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "cancelled"
+    assert outcome.activation_completed is True
+    assert outcome.service_may_be_running is True
+    assert len(activated) == 1
+    assert events[-1]["code"] == "cancelled"
+    assert b"service_ready" not in raw
+    assert not _lock_path(tmp_path / "state").exists()
+
+
+def test_a_lock_release_failure_after_readiness_is_not_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    real_locks: list[NativeRunLock] = []
+
+    class BadRelease:
+        def __init__(self, real: NativeRunLock) -> None:
+            self._real = real
+
+        def assert_held(self, *, run_id: str | None = None) -> None:
+            self._real.assert_held(run_id=run_id)
+
+        def release(self) -> None:
+            raise NativeLockError("lock_cleanup_refused")
+
+    def acquire(directory: native_lock.NativeStateDir, run_id: str) -> object:
+        real = NativeRunLock.acquire(directory, run_id=run_id)
+        real_locks.append(real)
+        return BadRelease(real)
+
+    def prove_ready(host: object, handoff: object, remaining: float) -> object:
+        assert isinstance(handoff, native_handoff.NativeHandoffResult)
+        return NativeReadinessProof(
+            ready=True, failure=None, port=handoff.port, version="1"
+        )
+
+    try:
+        outcome, events, raw = _run_coordinator(
+            tmp_path, acquire_lock=acquire, prove_ready=prove_ready
+        )
+    finally:
+        for real in real_locks:
+            real.release()
+
+    assert outcome.terminal == "failed"
+    assert outcome.failure_code == "internal_error"
+    assert outcome.lock_retained is True
+    assert outcome.activation_completed is True
+    assert events[-1]["code"] == "internal_error"
+    assert b"service_ready" not in raw
+
+
+@pytest.mark.parametrize("case", ["foreign", "none", "raises"])
+def test_wizard_ready_requires_the_child_to_hold_the_listener(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    child_pids: list[int] = []
+    activated: list[str] = []
+
+    def listener(port: int, child_pid: int) -> int | None:
+        child_pids.append(child_pid)
+        if case == "foreign":
+            return os.getpid()
+        if case == "none":
+            return None
+        raise RuntimeError("listener lookup failed")
+
+    def activate(run_id: str, remaining: float) -> native_handoff.NativeHandoffResult:
+        activated.append(run_id)
+        return _handoff(run_id)
+
+    outcome, events, raw = _run_coordinator(
+        tmp_path, wizard_listener=listener, activate=activate
+    )
+
+    assert outcome.failure_code == "wizard_failed"
+    assert outcome.activation_attempted is False
+    assert activated == []
+    assert [event["type"] for event in events] == ["phase", "phase", "failed"]
+    assert b"wizard_ready" not in raw
+    assert len(child_pids) == 1
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pids[0], 0)
+
+
+def test_owns_process_accepts_only_the_child_or_its_session_group() -> None:
+    script = (
+        "import subprocess, sys, time\n"
+        "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "print(grandchild.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+    )
+    grandchild_pid = 0
+    try:
+        assert process.stdout is not None
+        grandchild_pid = int(process.stdout.readline().strip())
+        owned = native._OwnedChild(
+            process,
+            term_grace=1.0,
+            reap_timeout=5.0,
+            poll_interval=0.01,
+        )
+        assert owned.owns_process(process.pid) is True
+        assert owned.owns_process(grandchild_pid) is True
+        assert owned.owns_process(os.getpid()) is False
+        assert owned.owns_process(0) is False
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
+        assert owned.owns_process(process.pid) is False
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+        if grandchild_pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild_pid, signal.SIGKILL)
+
+
+def test_the_coordinator_writer_refuses_the_shell_phases() -> None:
+    writer, read_fd = _writer(after_phase="download")
+    try:
+        for name in ("preflight", "bootstrap", "download"):
+            assert _reason(writer.phase, name) == "phase_out_of_order"
+        writer.phase("install")
+        writer.close()
+        assert [event.get("phase") for event in _events(read_fd)] == ["install"]
+    finally:
+        os.close(read_fd)
+
+
+def test_an_unknown_after_phase_is_refused_before_any_write() -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        assert (
+            _reason(EventWriter, write_fd, run_id=RUN_ID, after_phase="nope")
+            == "unknown_phase"
+        )
+        assert _available(read_fd) == b""
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [pytest.param(1, id="stdout"), pytest.param(2, id="stderr")],
+)
+def test_an_events_fd_aliasing_stdout_or_stderr_is_refused(target: int) -> None:
+    import fcntl
+
+    alias = os.dup(target)
+    try:
+        flags_before = fcntl.fcntl(alias, fcntl.F_GETFL)
+        assert _reason(EventWriter, alias, run_id=RUN_ID) == "stdio_alias"
+        assert fcntl.fcntl(alias, fcntl.F_GETFL) == flags_before
+    finally:
+        os.close(alias)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [pytest.param(1, id="stdout"), pytest.param(2, id="stderr")],
+)
+def test_a_coordinator_events_fd_aliasing_stdio_is_refused_before_classify(
+    tmp_path: Path, target: int
+) -> None:
+    calls: list[object] = []
+
+    def forbidden(workspace: Path | None) -> NativeInstallState:
+        calls.append(workspace)
+        raise AssertionError("the coordinator classified over an aliased channel")
+
+    with _public_event_pipe() as (read_fd, event_fd):
+        source = os.dup(target)
+        os.dup2(source, event_fd)
+        os.close(source)
+        outcome = native._run_native_install(
+            _coordinator_request(event_fd),
+            deps=_coordinator_deps(tmp_path, classify=forbidden),
+        )
+        raw = _drain(read_fd)
+
+    assert outcome.failure_code == "event_channel_failed"
+    assert outcome.terminal is None
+    assert calls == []
+    assert raw == b""
+
+
+@pytest.mark.parametrize("field", ["readiness_timeout", "readiness_interval"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="neg"),
+        pytest.param(float("inf"), id="inf"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(native.COORDINATOR_MAX_TIMEOUT_SECONDS + 1, id="huge"),
+    ],
+)
+def test_readiness_policy_values_are_bounded(field: str, value: float) -> None:
+    with pytest.raises(native.NativeCoordinatorError) as caught:
+        native._CoordinatorPolicy(**{field: value})
+    assert caught.value.reason == "invalid_timeout"
+    assert caught.value.failure_code == "internal_error"
