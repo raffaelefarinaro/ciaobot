@@ -1,0 +1,16 @@
+{
+  "id": "H9-code-cross-module-fix",
+  "tier": "hard",
+  "category": "multi_file_fix",
+  "prompt": "The tests in code/shipping_tool fail. Fix the code so the whole suite passes. Do not change any test file.",
+  "entry": {"kind": "prompt"},
+  "setup": [],
+  "requires": [],
+  "timeout_s": 900,
+  "checks": [
+    {"kind": "command", "argv": ["{python}", "-m", "unittest", "-q", "test_cart", "test_rates", "test_quote"], "cwd": "code/shipping_tool"},
+    {"kind": "unchanged", "path": "code/shipping_tool/test_cart.py"},
+    {"kind": "unchanged", "path": "code/shipping_tool/test_rates.py"},
+    {"kind": "unchanged", "path": "code/shipping_tool/test_quote.py"}
+  ]
+}
