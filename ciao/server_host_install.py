@@ -264,6 +264,13 @@ WARN_AND_CONTINUE = frozenset(
 #: cannot collide.
 STAGING_PREFIX = ".ciaobot-host-stage."
 
+#: The name a failed fresh install gives the bundle it renamed into its own
+#: staging directory before removing it. No other writer knows the name in
+#: advance, so the race moves onto it. The race is narrowed, not closed: a
+#: same-UID writer can still swap the stage directory or the scratch entry
+#: between the checks and the removal.
+_FRESH_ROLLBACK_PREFIX = "fresh-rollback-"
+
 #: ``install``'s exit status for a refusal in :data:`WARN_AND_CONTINUE`. The
 #: target is left exactly as it is and the shell installer warns and carries on
 #: with the engine: a host that is optional and inert must not turn every later
@@ -3179,6 +3186,117 @@ def _require_fresh_install_paths(
         )
 
 
+#: The message for a host bundle found at each fresh-install checkpoint. Every
+#: checkpoint refuses with ``HOST_EXISTS``; only the wording differs.
+_FRESH_SURFACE_MESSAGES: dict[str, str] = {
+    "before": (
+        "a host bundle already exists at {bundle}; a fresh install never adopts "
+        "or replaces it"
+    ),
+    "preparing": (
+        "a host bundle appeared at {bundle} while this fresh install was "
+        "preparing its directories"
+    ),
+    "staging": "a host bundle appeared at {bundle} while this fresh install was staging",
+}
+
+
+def _require_fresh_surface(
+    bundle: Path, record_path: Path, trusted_root: Path, *, moment: str
+) -> None:
+    """The fresh-install surface check, run at each checkpoint in the call order.
+
+    The moment is validated before any filesystem call.
+    """
+    if moment not in _FRESH_SURFACE_MESSAGES:
+        raise ValueError("unknown fresh-surface moment")
+    _require_fresh_install_paths(
+        bundle,
+        record_path,
+        trusted_root,
+        raw_bundle=os.fspath(bundle),
+        raw_record=os.fspath(record_path),
+    )
+    if os.path.lexists(bundle):
+        raise ServerHostInstallError(
+            _FRESH_SURFACE_MESSAGES[moment].format(bundle=bundle),
+            code=HOST_EXISTS,
+        )
+    _refuse_present_record(record_path)
+    _refuse_present_journal()
+
+
+def _remove_fresh_bundle(
+    bundle: Path, stage: Path, installed_identity: tuple[int, int] | None
+) -> tuple[str, bool]:
+    """Remove the bundle a failed fresh install renamed into place.
+
+    The bundle is renamed into a name inside this call's own staging directory
+    and only that entry is removed, and only after its inode matches
+    ``installed_identity``. This narrows the window between the check and the
+    removal; it does not close it. A same-UID writer can still swap the stage
+    directory or the scratch entry in between. A substitute swapped in before the
+    rename is kept in the staging directory. Returns ``(problem, keep_stage)``; an
+    empty problem means the bundle was removed or was already gone.
+    """
+    if installed_identity is None:
+        return (
+            f"the freshly installed host at {bundle} could not be examined for "
+            f"cleanup; it is left in place",
+            False,
+        )
+    try:
+        current = os.lstat(bundle)
+    except FileNotFoundError:
+        return ("", False)
+    except OSError:
+        return (
+            f"the freshly installed host at {bundle} could not be examined for "
+            f"cleanup; it is left in place",
+            False,
+        )
+    if (current.st_dev, current.st_ino) != installed_identity:
+        return (
+            f"the freshly installed host at {bundle} was replaced during the "
+            f"failed install; the substitute is left in place",
+            False,
+        )
+    scratch = stage / f"{_FRESH_ROLLBACK_PREFIX}{secrets.token_hex(8)}"
+    try:
+        os.rename(bundle, scratch)
+    except OSError:
+        return (
+            f"the freshly installed host at {bundle} could not be moved aside for "
+            f"cleanup; it is left in place",
+            False,
+        )
+    try:
+        moved = os.lstat(scratch)
+    except OSError:
+        return (
+            f"the host moved aside for cleanup could not be examined; it is kept "
+            f"at {scratch}",
+            True,
+        )
+    if not stat.S_ISDIR(moved.st_mode) or (
+        moved.st_dev,
+        moved.st_ino,
+    ) != installed_identity:
+        return (
+            f"a different object was at {bundle} when cleanup moved it; it is kept "
+            f"at {scratch}",
+            True,
+        )
+    shutil.rmtree(scratch, ignore_errors=True)
+    if os.path.lexists(scratch):
+        return (
+            f"the host moved aside for cleanup could not be fully removed; it is "
+            f"kept at {scratch}",
+            True,
+        )
+    return ("", False)
+
+
 def _remove_own_record(
     record_path: Path,
     snapshot: HostOwnership,
@@ -3518,21 +3636,7 @@ def _install_now(
 
     if require_absent:
         assert trusted_root is not None
-        _require_fresh_install_paths(
-            bundle,
-            record_path,
-            trusted_root,
-            raw_bundle=os.fspath(bundle),
-            raw_record=os.fspath(record_path),
-        )
-        if os.path.lexists(bundle):
-            raise ServerHostInstallError(
-                f"a host bundle already exists at {bundle}; a fresh install "
-                f"never adopts or replaces it",
-                code=HOST_EXISTS,
-            )
-        _refuse_present_record(record_path)
-        _refuse_present_journal()
+        _require_fresh_surface(bundle, record_path, trusted_root, moment="before")
         parent = bundle.parent
         # Create only missing controlled directories, descriptor-relative and
         # privately. Existing safe parents are validated and never chmod'ed.
@@ -3547,21 +3651,7 @@ def _install_now(
         )
         # The directory preparation is a mutation; re-check every host surface
         # immediately before the first staging temp is created.
-        _require_fresh_install_paths(
-            bundle,
-            record_path,
-            trusted_root,
-            raw_bundle=os.fspath(bundle),
-            raw_record=os.fspath(record_path),
-        )
-        if os.path.lexists(bundle):
-            raise ServerHostInstallError(
-                f"a host bundle appeared at {bundle} while this fresh install "
-                f"was preparing its directories",
-                code=HOST_EXISTS,
-            )
-        _refuse_present_record(record_path)
-        _refuse_present_journal()
+        _require_fresh_surface(bundle, record_path, trusted_root, moment="preparing")
     else:
         parent = bundle.parent
     try:
@@ -3646,21 +3736,7 @@ def _install_now(
             # before the write below is the documented same-UID race; the run
             # still refuses on a lost rename and preserves the concurrent state.
             assert trusted_root is not None
-            _require_fresh_install_paths(
-                bundle,
-                record_path,
-                trusted_root,
-                raw_bundle=os.fspath(bundle),
-                raw_record=os.fspath(record_path),
-            )
-            if os.path.lexists(bundle):
-                raise ServerHostInstallError(
-                    f"a host bundle appeared at {bundle} while this fresh install "
-                    f"was staging",
-                    code=HOST_EXISTS,
-                )
-            _refuse_present_record(record_path)
-            _refuse_present_journal()
+            _require_fresh_surface(bundle, record_path, trusted_root, moment="staging")
         if superseded_record is not None:
             # Move the superseded bundle out of the way first: a crash after this
             # leaves no bundle, and the next run installs fresh. It lives inside
@@ -3732,35 +3808,14 @@ def _install_now(
         problem = ""
         if renamed:
             if require_absent:
-                # Delete only the directory this call renamed into place. A
-                # same-UID writer can substitute the name after the rename; that
-                # object is not ours to remove, so leave it and report the
-                # unproven cleanup instead.
-                if installed_identity is None:
-                    problem = (
-                        f"the freshly installed host at {bundle} could not be "
-                        f"examined for cleanup; it is left in place"
-                    )
-                else:
-                    try:
-                        current = os.lstat(bundle)
-                    except FileNotFoundError:
-                        current = None
-                    except OSError:
-                        current = None
-                        problem = (
-                            f"the freshly installed host at {bundle} could not be "
-                            f"examined for cleanup; it is left in place"
-                        )
-                    if current is not None:
-                        if (current.st_dev, current.st_ino) != installed_identity:
-                            problem = (
-                                f"the freshly installed host at {bundle} was "
-                                f"replaced during the failed install; the "
-                                f"substitute is left in place"
-                            )
-                        else:
-                            shutil.rmtree(bundle, ignore_errors=True)
+                # Delete only what this call renamed into place, after moving it
+                # to a name no other writer knows in advance; see
+                # _remove_fresh_bundle for what that does and does not close.
+                problem, keep_aside = _remove_fresh_bundle(
+                    bundle, stage, installed_identity
+                )
+                if keep_aside:
+                    keep_stage = True
             else:
                 shutil.rmtree(bundle, ignore_errors=True)
         if moved_aside:
