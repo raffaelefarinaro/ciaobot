@@ -89,10 +89,15 @@ on every row.
    archives that chat through `POST /api/chats/{id}/archive`, which starts the
    end-of-chat memory pass exactly as an operator's archive does. The run then
    waits on the pass's `postprocess.steps.memory_pass.status` until it is `ok`
-   or `attention` within `timeout_s`; on timeout the pass is stopped and the run
-   is marked `timed_out`. Only `ok` counts as settled. The pass's tokens come
+   or `attention` within `timeout_s`; on timeout the pass is stopped, the
+   harness waits briefly for the engine to flush the pass's last turn, and the
+   run is marked `timed_out`. Only `ok` counts as settled. The pass's tokens come
    from its runtime transcript while it is live, or from the `usage_totals`
-   frontmatter of its archive once it has archived.
+   frontmatter of its archive once it has archived. When neither is found (an
+   `ok` pass whose archive does not appear within 30 s, or a pass with no
+   transcript at all), the run is an error with the message `memory pass usage
+   unavailable (archive not found)` and no pass tokens are recorded: zero would
+   read as a pass that cost nothing.
 6. The run is settled when `/api/admin/restart-blockers` is empty on two
    consecutive polls two seconds apart, at least five seconds after the prompt
    was accepted. This also covers chats spawned by a delegation. On timeout the
@@ -125,7 +130,7 @@ Each run is one JSON object per line:
 | `answer` | the last 2000 characters of the answer text (all turns of all chats, most recent last) |
 | `checks` | per check: `kind`, `ok`, `detail` |
 | `tokens` | `input`, `output`, `cache_read`, `cache_write` and `context_total` (input + cache read + cache write), summed over every turn of every chat in the run. OpenCode's camelCase usage keys (`inputTokens` and so on) are read too; a field present in both spellings counts the snake_case one. For a `transcript` task the synthetic chat has no tokens, so `tokens` is the memory pass's cost; a pass that archived cleanly adds its tokens but no tool calls or cost |
-| `memory_pass_status`, `memory_pass_chat_id`, `memory_pass_tokens` | `transcript` tasks only: how the pass ended (`ok`, `attention`, `timeout`), the pass's chat id, and the pass's own tokens in the `tokens` shape. A `not_queued` pass is an error row. Null on `prompt` and `delegate` rows |
+| `memory_pass_status`, `memory_pass_chat_id`, `memory_pass_tokens` | `transcript` tasks only: how the pass ended (`ok`, `attention`, `timeout`), the pass's chat id, and the pass's own tokens in the `tokens` shape. A `not_queued` pass, or one whose usage cannot be found, is an error row, and its `memory_pass_tokens` is null. Null on `prompt` and `delegate` rows |
 | `tool_calls`, `tool_errors` | from the turns' tool-call lists |
 | `trace` | the ordered tool calls of every measured chat, one entry per call: `{"chat_id", "name", "input", "error"}`. Built from the engine transcripts' `tool_events` (both providers). For a Claude run, `input` is replaced by the real input from the Claude session log (`command`, `file_path`, `pattern` or `skill`, else the input's JSON) for the same tool use. Each string is capped at 200 characters and the list keeps its first 200 calls. Empty on skipped and error rows that never reached the grader |
 | `trace_truncated` | `true` when the trace had more than 200 calls and the rest were dropped |
@@ -246,7 +251,7 @@ matching is case-insensitive.
 | `task_attempt` | `title_contains`, `outcome`, `count` | the matching task has exactly `count` attempts with that outcome (`done`, `blocked`, `needs_input`) |
 | `command` | `argv`, `cwd`, `timeout_s` | the command exits 0; `{python}` in argv is `sys.executable` |
 | `gws_calls` | `must`, `must_not`, `min_calls` | over the fake gws call log (see [Capabilities](#capabilities)): every `must` regex matches at least one call summary, no `must_not` regex matches any, and there are at least `min_calls` calls. Fails with "no gws fake in this run" when the task has no fake |
-| `proposals` | `path`, `must`, `must_not`, `include_files`, `max_new` | the queue bullets added since the snapshot (default `memory-vault/Workspace/Memory-Proposals.md`) and the lines added to each `include_files` file are the items. Every `must` regex matches an item, no `must_not` regex matches one, and at most `max_new` queue bullets are new. Regexes are case-insensitive. Bullets are read with the grammar `list_proposals` uses. A missing queue is empty. At least one of `must`, `must_not` or `max_new` is required |
+| `proposals` | `path`, `must`, `must_not`, `include_files`, `max_new` | the queue bullets added since the snapshot (default `memory-vault/Workspace/Memory-Proposals.md`) and the lines added to each `include_files` file are the items. An `include_files` entry ending in `/` is a directory: every file under it is diffed line by line against the snapshot, and a file that did not exist then counts as all new lines. Every `must` regex matches an item, no `must_not` regex matches one, and at most `max_new` queue bullets are new. Regexes are case-insensitive. Bullets are read with the grammar `list_proposals` uses. A missing queue is empty. At least one of `must`, `must_not` or `max_new` is required |
 
 A check that raises is a failed check with the exception in its detail. It does
 not stop grading of the other checks.

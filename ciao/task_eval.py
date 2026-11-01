@@ -63,6 +63,8 @@ PROPOSALS_PATH = "memory-vault/Workspace/Memory-Proposals.md"
 MEMORY_PASS_TERMINAL: frozenset[str] = frozenset({"ok", "attention"})
 MEMORY_PASS_POLL_S = 2.0
 MEMORY_PASS_ARCHIVE_WAIT_S = 30.0
+# After a stop, the engine flushes the pass's last turn only once the stop has landed.
+MEMORY_PASS_STOP_SETTLE_S = 2.0
 MAX_TRANSCRIPT_TURNS = 20
 SETUP_KINDS: frozenset[str] = frozenset({"task", "project"})
 SCHEMA = "ciao-task-eval/1"
@@ -153,6 +155,7 @@ class MemoryPassOutcome:
     chat_id: str | None
     tokens: dict[str, int]  # raw input / output / cache_read / cache_write
     response: str  # the pass's final reply, "" when unknown
+    usage_known: bool  # False when no record of the pass was found, so tokens are not a measurement
 
 
 @dataclass(frozen=True)
@@ -236,7 +239,7 @@ def _validate_proposals(task_id: str, spec: dict[str, Any]) -> None:
         raise TaskCatalogError(f"{task_id}: proposals names nothing to check (must, must_not or max_new)")
     if "include_files" in spec:
         files = spec["include_files"]
-        if not isinstance(files, list) or not all(isinstance(f, str) and f.strip() for f in files):
+        if not isinstance(files, list) or not all(isinstance(f, str) and f.rstrip("/").strip() for f in files):
             raise TaskCatalogError(f"{task_id}: proposals include_files must be a list of non-empty paths")
     if "max_new" in spec:
         cap = spec["max_new"]
@@ -741,6 +744,19 @@ def _queue_items(text: str) -> list[tuple[str, str]]:
     return items
 
 
+def _added_lines(saved: dict[str, bytes], key: str, target: Path) -> list[str]:
+    """The non-blank lines of ``target`` that were not lines of ``key`` at the snapshot (a new file: all of them)."""
+    if not target.is_file():
+        return []
+    old = {line.strip() for line in saved.get(key, b"").decode("utf-8", "replace").splitlines()}
+    added: list[str] = []
+    for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and stripped not in old:
+            added.append(stripped)
+    return added
+
+
 def _check_proposals(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     """Grade what a memory pass added: new queue bullets, and lines added to ``include_files``.
 
@@ -756,15 +772,14 @@ def _check_proposals(ctx: GradeContext, spec: dict[str, Any]) -> CheckResult:
     new = [(kind, text) for kind, text in _queue_items(queue_text) if text not in before]
     items = [f"[{kind}] {text}" for kind, text in new]
     for extra in spec.get("include_files", []):
-        target = _resolve_in_root(ctx.agent_root, str(extra))
-        old_lines = {
-            line.strip() for line in saved.get(str(extra), b"").decode("utf-8", "replace").splitlines()
-        }
-        if target.is_file():
-            for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
-                stripped = line.strip()
-                if stripped and stripped not in old_lines:
-                    items.append(stripped)
+        rel_extra = str(extra)
+        if rel_extra.endswith("/"):
+            base = rel_extra.rstrip("/")
+            folder = _resolve_in_root(ctx.agent_root, base)
+            for inner in _list_files(folder):
+                items.extend(_added_lines(saved, f"{base}/{inner}", folder / inner))
+        else:
+            items.extend(_added_lines(saved, rel_extra, _resolve_in_root(ctx.agent_root, rel_extra)))
     problems: list[str] = []
     for pattern in spec.get("must", []):
         if not any(re.search(pattern, item, re.IGNORECASE) for item in items):
@@ -1231,7 +1246,7 @@ class IsolatedEngine(EngineSession):
         extra = step.get("extra") or {}
         pass_id = str(extra.get("chat_id") or "")
         if not pass_id:
-            return MemoryPassOutcome("not_queued", None, {name: 0 for name in _TOKEN_FIELDS}, "")
+            return MemoryPassOutcome("not_queued", None, {name: 0 for name in _TOKEN_FIELDS}, "", usage_known=False)
         deadline = time.monotonic() + timeout_s
         status = ""
         while True:
@@ -1242,11 +1257,12 @@ class IsolatedEngine(EngineSession):
             time.sleep(MEMORY_PASS_POLL_S)
         if status not in MEMORY_PASS_TERMINAL:
             self.stop_chat(pass_id)
+            time.sleep(MEMORY_PASS_STOP_SETTLE_S)
             status = "timeout"
         archive_path = self._pass_archive_path(pass_id) if status == "ok" else None
-        tokens, response = memory_pass_usage(self.ws, pass_id, archive_path)
+        tokens, response, usage_known = memory_pass_usage(self.ws, pass_id, archive_path)
         self._chat_ids.append(pass_id)
-        return MemoryPassOutcome(status, pass_id, tokens, response)
+        return MemoryPassOutcome(status, pass_id, tokens, response, usage_known=usage_known)
 
     def _pass_archive_path(self, pass_id: str) -> str | None:
         """The pass's archive path once it has archived. The source step turns ``ok`` before the pass archives."""
@@ -2109,13 +2125,14 @@ def _archive_usage_totals(text: str) -> dict[str, Any]:
     return totals if isinstance(totals, dict) else {}
 
 
-def memory_pass_usage(ws: Path, chat_id: str, archive_path: str | None) -> tuple[dict[str, int], str]:
-    """Tokens and final reply of one memory-pass chat.
+def memory_pass_usage(ws: Path, chat_id: str, archive_path: str | None) -> tuple[dict[str, int], str, bool]:
+    """Tokens, final reply and whether either was found, for one memory-pass chat.
 
     A pass that is still live (``attention``, or stopped on timeout) keeps its
     runtime transcript, which is read directly. A pass that archived cleanly has
     lost that file, so its archive's ``usage_totals`` frontmatter is read; the
-    archive path is relative to the workspace root.
+    archive path is relative to the workspace root. With neither, the tokens are
+    zero and the flag is False: zero would be a measurement that was never made.
     """
     from ciao.transcripts import parse_archive_turns
 
@@ -2129,20 +2146,20 @@ def memory_pass_usage(ws: Path, chat_id: str, archive_path: str | None) -> tuple
                 text = turn.get("response")
                 if isinstance(text, str) and text:
                     response = text
-        return tokens, response
+        return tokens, response, True
     if not archive_path:
-        return tokens, ""
+        return tokens, "", False
     target = Path(archive_path)
     if not target.is_absolute():
         target = ws / target
     try:
         text = target.read_text(encoding="utf-8")
     except OSError:
-        return tokens, ""
+        return tokens, "", False
     _add_usage(tokens, _archive_usage_totals(text))
     turns = parse_archive_turns(text)
     response = str(turns[-1].get("assistant") or "").strip() if turns else ""
-    return tokens, response
+    return tokens, response, True
 
 
 def transcript_path(ws: Path, chat_id: str, provider: str) -> Path:
@@ -2217,6 +2234,13 @@ def take_snapshot(agent_root: Path, api: Callable[..., Any], keep: Iterable[str]
     projects = api("GET", "/api/projects")
     saved: dict[str, bytes] = {}
     for rel in keep:
+        if rel.endswith("/"):
+            # A directory keeps every file under it, so a later diff can see each one's old lines.
+            base = rel.rstrip("/")
+            folder = _resolve_in_root(agent_root, base)
+            for inner in _list_files(folder):
+                saved[f"{base}/{inner}"] = (folder / inner).read_bytes()
+            continue
         path = _resolve_in_root(agent_root, rel)
         if path.is_file():
             saved[rel] = path.read_bytes()
@@ -2502,8 +2526,12 @@ def run_task(
             pass_fields = {
                 "memory_pass_status": pass_outcome.status,
                 "memory_pass_chat_id": pass_outcome.chat_id,
-                "memory_pass_tokens": _tokens(pass_outcome.tokens),
+                "memory_pass_tokens": _tokens(pass_outcome.tokens) if pass_outcome.usage_known else None,
             }
+            if not pass_outcome.usage_known:
+                # Zero tokens here would read as a free pass; the record must not claim a cost it lacks.
+                status = "error"
+                error = "memory pass usage unavailable (archive not found)"
         record.update(
             status=status,
             error=error,

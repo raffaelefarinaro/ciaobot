@@ -29,17 +29,17 @@
   "checks": [
     {
       "kind": "proposals",
-      "include_files": ["AGENTS.md"],
+      "include_files": ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"],
       "must": ["kilomet|\\bkm\\b"]
     },
     {
       "kind": "proposals",
-      "include_files": ["AGENTS.md"],
+      "include_files": ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"],
       "must_not": ["timber|\\bpermit\\b|foundation pour"]
     },
     {
       "kind": "proposals",
-      "include_files": ["AGENTS.md"],
+      "include_files": ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"],
       "must_not": ["max_span|\\b240\\b|settings\\.toml"]
     }
   ]

@@ -1694,10 +1694,11 @@ def test_memory_pass_usage_reads_archive_frontmatter(tmp_path: Path) -> None:
     )
     assert md is not None
 
-    tokens, response = te.memory_pass_usage(tmp_path, "pass-1", str(md.relative_to(tmp_path)))
+    tokens, response, known = te.memory_pass_usage(tmp_path, "pass-1", str(md.relative_to(tmp_path)))
 
     assert tokens == {"input": 10, "output": 5, "cache_read": 3, "cache_write": 2}
     assert response == "Queued 1 fact."
+    assert known is True
 
 
 def test_memory_pass_usage_prefers_live_runtime_transcript(tmp_path: Path) -> None:
@@ -1710,16 +1711,19 @@ def test_memory_pass_usage_prefers_live_runtime_transcript(tmp_path: Path) -> No
         ],
     )
 
-    tokens, response = te.memory_pass_usage(tmp_path, "pass-2", None)
+    tokens, response, known = te.memory_pass_usage(tmp_path, "pass-2", None)
 
     assert tokens == {"input": 8, "output": 2, "cache_read": 0, "cache_write": 0}
     assert response == "first"
+    assert known is True
 
 
 def test_memory_pass_usage_without_any_record_is_zero(tmp_path: Path) -> None:
+    # No live transcript and no archive: the usage is unknown, not zero.
     assert te.memory_pass_usage(tmp_path, "gone", None) == (
         {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
         "",
+        False,
     )
 
 
@@ -1790,9 +1794,9 @@ def test_run_memory_pass_polls_until_ok(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(te, "MEMORY_PASS_POLL_S", 0)
     seen: dict[str, Any] = {}
 
-    def fake_usage(ws: Path, chat_id: str, archive_path: str | None) -> tuple[dict[str, int], str]:
+    def fake_usage(ws: Path, chat_id: str, archive_path: str | None) -> tuple[dict[str, int], str, bool]:
         seen.update(ws=ws, chat_id=chat_id, archive_path=archive_path)
-        return {"input": 7, "output": 0, "cache_read": 0, "cache_write": 0}, "done"
+        return {"input": 7, "output": 0, "cache_read": 0, "cache_write": 0}, "done", True
 
     monkeypatch.setattr(te, "memory_pass_usage", fake_usage)
 
@@ -1803,6 +1807,7 @@ def test_run_memory_pass_polls_until_ok(tmp_path: Path, monkeypatch: pytest.Monk
         chat_id="pass-1",
         tokens={"input": 7, "output": 0, "cache_read": 0, "cache_write": 0},
         response="done",
+        usage_known=True,
     )
     assert calls == [
         ("POST", "/api/chats/src/archive"),
@@ -1872,11 +1877,13 @@ class FakeTranscriptSession(FakeSession):
         *,
         outcome: te.MemoryPassOutcome,
         pass_bullet: str | None = None,
+        pre_tokens: dict[str, int] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(root, **kwargs)
         self.outcome = outcome
         self.pass_bullet = pass_bullet
+        self.pre_tokens = dict(pre_tokens or {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
         self.started: list[dict[str, str]] = []
         self.pass_calls: list[tuple[str, float]] = []
         self.ran_pass = False
@@ -1895,10 +1902,17 @@ class FakeTranscriptSession(FakeSession):
         return self.outcome
 
     def usage(self) -> dict[str, Any]:
-        # The synthetic chat carries no tokens; the pass's own tokens come from the outcome.
+        # Before the pass the synthetic chat holds the pre-pass tokens. The archive deletes
+        # that transcript, so afterwards only a live pass's own transcript remains.
+        if not self.ran_pass:
+            tokens = dict(self.pre_tokens)
+        elif self.outcome.status != "ok":
+            tokens = dict(self.outcome.tokens)
+        else:
+            tokens = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         # Provider errors belong to the pass, so they show only once it has run.
         return {
-            "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+            "tokens": tokens,
             "tool_calls": 0,
             "tool_errors": 0,
             "ciao_calls": 0,
@@ -1935,7 +1949,7 @@ _PASS_TOKENS = {"input": 40, "output": 8, "cache_read": 0, "cache_write": 2}
 def test_run_task_transcript_entry_records_memory_pass_tokens(
     tmp_path: Path, stable_provenance: None
 ) -> None:
-    outcome = te.MemoryPassOutcome("ok", "pass-1", dict(_PASS_TOKENS), "Queued 1 fact.")
+    outcome = te.MemoryPassOutcome("ok", "pass-1", dict(_PASS_TOKENS), "Queued 1 fact.", usage_known=True)
     session = FakeTranscriptSession(tmp_path, outcome=outcome, pass_bullet="Uses kilometres for distances")
 
     record = te.run_task(
@@ -1962,7 +1976,7 @@ def test_run_task_transcript_entry_records_memory_pass_tokens(
 def test_run_task_transcript_attention_and_timeout_fail(
     tmp_path: Path, stable_provenance: None, status: str, timed_out: bool
 ) -> None:
-    outcome = te.MemoryPassOutcome(status, "pass-1", dict(_ZERO_TOKENS), "")
+    outcome = te.MemoryPassOutcome(status, "pass-1", dict(_ZERO_TOKENS), "", usage_known=True)
     session = FakeTranscriptSession(tmp_path, outcome=outcome, pass_bullet="Uses kilometres for distances")
 
     record = te.run_task(
@@ -1980,7 +1994,7 @@ def test_run_task_transcript_attention_and_timeout_fail(
 
 
 def test_run_task_transcript_not_queued_is_error(tmp_path: Path, stable_provenance: None) -> None:
-    outcome = te.MemoryPassOutcome("not_queued", None, dict(_ZERO_TOKENS), "")
+    outcome = te.MemoryPassOutcome("not_queued", None, dict(_ZERO_TOKENS), "", usage_known=False)
     session = FakeTranscriptSession(tmp_path, outcome=outcome)
 
     record = te.run_task(
@@ -1999,7 +2013,7 @@ def test_run_task_transcript_not_queued_is_error(tmp_path: Path, stable_provenan
 def test_run_task_transcript_provider_error_in_pass_follows_error_rule(
     tmp_path: Path, stable_provenance: None
 ) -> None:
-    outcome = te.MemoryPassOutcome("attention", "pass-1", dict(_ZERO_TOKENS), "")
+    outcome = te.MemoryPassOutcome("attention", "pass-1", dict(_ZERO_TOKENS), "", usage_known=True)
     session = FakeTranscriptSession(
         tmp_path,
         outcome=outcome,
@@ -2232,3 +2246,145 @@ def test_summarize_reports_median_model_calls() -> None:
 
     assert group["median_model_calls"] == 7
     assert "Median model calls" in te.render_summary([group])
+def test_run_task_attention_pass_tokens_are_not_doubled(tmp_path: Path, stable_provenance: None) -> None:
+    pre = {"input": 30, "output": 4, "cache_read": 5, "cache_write": 1}
+    outcome = te.MemoryPassOutcome("attention", "pass-1", dict(_PASS_TOKENS), "", usage_known=True)
+    session = FakeTranscriptSession(
+        tmp_path,
+        outcome=outcome,
+        pass_bullet="Uses kilometres for distances",
+        pre_tokens=pre,
+    )
+
+    record = te.run_task(
+        _transcript_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    # The post-run count holds the pass too; the record must add it once, not twice.
+    assert record["tokens"] == {"input": 70, "output": 12, "cache_read": 5, "cache_write": 3, "context_total": 78}
+    assert record["memory_pass_tokens"] == {**_PASS_TOKENS, "context_total": 42}
+    assert record["status"] == "failed"
+
+
+def test_run_task_unknown_pass_usage_is_error(tmp_path: Path, stable_provenance: None) -> None:
+    outcome = te.MemoryPassOutcome("ok", "pass-1", dict(_ZERO_TOKENS), "", usage_known=False)
+    session = FakeTranscriptSession(tmp_path, outcome=outcome, pass_bullet="Uses kilometres for distances")
+
+    record = te.run_task(
+        _transcript_task(),
+        provider="claude",
+        model="haiku",
+        label="candidate",
+        repeat=1,
+        session_factory=lambda task: session,
+    )
+
+    assert record["status"] == "error"
+    assert record["error"] == "memory pass usage unavailable (archive not found)"
+    assert record["memory_pass_status"] == "ok"
+    assert record["memory_pass_tokens"] is None
+
+
+def test_run_memory_pass_ok_without_archive_has_unknown_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+    calls: list[tuple[str, str]] = []
+    replies = {
+        ("POST", "/api/chats/src/archive"): [{"postprocess": _pass_step("queued")}],
+        ("GET", "/api/chats/src"): [{"postprocess": _pass_step("ok")}],
+        ("GET", "/api/chats/pass-1"): [{"archived": False, "archive_path": ""}],
+    }
+    monkeypatch.setattr(engine, "api", _scripted_api(calls, replies))
+    monkeypatch.setattr(te, "MEMORY_PASS_POLL_S", 0)
+    monkeypatch.setattr(te, "MEMORY_PASS_ARCHIVE_WAIT_S", 0)
+
+    outcome = engine.run_memory_pass("src", 60.0)
+
+    assert outcome.status == "ok"
+    assert outcome.usage_known is False
+    assert outcome.tokens == {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+
+
+def test_run_memory_pass_timeout_rereads_transcript_after_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = te.IsolatedEngine(tmp_path / "T", keep_workdir=True)
+    calls: list[tuple[str, str]] = []
+    replies = {
+        ("POST", "/api/chats/src/archive"): [{"postprocess": _pass_step("queued")}],
+        ("GET", "/api/chats/src"): [{"postprocess": _pass_step("running")}],
+    }
+    monkeypatch.setattr(engine, "api", _scripted_api(calls, replies))
+    monkeypatch.setattr(te, "MEMORY_PASS_STOP_SETTLE_S", 0)
+
+    def stop_flushes_last_turn(chat_id: str) -> None:
+        # The engine writes the pass's final turn only once the stop has landed.
+        _write_runtime_transcript(engine.ws, chat_id, [{"response": "partial", "usage": {"input_tokens": 9}}])
+
+    monkeypatch.setattr(engine, "stop_chat", stop_flushes_last_turn)
+
+    outcome = engine.run_memory_pass("src", 0.0)
+
+    assert outcome.status == "timeout"
+    assert outcome.usage_known is True
+    assert outcome.tokens["input"] == 9
+    assert outcome.response == "partial"
+
+
+def test_proposals_check_reads_directories_in_include_files(tmp_path: Path) -> None:
+    people = tmp_path / "memory-vault" / "People"
+    people.mkdir(parents=True)
+    old = "# Lena\n\nLives in Bologna.\n"
+    (people / "lena.md").write_text(old + "Prefers kilometres.\n", encoding="utf-8", newline="")
+    (people / "owner.md").write_text("# Owner\n\nAllergic to hazelnuts.\n", encoding="utf-8", newline="")
+    saved = {"memory-vault/People/lena.md": old.encode("utf-8")}
+    ctx = _ctx(tmp_path, snapshot=_snapshot(saved=saved))
+    spec = {"kind": "proposals", "include_files": ["memory-vault/People/"]}
+
+    assert te._check_proposals(ctx, {**spec, "must": ["kilometres"]}).ok  # added to an existing file
+    assert te._check_proposals(ctx, {**spec, "must": ["hazelnut"]}).ok  # a new file is all new lines
+    assert not te._check_proposals(ctx, {**spec, "must": ["Bologna"]}).ok  # already there at the snapshot
+    assert not te._check_proposals(ctx, {**spec, "must_not": ["hazelnut"]}).ok
+
+
+def test_take_snapshot_saves_every_file_under_a_directory(tmp_path: Path) -> None:
+    people = tmp_path / "memory-vault" / "People"
+    (people / "sub").mkdir(parents=True)
+    (people / "lena.md").write_text("Lena\n", encoding="utf-8", newline="")
+    (people / "sub" / "x.md").write_text("X\n", encoding="utf-8", newline="")
+
+    def api(method: str, path: str, body: Any = None) -> Any:
+        return {"tasks": []} if path.startswith("/api/tasks") else []
+
+    snapshot = te.take_snapshot(tmp_path, api, ["memory-vault/People/"])
+
+    assert snapshot.saved == {
+        "memory-vault/People/lena.md": b"Lena\n",
+        "memory-vault/People/sub/x.md": b"X\n",
+    }
+
+
+MEMORY_PASS_INCLUDES = ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"]
+
+
+def test_memory_pass_checks_cover_people_documents_and_the_decision_sidecar() -> None:
+    by_id = {task.id: task for task in te.load_tasks()}
+    for task_id in (M5_ID, M6_ID):
+        for spec in by_id[task_id].checks:
+            if spec["kind"] == "proposals":
+                assert spec["include_files"] == MEMORY_PASS_INCLUDES, task_id
+
+    m6_checks = by_id[M6_ID].checks
+    sidecar = "memory-vault/Workspace/Memory-Proposals.dismissed.jsonl"
+    assert {"kind": "unchanged", "path": sidecar} not in m6_checks
+    assert {
+        "kind": "file_contains",
+        "path": sidecar,
+        "all": ["Send the weekly round-up on Sunday evenings."],
+    } in m6_checks
