@@ -1933,6 +1933,9 @@ async def test_claude_turn_logs_reconnect_reason_on_model_change(
     provider._connected = True
 
     second = AgentRequest(prompt="b", model="opus", mode="auto", extra_env={"CIAO_CHAT_ID": "c2"})
+    # The first connect also logs at INFO; whether caplog keeps it depends on the
+    # logger level an earlier test on this worker left behind. Drop it.
+    caplog.clear()
     with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
         await provider._ensure_connected(second)
 
