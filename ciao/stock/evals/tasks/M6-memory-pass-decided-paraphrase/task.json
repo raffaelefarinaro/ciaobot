@@ -25,17 +25,18 @@
   "checks": [
     {
       "kind": "proposals",
-      "include_files": ["AGENTS.md"],
+      "include_files": ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"],
       "must": ["hazelnut"]
     },
     {
       "kind": "proposals",
-      "include_files": ["AGENTS.md"],
+      "include_files": ["AGENTS.md", "memory-vault/People/", "memory-vault/Documents/"],
       "must_not": ["sunday"]
     },
     {
-      "kind": "unchanged",
-      "path": "memory-vault/Workspace/Memory-Proposals.dismissed.jsonl"
+      "kind": "file_contains",
+      "path": "memory-vault/Workspace/Memory-Proposals.dismissed.jsonl",
+      "all": ["Send the weekly round-up on Sunday evenings."]
     }
   ]
 }
