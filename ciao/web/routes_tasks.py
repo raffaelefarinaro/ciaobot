@@ -40,6 +40,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.control_plane import ControlPlaneError
+from ciao.provider_service import supported_providers
 from ciao.task_decisions import MAX_REASON
 
 #: One status per application error the task service can raise. The codes are
@@ -91,7 +92,14 @@ _WRITE_KEYS = ("workspace", "expected_revision", "body")
 #: prompt is built server-side from the record; ``instructions`` is the user's
 #: note for this hand-over, quoted after the description in its own fence, so it
 #: can shape how the task is done but cannot replace the task.
-_DELEGATE_KEYS = ("workspace", "expected_revision", "project_id", "instructions")
+_DELEGATE_KEYS = (
+    "workspace",
+    "expected_revision",
+    "project_id",
+    "instructions",
+    "provider",
+    "model",
+)
 
 
 def _control_plane(request: Request) -> Any | None:
@@ -377,7 +385,10 @@ async def task_update(request: Request) -> JSONResponse:
 
 async def task_delegate(request: Request) -> JSONResponse:
     """Hand one task to the agent: ``{"workspace", "expected_revision", "project_id",
-    "instructions"}``.
+    "instructions", "provider", "model"}``.
+
+    ``provider`` and ``model`` pick the delegated chat's runtime; unset keeps the
+    workspace default.
 
     200 with the attempt, the chat it runs in and the task as it now stands.
     ``created: false`` means a live attempt already existed and **nothing** was
@@ -418,6 +429,18 @@ async def task_delegate(request: Request) -> JSONResponse:
         return _refusal(
             "invalid_task_field", "Delegation instructions must be text.", 400
         )
+    provider = body.get("provider")
+    model = body.get("model")
+    if provider in ("", None):
+        provider = None
+    if model in ("", None):
+        model = None
+    if provider is not None and (
+        not isinstance(provider, str) or provider not in supported_providers()
+    ):
+        return _refusal("invalid_task_field", "Unknown provider for this delegation.", 400)
+    if model is not None and not isinstance(model, str):
+        return _refusal("invalid_task_field", "The delegation model must be text.", 400)
     try:
         outcome = plane.workspace_task_delegate(
             workspace,
@@ -426,6 +449,8 @@ async def task_delegate(request: Request) -> JSONResponse:
             project_id=str(body.get("project_id")) if body.get("project_id") else None,
             actor="user",
             instructions=instructions,
+            provider=provider,
+            model=model,
         )
     except ControlPlaneError as exc:
         return _error(exc)

@@ -19,6 +19,7 @@ import TaskWorkspaceSurface from '../TaskWorkspaceSurface.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskBoardStore } from '../../stores/taskBoard'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
+import { useTaskStore } from '../../stores/tasks'
 import type { Task, TaskRow } from '../../lib/types'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -2277,6 +2278,35 @@ describe('TaskBoardView', () => {
       workspace: 'personal',
       expected_revision: REVISION,
       instructions: 'Ask before deleting. Done = a link.',
+    })
+    wrapper.unmount()
+  })
+
+  it('delegates on the model picked in the sheet', async () => {
+    apiPost.mockResolvedValue(delegateAnswer())
+    useTaskStore().models = {
+      models: ['opus', 'sonnet'], default: 'opus',
+      provider_models: { claude: ['opus', 'sonnet'] },
+      provider_defaults: { claude: 'opus' },
+    }
+    const wrapper = await mountWithBody([plainTask({ project_id: 'p1' })])
+
+    await openPreview(wrapper, 'Draft the runbook')
+    await wrapper.get('.task-delegate-model').trigger('click')
+    await flushPromises()
+    const sonnet = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find((option) => option.dataset.model === 'sonnet')
+    expect(sonnet).toBeTruthy()
+    sonnet!.click()
+    await flushPromises()
+    await wrapper.get('.task-sheet .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/fresh/delegate', {
+      workspace: 'personal',
+      expected_revision: REVISION,
+      provider: 'claude',
+      model: 'sonnet',
     })
     wrapper.unmount()
   })
