@@ -352,6 +352,29 @@ describe('taskBoard store', () => {
     })
   })
 
+  it('sends the chosen provider and model with a delegation', async () => {
+    const store = useTaskBoardStore()
+    get.mockResolvedValue({ workspace: 'personal', tasks: [task()] })
+    await store.reload('personal')
+    post.mockResolvedValue(delegated())
+
+    await store.delegate('personal', 'ship', REVISION, undefined, undefined, {
+      provider: 'claude',
+      model: 'sonnet',
+    })
+    expect(post).toHaveBeenLastCalledWith('/api/tasks/ship/delegate', {
+      workspace: 'personal',
+      expected_revision: REVISION,
+      provider: 'claude',
+      model: 'sonnet',
+    })
+
+    await store.delegate('personal', 'ship', REVISION)
+    const body = post.mock.calls.at(-1)?.[1] as Record<string, unknown>
+    expect(body).not.toHaveProperty('provider')
+    expect(body).not.toHaveProperty('model')
+  })
+
   it('adopts the attempt a second delegation returned rather than inventing one',
     async () => {
       const store = useTaskBoardStore()

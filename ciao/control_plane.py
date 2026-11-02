@@ -4393,6 +4393,8 @@ class CiaoControlPlane:
         actor: Actor = "user",
         instructions: str = "",
         mode: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Hand one task to the agent as an ordinary chat, exactly once.
 
@@ -4428,6 +4430,8 @@ class CiaoControlPlane:
         passes none and gets the workspace default; an agent caller passes its
         own ceiling (:meth:`_child_mode`), so a workspace override can never
         hand an agent a stronger chat than its own.
+
+        ``provider`` and ``model`` override the workspace default for the delegated chat; unset keeps it.
 
         ``actor`` is recorded for the caller, not used to weaken anything: the
         store refuses an agent completion either way, and this method never
@@ -4517,6 +4521,8 @@ class CiaoControlPlane:
                 project,
                 title=record.title,
                 mode=mode,
+                provider=provider or None,
+                model=model or None,
                 helper=task_delegation_helper(
                     task_id=record.id, task_revision=revision, attempt_id=attempt_id
                 ),

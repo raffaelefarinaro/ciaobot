@@ -93,6 +93,7 @@ class _Pcm:
         self.start_stream_kwargs: list[dict] = []
         self.start_stream_calls: list[tuple[str, str]] = []
         self.create_chat_calls: list[tuple[str, ...]] = []
+        self.create_chat_runtimes: list[tuple[str | None, str | None]] = []
         self.stopped: list[str] = []
         self.streams: list[_Stream] = []
         self._next = 0
@@ -126,6 +127,7 @@ class _Pcm:
             pending_permission="",
         )
         self.create_chat_calls.append((project_id,))
+        self.create_chat_runtimes.append((provider, model))
         return self.chats[chat_id]
 
     def update_chat(self, chat_id, **fields):
@@ -998,6 +1000,18 @@ async def test_non_text_instructions_are_refused_rather_than_stringified(world) 
     assert pcm.start_stream_calls == []
 
 
+async def test_an_overlong_delegation_model_is_refused_before_anything_starts(world) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Draft the runbook", body="Steps and links.")
+
+    response = _delegate(client, cookies, task, pcm, provider="claude", model="m" * 201)
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task_field"
+    assert pcm.create_chat_calls == []
+    assert pcm.start_stream_calls == []
+
+
 async def test_a_delegation_body_cannot_carry_prompt_or_task_fields(world) -> None:
     """Only `project_id` and the hand-over `instructions` are delegation inputs
     besides the workspace and the revision, so a typo is a 400 rather than a store refusal reported as a broken
@@ -1014,6 +1028,47 @@ async def test_a_delegation_body_cannot_carry_prompt_or_task_fields(world) -> No
         response = _delegate(client, cookies, task, pcm, **{key: value})
         assert response.status_code == 400, key
         assert response.json()["error"]["code"] == "invalid_task_field", key
+    assert pcm.create_chat_calls == []
+    assert pcm.start_stream_calls == []
+
+
+async def test_a_delegation_runs_on_the_chosen_provider_and_model(world) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Pick a runtime", body="Steps and links.")
+
+    response = _delegate(client, cookies, task, pcm, provider="claude", model="sonnet")
+
+    assert response.status_code == 200, response.text
+    assert pcm.create_chat_runtimes == [("claude", "sonnet")]
+
+
+async def test_a_delegation_without_a_model_keeps_the_workspace_default(world) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Default runtime", body="Steps and links.")
+
+    response = _delegate(client, cookies, task, pcm)
+
+    assert response.status_code == 200, response.text
+    assert pcm.create_chat_runtimes == [(None, None)]
+
+
+async def test_an_unknown_delegation_provider_is_refused_before_anything_starts(
+    world,
+) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Bad runtime", body="Steps and links.")
+
+    response = _delegate(client, cookies, task, pcm, provider="nope")
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task_field"
+    assert pcm.create_chat_calls == []
+    assert pcm.start_stream_calls == []
+
+    response = _delegate(client, cookies, task, pcm, model=["x"])
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task_field"
     assert pcm.create_chat_calls == []
     assert pcm.start_stream_calls == []
 

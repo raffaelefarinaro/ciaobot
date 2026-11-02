@@ -125,6 +125,8 @@ class _RecordingPcm:
         ]
         self.raise_on_start: Exception | None = None
         self.raise_on_create: Exception | None = None
+        #: The (provider, model) each ``create_chat`` was asked for, in call order.
+        self.runtimes: list[tuple[Any, Any]] = []
         #: How many times ``stop_chat`` was actually awaited. Zero after a stop
         #: means the coroutine was built and dropped, which is the bug.
         self.stop_awaited = 0
@@ -182,6 +184,7 @@ class _RecordingPcm:
         self.calls.append(
             ("create_chat", (project_id,), {"title": title, "mode": mode, "helper": helper})
         )
+        self.runtimes.append((provider, model))
         return chat
 
     def update_chat(
@@ -3113,3 +3116,20 @@ async def test_agent_delegation_is_capped_at_the_callers_mode_not_the_workspace_
     other = _create(plane, title="Second job")
     _delegate(plane, other)
     assert [c for c in pcm.calls if c[0] == "create_chat"][-1][2]["mode"] is None
+
+
+async def test_the_delegated_chat_is_created_on_the_requested_runtime(
+    tmp_path: Path,
+) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Pick a runtime")
+
+    plane.workspace_task_delegate(
+        "personal",
+        task["id"],
+        expected_revision=task["revision"],
+        provider="claude",
+        model="sonnet",
+    )
+
+    assert pcm.runtimes == [("claude", "sonnet")]

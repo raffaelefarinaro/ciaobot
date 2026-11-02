@@ -55,9 +55,12 @@ import { useDragSort, type DragCommit, type DragScope } from '../composables/use
 import { canStep, placementAnchors, type PlacementAnchors } from '../lib/taskOrder'
 import { useMenuFocusReturn } from '../composables/useMenuFocusReturn'
 import { useModalFocus } from '../composables/useModalFocus'
-import { useProjectStore } from '../stores/projects'
+import { useProjectStore, type NewChatRuntime } from '../stores/projects'
 import { useTaskBoardStore, type TaskChanges } from '../stores/taskBoard'
 import { useTaskSignalsStore } from '../stores/taskSignals'
+import { useTaskStore } from '../stores/tasks'
+import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import ModelSelector from './ModelSelector.vue'
 import { askConfirm, askConfirmReason, pendingConfirm } from '../lib/confirm'
 import { cleanReason } from '../lib/decisionReasons'
 import DecisionReason from './DecisionReason.vue'
@@ -913,9 +916,8 @@ const delegateTask = computed(
 /**
  * What the delegated turn will run with, named rather than implied.
  *
- * The provider and model are the operator's own workspace defaults — the board has
- * no reach into them, exactly as a webhook trigger has none — so the preview says
- * so rather than showing a value it cannot promise. The permission mode is the
+ * The provider and model are not named here: they are the model chip in the sheet,
+ * the workspace default unless one was picked. The permission mode is the
  * chat's, taken from those defaults and *never* escalated: a delegated turn runs
  * with the default attendance, which is the whole reason an approval card it asks
  * for can be answered.
@@ -925,13 +927,67 @@ const delegatePreview = computed(() => {
   if (!task) return null
   return {
     project: projectName(task.project_id),
-    provider: 'Your workspace default',
-    model: 'Your workspace default',
     // Named as the fact it is, since the client cannot read the chat's mode before
     // the chat exists.
     attendance: 'Attended — approval cards ask you in the chat',
   }
 })
+
+/** Sentinel row for "no override": the workspace default, offered as its own model row. */
+const DELEGATE_DEFAULT_KEY = '__workspace-default__'
+/** The provider and model the hand-over runs on; null keeps the workspace default. */
+const delegateRuntime = ref<NewChatRuntime | null>(null)
+const delegateModelPickerOpen = ref(false)
+const delegateModelTrigger = ref<HTMLButtonElement | null>(null)
+const taskStore = useTaskStore()
+
+// The provider the workspace starts chats on; names the default row.
+const delegateProviderLabel = computed(() => {
+  const provider = projectStore.workspaceOptions.find(
+    option => option.name === workspace.value,
+  )?.default_provider
+  if (!provider) return ''
+  return projectStore.workspaceProviderOptions.find(option => option.value === provider)?.label || provider
+})
+const delegateDefaultModelLabel = computed(() => (
+  delegateProviderLabel.value
+    ? `Your workspace default (${delegateProviderLabel.value})`
+    : 'Your workspace default'
+))
+const delegateModelLabel = computed(() => delegateRuntime.value?.model || delegateDefaultModelLabel.value)
+const delegateModelSections = computed<ModelSection[]>(() => [
+  {
+    key: 'default',
+    label: 'Workspace default',
+    models: [DELEGATE_DEFAULT_KEY],
+    modelLabels: { [DELEGATE_DEFAULT_KEY]: delegateDefaultModelLabel.value },
+  },
+  ...sectionsFromModelsResponse(taskStore.models).map(section => (
+    section.key === 'anthropic' ? { ...section, label: 'Claude (Anthropic)' } : section
+  )),
+])
+
+// The triggerless selector does not own the chip, so return focus to it
+// ourselves when the list closes (Escape, outside click, or a pick).
+function closeDelegateModelPicker(): void {
+  delegateModelPickerOpen.value = false
+  void nextTick(() => delegateModelTrigger.value?.focus())
+}
+
+function toggleDelegateModelPicker(): void {
+  if (!delegateModelPickerOpen.value && !taskStore.models) void taskStore.fetchModels()
+  delegateModelPickerOpen.value = !delegateModelPickerOpen.value
+}
+
+function selectDelegateModel(value: string | string[], sectionKey: string): void {
+  const model = Array.isArray(value) ? value[0] : value
+  closeDelegateModelPicker()
+  if (!model || model === DELEGATE_DEFAULT_KEY || sectionKey === 'default') {
+    delegateRuntime.value = null
+    return
+  }
+  delegateRuntime.value = { model, provider: providerForModelSection(sectionKey) }
+}
 
 const delegateFocusActive = computed(
   () => delegateOpen.value && !pendingConfirm.value,
@@ -1009,7 +1065,12 @@ function retryDelegateBody() {
 }
 
 useModalFocus(delegateEl, delegateFocusActive, {
-  onEscape: () => { if (!delegateBusy.value) closeDelegate() },
+  // An open model list takes the first Escape: the focus trap runs in the capture
+  // phase, so it would otherwise close the whole sheet before the list sees the key.
+  onEscape: () => {
+    if (delegateModelPickerOpen.value) { closeDelegateModelPicker(); return }
+    if (!delegateBusy.value) closeDelegate()
+  },
 })
 
 /**
@@ -1028,7 +1089,10 @@ useModalFocus(delegateEl, delegateFocusActive, {
 async function openDelegate(task: Task, mode?: DelegateMode) {
   board.clearError()
   // A retry of the body read keeps what was typed; a new sheet starts empty.
-  if (delegateTaskId.value !== task.id || !delegateOpen.value) delegateInstructions.value = ''
+  if (delegateTaskId.value !== task.id || !delegateOpen.value) {
+    delegateInstructions.value = ''
+    delegateRuntime.value = null
+  }
   delegateTaskId.value = task.id
   delegateMode.value = mode ?? delegateModeFor(task)
   delegateBody.value = ''
@@ -1076,6 +1140,8 @@ function resetDelegate() {
   delegateBodyState.value = 'idle'
   delegateMode.value = 'delegate'
   delegateInstructions.value = ''
+  delegateRuntime.value = null
+  delegateModelPickerOpen.value = false
   // Invalidate any read still in flight, so its answer cannot fill a later dialog.
   delegateSeq++
   board.clearError()
@@ -1121,6 +1187,7 @@ async function submitDelegate() {
   } else {
     outcome = await board.delegate(
       workspace.value, task.id, revision, undefined, delegateInstructions.value,
+      delegateRuntime.value ?? undefined,
     )
   }
   if (seq !== delegateSeq || workspace.value !== originWorkspace) return
@@ -3281,7 +3348,7 @@ defineExpose({ requestClose })
     <div v-if="delegateOpen && delegateTask" class="modal-backdrop" @click.self="closeDelegate">
       <div
         ref="delegateEl"
-        class="modal-sheet task-sheet"
+        class="modal-sheet task-sheet task-delegate-sheet"
         role="dialog"
         aria-modal="true"
         aria-labelledby="task-delegate-title"
@@ -3303,7 +3370,31 @@ defineExpose({ requestClose })
             </div>
             <div>
               <dt>Provider &amp; model</dt>
-              <dd>{{ delegatePreview?.provider }} · {{ delegatePreview?.model }}</dd>
+              <dd>
+                <div v-if="delegateTakesInstructions" class="task-delegate-model-wrap">
+                  <button
+                    ref="delegateModelTrigger"
+                    type="button"
+                    class="btn-chip task-chip task-delegate-model"
+                    :aria-label="`Model for the delegated chat — ${delegateModelLabel}`"
+                    aria-haspopup="listbox"
+                    :aria-expanded="delegateModelPickerOpen"
+                    :disabled="delegateBusy"
+                    @click="toggleDelegateModelPicker"
+                  >{{ delegateModelLabel }}</button>
+                  <ModelSelector
+                    v-if="delegateModelPickerOpen"
+                    triggerless
+                    :model-value="delegateRuntime?.model || DELEGATE_DEFAULT_KEY"
+                    :sections="delegateModelSections"
+                    placeholder="Model"
+                    placement="bottom-start"
+                    @select="selectDelegateModel"
+                    @close="closeDelegateModelPicker"
+                  />
+                </div>
+                <template v-else>The attempt's own chat</template>
+              </dd>
             </div>
             <div>
               <dt>Attendance</dt>
@@ -3350,7 +3441,7 @@ defineExpose({ requestClose })
             <textarea
               id="task-delegate-instructions"
               v-model="delegateInstructions"
-              rows="3"
+              rows="8"
               :maxlength="MAX_DELEGATE_INSTRUCTIONS"
               :disabled="delegateBusy"
               placeholder="How to go about it, what to avoid, what you expect when it's done"
@@ -4594,6 +4685,11 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 /* ── Dialogs ───────────────────────────────────────────────────────────── */
 .task-sheet { padding: 0; }
 .task-move-sheet { max-width: 28rem; }
+/* As wide as the task editor the sheet opens from. */
+.task-delegate-sheet { max-width: 1120px; }
+.task-delegate-sheet .task-form textarea { min-height: 12rem; }
+.task-delegate-model-wrap { position: relative; display: inline-flex; }
+.task-delegate-model { white-space: nowrap; }
 .task-form textarea {
   width: 100%;
   min-width: 0;
@@ -4904,7 +5000,8 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   .task-resolution-sheet .btn-small,
   .task-resolution-sheet .task-chip,
   .task-move-sheet .btn-primary,
-  .task-move-sheet .btn-small { min-height: var(--touch); }
+  .task-move-sheet .btn-small,
+  .task-delegate-model { min-height: var(--touch); }
 }
 /* ── Task editor ─────────────────────────────────────────────────────────
    Nearly the whole window. The main column carries the title, description,
