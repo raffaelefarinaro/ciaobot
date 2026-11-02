@@ -88,7 +88,9 @@ ABSTAIN_RE = re.compile(
     r"don[’']t know|do not know|not (recorded|mentioned|in (the|your) vault|listed)"
     r"|no (record|information|mention)|couldn[’']t find|could not find|can[’']t find"
     r"|cannot find|doesn[’']t (say|mention|record|include)"
-    r"|does not (say|mention|record|include)|isn[’']t (recorded|mentioned)",
+    r"|does not (say|mention|record|include)|isn[’']t (recorded|mentioned|saved)"
+    r"|don[’']t have|do not have|doesn[’']t have|does not have"
+    r"|no [\w' -]{1,40}? (is |was )?(recorded|saved|stored|on file)",
     re.IGNORECASE,
 )
 _MD_LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
@@ -1307,9 +1309,9 @@ class IsolatedEngine(EngineSession):
             "POST",
             "/api/projects",
             {
-                "name": "Task eval host",
+                "name": "Personal",
                 "workspace": WORKSPACE,
-                "context": "Hosts evaluation chats. Not a real project.",
+                "context": "Everyday personal admin, notes and errands.",
             },
         )
         self._host_project_id = str(project["project_id"])
