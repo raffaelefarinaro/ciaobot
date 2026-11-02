@@ -2749,7 +2749,8 @@ def repair_server_host(
 
     Still refused, with nothing touched: a symlink at the bundle path, an unfinished
     upgrade journal, an archive that fails :func:`verify_host_archive` or
-    :func:`inspect_host_bundle`, and a symlinked or non-regular ownership record.
+    :func:`inspect_host_bundle`, and an existing host's symlinked or non-regular
+    ownership record.
 
     Replacing a host changes its code identity, so macOS privacy grants made to the
     old host, such as Full Disk Access, may have to be granted again.
@@ -3712,7 +3713,35 @@ def _read_previous_record(record_path: Path) -> bytes | None:
             f"the ownership record at {record_path} is not a regular file",
             code=TARGET_UNSAFE,
         )
-    return _read_private_bytes(record_path, what="the previous ownership record")
+    # The record is read as it is, whatever its mode: a loose record is exactly
+    # the unprovable case repair replaces, so refusing to read it would block the
+    # repair. The descriptor must still be the file that was just examined.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(record_path, flags)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the ownership record at {record_path} is unreadable: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+            raise ServerHostInstallError(
+                f"the ownership record at {record_path} changed while it was read",
+                code=INSTALL_FAILED,
+            )
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return handle.read()
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the ownership record at {record_path} is unreadable: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _restore_record_bytes(record_path: Path, data: bytes | None) -> None:
@@ -3976,7 +4005,12 @@ def _install_now(
                         f"ownership record could not be written back to "
                         f"{record_path} ({exc}); the host is kept at {bundle}"
                     )
-            elif unproven_present and recorded and not keep_record:
+            elif unproven_present and not keep_record:
+                # Restore whenever this run may have touched the record, not only
+                # when its write returned: a write that replaced the file and then
+                # failed (e.g. its directory flush) still has to be put back. The
+                # restore is idempotent, so a record that was never replaced is
+                # simply rewritten with the bytes it already has.
                 try:
                     _restore_record_bytes(record_path, previous_record)
                     recorded = False

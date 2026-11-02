@@ -11,35 +11,78 @@ from __future__ import annotations
 import errno
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ciao import server_host_install
+from ciao import server_host, server_host_install
+from ciao.release_manifest import SERVER_HOST_FILENAME, server_host_artifact_entry
 from ciao.server_host import (
     APP_NAME,
     BUNDLE_ID,
+    ServerHostError,
     read_host_ownership,
     verify_owned_host,
+    verify_superseded_host,
 )
 from tests.test_server_host_install import (
     _CDHASH,
     _CODESIGN_REL,
     _EXE_REL,
     _ICON_REL,
+    _OTHER_TEAM,
     _PLIST_REL,
+    _SIGNED_TEAM,
     _FakeRunner,
     _SignedRunner,
+    _archive_of,
+    _deferred,
     _fixture,
     _install_production_host,
+    _make_signed_bundle,
     _make_superseded_bundle,
     _signed_fixture,
     _target,
     _write_superseded_record,
     requires_posix_uid,
 )
+
+# The stapled ticket a candidate built for the other Developer ID team carries.
+# _SignedRunner answers every bundle with one team; this lets one run tell the
+# installed host (team _SIGNED_TEAM) from a candidate (team _OTHER_TEAM).
+_OTHER_TICKET = b"stapled-ticket-other"
+
+
+class _TeamByTicketRunner(_SignedRunner):
+    """A signed-host runner whose team follows each bundle's stapled ticket."""
+
+    def __call__(
+        self, argv: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        ticket = self._bundle_of(argv[-1]) / "Contents" / "CodeResources"
+        try:
+            other = ticket.read_bytes() == _OTHER_TICKET
+        except OSError:
+            other = False
+        self.team = _OTHER_TEAM if other else _SIGNED_TEAM
+        return super().__call__(argv, **kwargs)
+
+
+def _loose_superseded_host(tmp_path: Path, target: Path, record: Path) -> bytes:
+    """A superseded host whose own record would prove it, but is group-readable.
+
+    The loose mode is the only reason it is unprovable, so the repair is the one
+    that has to replace it. Returns the record's bytes for later checks.
+    """
+    _make_superseded_bundle(target.parent, 3)
+    _write_superseded_record(record, target, 3)
+    os.chmod(record, 0o644)
+    with pytest.raises(ServerHostError):
+        verify_superseded_host(target, ownership_path=record, runner=_FakeRunner())
+    return record.read_bytes()
 
 
 def _foreign_host(target: Path) -> bytes:
@@ -362,3 +405,250 @@ def test_install_server_host_still_refuses_an_unproven_host(
         )
     assert caught.value.code == server_host_install.HOST_EXISTS
     assert (target / "marker").read_bytes() == marker
+
+
+@requires_posix_uid
+def test_repair_replaces_an_unprovable_host_with_a_loose_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 1: a record that is group-readable is not provable, so the host is
+    # replaced; reading that record for the restore must not refuse the repair.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    record = tmp_path / "records" / "server-host.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    _loose_superseded_host(tmp_path, target, record)
+
+    snapshot = server_host_install.repair_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=_FakeRunner()
+    )
+
+    assert snapshot.host_revision == 4
+    assert (target / _EXE_REL).read_bytes() == b"universal-host-binary"
+    assert read_host_ownership(record) == snapshot
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_repair_restores_a_loose_record_when_the_swap_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 1: the same setup with the swap failing. The original record bytes
+    # (group-readable, so unprovable) come back exactly.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    record = tmp_path / "records" / "server-host.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record_before = _loose_superseded_host(tmp_path, target, record)
+    old_exe = (target / _EXE_REL).read_bytes()
+    real_rename = os.rename
+
+    def refuse_the_new_bundle(src: Any, dst: Any) -> None:
+        if os.fspath(dst) == os.fspath(target) and os.path.basename(
+            os.fspath(src)
+        ) == APP_NAME:
+            raise OSError(errno.EPERM, "Operation not permitted")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(server_host_install.os, "rename", refuse_the_new_bundle)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.repair_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+
+    assert (target / _EXE_REL).read_bytes() == old_exe
+    assert record.read_bytes() == record_before
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_repair_refuses_an_unfinished_journal_and_touches_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Acceptance criterion: an unfinished journal still refuses, nothing touched.
+    # A legacy host upgraded to the signed one as a deferred transaction leaves
+    # exactly such a journal at phase "installed".
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    _install_production_host(
+        tmp_path, target=target, record=record, runner=_FakeRunner()
+    )
+    signed_archive, _bundle, signed_entry = _signed_fixture(tmp_path)
+    _deferred(
+        signed_archive,
+        signed_entry,
+        target=target,
+        record=record,
+        runner=_SignedRunner(),
+    )
+    journal = server_host_install.upgrade_journal_path()
+    assert journal.exists()
+    exe_before = (target / _EXE_REL).read_bytes()
+    record_before = record.read_bytes()
+    journal_before = journal.read_bytes()
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.repair_server_host(
+            signed_archive,
+            signed_entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_SignedRunner(),
+        )
+    assert caught.value.code in (
+        server_host_install.TRANSACTION_CONFLICT,
+        server_host_install.TRANSACTION_BUSY,
+    )
+    assert (target / _EXE_REL).read_bytes() == exe_before
+    assert record.read_bytes() == record_before
+    assert journal.read_bytes() == journal_before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+@requires_posix_uid
+def test_repair_refuses_a_symlinked_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 3: an existing host whose ownership record is a symlink is refused,
+    # with the link, its target and the host untouched.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    marker = _foreign_host(target)
+    elsewhere = tmp_path / "elsewhere" / "record.json"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text("not a record", encoding="utf-8")
+    os.chmod(elsewhere, 0o600)
+    record = tmp_path / "records" / "server-host.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.symlink_to(elsewhere)
+    link_before = os.readlink(record)
+    elsewhere_before = elsewhere.read_bytes()
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.repair_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.TARGET_UNSAFE
+    assert (target / "marker").read_bytes() == marker
+    assert record.is_symlink()
+    assert os.readlink(record) == link_before
+    assert elsewhere.read_bytes() == elsewhere_before
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_repair_replaces_a_policy_refused_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 4: a host signed by another Developer ID team classifies as
+    # POLICY_REFUSED for this release. Repair replaces it with the verified host
+    # of the release, and the new record verifies.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    target = _target(tmp_path)
+    record = tmp_path / "records" / "server-host.json"
+    installed_archive, _bundle, installed_entry = _signed_fixture(tmp_path)
+    server_host_install.install_server_host(
+        installed_archive,
+        installed_entry,
+        bundle_path=target,
+        ownership_path=record,
+        runner=_SignedRunner(),
+    )
+    other_src = _make_signed_bundle(tmp_path / "other-src")
+    (other_src / "Contents" / "CodeResources").write_bytes(_OTHER_TICKET)
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other_archive = _archive_of(other_src, other_dir / SERVER_HOST_FILENAME)
+    other_entry = server_host_artifact_entry(
+        other_archive, signing=server_host.DeveloperIDSigning(_OTHER_TEAM)
+    )
+    runner = _TeamByTicketRunner()
+    inode = target.stat().st_ino
+
+    # The fixture really is a policy refusal, not an unproven host: the legacy
+    # installer refuses it and leaves it untouched.
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            other_archive,
+            other_entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=runner,
+        )
+    assert caught.value.code == server_host_install.POLICY_REFUSED
+    assert target.stat().st_ino == inode
+
+    snapshot = server_host_install.repair_server_host(
+        other_archive,
+        other_entry,
+        bundle_path=target,
+        ownership_path=record,
+        runner=runner,
+    )
+
+    assert snapshot.signing is not None
+    assert snapshot.signing.team_id == _OTHER_TEAM
+    assert read_host_ownership(record) == snapshot
+    assert verify_owned_host(target, ownership_path=record, runner=runner) == snapshot
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_repair_restores_the_record_when_the_record_write_fails_late(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Finding 5: the record write replaces the record and then fails at the
+    # directory fsync. The old record bytes and the old bundle must come back.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    marker = _foreign_host(target)
+    record = tmp_path / "records" / "server-host.json"
+    record_before = _foreign_record(record, tmp_path)
+    real_fsync_dir = server_host_install._fsync_dir
+    injected: list[Path] = []
+
+    def fail_once_after_the_record_replace(path: Path) -> None:
+        # The first directory flush of the record's own parent comes from the
+        # record write itself, after its replace. Later calls are real.
+        if not injected and Path(path) == record.parent:
+            injected.append(Path(path))
+            raise OSError(errno.EIO, "directory flush failed")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(
+        server_host_install, "_fsync_dir", fail_once_after_the_record_replace
+    )
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.repair_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert injected, "the late failure was never injected"
+
+    assert (target / "marker").read_bytes() == marker
+    assert record.read_bytes() == record_before
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
