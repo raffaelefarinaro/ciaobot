@@ -55,7 +55,12 @@ from ciao.update_host import (
 )
 from ciao import macos_service
 from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
-from ciao.release_manifest import artifact_entry, build_manifest
+from ciao.release_manifest import (
+    artifact_entry,
+    build_manifest,
+    installer_artifact_entry,
+    verify_manifest,
+)
 from ciao.os_support.private import is_private
 
 # The minisign helpers are copied from tests/test_release_manifest.py rather
@@ -516,6 +521,36 @@ def test_find_uv_prefers_receipt_then_path(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "empty-home"))
     with pytest.raises(UpdateError, match="uv"):
         find_uv(str(tmp_path / "absent" / "uv"))
+
+
+@mac_update_host
+def test_find_uv_refuses_a_missing_or_unusable_receipt_uv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    _write_executable(home / ".local" / "bin" / "uv")
+    which_uv = _write_executable(tmp_path / "from-path" / "uv")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(shutil, "which", lambda name: which_uv if name == "uv" else None)
+    not_executable = tmp_path / "noexec" / "uv"
+    not_executable.parent.mkdir(parents=True)
+    not_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    not_executable.chmod(0o644)
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+
+    # A recorded uv that is gone, not executable or not a file is an error
+    # naming it, never a fall-through to PATH or ~/.local/bin/uv.
+    for receipt_uv in (tmp_path / "gone" / "uv", not_executable, directory):
+        with pytest.raises(UpdateError, match="install receipt names uv at"):
+            find_uv(str(receipt_uv))
+
+
+def _write_executable(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
 
 
 def test_default_fetch_retries_then_succeeds(
@@ -3492,3 +3527,25 @@ def test_python_request_keeps_the_running_version_and_windows_architecture(
     monkeypatch.setattr(engine_update.sys, "version_info", SimpleNamespace(major=3, minor=13))
     monkeypatch.setattr(engine_update.sysconfig, "get_platform", lambda: host_platform)
     assert engine_update.python_request() == expected
+
+
+def test_pick_wheel_ignores_installer_artifacts(tmp_path: Path) -> None:
+    # #2483: a manifest that lists the installer scripts still yields exactly one
+    # wheel to the updater, because the updater filters by kind.
+    wheel_path = tmp_path / "ciaobot-1.2.3-py3-none-any.whl"
+    wheel_path.write_bytes(b"w")
+    installer = tmp_path / "install.sh"
+    installer.write_bytes(b"#!/bin/sh\n")
+    wheel = artifact_entry(wheel_path, kind="wheel")
+    raw = json.dumps(
+        build_manifest(
+            "1.2.3",
+            [installer_artifact_entry(installer), wheel],
+            created="2026-09-25T10:00:00+00:00",
+        )
+    ).encode()
+    priv, public_key, key_id = _keypair()
+
+    manifest = verify_manifest(raw, _sign(raw, priv, key_id), public_key)
+
+    assert engine_update._pick_wheel(manifest) == wheel

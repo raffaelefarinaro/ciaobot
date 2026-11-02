@@ -68,6 +68,16 @@ _VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ASSET_REF_RE = re.compile(r'(?:src|href)="(/assets/[^"]+)"')
 _CHUNK = 1 << 20
+# The installer scripts publish.yml uploads (#2483). Listing them lets a client
+# authenticate install.sh from the signed manifest instead of pinning one
+# release's digest. install.sh and install-engine.sh are the same bytes under two names.
+INSTALLER_KIND = "installer"
+#: Each installer script a release uploads, by asset name, and the platform it runs on.
+INSTALLER_PLATFORMS: dict[str, str] = {
+    "install.sh": "macos",
+    "install-engine.sh": "macos",
+    "install.ps1": "windows",
+}
 
 
 class SignatureError(ValueError):
@@ -131,6 +141,17 @@ def server_host_artifact_entry(
     entry["host_protocol"] = SERVER_HOST_PROTOCOL
     entry["signing"] = {"kind": SERVER_HOST_SIGNING_KIND, "team_id": signing.team_id}
     return entry
+
+
+def installer_artifact_entry(path: Path) -> dict[str, Any]:
+    """Describe one installer script a release uploads, by its fixed asset name."""
+    platform = INSTALLER_PLATFORMS.get(path.name)
+    if platform is None:
+        raise ValueError(
+            f"not a release installer: {path.name!r}; expected one of "
+            f"{', '.join(sorted(INSTALLER_PLATFORMS))}"
+        )
+    return artifact_entry(path, kind=INSTALLER_KIND, platform=platform)
 
 
 def build_manifest(
@@ -416,6 +437,30 @@ def select_server_host_artifact(manifest: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
+def verify_assets(manifest: dict[str, Any], paths: list[Path]) -> None:
+    """Refuse any file whose bytes differ from its entry in a verified manifest.
+
+    Each file is matched to the one artifact with the same filename. A file
+    the manifest does not list, a filename listed twice, or a different
+    sha256 or size is refused. The caller must have verified the manifest
+    with :func:`verify_manifest` first.
+    """
+    artifacts: list[Any] = manifest["artifacts"]
+    for path in paths:
+        entries = [a for a in artifacts if a["filename"] == path.name]
+        if len(entries) != 1:
+            raise ValueError(
+                f"manifest lists {len(entries)} artifacts named {path.name!r}, "
+                f"expected exactly one"
+            )
+        actual = artifact_entry(path, kind=str(entries[0]["kind"]))
+        if (
+            actual["sha256"] != entries[0]["sha256"]
+            or actual["size"] != entries[0]["size"]
+        ):
+            raise ValueError(f"{path.name} does not match the manifest")
+
+
 def missing_static_assets(static_dir: Path) -> list[str]:
     """Return the packaged PWA files the built index.html needs but lacks."""
     index = static_dir / "index.html"
@@ -464,6 +509,13 @@ def main(argv: list[str] | None = None) -> int:
             "signed host entry instead of the production one"
         ),
     )
+    build.add_argument(
+        "--installer",
+        type=Path,
+        action="append",
+        default=[],
+        help="installer script to list (install.sh, install-engine.sh, install.ps1); repeatable",
+    )
     build.add_argument("wheels", nargs="+", type=Path, help="wheels to list")
 
     verify = sub.add_parser("verify", help="Verify a signed engine manifest")
@@ -471,6 +523,13 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("signature", type=Path, help="manifest signature to read")
     verify.add_argument(
         "--public-key", default=RELEASE_PUBLIC_KEY, help="minisign public key"
+    )
+    verify.add_argument(
+        "--asset",
+        type=Path,
+        action="append",
+        default=[],
+        help="release file whose bytes must match its manifest entry; repeatable",
     )
 
     check_static = sub.add_parser(
@@ -488,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
         wheels: list[Path] = args.wheels
         server_host: Path | None = args.server_host
         team_id: str | None = args.server_host_team_id
+        installers: list[Path] = args.installer
         try:
             if team_id is not None and server_host is None:
                 raise ValueError(
@@ -511,6 +571,16 @@ def main(argv: list[str] | None = None) -> int:
                 artifacts.append(
                     server_host_artifact_entry(server_host, signing=signing)
                 )
+            seen: set[str] = set()
+            for installer in installers:
+                if installer.name in seen:
+                    raise ValueError(f"installer listed twice: {installer.name}")
+                seen.add(installer.name)
+                if not installer.is_file():
+                    raise ValueError(f"installer is not a regular file: {installer}")
+                if installer.stat().st_size == 0:
+                    raise ValueError(f"installer is empty: {installer}")
+                artifacts.append(installer_artifact_entry(installer))
             manifest = build_manifest(
                 version,
                 artifacts,
@@ -531,15 +601,19 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path: Path = args.manifest
         signature_path: Path = args.signature
         public_key: str = args.public_key
+        assets: list[Path] = args.asset
         try:
             raw = manifest_path.read_bytes()
             signature_text = signature_path.read_text(encoding="utf-8")
             trusted_comment = verify_signature(raw, signature_text, public_key)
             manifest = verify_manifest(raw, signature_text, public_key)
+            verify_assets(manifest, assets)
         except (SignatureError, ValueError, OSError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
         print(f"verified {manifest['version']}: {trusted_comment}")
+        for asset in assets:
+            print(f"asset matches: {asset.name}")
         return 0
 
     static_dir: Path = args.static_dir or packaged_static_dir()

@@ -15,6 +15,8 @@ import contextlib
 import dataclasses
 import json
 import os
+import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -24,14 +26,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao import install_receipt, native_handoff, native_lock, native_readiness
+from ciao import engine_update, install_receipt, native_handoff, native_lock, native_readiness
 from ciao import native_installer as native
 from ciao import server_host, server_host_install
 from ciao.install_discovery import NativeInstallState
 from ciao.native_installer import NativeCoordinatorError
 from ciao.native_lock import NativeLockError, NativeRunLock
 from ciao.native_readiness import NativeReadinessProof
-from tests.native_artifacts import make_artifacts, rehash
+from ciao.update_host import MacUpdateHost
+from tests.native_artifacts import make_artifacts, rehash, sha256_of
 from tests.test_native_installer import (
     RUN_ID,
     _available,
@@ -829,7 +832,96 @@ def test_engine_install_runs_uv_without_force_and_writes_the_one_receipt(
     assert receipt.service_label == "com.ciao.server"
     assert receipt.previous_version == ""
     assert receipt.previous_executable == ""
-    assert receipt.uv == ""
+    assert receipt.uv == str(native.persisted_uv_path())
+
+
+def test_native_install_keeps_a_uv_the_updater_stages_with(
+    tmp_path: Path, pinned_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    private = tmp_path / "ciao-native-run"
+    private.mkdir(mode=0o700)
+    private_uv = private / "uv"
+    shutil.copy2(_fake_uv(tmp_path, pinned_home), private_uv)
+    artifacts = rehash(dataclasses.replace(make_artifacts(tmp_path), uv=private_uv))
+    tools, bin_dir = _tool_dirs_under(pinned_home)
+    native._install_engine(
+        artifacts,
+        tools,
+        bin_dir,
+        30.0,
+        cancellation=native.NativeCancellation(),
+        env=_install_env(),
+        cwd=tmp_path,
+    )
+    # What `_PrivateRun.remove` does when the run ends.
+    shutil.rmtree(private)
+
+    receipt = install_receipt.read_receipt()
+    assert receipt is not None
+    assert receipt.uv == str(native.persisted_uv_path())
+    persisted = Path(receipt.uv)
+    assert persisted.read_bytes() == (tmp_path / "uv").read_bytes()
+    assert stat.S_IMODE(os.stat(persisted).st_mode) == 0o755
+    assert stat.S_IMODE(os.stat(persisted.parent).st_mode) == 0o700
+    assert sorted(p.name for p in persisted.parent.iterdir()) == ["uv"]
+    assert not (pinned_home / ".local" / "bin" / "uv").exists()
+    monkeypatch.setattr(sys, "executable", receipt.python)
+    assert engine_update.find_uv(engine_update._receipt_uv(), host=MacUpdateHost()) == (
+        receipt.uv
+    )
+
+
+def test_persist_uv_replaces_an_existing_copy(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    (state / "uv").mkdir(parents=True, mode=0o700)
+    old = state / "uv" / "uv"
+    old.write_bytes(b"old")
+    os.chmod(old, 0o755)
+    source = _script(tmp_path / "src-uv", "exit 0\n")
+
+    target = native._persist_uv(source, sha256_of(source), state_dir=state)
+
+    assert target == state / "uv" / "uv"
+    assert target.read_bytes() == source.read_bytes()
+    assert sorted(p.name for p in (state / "uv").iterdir()) == ["uv"]
+
+
+def test_persist_uv_refuses_a_digest_mismatch(tmp_path: Path) -> None:
+    source = _script(tmp_path / "src-uv", "exit 0\n")
+
+    with pytest.raises(NativeCoordinatorError) as caught:
+        native._persist_uv(source, "0" * 64, state_dir=tmp_path / "state")
+
+    assert caught.value.failure_code == "verification_failed"
+    assert not (tmp_path / "state" / "uv" / "uv").exists()
+    assert list((tmp_path / "state" / "uv").iterdir()) == []
+
+
+@pytest.mark.parametrize("case", ["symlink", "group-readable"])
+def test_persist_uv_refuses_an_unsafe_directory(tmp_path: Path, case: str) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = _script(tmp_path / "src-uv", "exit 0\n")
+    if case == "symlink":
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        os.symlink(elsewhere, state / "uv")
+    else:
+        (state / "uv").mkdir(mode=0o750)
+        os.chmod(state / "uv", 0o750)
+
+    with pytest.raises(NativeCoordinatorError) as caught:
+        native._persist_uv(source, sha256_of(source), state_dir=state)
+
+    assert caught.value.failure_code == "install_failed"
+    assert str(caught.value) == "uv_persist_failed"
+    if case == "symlink":
+        assert list(elsewhere.iterdir()) == []
+    else:
+        assert stat.S_IMODE(os.stat(state / "uv").st_mode) == 0o750
 
 
 @pytest.mark.parametrize(
@@ -1256,6 +1348,7 @@ def _e2e(
     )
     deps = dataclasses.replace(
         production.deps,
+        port_bindable=lambda port: True,
         prepare_state_dir=lambda: native_lock.prepare_native_state_dir(
             tmp_path / "state", trusted_root=tmp_path
         ),
@@ -1663,6 +1756,7 @@ def test_a_held_lock_reports_pid_liveness_on_stderr_only(
     )
     deps = dataclasses.replace(
         production.deps,
+        port_bindable=lambda port: True,
         prepare_state_dir=lambda: native_lock.prepare_native_state_dir(
             state, trusted_root=tmp_path
         ),

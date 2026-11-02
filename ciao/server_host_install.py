@@ -2726,6 +2726,77 @@ def install_server_host(
         )
 
 
+_UNPROVEN = "unproven"
+
+
+def repair_server_host(
+    archive_path: Path,
+    entry: Mapping[str, Any],
+    *,
+    bundle_path: Path | None = None,
+    ownership_path: Path | None = None,
+    runner: Runner = subprocess.run,
+) -> HostOwnership:
+    """Make the host at the canonical path the verified host of this release (#2485).
+
+    Native repair only; :func:`install_server_host` keeps its own refusals. A
+    current host is returned untouched. An absent host is installed. A superseded
+    host, a legacy host when ``entry`` selects the signed one, a host no record
+    proves and a host of another Developer ID team are replaced in one step, after
+    the staged archive has been verified and inspected. An existing host is moved
+    aside, and when the replacement fails it and its exact previous record bytes
+    (or the absence of a record) are put back.
+
+    Still refused, with nothing touched: a symlink at the bundle path, an unfinished
+    upgrade journal, an archive that fails :func:`verify_host_archive` or
+    :func:`inspect_host_bundle`, and an existing host's symlinked or non-regular
+    ownership record.
+
+    Replacing a host changes its code identity, so macOS privacy grants made to the
+    old host, such as Full Disk Access, may have to be granted again.
+    """
+    _require_macos()
+    path = Path(archive_path)
+    verify_host_archive(path, entry)
+    policy = _entry_policy(entry)
+    bundle = default_bundle_path() if bundle_path is None else Path(bundle_path)
+    record_path = (
+        default_ownership_path() if ownership_path is None else Path(ownership_path)
+    )
+    if not bundle.is_absolute():
+        raise ServerHostInstallError(
+            f"the host bundle path must be absolute: {bundle}", code=INSTALL_FAILED
+        )
+    if bundle.name != APP_NAME:
+        raise ServerHostInstallError(
+            f"the host bundle must be named {APP_NAME!r}: {bundle}", code=INSTALL_FAILED
+        )
+    with _upgrade_lock():
+        _refuse_unfinished_journal(bundle, record_path)
+        try:
+            kind, existing = _classify_host(bundle, record_path, runner, policy)
+        except ServerHostInstallError as exc:
+            if exc.code not in (HOST_EXISTS, POLICY_REFUSED):
+                raise
+            kind, existing = _UNPROVEN, None
+        if kind == _CURRENT:
+            assert existing is not None
+            return existing
+        if kind == _ABSENT:
+            return _install_now(path, policy, bundle, record_path, None, runner)
+        if kind == _REPLACE:
+            return _install_now(path, policy, bundle, record_path, existing, runner)
+        return _install_now(
+            path,
+            policy,
+            bundle,
+            record_path,
+            None,
+            runner,
+            replace_unproven=True,
+        )
+
+
 def _refuse_present_journal() -> None:
     """Refuse any journal evidence, including a terminal one, without touching it.
 
@@ -3621,6 +3692,66 @@ def _install_deferred(
         shutil.rmtree(stage, ignore_errors=True)
 
 
+def _read_previous_record(record_path: Path) -> bytes | None:
+    """The exact bytes of the ownership record a native repair is about to replace.
+
+    ``None`` when there is no record. A symlink or a non-regular file is refused
+    rather than read, so the bytes put back on a failed swap are the ones this
+    run saw.
+    """
+    try:
+        checked = os.lstat(record_path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the ownership record at {record_path} cannot be examined: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    if not stat.S_ISREG(checked.st_mode):
+        raise ServerHostInstallError(
+            f"the ownership record at {record_path} is not a regular file",
+            code=TARGET_UNSAFE,
+        )
+    # The record is read as it is, whatever its mode: a loose record is exactly
+    # the unprovable case repair replaces, so refusing to read it would block the
+    # repair. The descriptor must still be the file that was just examined.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(record_path, flags)
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the ownership record at {record_path} is unreadable: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino):
+            raise ServerHostInstallError(
+                f"the ownership record at {record_path} changed while it was read",
+                code=INSTALL_FAILED,
+            )
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return handle.read()
+    except OSError as exc:
+        raise ServerHostInstallError(
+            f"the ownership record at {record_path} is unreadable: {exc}",
+            code=INSTALL_FAILED,
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _restore_record_bytes(record_path: Path, data: bytes | None) -> None:
+    """Put back the exact previous record bytes, or remove the record if there were none."""
+    if data is None:
+        record_path.unlink(missing_ok=True)
+        return
+    _write_private_bytes(record_path, data, what="the previous ownership record")
+
+
 def _install_now(
     path: Path,
     policy: _EntryPolicy,
@@ -3631,9 +3762,19 @@ def _install_now(
     *,
     require_absent: bool = False,
     trusted_root: Path | None = None,
+    replace_unproven: bool = False,
 ) -> HostOwnership:
-    """The established single-step install: a fresh host or a superseded one."""
+    """The established single-step install: a fresh host or a superseded one.
 
+    ``replace_unproven`` is native repair (#2485): an existing bundle no record
+    proves is moved aside and replaced instead of refused, and its exact previous
+    record bytes are put back if the replacement fails.
+    """
+
+    if replace_unproven and require_absent:
+        raise ServerHostInstallError(
+            "a fresh install never replaces a host", code=INSTALL_FAILED
+        )
     if require_absent:
         assert trusted_root is not None
         _require_fresh_surface(bundle, record_path, trusted_root, moment="before")
@@ -3673,6 +3814,8 @@ def _install_now(
     moved_aside = False
     keep_stage = False
     aside = stage / "superseded"
+    unproven_present = False
+    previous_record: bytes | None = None
     try:
         staged_app = extract_host_archive(path, stage)
         # Prove the bytes before they reach ~/Applications. This runs the plist
@@ -3697,24 +3840,30 @@ def _install_now(
                 ) from exc
             staged_identity = (staged_info.st_dev, staged_info.st_ino)
         if os.path.lexists(bundle):
-            if superseded_record is None:
+            if replace_unproven and superseded_record is None:
+                # Native repair: the host no record proves is moved aside below.
+                # Its record bytes are kept so a failed replacement restores them.
+                unproven_present = True
+                previous_record = _read_previous_record(record_path)
+            elif superseded_record is None:
                 # Lost the race with another installer between the check above and
                 # the rename. Refuse rather than replace what appeared.
                 raise ServerHostInstallError(
                     f"a host bundle appeared at {bundle} while this install was staging",
                     code=HOST_EXISTS,
                 )
-            # The superseded host is replaced, so its record and bytes are proven
-            # again right before it is moved aside. Its record is kept in memory
-            # so a failed replacement can put it back.
-            superseded_record = _verify_recorded_host(
-                bundle,
-                record_path,
-                superseded_record,
-                runner,
-                refusal=f"the host at {bundle} changed while this install was "
-                f"staging and is no longer proven ours",
-            )
+            else:
+                # The superseded host is replaced, so its record and bytes are proven
+                # again right before it is moved aside. Its record is kept in memory
+                # so a failed replacement can put it back.
+                superseded_record = _verify_recorded_host(
+                    bundle,
+                    record_path,
+                    superseded_record,
+                    runner,
+                    refusal=f"the host at {bundle} changed while this install was "
+                    f"staging and is no longer proven ours",
+                )
         # The record names the canonical target, not the staging directory, and
         # is written before the rename. A crash before the rename leaves a record
         # with no bundle (the next fresh install overwrites it); a crash after
@@ -3737,7 +3886,7 @@ def _install_now(
             # still refuses on a lost rename and preserves the concurrent state.
             assert trusted_root is not None
             _require_fresh_surface(bundle, record_path, trusted_root, moment="staging")
-        if superseded_record is not None:
+        if superseded_record is not None or unproven_present:
             # Move the superseded bundle out of the way first: a crash after this
             # leaves no bundle, and the next run installs fresh. It lives inside
             # the staging directory, so the cleanup below removes it on success.
@@ -3855,6 +4004,21 @@ def _install_now(
                         f"the superseded host was restored at {bundle}, but its "
                         f"ownership record could not be written back to "
                         f"{record_path} ({exc}); the host is kept at {bundle}"
+                    )
+            elif unproven_present and not keep_record:
+                # Restore whenever this run may have touched the record, not only
+                # when its write returned: a write that replaced the file and then
+                # failed (e.g. its directory flush) still has to be put back. The
+                # restore is idempotent, so a record that was never replaced is
+                # simply rewritten with the bytes it already has.
+                try:
+                    _restore_record_bytes(record_path, previous_record)
+                    recorded = False
+                except (ServerHostError, OSError) as exc:
+                    problem = (
+                        f"the previous host was restored at {bundle}, but its "
+                        f"ownership record could not be put back at {record_path} "
+                        f"({exc}); the host is kept at {bundle}"
                     )
         if recorded and not keep_record and not problem:
             if require_absent:

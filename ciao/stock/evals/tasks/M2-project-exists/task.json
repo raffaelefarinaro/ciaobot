@@ -32,9 +32,6 @@
     {
       "kind": "answer_excludes",
       "any": [
-        "i've created",
-        "i created",
-        "created a new",
         "don't have a",
         "do not have a",
         "no project for"

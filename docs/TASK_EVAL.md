@@ -11,6 +11,9 @@ checks, and records tokens, tool calls, ciao-call errors, cost and wall time.
 Implementation: `ciao/task_eval.py`. Catalog: `ciao/stock/evals/tasks/`.
 CLI: `ciao eval tasks`.
 
+
+Recorded results, one file per run or release: [evals/](evals/README.md). The public summary is the site's [How we measure Ciaobot](https://www.raffaelefarinaro.com/ciaobot/evals.html) page.
+
 ## Cost warning
 
 `ciao eval tasks run` makes real model calls, one per task per repeat, and
@@ -76,7 +79,7 @@ on every row.
    Steps 1 and 2 are `prepare_workspace`, which runs without booting an engine.
 3. The engine is started with `ciao run` (cwd `T/ws`, the same environment
    scrub), and the harness waits until `/api/status` answers 401. It then
-   signs in with the run's own token and creates a "Task eval host" project
+   signs in with the run's own token and creates a neutrally named "Personal" host project (a name that says "eval" made one model refuse the task)
    to hold the eval chat.
 4. Setup steps run (`task`, `project`), then the harness takes a snapshot:
    task ids, schedule ids, project ids, the relative paths of every file under

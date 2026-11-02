@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { cleanReason } from '../lib/decisionReasons'
 import { errorPayload } from '../lib/errorMessage'
 import { EMPTY_TASK_ORDER, taskOrderFrom, type PlacementAnchors } from '../lib/taskOrder'
+import type { NewChatRuntime } from './projects'
 import {
   isTaskInvalidRow,
   taskApiErrorMessage,
@@ -879,6 +880,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     expectedRevision: string,
     projectId?: string,
     instructions?: string,
+    runtime?: NewChatRuntime,
   ): Promise<TaskDelegateResponse['attempt'] | null> {
     if (!workspace || !taskId || !expectedRevision) return null
     // This write's answer is about to be the newest record the board holds.
@@ -893,6 +895,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
           expected_revision: expectedRevision,
           ...(projectId ? { project_id: projectId } : {}),
           ...(instructions?.trim() ? { instructions: instructions.trim() } : {}),
+          ...(runtime?.model ? { provider: runtime.provider, model: runtime.model } : {}),
         },
       )
       // The board moved to another workspace while this delegated. The attempt

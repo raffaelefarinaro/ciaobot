@@ -107,7 +107,7 @@ The module also contains the native coordinator lifecycle (#2340).
 ``python -I -m ciao.native_installer run`` (:func:`main`) is its only entry
 point, started by ``install.sh --native-install``. The coordinator owns the run
 lock, both canonical classifications, the host install and the engine install
-(``uv tool install`` plus the one install receipt). It runs before any of those
+(``uv tool install``, the persisted verified uv the updater stages with, and the one install receipt). It runs before any of those
 mutations, from a private venv the shell builds out of the wheel it digest-pinned; the coordinator re-hashes its private copies.
 :func:`run_native_install` validates the request and the shell's verified
 artifacts, then builds the real steps with :func:`_production_deps` and runs
@@ -173,7 +173,10 @@ from typing import IO, Any, Final, NoReturn, TypeVar
 
 from ciao import __version__ as _PACKAGE_VERSION
 from ciao import install_receipt, native_handoff, native_lock, native_readiness
+from ciao.app_settings import DEFAULT_PWA_HOST
+from ciao.port_in_use import port_is_available
 from ciao.install_discovery import NativeInstallState, classify_native_install
+from ciao.os_support.private import make_private_dir
 from ciao.native_handoff import NativeHandoffError, NativeHandoffResult
 from ciao.native_lock import NativeLockError, NativeRunLock, NativeStateDir
 from ciao.native_readiness import (
@@ -256,6 +259,8 @@ FAILURE_CODES: Final[tuple[str, ...]] = (
     "cancelled",
     "event_channel_failed",
     "internal_error",
+    #: native repair (#2485): nothing installed to repair; the client offers native install.
+    "not_installed",
 )
 #: Every event type this module can write.
 EVENT_TYPES: Final[tuple[str, ...]] = (
@@ -365,7 +370,11 @@ def _set_descriptor_flags(fd: int, flags: int) -> None:
 
 
 class EventWriter:
-    """Write one run's bounded events to an inherited writable descriptor."""
+    """Write one run's bounded events to an inherited writable descriptor.
+
+    ``repair=True`` is native repair (#2485): it has no wizard, so ``service_ready``
+    follows the ``readiness`` phase instead of ``setup_saved``.
+    """
 
     def __init__(
         self,
@@ -376,8 +385,11 @@ class EventWriter:
         prior_events: int = 0,
         write_timeout: float = WRITE_TIMEOUT_SECONDS,
         after_phase: str | None = None,
+        repair: bool = False,
     ) -> None:
         self._run_id = _canonical_run_id(run_id)
+        if type(repair) is not bool:
+            raise EventError("invalid_mode")
         if type(first_seq) is not int or first_seq < 1:
             raise EventError("invalid_seq")
         if type(prior_events) is not int or prior_events < 0:
@@ -439,6 +451,7 @@ class EventWriter:
         self._last_phase = last_phase
         self._wizard_ready = False
         self._setup_saved = False
+        self._repair = repair
         self._terminal: str | None = None
         self._emitting = False
         self._lock = threading.RLock()
@@ -462,6 +475,8 @@ class EventWriter:
         with self._lock:
             self._require_open()
             index = _phase_index(name)
+            if self._repair and name == "wizard":
+                raise EventError("repair_has_no_wizard")
             if name in self._phases:
                 raise EventError("duplicate_phase")
             if index <= self._last_phase:
@@ -474,6 +489,8 @@ class EventWriter:
         """This run's wizard bound ``port``; emits its canonical origin."""
         with self._lock:
             self._require_open()
+            if self._repair:
+                raise EventError("repair_has_no_wizard")
             if "wizard" not in self._phases:
                 raise EventError("wizard_not_started")
             if self._wizard_ready:
@@ -486,6 +503,8 @@ class EventWriter:
         """The guarded wizard save completed; carries no data at all."""
         with self._lock:
             self._require_open()
+            if self._repair:
+                raise EventError("repair_has_no_wizard")
             if not self._wizard_ready:
                 raise EventError("wizard_not_ready")
             if self._setup_saved:
@@ -497,7 +516,10 @@ class EventWriter:
         """Verified activation and live readiness succeeded; terminal."""
         with self._lock:
             self._require_open()
-            if not self._setup_saved:
+            if self._repair:
+                if "readiness" not in self._phases:
+                    raise EventError("readiness_not_started")
+            elif not self._setup_saved:
                 raise EventError("setup_not_saved")
             origin = _loopback_origin(port)
             self._emit_locked("service_ready", {"origin": origin})
@@ -908,6 +930,8 @@ COORDINATOR_READINESS_INTERVAL_SECONDS: Final[float] = 1.0
 #: How long, after the wizard exits, its process group may keep running and the
 #: setup port may stay held before the coordinator stops the group itself.
 COORDINATOR_PORT_RELEASE_TIMEOUT_SECONDS: Final[float] = 15.0
+#: How long the service port may stay unbindable before activation is refused.
+COORDINATOR_PORT_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 #: Readiness answers that may be retried. Every other failure is final.
 _READINESS_RETRYABLE: Final[frozenset[str]] = frozenset(
     {"listener_missing", "startup_status_unavailable", "startup_not_ready"}
@@ -1139,6 +1163,7 @@ class _CoordinatorPolicy:
     readiness_timeout: float = COORDINATOR_READINESS_TIMEOUT_SECONDS
     readiness_interval: float = COORDINATOR_READINESS_INTERVAL_SECONDS
     port_release_timeout: float = COORDINATOR_PORT_RELEASE_TIMEOUT_SECONDS
+    port_bind_timeout: float = COORDINATOR_PORT_BIND_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         for name in (
@@ -1151,6 +1176,7 @@ class _CoordinatorPolicy:
             "readiness_timeout",
             "readiness_interval",
             "port_release_timeout",
+            "port_bind_timeout",
         ):
             value = getattr(self, name)
             if type(value) not in (int, float):
@@ -1201,6 +1227,9 @@ class _CoordinatorDeps:
     #: must raise, or return ``None``, when the query itself fails: a failed query
     #: is never read as a free port.
     port_listeners: Callable[[int], frozenset[int]]
+    #: ``port -> bool``: whether the engine's own bind of the service port would
+    #: succeed now. Read before activation, after the wizard's group and listeners.
+    port_bindable: Callable[[int], bool]
     prove_ready: Callable[
         [FreshHostInstall, NativeHandoffResult, float], NativeReadinessProof
     ]
@@ -2518,6 +2547,77 @@ def _verified_copy(
         raise NativeCoordinatorError("artifact_digest_mismatch", "verification_failed")
 
 
+#: Where the native coordinator keeps its verified uv so the updater can
+#: stage with it (#2484): a private directory beside the install receipt,
+#: outside the tool environment an update replaces and outside the shared
+#: ~/.local/bin.
+PERSISTED_UV_DIR_NAME: Final[str] = "uv"
+PERSISTED_UV_NAME: Final[str] = "uv"
+
+
+def persisted_uv_path(state_dir: Path | None = None) -> Path:
+    """The absolute path the native install records as the receipt's ``uv``."""
+    root = state_dir or install_receipt.default_receipt_path().parent
+    return root / PERSISTED_UV_DIR_NAME / PERSISTED_UV_NAME
+
+
+def _persist_uv(source: Path, digest: str, *, state_dir: Path | None = None) -> Path:
+    """Keep the run's verified uv where the updater finds it; return its path.
+
+    ``source`` is copied with :func:`_verified_copy` (no-follow, owner and
+    mode checked, hashed during and after the copy against ``digest``) into a
+    unique temp sibling, then renamed over ``uv/uv`` so an existing copy is
+    replaced atomically. The ``uv`` directory must be a 0700 directory owned
+    by this user; an existing one is judged, never chmod'ed or replaced.
+    Native repair (#2485) calls this to re-provision uv.
+    """
+    uid = _uid()
+    target = persisted_uv_path(state_dir)
+    directory = target.parent
+    failed = NativeCoordinatorError("uv_persist_failed", "install_failed")
+    try:
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        make_private_dir(directory.parent)
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(directory)
+    except OSError:
+        raise failed from None
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != uid
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise failed
+    tmp = directory / f".{PERSISTED_UV_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        _verified_copy(source, tmp, digest, mode=0o755, expected_uid=uid)
+        try:
+            os.replace(tmp, target)
+        except OSError:
+            raise failed from None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    try:
+        final = os.lstat(target)
+    except OSError:
+        raise failed from None
+    if (
+        not stat.S_ISREG(final.st_mode)
+        or final.st_uid != uid
+        or stat.S_IMODE(final.st_mode) != 0o755
+    ):
+        raise failed
+    if _file_identity(target).sha256 != digest:
+        raise NativeCoordinatorError("artifact_digest_mismatch", "verification_failed")
+    return target
+
+
 def _same_file(path: Path, expected: Path) -> bool:
     try:
         seen = os.stat(path)
@@ -2775,13 +2875,16 @@ def _install_engine(
     cancellation: NativeCancellation,
     env: Mapping[str, str],
     cwd: Path,
+    force: bool = False,
 ) -> _EngineInstall:
-    """Install the staged wheel with the staged uv, probe it, then write the one receipt.
+    """Install the staged wheel with the staged uv, probe it, keep the uv, then write the one receipt.
 
-    There is no ``--force``: the classifications proved there is no tool
-    environment and no shim. The index is pinned, and the call runs with the
-    scrubbed environment in its own session. The probed interpreter and the shim
-    identity are returned so later steps can be bound to them.
+    The classifications normally prove there is no tool environment and no
+    shim, so install mode passes no ``--force``. The index is pinned, and the
+    call runs with the scrubbed environment in its own session. The probed
+    interpreter and the shim identity are returned so later steps can be bound
+    to them. ``force`` is native repair's reinstall of a tool environment that
+    failed verification; native install never passes it.
     """
     from ciao import macos_service
 
@@ -2791,6 +2894,7 @@ def _install_engine(
                 str(artifacts.uv),
                 "tool",
                 "install",
+                *(("--force", "--reinstall") if force else ()),
                 "--no-config",
                 "--default-index",
                 DEFAULT_INDEX_URL,
@@ -2838,6 +2942,9 @@ def _install_engine(
     except NativeCoordinatorError:
         raise _engine_failed() from None
 
+    # The run's private uv is deleted when the run ends; the updater stages
+    # with this persisted copy, which the receipt names (#2484).
+    uv_path = _persist_uv(artifacts.uv, artifacts.uv_sha256)
     receipt = install_receipt.InstallReceipt(
         version=artifacts.version,
         executable=str(ciao_path),
@@ -2845,6 +2952,7 @@ def _install_engine(
         service_backend="launchd",
         service_label=macos_service.SERVER_LABEL,
         installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        uv=str(uv_path),
     )
     try:
         install_receipt.write_receipt(receipt)
@@ -2856,6 +2964,7 @@ def _install_engine(
         or written.version != artifacts.version
         or Path(written.executable) != ciao_path
         or Path(written.python) != tool_python
+        or written.uv != str(uv_path)
     ):
         raise _engine_failed()
     shim, _target = _shim_identity(bin_dir, tool_dir)
@@ -3087,6 +3196,7 @@ def _production_deps(
         activate=activate,
         wizard_listener=wizard_listener,
         port_listeners=_setup_port_listeners,
+        port_bindable=_service_port_bindable,
         prove_ready=prove_ready,
     )
     return _ProductionDeps(deps=deps, private=private)
@@ -3206,6 +3316,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 
+def _service_port_bindable(port: int) -> bool:
+    """The engine's own bind probe for the service port, on the host it serves.
+
+    The engine binds ``config.pwa_host`` (``DEFAULT_PWA_HOST`` for a fresh
+    install), so the probe uses that host and the engine's socket options.
+    """
+    return port_is_available(port, DEFAULT_PWA_HOST)
+
+
 def _setup_port_listeners(port: int) -> frozenset[int]:
     """Production listener lookup for the setup port. Raises when not known.
 
@@ -3225,6 +3344,42 @@ def _setup_port_listeners(port: int) -> frozenset[int]:
     if probe is not True:
         raise OSError("the setup port is not proven free")
     return frozenset()
+
+
+def _await_service_port_bindable(
+    deps: _CoordinatorDeps,
+    port: int,
+    policy: _CoordinatorPolicy,
+    deadline: _Deadline,
+    cancellation: NativeCancellation,
+) -> None:
+    """Return once the engine's bind probe accepts ``port``; otherwise refuse.
+
+    Polls every ``poll_interval`` for at most ``port_bind_timeout``, observing
+    cancellation and the run deadline. A probe that raises, answers something
+    other than a bool, or never accepts the port refuses with
+    ``activation_refused`` before any activation.
+    """
+    bind = _Deadline.after(policy.port_bind_timeout)
+    while True:
+        _check_stage(deadline, cancellation)
+        try:
+            bindable = deps.port_bindable(port)
+        except (_Cancelled, _TimedOut):
+            raise
+        except Exception:
+            raise _Refusal("activation_refused") from None
+        if not isinstance(bindable, bool):
+            raise _Refusal("activation_refused")
+        if bindable:
+            return
+        if bind.remaining() <= 0:
+            raise _Refusal("activation_refused")
+        _wait_observing(
+            min(policy.poll_interval, bind.remaining()),
+            cancellation,
+            policy.poll_interval,
+        )
 
 
 def _port_listeners_answer(deps: _CoordinatorDeps, port: int) -> frozenset[int]:
@@ -3550,6 +3705,12 @@ def _run_native_install(
                 writer.setup_saved()
                 lock.assert_held(run_id=request.run_id)
                 _check_stage(deadline, cancellation)
+                # The engine binds the service port itself. macOS can keep an
+                # address unbindable for a while after the wizard closes, so
+                # activation waits for the engine's own bind probe to accept it.
+                _await_service_port_bindable(
+                    deps, handoff.port, policy, deadline, cancellation
+                )
 
                 writer.phase("activation")
                 activation_attempted = True
