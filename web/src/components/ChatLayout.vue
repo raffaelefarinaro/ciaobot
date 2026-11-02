@@ -7,7 +7,9 @@
       :style="sidebarStyle"
       @toggle="sidebarCollapsed = !sidebarCollapsed"
       @chat-selected="onChatSelected"
+      :can-open-beside="splitFits && !!activePinKey && !subagentRoute"
       @new-schedule="showNewSchedule = true"
+      @open-beside="openBeside"
     />
     <div
       v-if="!sidebarCollapsed && !isMobile"
@@ -23,17 +25,23 @@
     />
     <div ref="chatMainEl" class="chat-main" :class="{ 'chat-split': sideSlotOccupied }">
       <!-- The chat column: everything the route shows. The slot beside it is
-           one slot with two possible occupants — a pinned file, and the
-           terminal — and whichever wins it, the divider and the remembered
-           ratio are the same. -->
+           one slot with three possible occupants — a pinned file, the terminal,
+           and a second chat — and whichever wins it, the divider and the
+           remembered ratio are the same. -->
       <div
         ref="chatBodyEl"
         class="chat-body"
-        :class="{ 'chat-body--split': sideSlotOccupied, 'chat-body--terminal': terminalInTile }"
+        :class="{
+          'chat-body--split': sideSlotOccupied,
+          'chat-body--terminal': terminalInTile || besideInTile,
+          'chat-body--pane-focused': besideInTile && focusedPane === 'main',
+        }"
         :style="chatColumnStyle"
+        @pointerdown.capture="focusPane('main')"
+        @focusin="focusPane('main')"
       >
-        <!-- Split view when a file is pinned -->
-        <template v-if="panelPath">
+        <!-- Split view when a file is pinned and holds the slot -->
+        <template v-if="fileInTile">
           <SubagentChatView
             v-if="subagentRoute"
             :key="subagentRoute.agentId"
@@ -41,7 +49,7 @@
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" file-pinned :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <!-- The route names a chat the catalog has not delivered yet: the
                pane is on its way, so it shows the skeleton rather than
                nothing (#1651). -->
@@ -171,7 +179,7 @@
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
               </button>
             </div>
-            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+            <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" :chat-id="store.activeChat.chat_id" :split="besideInTile" :inactive="besideInTile && focusedPane === 'beside'" :plain-header="besideInTile" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           </template>
           <!-- The route names a chat the catalog has not delivered yet: the pane
                is on its way, so it shows the skeleton rather than nothing
@@ -246,8 +254,7 @@
           </div>
         </template>
       </div>
-      <!-- The slot's divider: the same grip whether a pinned file or the
-           terminal is in the tile beside it. -->
+      <!-- The slot's divider: the same grip whatever is in the tile beside it. -->
       <div
         v-if="sideSlotOccupied && !isMobile"
         class="chat-split-resizer"
@@ -256,23 +263,39 @@
         :class="{ 'is-dragging': isDraggingSplit }"
         @mousedown="startSplitDrag"
       />
-      <!-- The slot: the tile the file panel and the terminal share. It takes
-           whatever the chat pane and gutter leave, so the tile's inset
-           margin never pushes the pair past 100%. -->
+      <!-- The slot: the tile the file panel, the second chat and the terminal
+           share. It takes whatever the chat pane and gutter leave, so the
+           tile's inset margin never pushes the pair past 100%. -->
       <div
         v-if="sideTileExists"
         class="chat-split-side"
         :class="{
           'chat-split-side--terminal': terminalInTile,
+          'chat-split-side--chat': besideInTile,
+          'chat-split-side--focused': besideInTile && focusedPane === 'beside',
           'chat-split-side--closed': !sideSlotOccupied,
         }"
+        @pointerdown.capture="focusPane('beside')"
+        @focusin="focusPane('beside')"
       >
-        <PinnedFilePanel v-if="panelPath" ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
+        <ChatPanel
+          v-if="besideInTile && besideChat"
+          ref="besidePanelRef"
+          :key="`beside-${besideChat.chat_id}`"
+          :chat-id="besideChat.chat_id"
+          beside
+          split
+          plain-header
+          :inactive="focusedPane !== 'beside'"
+          @close="closeBeside"
+          @open-sidebar="sidebarCollapsed = false"
+        />
+        <PinnedFilePanel v-if="fileInTile" ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
         <TerminalPane v-if="terminalMounted && terminalInTile" in-tile :chat-id="activePinKey" @open="terminalOpen = $event" />
       </div>
-      <!-- The terminal leaves the tile when it cannot have it: a pinned file
-           keeps the slot, and the terminal falls back to the drawer over the
-           pane. -->
+      <!-- The terminal leaves the tile when it cannot have it: a pinned file or
+           a second chat keeps the slot, and the terminal falls back to the
+           drawer over the pane. -->
       <TerminalPane v-if="terminalMounted && !terminalInTile" :chat-id="activePinKey" @open="terminalOpen = $event" />
     </div>
     <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
@@ -281,11 +304,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import HomeNoticeReopen from './HomeNoticeReopen.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { terminalPanelWanted } from '../lib/terminalPanel'
+import { readBesideChat, writeBesideChat } from '../lib/chatSplit'
 import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useItemPeekStore } from '../stores/itemPeek'
@@ -382,12 +406,17 @@ watch(() => itemPeek.isOpen, (open) => {
 // reach composer-owned actions (archive).
 //
 // The template declares ChatPanel and HomeRecentChats twice, once under
-// `v-if="pinnedFilePath"` (split view) and once under the `v-else` (no pinned
-// file). Both copies must carry the ref: only one is ever mounted, so the ref
+// `v-if="fileInTile"` (split view) and once under the `v-else` (no pinned
+// file in the tile). Both copies must carry the ref: only one is ever mounted, so the ref
 // holds whichever that is, but tagging only the split-view copy left
 // Cmd+Backspace and the home arrow keys silently dead in the far more common
-// no-pinned-file layout.
+// no-pinned-file layout. The second chat beside it has its own ref.
 const chatPanelRef = ref<InstanceType<typeof ChatPanelComponent> | null>(null)
+const besidePanelRef = ref<InstanceType<typeof ChatPanelComponent> | null>(null)
+/** The pane the keyboard belongs to: the chat chords act on it. */
+const focusedPanel = computed(() => (besideInTile.value && focusedPane.value === 'beside'
+  ? besidePanelRef.value
+  : chatPanelRef.value))
 const pinnedFilePanelRef = ref<InstanceType<typeof PinnedFilePanelComponent> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
@@ -525,9 +554,11 @@ function handleSplitDrag(e: MouseEvent) {
   
   // The floors belong to whoever is in the slot: a file keeps the widths it
   // has always had, and the terminal keeps its own — a chat narrower than
-  // that is a sliver, and a shell narrower than that is not a shell.
-  const minLeft = terminalInTile.value ? TERMINAL_CHAT_MIN_PX : MIN_CHAT_PANE_WIDTH
-  const minSide = terminalInTile.value ? TERMINAL_DOCK_MIN_PX : MIN_SIDE_PANE_WIDTH
+  // that is a sliver, and a shell narrower than that is not a shell. A second
+  // chat is a chat, so it gets the terminal's floors on both sides.
+  const roomy = terminalInTile.value || besideInTile.value
+  const minLeft = roomy ? TERMINAL_CHAT_MIN_PX : MIN_CHAT_PANE_WIDTH
+  const minSide = roomy ? TERMINAL_DOCK_MIN_PX : MIN_SIDE_PANE_WIDTH
   const maxLeft = dragContainerWidth - minSide - SIDE_TILE_CHROME
   
   if (maxLeft < minLeft) {
@@ -724,34 +755,6 @@ const terminalDockFits = computed(() => chatMainWidth.value !== null
   && chatMainWidth.value >= TERMINAL_DOCK_MIN_PANE_PX)
 /** Whether the terminal is on screen. The pane owns that, and says so. */
 const terminalOpen = ref(false)
-/**
- * The terminal occupies the slot: no file has claimed it, and the pane is
- * wide enough to hold both columns.
- *
- * A hidden terminal keeps the slot — it is the same element either way, and
- * the shell it runs in is still there behind the hide.
- */
-const terminalInTile = computed(() => terminalMounted.value
-  && !isMobile.value
-  && terminalDockFits.value
-  && !panelPath.value)
-/** The slot is on screen: a pinned file, or an open terminal in the tile. */
-const sideSlotOccupied = computed(() => !!panelPath.value
-  || (terminalInTile.value && terminalOpen.value))
-/** The slot's tile exists whenever it has an occupant to keep, or the
- *  terminal is mounted: the pane stays in it across a hide. */
-const sideTileExists = computed(() => !!panelPath.value || terminalMounted.value)
-/** The chat column's width: the shared ratio while the slot is on screen. */
-const chatColumnStyle = computed(() => {
-  if (!sideSlotOccupied.value) return {}
-  return {
-    width: isMobile.value ? '100%' : (chatSplitRatio.value * 100) + '%',
-    // Shrinkable, so the slot's floor always wins over the ratio: the chat
-    // gives up the room the tile needs rather than the tile overflowing.
-    flex: isMobile.value ? undefined : '0 1 auto',
-    transition: isDraggingSplit.value ? 'none' : undefined,
-  }
-})
 let chatPaneObserver: ResizeObserver | null = null
 let chatMainObserver: ResizeObserver | null = null
 let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
@@ -906,6 +909,94 @@ const pinWritePending = computed(() => {
   const key = activePinKey.value
   return !!key && store.isChatPinPending(key)
 })
+
+/** A second chat beside the open one needs room for two readable columns. Mirrors the 940px
+ *  pane threshold the page grid uses (DESIGN.md › Layout). */
+const SPLIT_CHAT_MIN_PANE_PX = 940
+const focusedPane = ref<'main' | 'beside'>('main')
+const besideWanted = ref(readBesideChat(store.activeWorkspace))
+watch(() => store.activeWorkspace, (ws) => { besideWanted.value = readBesideChat(ws) })
+function setBeside(chatId: string): void {
+  besideWanted.value = chatId
+  writeBesideChat(store.activeWorkspace, chatId)
+  if (!chatId) focusedPane.value = 'main'
+}
+/** The remembered chat, shown only beside a chat route and never as a copy of the main pane. */
+const besideChat = computed(() => {
+  const id = besideWanted.value
+  if (!id || !activePinKey.value || id === activePinKey.value || subagentRoute.value) return null
+  return store.chats.find(c => c.chat_id === id && !c.archived && c.local !== false) || null
+})
+const splitFits = computed(() => !isMobile.value && chatMainWidth.value !== null
+  && chatMainWidth.value >= SPLIT_CHAT_MIN_PANE_PX)
+const besideInTile = computed(() => !!besideChat.value && splitFits.value)
+/** The pinned file keeps the slot unless a chat was opened beside after it. */
+const fileInTile = computed(() => !!panelPath.value && !besideInTile.value)
+// The socket and history follow what is on screen.
+watch(() => (besideInTile.value ? besideChat.value!.chat_id : null),
+  (id) => { void store.attachBesideChat(id) }, { immediate: true })
+// The remembered chat became the main one, or it is gone: forget it.
+watch(() => activePinKey.value && activePinKey.value === besideWanted.value, (same) => { if (same) setBeside('') })
+watch(() => store.bootstrapped && !!besideWanted.value
+  && !store.chats.some(c => c.chat_id === besideWanted.value && !c.archived),
+  (stale) => { if (stale) setBeside('') })
+
+/**
+ * The terminal occupies the slot: no file or second chat has claimed it, and the pane is
+ * wide enough to hold both columns.
+ *
+ * A hidden terminal keeps the slot — it is the same element either way, and
+ * the shell it runs in is still there behind the hide.
+ */
+const terminalInTile = computed(() => terminalMounted.value
+  && !isMobile.value
+  && terminalDockFits.value
+  && !fileInTile.value
+  && !besideInTile.value)
+/** The slot is on screen: a pinned file, a second chat, or an open terminal in the tile. */
+const sideSlotOccupied = computed(() => fileInTile.value || besideInTile.value
+  || (terminalInTile.value && terminalOpen.value))
+/** The slot's tile exists whenever it has an occupant to keep, or the
+ *  terminal is mounted: the pane stays in it across a hide. */
+const sideTileExists = computed(() => fileInTile.value || besideInTile.value || terminalMounted.value)
+/** The chat column's width: the shared ratio while the slot is on screen. */
+const chatColumnStyle = computed(() => {
+  if (!sideSlotOccupied.value) return {}
+  return {
+    width: isMobile.value ? '100%' : (chatSplitRatio.value * 100) + '%',
+    // Shrinkable, so the slot's floor always wins over the ratio: the chat
+    // gives up the room the tile needs rather than the tile overflowing.
+    flex: isMobile.value ? undefined : '0 1 auto',
+    transition: isDraggingSplit.value ? 'none' : undefined,
+  }
+})
+
+// A new pin on the open chat takes the tile back (a navigation to a pinned chat does not).
+watch([activePinKey, pinnedFilePath], ([key, path], [prevKey, prevPath]) => {
+  if (key && key === prevKey && path && path !== prevPath && besideInTile.value) setBeside('')
+})
+// Opening the terminal takes the tile.
+watch(terminalOpen, (open, wasOpen) => { if (open && !wasOpen && besideInTile.value) setBeside('') })
+
+async function openBeside(chatId: string): Promise<void> {
+  if (!splitFits.value || !activePinKey.value || chatId === activePinKey.value) return
+  if (terminalOpen.value) {
+    // Loaded already: the terminal is open. The shell keeps running, as with the pane's own ×.
+    const { useTerminalStore } = await import('../stores/terminal')
+    useTerminalStore().hide()
+  }
+  focusedPane.value = 'beside'
+  setBeside(chatId)
+}
+function closeBeside(): void {
+  setBeside('')
+  void nextTick(() => chatPanelRef.value?.focusComposer?.())
+}
+function focusPane(pane: 'main' | 'beside', moveFocus = false): void {
+  if (!besideInTile.value) return
+  focusedPane.value = pane
+  if (moveFocus) (pane === 'beside' ? besidePanelRef.value : chatPanelRef.value)?.focusComposer?.()
+}
 const narrowSharedPinBase = computed(() => {
   const p = narrowSharedPin.value
   const idx = p.lastIndexOf('/')
@@ -1061,9 +1152,17 @@ function onChatSelected() {
 }
 
 function closeChat() {
-  void store.closeChat().catch((error) => {
-    store.pushErrorToast('Could not close chat', error instanceof Error ? error.message : 'Could not close chat')
-  })
+  // With a second chat beside, closing the main one promotes that chat into the main pane.
+  const promote = besideInTile.value && besideChat.value ? besideChat.value.chat_id : ''
+  void store.closeChat()
+    .then(async () => {
+      if (!promote) return
+      setBeside('')
+      await store.switchChat(promote)
+    })
+    .catch((error) => {
+      store.pushErrorToast('Could not close chat', error instanceof Error ? error.message : 'Could not close chat')
+    })
 }
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
@@ -1143,7 +1242,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     .find(i => matchesShortcut(e, `workspace${i}` as ShortcutId))
   if (viewShortcutsActive.value && !isTypingTarget(e.target) && !e.defaultPrevented
     && workspaceSlot) {
-    if (chatPanelRef.value?.handleQuestionShortcut?.(e)) {
+    if (focusedPanel.value?.handleQuestionShortcut?.(e)) {
       e.preventDefault()
       return
     }
@@ -1151,7 +1250,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     // switcher while it is up, mirroring the question card's first-refusal:
     // the model is blocked on the approval and the digits are printed on the
     // buttons. Only the first card is keyed (1 deny / 2 approve).
-    if (chatPanelRef.value?.handlePermissionShortcut?.(e)) {
+    if (focusedPanel.value?.handlePermissionShortcut?.(e)) {
       e.preventDefault()
       return
     }
@@ -1175,7 +1274,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // the card's own buttons alone.
   if (e.key === 'Enter' && viewShortcutsActive.value && !isTypingTarget(e.target)
     && !e.defaultPrevented && bare) {
-    if (chatPanelRef.value?.handleQuestionShortcut?.(e)) {
+    if (focusedPanel.value?.handleQuestionShortcut?.(e)) {
       e.preventDefault()
       return
     }
@@ -1234,6 +1333,12 @@ function onUnreservedKeydown(e: KeyboardEvent) {
     if (subagentRoute.value) {
       e.preventDefault()
       void router.push(`/chat/${subagentRoute.value.chatId}`)
+      return
+    }
+    // The second chat, when it has the keyboard, closes alone: the main chat stays.
+    if (besideInTile.value && focusedPane.value === 'beside') {
+      e.preventDefault()
+      closeBeside()
       return
     }
     if (store.activeChat) {
@@ -1315,7 +1420,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   if (mod && !alt && e.key === 'Enter') {
     if (isTypingTarget(e.target) || e.defaultPrevented || !store.activeChat) return
     if (pinnedFilePanelRef.value?.isBusyAuthoring) return
-    if (chatPanelRef.value?.handleSendShortcut?.()) e.preventDefault()
+    if (focusedPanel.value?.handleSendShortcut?.()) e.preventDefault()
     return
   }
 
@@ -1343,7 +1448,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
     // ChatPanel's methods. Guarding the ref alone left `archiveActiveChat`
     // an "is not a function" throw in exactly the window the skeleton
     // covers (#1651).
-    chatPanelRef.value?.archiveActiveChat?.()
+    focusedPanel.value?.archiveActiveChat?.()
     return
   }
 
@@ -1366,7 +1471,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
     e.preventDefault()
     // Same as the archive chord above: the ref can be the loading
     // component, which has no model picker to open.
-    chatPanelRef.value?.toggleModelPicker?.()
+    focusedPanel.value?.toggleModelPicker?.()
     return
   }
 
@@ -1541,6 +1646,21 @@ onBeforeUnmount(() => {
    to, so the two floors are the same number on both sides of the divider. */
 .chat-body--terminal {
   min-width: 360px;
+}
+
+/* Two chats: the pane with the keyboard wears the accent ring. A ring, not a tint, so the
+   cue is a shape as well as a colour. */
+.chat-body--pane-focused,
+.chat-split-side--chat { position: relative; }
+.chat-body--pane-focused::after,
+.chat-split-side--focused::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--accent);
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 20;
 }
 
 .empty-shell {
@@ -1912,6 +2032,13 @@ onBeforeUnmount(() => {
    is not worth looking at. */
 .chat-split-side--terminal {
   min-width: 360px;
+}
+/* A chat in the tile is a full chat pane: the same 360px floor as the terminal, and the
+   container names the chat's own queries answer to. */
+.chat-split-side--chat {
+  min-width: 360px;
+  container-type: inline-size;
+  container-name: chat-pane chat-split;
 }
 /* The slot is closed — the terminal is hidden, or a file owns the tile and
    the terminal is the drawer over the pane. The tile keeps the terminal

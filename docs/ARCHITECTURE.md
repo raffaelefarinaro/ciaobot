@@ -410,7 +410,8 @@ web/                           Vue 3 PWA frontend.
                                (`.chat-split-side` — the same inset, radius, tone and animation,
                                behind the same draggable `chat-split-resizer` and the same
                                remembered `ciao:chat-split-ratio`), which it takes only when no
-                               file owns the slot and the pane is at least 360px of chat
+                               file owns the slot or a second chat (`ChatLayout` `besideInTile`; the
+                               remembered choice is `ciao:beside-chat`), and the pane is at least 360px of chat
                                column + 360px of tile + 24px of slot chrome = 744px wide; and
                                otherwise it is a full-height drawer over the pane, which is what
                                a phone gets and what a pane too narrow for both columns gets,
