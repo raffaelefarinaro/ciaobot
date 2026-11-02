@@ -173,6 +173,8 @@ from typing import IO, Any, Final, NoReturn, TypeVar
 
 from ciao import __version__ as _PACKAGE_VERSION
 from ciao import install_receipt, native_handoff, native_lock, native_readiness
+from ciao.app_settings import DEFAULT_PWA_HOST
+from ciao.port_in_use import port_is_available
 from ciao.install_discovery import NativeInstallState, classify_native_install
 from ciao.native_handoff import NativeHandoffError, NativeHandoffResult
 from ciao.native_lock import NativeLockError, NativeRunLock, NativeStateDir
@@ -908,6 +910,8 @@ COORDINATOR_READINESS_INTERVAL_SECONDS: Final[float] = 1.0
 #: How long, after the wizard exits, its process group may keep running and the
 #: setup port may stay held before the coordinator stops the group itself.
 COORDINATOR_PORT_RELEASE_TIMEOUT_SECONDS: Final[float] = 15.0
+#: How long the service port may stay unbindable before activation is refused.
+COORDINATOR_PORT_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 #: Readiness answers that may be retried. Every other failure is final.
 _READINESS_RETRYABLE: Final[frozenset[str]] = frozenset(
     {"listener_missing", "startup_status_unavailable", "startup_not_ready"}
@@ -1139,6 +1143,7 @@ class _CoordinatorPolicy:
     readiness_timeout: float = COORDINATOR_READINESS_TIMEOUT_SECONDS
     readiness_interval: float = COORDINATOR_READINESS_INTERVAL_SECONDS
     port_release_timeout: float = COORDINATOR_PORT_RELEASE_TIMEOUT_SECONDS
+    port_bind_timeout: float = COORDINATOR_PORT_BIND_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         for name in (
@@ -1151,6 +1156,7 @@ class _CoordinatorPolicy:
             "readiness_timeout",
             "readiness_interval",
             "port_release_timeout",
+            "port_bind_timeout",
         ):
             value = getattr(self, name)
             if type(value) not in (int, float):
@@ -1201,6 +1207,9 @@ class _CoordinatorDeps:
     #: must raise, or return ``None``, when the query itself fails: a failed query
     #: is never read as a free port.
     port_listeners: Callable[[int], frozenset[int]]
+    #: ``port -> bool``: whether the engine's own bind of the service port would
+    #: succeed now. Read before activation, after the wizard's group and listeners.
+    port_bindable: Callable[[int], bool]
     prove_ready: Callable[
         [FreshHostInstall, NativeHandoffResult, float], NativeReadinessProof
     ]
@@ -3087,6 +3096,7 @@ def _production_deps(
         activate=activate,
         wizard_listener=wizard_listener,
         port_listeners=_setup_port_listeners,
+        port_bindable=_service_port_bindable,
         prove_ready=prove_ready,
     )
     return _ProductionDeps(deps=deps, private=private)
@@ -3206,6 +3216,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 
+def _service_port_bindable(port: int) -> bool:
+    """The engine's own bind probe for the service port, on the host it serves.
+
+    The engine binds ``config.pwa_host`` (``DEFAULT_PWA_HOST`` for a fresh
+    install), so the probe uses that host and the engine's socket options.
+    """
+    return port_is_available(port, DEFAULT_PWA_HOST)
+
+
 def _setup_port_listeners(port: int) -> frozenset[int]:
     """Production listener lookup for the setup port. Raises when not known.
 
@@ -3225,6 +3244,42 @@ def _setup_port_listeners(port: int) -> frozenset[int]:
     if probe is not True:
         raise OSError("the setup port is not proven free")
     return frozenset()
+
+
+def _await_service_port_bindable(
+    deps: _CoordinatorDeps,
+    port: int,
+    policy: _CoordinatorPolicy,
+    deadline: _Deadline,
+    cancellation: NativeCancellation,
+) -> None:
+    """Return once the engine's bind probe accepts ``port``; otherwise refuse.
+
+    Polls every ``poll_interval`` for at most ``port_bind_timeout``, observing
+    cancellation and the run deadline. A probe that raises, answers something
+    other than a bool, or never accepts the port refuses with
+    ``activation_refused`` before any activation.
+    """
+    bind = _Deadline.after(policy.port_bind_timeout)
+    while True:
+        _check_stage(deadline, cancellation)
+        try:
+            bindable = deps.port_bindable(port)
+        except (_Cancelled, _TimedOut):
+            raise
+        except Exception:
+            raise _Refusal("activation_refused") from None
+        if not isinstance(bindable, bool):
+            raise _Refusal("activation_refused")
+        if bindable:
+            return
+        if bind.remaining() <= 0:
+            raise _Refusal("activation_refused")
+        _wait_observing(
+            min(policy.poll_interval, bind.remaining()),
+            cancellation,
+            policy.poll_interval,
+        )
 
 
 def _port_listeners_answer(deps: _CoordinatorDeps, port: int) -> frozenset[int]:
@@ -3550,6 +3605,12 @@ def _run_native_install(
                 writer.setup_saved()
                 lock.assert_held(run_id=request.run_id)
                 _check_stage(deadline, cancellation)
+                # The engine binds the service port itself. macOS can keep an
+                # address unbindable for a while after the wizard closes, so
+                # activation waits for the engine's own bind probe to accept it.
+                _await_service_port_bindable(
+                    deps, handoff.port, policy, deadline, cancellation
+                )
 
                 writer.phase("activation")
                 activation_attempted = True
