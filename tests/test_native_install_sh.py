@@ -195,7 +195,10 @@ def emit(body):
 
 
 def argv_record():
-    (home / "coordinator-argv.json").write_text(json.dumps(sys.argv[1:]))
+    # Atomic: the test polls for this file and must never read it half-written.
+    tmp = home / "coordinator-argv.json.tmp"
+    tmp.write_text(json.dumps(sys.argv[1:]))
+    os.replace(tmp, home / "coordinator-argv.json")
 
 
 if (home / "coordinator-wait-term").exists():
