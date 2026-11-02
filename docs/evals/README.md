@@ -4,6 +4,7 @@ Each file here records one run of `ciao eval tasks` (see [TASK_EVAL.md](../TASK_
 
 | File | Engine | Models |
 |---|---|---|
+| [v1.9.0.md](v1.9.0.md) | v1.9.0 candidate, develop `a60fae98` | claude/haiku, opencode/deepseek-v4.1-flash |
 | [2026-11-02.md](2026-11-02.md) | develop `06c0dd8e` (after 1.8.1) | claude/haiku, opencode/deepseek-v4.1-flash, opencode/gpt-6-luna |
 
 ## Recording a run
