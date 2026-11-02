@@ -1000,6 +1000,18 @@ async def test_non_text_instructions_are_refused_rather_than_stringified(world) 
     assert pcm.start_stream_calls == []
 
 
+async def test_an_overlong_delegation_model_is_refused_before_anything_starts(world) -> None:
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Draft the runbook", body="Steps and links.")
+
+    response = _delegate(client, cookies, task, pcm, provider="claude", model="m" * 201)
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task_field"
+    assert pcm.create_chat_calls == []
+    assert pcm.start_stream_calls == []
+
+
 async def test_a_delegation_body_cannot_carry_prompt_or_task_fields(world) -> None:
     """Only `project_id` and the hand-over `instructions` are delegation inputs
     besides the workspace and the revision, so a typo is a 400 rather than a store refusal reported as a broken

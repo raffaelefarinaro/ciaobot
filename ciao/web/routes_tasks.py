@@ -92,6 +92,9 @@ _WRITE_KEYS = ("workspace", "expected_revision", "body")
 #: prompt is built server-side from the record; ``instructions`` is the user's
 #: note for this hand-over, quoted after the description in its own fence, so it
 #: can shape how the task is done but cannot replace the task.
+#: Longest model id a delegation accepts; real ids are far shorter.
+MAX_DELEGATE_MODEL = 200
+
 _DELEGATE_KEYS = (
     "workspace",
     "expected_revision",
@@ -439,8 +442,12 @@ async def task_delegate(request: Request) -> JSONResponse:
         not isinstance(provider, str) or provider not in supported_providers()
     ):
         return _refusal("invalid_task_field", "Unknown provider for this delegation.", 400)
-    if model is not None and not isinstance(model, str):
-        return _refusal("invalid_task_field", "The delegation model must be text.", 400)
+    if model is not None and (not isinstance(model, str) or len(model) > MAX_DELEGATE_MODEL):
+        return _refusal(
+            "invalid_task_field",
+            f"The delegation model must be text of at most {MAX_DELEGATE_MODEL} characters.",
+            400,
+        )
     try:
         outcome = plane.workspace_task_delegate(
             workspace,
