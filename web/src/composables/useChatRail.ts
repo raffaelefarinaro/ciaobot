@@ -5,6 +5,8 @@ import { railNeighbours, stableRailOrder, type ChatRailItem } from '../lib/chatR
 
 // Module-level so it survives ChatPanel remounts (ChatLayout keys ChatPanel by chat id).
 let snapshot: { workspace: string; chatId: string; ids: string[] } | null = null
+// True while a rail switch is in flight; a second swipe during it is ignored.
+let switching = false
 
 export function resetChatRailSnapshot(): void {
   snapshot = null
@@ -30,9 +32,11 @@ export function useChatRail(currentChatId: () => string): {
   })
 
   // Frozen at setup: ChatPanel remounts per chat, so "setup" = "arrived at this chat".
+  // The travel order is consumed here, so only the panel a rail switch mounts reuses it.
   const saved = snapshot
+  snapshot = null
   const reuse = saved !== null && saved.workspace === store.activeWorkspace && saved.chatId === currentChatId()
-  const frozen: string[] | null = reuse && saved ? saved.ids : null
+  const frozen: string[] = reuse && saved ? saved.ids : fresh.value.map(e => e.chat.chat_id)
 
   const items = computed<ChatRailItem[]>(() => {
     const byId = new Map(fresh.value.map(e => [e.chat.chat_id, e]))
@@ -53,9 +57,17 @@ export function useChatRail(currentChatId: () => string): {
   const neighbours = computed(() => railNeighbours(items.value.map(i => i.chatId), currentChatId()))
 
   async function select(chatId: string): Promise<void> {
-    if (chatId === currentChatId()) return
-    snapshot = { workspace: store.activeWorkspace, chatId, ids: items.value.map(i => i.chatId) }
-    await store.switchChat(chatId)
+    if (switching || chatId === currentChatId()) return
+    switching = true
+    try {
+      snapshot = { workspace: store.activeWorkspace, chatId, ids: items.value.map(i => i.chatId) }
+      await store.switchChat(chatId)
+    } catch (err) {
+      snapshot = null
+      throw err
+    } finally {
+      switching = false
+    }
   }
 
   function step(direction: -1 | 1): boolean {

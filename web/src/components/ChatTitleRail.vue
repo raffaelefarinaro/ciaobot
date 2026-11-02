@@ -1,5 +1,10 @@
 <template>
-  <div class="title-rail" role="group" :aria-label="`Chats in this workspace, ${neighbours.index + 1} of ${items.length}`">
+  <div
+    class="title-rail"
+    :class="{ 'title-rail--count': items.length > RAIL_MAX_DOTS }"
+    role="group"
+    :aria-label="`Chats in this workspace, ${neighbours.index + 1} of ${items.length}`"
+  >
     <button
       type="button"
       class="btn-icon title-rail-arrow title-rail-arrow--prev"
@@ -33,6 +38,7 @@
         :tabindex="entry.chatId === currentId ? 0 : -1"
         @click="onItemClick(entry.chatId)"
         @dblclick="onItemDblclick(entry.chatId)"
+        @keydown="onItemKeydown($event, entry.chatId)"
       >
         <span
           v-if="entry.titlePending"
@@ -108,6 +114,15 @@ function onItemDblclick(chatId: string): void {
   if (chatId === props.currentId) emit('rename')
 }
 
+// Keyboard path for phones, where the arrow buttons are hidden: the arrow keys step from the current item.
+function onItemKeydown(e: KeyboardEvent, chatId: string): void {
+  if (chatId !== props.currentId) return
+  const target = e.key === 'ArrowLeft' ? neighbours.value.previous : e.key === 'ArrowRight' ? neighbours.value.next : null
+  if (!target) return
+  e.preventDefault()
+  emit('select', target)
+}
+
 // Settle logic: a neighbour is chosen only after a real finger or wheel gesture.
 // Programmatic centring, focus-induced scrolling and screen-reader scrolling
 // move the strip without a gesture, so they never switch the chat.
@@ -144,8 +159,9 @@ function onScroll(): void {
   timer = setTimeout(settle, RAIL_SETTLE_MS)
 }
 
-function onWheel(): void {
-  gestureSeen = true
+// Only a sideways wheel is a strip gesture; a vertical one is the page scrolling.
+function onWheel(e: WheelEvent): void {
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) gestureSeen = true
 }
 
 function onTouchStart(): void {
@@ -194,6 +210,7 @@ onBeforeUnmount(() => {
 .title-rail-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--fg3); opacity: .5; }
 .title-rail-dot.is-current { background: var(--fg); opacity: 1; }
 .title-rail-dot.is-needs { background: var(--accent); opacity: 1; }
+.title-rail--count .title-rail-item { padding-bottom: 16px; }
 .title-rail-count { font: var(--text-xs)/1 var(--font-mono); color: var(--fg3); }
 /* A .btn-icon box is 46px: 44px plus its 1px border. The selector outranks PaneHeader's `.pane-header .btn-icon` margin, which would otherwise pull the arrow up 7px. */
 .title-rail > .title-rail-arrow.btn-icon { grid-row: 1; align-self: start; margin-top: calc(var(--rail-title-centre) - 23px); }

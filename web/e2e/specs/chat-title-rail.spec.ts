@@ -37,6 +37,29 @@ test.describe('chat title rail, desktop', () => {
     await expect(page).toHaveURL(/\/chat\/alpha-chat-2$/)
     await expect(page.locator('.title-rail [aria-current="page"]')).toContainText('alpha second conversation')
   })
+
+  test('with 13 chats the n / N count sits clear of the project line and the header stays 61px', async ({ page }) => {
+    // Eleven more chats in alpha, copied from alpha-chat-2 so they share its
+    // project. The fixture itself stays as it is for the other specs.
+    await page.route(/\/api\/chats(\?.*)?$/, async route => {
+      const response = await route.fetch()
+      const chats = await response.json() as Array<Record<string, unknown>>
+      const base = chats.find(c => c.chat_id === 'alpha-chat-2')!
+      const extra = Array.from({ length: 11 }, (_, i) => ({ ...base, chat_id: `alpha-extra-${i}`, title: `alpha extra ${i}` }))
+      await route.fulfill({ response, json: [...chats, ...extra] })
+    })
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+
+    await expect(page.locator('.title-rail-count')).toHaveText('1 / 13')
+    const headerHeight = await page.locator('.chat-panel .pane-header').evaluate(el => el.getBoundingClientRect().height)
+    expect(headerHeight).toBe(61)
+
+    const boxes = await page.locator('.title-rail-item[aria-current] .title-rail-project, .title-rail-count').evaluateAll(
+      els => els.map(el => { const b = el.getBoundingClientRect(); return { top: b.top, bottom: b.bottom } }),
+    )
+    const [project, count] = boxes
+    expect(count.top, 'count must start below the project line').toBeGreaterThanOrEqual(project.bottom)
+  })
 })
 
 test.describe('chat title rail, phone', () => {

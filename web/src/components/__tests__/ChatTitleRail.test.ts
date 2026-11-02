@@ -130,6 +130,39 @@ describe('ChatTitleRail', () => {
     expect(capped.find('.title-rail-count').text()).toBe('1 / 13')
   })
 
+  it('gives the count room only above the dots cap', () => {
+    seed(['chat-0'])
+    const many = (n: number) => Array.from({ length: n }, (_, i) => item(`chat-${i}`))
+
+    expect(mount(ChatTitleRail, { props: { items: many(12), currentId: 'chat-0' } }).classes()).not.toContain('title-rail--count')
+    expect(mount(ChatTitleRail, { props: { items: many(13), currentId: 'chat-0' } }).classes()).toContain('title-rail--count')
+  })
+
+  // Item 7: with no arrow buttons (phones), the arrow keys still step the chat.
+  it('steps to a neighbour with the arrow keys from the current item', async () => {
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+    })
+    const current = wrapper.get('.title-rail-item[aria-current="page"]')
+
+    await current.trigger('keydown', { key: 'ArrowLeft' })
+    await current.trigger('keydown', { key: 'ArrowRight' })
+
+    expect(wrapper.emitted('select')).toEqual([['a'], ['c']])
+  })
+
+  it('does nothing for an arrow key at either end of the rail', async () => {
+    seed(['a', 'b'])
+    const first = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' } })
+    await first.get('.title-rail-item[aria-current="page"]').trigger('keydown', { key: 'ArrowLeft' })
+    expect(first.emitted('select')).toBeUndefined()
+
+    const last = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'b' } })
+    await last.get('.title-rail-item[aria-current="page"]').trigger('keydown', { key: 'ArrowRight' })
+    expect(last.emitted('select')).toBeUndefined()
+  })
+
   function geometry(wrapper: ReturnType<typeof mount>) {
     const strip = wrapper.find('.title-rail-strip').element as HTMLElement
     const els = wrapper.findAll('.title-rail-item').map(w => w.element as HTMLElement)
@@ -151,7 +184,7 @@ describe('ChatTitleRail', () => {
     const strip = geometry(wrapper)
 
     strip.scrollLeft = 200
-    strip.dispatchEvent(new Event('wheel'))
+    strip.dispatchEvent(new WheelEvent('wheel', { deltaX: 50 }))
     strip.dispatchEvent(new Event('scroll'))
     vi.advanceTimersByTime(RAIL_SETTLE_MS)
 
@@ -168,6 +201,24 @@ describe('ChatTitleRail', () => {
     })
     const strip = geometry(wrapper)
 
+    strip.scrollLeft = 200
+    strip.dispatchEvent(new Event('scroll'))
+    vi.advanceTimersByTime(RAIL_SETTLE_MS)
+
+    expect(wrapper.emitted('select')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('does not switch after a vertical wheel, which is page scrolling', () => {
+    vi.useFakeTimers()
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+      attachTo: document.body,
+    })
+    const strip = geometry(wrapper)
+
+    strip.dispatchEvent(new WheelEvent('wheel', { deltaY: 40 }))
     strip.scrollLeft = 200
     strip.dispatchEvent(new Event('scroll'))
     vi.advanceTimersByTime(RAIL_SETTLE_MS)
