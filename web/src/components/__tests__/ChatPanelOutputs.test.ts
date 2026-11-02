@@ -121,6 +121,7 @@ async function mountPanel(extraStubs: Record<string, unknown> = {}): Promise<{
   })
 
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     global: {
       plugins: [pinia],
       stubs: {
@@ -460,6 +461,7 @@ describe('ChatPanel Outputs section', () => {
       },
     }]
     store.activeChatId = 'pass-1'
+    await wrapper.setProps({ chatId: 'pass-1' })
     await flushPromises()
 
     const link = wrapper.get('.chat-origin-link')

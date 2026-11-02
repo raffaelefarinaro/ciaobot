@@ -117,6 +117,7 @@ async function mountPanel(archived = false): Promise<{
 
   const sendMessage = vi.spyOn(store, 'sendMessage').mockImplementation(() => true)
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     global: {
       plugins: [pinia],
       stubs: {

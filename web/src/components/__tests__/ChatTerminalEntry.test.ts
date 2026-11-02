@@ -203,6 +203,7 @@ describe('the ways into the browser terminal', () => {
     vi.spyOn(useTaskStore(pinia), 'fetchSchedules').mockResolvedValue()
 
     const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
       global: {
         plugins: [pinia, router],
         stubs: {

@@ -387,6 +387,6 @@ describe('useChatComposer attachments', () => {
   it('forwards a pending-image removal to the store', () => {
     const { composer, store } = makeComposer()
     composer.removePendingImage(2)
-    expect(store.removePendingImage).toHaveBeenCalledWith(2)
+    expect(store.removePendingImage).toHaveBeenCalledWith(CHAT_ID, 2)
   })
 })

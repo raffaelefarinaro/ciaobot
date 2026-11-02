@@ -120,6 +120,7 @@ async function mountPanel(): Promise<{
   })
 
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     global: {
       plugins: [pinia],
       stubs: {
@@ -478,6 +479,7 @@ describe('ChatPanel live trace', () => {
     store.messages['chat-2'] = turnMessages().slice(0, 1)
     store.streaming['chat-2'] = true
     store.activeChatId = 'chat-2'
+    await wrapper.setProps({ chatId: 'chat-2' })
     await flushPromises()
     expect(wrapper.get('.trace-block.live').classes()).not.toContain('open')
   })
@@ -622,6 +624,7 @@ describe('ChatPanel live trace', () => {
     await flushPromises()
 
     store.activeChatId = 'chat-2'
+    await wrapper.setProps({ chatId: 'chat-2' })
     await flushPromises()
     await new Promise(r => setTimeout(r, 60))
 
@@ -724,6 +727,7 @@ describe('ChatPanel live trace', () => {
     expect(wrapper.get('.trace-block').classes()).toContain('open')
 
     store.activeChatId = 'chat-2'
+    await wrapper.setProps({ chatId: 'chat-2' })
     await flushPromises()
     expect(wrapper.get('.trace-block').classes()).not.toContain('open')
   })

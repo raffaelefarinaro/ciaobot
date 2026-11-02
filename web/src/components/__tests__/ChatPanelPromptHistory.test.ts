@@ -114,6 +114,7 @@ async function mountPanel(): Promise<{
 
   const sendMessage = vi.spyOn(store, 'sendMessage')
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     global: {
       plugins: [pinia],
       stubs: {

@@ -152,6 +152,7 @@ async function mountPanel(options: MountOptions = {}): Promise<{
 
   const sendMessage = vi.spyOn(store, 'sendMessage')
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     global: {
       plugins: [pinia],
       stubs: {
@@ -1061,6 +1062,7 @@ describe('ChatPanel recovery model picker', () => {
     // The user moves to another chat before choosing a model.
     store.chats.push(makeChat('chat-2'))
     store.activeChatId = 'chat-2'
+    await wrapper.setProps({ chatId: 'chat-2' })
     store.messages['chat-2'] = []
     await flushPromises()
 

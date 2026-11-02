@@ -153,7 +153,7 @@ describe('TaskOriginNote', () => {
     await flushPromises()
     expect(askConfirm).not.toHaveBeenCalled()
     expect(apiPost).not.toHaveBeenCalled()
-    expect(wrapper.find('#task-origin-resolution').exists()).toBe(false)
+    expect(wrapper.find('textarea.task-origin-note').exists()).toBe(false)
     expect(wrapper.emitted('marked-done')).toBeUndefined()
   })
 
@@ -186,7 +186,7 @@ describe('TaskOriginNote', () => {
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, status: 'done', live_attempt_id: '' }] })
     await wrapper.get('button').trigger('click')
     await flushPromises()
-    await wrapper.get('#task-origin-resolution').setValue('  Merged  ')
+    await wrapper.get('textarea.task-origin-note').setValue('  Merged  ')
     await wrapper.findAll('button').find((b) => b.text() === 'Approve Done')!.trigger('click')
     await flushPromises()
 
@@ -200,7 +200,9 @@ describe('TaskOriginNote', () => {
 
     expect(wrapper.findAll('.task-origin-actions button').map(b => b.text())).toEqual(['Mark done and archive', 'Cancel'])
     expect(wrapper.text()).not.toContain('Complete without note')
-    expect(wrapper.get('label[for="task-origin-resolution"]').text()).toBe('How was it completed? (optional)')
+    const noteLabel = wrapper.get('label.task-origin-note-label')
+    expect(noteLabel.attributes('for')).toBe(wrapper.get('textarea.task-origin-note').attributes('id'))
+    expect(noteLabel.text()).toBe('How was it completed? (optional)')
     // A blank note is allowed: the action is never held back by the field.
     expect((wrapper.get('.task-origin-actions .btn-primary').element as HTMLButtonElement).disabled).toBe(false)
   })
@@ -226,7 +228,7 @@ describe('TaskOriginNote', () => {
     await wrapper.get('button').trigger('click')
     await flushPromises()
 
-    expect(document.activeElement).toBe(wrapper.get('#task-origin-resolution').element)
+    expect(document.activeElement).toBe(wrapper.get('textarea.task-origin-note').element)
   })
 
   it('gives the keyboard back to the button that opened the prompt when Cancel closes it', async () => {
@@ -251,7 +253,7 @@ describe('TaskOriginNote', () => {
     const wrapper = mountAttached([reviewed])
     await wrapper.get('button').trigger('click')
     await flushPromises()
-    await wrapper.get('#task-origin-resolution').setValue('Done')
+    await wrapper.get('textarea.task-origin-note').setValue('Done')
     await wrapper.findAll('button').find((b) => b.text() === 'Approve Done')!.trigger('click')
     await flushPromises()
 
@@ -259,7 +261,7 @@ describe('TaskOriginNote', () => {
     // refusal would find the field still focused and the assertion would
     // pass by accident; take it away by hand — the link is the next stop.
     wrapper.get('a').element.focus()
-    expect(document.activeElement).not.toBe(wrapper.get('#task-origin-resolution').element)
+    expect(document.activeElement).not.toBe(wrapper.get('textarea.task-origin-note').element)
 
     refuse(Object.assign(new Error('conflict'), { status: 409 }))
     await flushPromises()
@@ -267,8 +269,8 @@ describe('TaskOriginNote', () => {
     // The prompt stays open with the draft and the error, and the keyboard is
     // back in the field.
     expect(wrapper.get('[role="alert"]').text()).toBe('This task changed since it was read. Check it and approve again.')
-    expect((wrapper.get('#task-origin-resolution').element as HTMLTextAreaElement).value).toBe('Done')
-    expect(document.activeElement).toBe(wrapper.get('#task-origin-resolution').element)
+    expect((wrapper.get('textarea.task-origin-note').element as HTMLTextAreaElement).value).toBe('Done')
+    expect(document.activeElement).toBe(wrapper.get('textarea.task-origin-note').element)
   })
 
   it('answers a stale-revision refusal with a short line and a reload', async () => {
