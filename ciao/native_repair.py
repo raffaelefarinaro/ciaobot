@@ -24,7 +24,6 @@ import signal
 import stat
 import subprocess
 import sys
-import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -65,7 +64,7 @@ from ciao.native_installer import (
 )
 from ciao.native_lock import NativeLockError, NativeRunLock, NativeStateDir
 from ciao.native_readiness import NativeReadinessProof
-from ciao.os_support.definition import read_definition
+from ciao.os_support.definition import DefinitionReadError, read_definition
 from ciao.provider_versions import compare_versions
 from ciao.server_host import HostOwnership
 from ciao.server_host_install import ServerHostInstallError
@@ -139,12 +138,12 @@ class RepairTarget:
     job_registered: bool
 
 
-class HostPlan(str, Enum):
+class HostPlan(Enum):
     """What the server host needs: nothing, nothing to change, or a verified swap."""
 
     absent = "absent"
     current = "current"
-    replace = "replace"  # type: ignore[assignment]  # shadows str.replace; the plan fixes this name
+    replace = "replace"
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +171,7 @@ class _RepairDeps:
     """Every external effect of a repair run. Tests inject all of them."""
 
     validate_inputs: Callable[[], None]
-    classify: Callable[[], RepairTarget]
+    classify: Callable[[str | None], RepairTarget]
     prepare_state_dir: Callable[[], NativeStateDir]
     acquire_lock: Callable[[NativeStateDir, str], NativeRunLock]
     plan_host: Callable[[], HostPlan]
@@ -275,11 +274,15 @@ def _classify_repair(
     bin_dir: Path,
     job_absent: Callable[[], bool],
     override_disabled: Callable[[], bool],
+    own_run_id: str | None = None,
 ) -> RepairTarget:
     """Prove the installed engine is repairable, or refuse. Read-only.
 
     Refusals: ``unknown_state`` for anything not provably ours, ``install_in_progress``
-    for a held run lock, ``not_installed`` when there is no completed workspace.
+    for a lock another run holds, ``not_installed`` when there is no workspace or no
+    native evidence (receipt, LaunchAgent or host record). A lock held by this run
+    itself, ``own_run_id`` in this process, is not a conflict: the second
+    classification runs under it.
     """
     if sys.platform != "darwin":
         raise _Refusal("unknown_state")
@@ -291,13 +294,21 @@ def _classify_repair(
     if install_discovery._unsafe_native_state_dir(state_dir):
         raise _Refusal("unknown_state")
     try:
-        lock_state = native_lock.inspect_native_lock(state_dir).state
+        lock = native_lock.inspect_native_lock(state_dir)
     except Exception:
         raise _Refusal("unknown_state") from None
-    if lock_state in ("busy", "unknown"):
+    own = (
+        own_run_id is not None
+        and lock.state == "busy"
+        and lock.run_id == own_run_id
+        and lock.pid == os.getpid()
+    )
+    if lock.state == "absent" or own:
+        pass
+    elif lock.state in ("busy", "unknown"):
         native_installer._report_lock_holder(state_dir)
         raise _Refusal("install_in_progress")
-    if lock_state != "absent":
+    else:
         raise _Refusal("unknown_state")
 
     live_dir = macos_service.live_launch_agents_dir()
@@ -336,6 +347,12 @@ def _classify_repair(
         raise _Refusal("unknown_state") from None
     if not set_up:
         raise _Refusal("unknown_state" if present else "not_installed")
+    receipt_path = install_receipt.default_receipt_path()
+    has_receipt = _lstat_or_none(receipt_path) is not None
+    has_host_record = _lstat_or_none(server_host.default_ownership_path()) is not None
+    if not (present or has_receipt or has_host_record):
+        # A workspace and a shim alone could be a user's own uv install; never reinstall that.
+        raise _Refusal("not_installed")
     port = _configured_port(workspace)
 
     shim = bin_dir / "ciao"
@@ -352,8 +369,7 @@ def _classify_repair(
         if not resolved.is_relative_to(tool_dir / "ciaobot" / "bin"):
             raise _Refusal("unknown_state")
 
-    receipt_path = install_receipt.default_receipt_path()
-    if _lstat_or_none(receipt_path) is not None:
+    if has_receipt:
         try:
             raw = install_discovery._read_native_text(receipt_path)
             receipt = install_receipt.parse_receipt(raw)
@@ -378,8 +394,20 @@ def _classify_repair(
     )
 
 
-def _plan_host(artifacts: NativeInstallArtifacts) -> tuple[HostPlan, dict[str, Any]]:
-    """Read-only: what the host at our install path needs, and the verified entry."""
+def _verify_archive(artifacts: NativeInstallArtifacts, entry: Mapping[str, Any]) -> None:
+    """The archive a create or swap would use must verify before the service stops."""
+    try:
+        server_host_install.verify_host_archive(artifacts.host_archive, entry)
+    except Exception:
+        raise _Refusal("verification_failed") from None
+
+
+def _plan_host(
+    artifacts: NativeInstallArtifacts,
+) -> tuple[HostPlan, dict[str, Any], HostOwnership | None]:
+    """Read-only: what the host at our install path needs, the verified entry, and
+    for ``current`` the verified ownership. Every check that can fail runs here,
+    before the service is stopped."""
     try:
         manifest = release_manifest.verify_manifest(
             artifacts.manifest.read_bytes(),
@@ -395,23 +423,30 @@ def _plan_host(artifacts: NativeInstallArtifacts) -> tuple[HostPlan, dict[str, A
         raise _Refusal("unknown_state")
     if not os.path.lexists(bundle):
         if not os.path.lexists(record):
-            return HostPlan.absent, entry
-        return HostPlan.replace, entry
+            _verify_archive(artifacts, entry)
+            return HostPlan.absent, entry, None
+        _verify_archive(artifacts, entry)
+        return HostPlan.replace, entry, None
     try:
         policy = server_host_install._entry_policy(entry)
         state, _ = server_host_install._classify_host(
             bundle, record, subprocess.run, policy
         )
     except ServerHostInstallError as exc:
-        if exc.code in {server_host_install.HOST_EXISTS, server_host_install.POLICY_REFUSED}:
-            return HostPlan.replace, entry
-        raise _Refusal("unknown_state") from None
+        if exc.code not in {server_host_install.HOST_EXISTS, server_host_install.POLICY_REFUSED}:
+            raise _Refusal("unknown_state") from None
+        state = server_host_install._REPLACE
     except Exception:
         raise _Refusal("unknown_state") from None
     if state == server_host_install._CURRENT:
-        return HostPlan.current, entry
+        try:
+            owned = server_host.verify_owned_host(bundle, ownership_path=record)
+        except Exception:
+            raise _Refusal("unknown_state") from None
+        return HostPlan.current, entry, owned
     if state == server_host_install._REPLACE:
-        return HostPlan.replace, entry
+        _verify_archive(artifacts, entry)
+        return HostPlan.replace, entry, None
     raise _Refusal("unknown_state")
 
 
@@ -459,11 +494,17 @@ def _receipt_version() -> str | None:
 # ── Mutations ─────────────────────────────────────────────────────────────
 
 
-def _stop_service(remaining: float) -> None:
-    """Boot the registered job out and wait until launchd no longer has it."""
+def _stop_service(remaining: float, cancellation: NativeCancellation) -> None:
+    """Boot the registered job out and wait until launchd no longer has it.
+
+    The wait observes the run's cancellation, so a SIGTERM during a slow teardown
+    ends the run promptly as ``cancelled``.
+    """
     macos_service.bootout_agent(macos_service.SERVER_LABEL)
     wait = _Deadline.after(min(remaining, REPAIR_TEARDOWN_TIMEOUT_SECONDS))
     while True:
+        if cancellation.cancelled:
+            raise _Cancelled
         try:
             if macos_service.server_job_absent():
                 return
@@ -471,7 +512,11 @@ def _stop_service(remaining: float) -> None:
             raise _Refusal("install_failed") from None
         if wait.remaining() <= 0:
             raise _Refusal("install_failed")
-        time.sleep(min(REPAIR_POLL_INTERVAL_SECONDS, wait.remaining()))
+        _wait_observing(
+            min(REPAIR_POLL_INTERVAL_SECONDS, wait.remaining()),
+            cancellation,
+            REPAIR_POLL_INTERVAL_SECONDS,
+        )
 
 
 def _ensure_host(
@@ -480,8 +525,12 @@ def _ensure_host(
     plan: HostPlan,
     entry: Mapping[str, Any],
     artifacts: NativeInstallArtifacts,
+    verified: HostOwnership | None,
 ) -> HostOwnership:
-    """Create, replace or re-verify the host at our install path, per the plan."""
+    """Create, replace or keep the host at our install path, per the plan.
+
+    ``verified`` is the ownership :func:`_plan_host` already proved for ``current``.
+    """
     if plan is HostPlan.absent:
         fresh = native_installer.create_fresh_host(
             run_lock=lock,
@@ -496,10 +545,9 @@ def _ensure_host(
         replaced = server_host_install.repair_server_host(artifacts.host_archive, entry)
         lock.assert_held(run_id=run_id)
         return replaced
-    return server_host.verify_owned_host(
-        server_host.default_bundle_path(),
-        ownership_path=server_host.default_ownership_path(),
-    )
+    if verified is None:
+        raise NativeCoordinatorError("plan_missing", "internal_error")
+    return verified
 
 
 def _ensure_receipt(
@@ -575,11 +623,13 @@ def _write_definition(target: RepairTarget, rendered: bytes) -> str:
     digest = hashlib.sha256(rendered).hexdigest()
     if target.definition_present:
         try:
-            live = read_definition(
+            live: bytes | None = read_definition(
                 target.definition, max_bytes=macos_service.MAX_DEFINITION_BYTES
             ).data
-        except Exception:
-            raise NativeCoordinatorError("definition_write_failed", "install_failed") from None
+        except (DefinitionReadError, OSError):
+            # Not a regular file (a symlink, say): the rename below replaces the
+            # entry itself and never follows it.
+            live = None
         if live == rendered:
             return digest
     parent = target.definition.parent
@@ -587,9 +637,16 @@ def _write_definition(target: RepairTarget, rendered: bytes) -> str:
     created = False
     try:
         parent.mkdir(parents=True, exist_ok=True)
-        # O_EXCL refuses an existing path, a symlink included; 0o600 under any umask is at most 0600.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # O_EXCL refuses an existing path, a symlink included; O_NOFOLLOW is the
+        # same flag set as the install-mode definition write in ciao/cli.py.
+        fd = os.open(
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
         created = True
+        if sys.platform != "win32":  # os.fchmod is POSIX-only; the write is darwin-only anyway
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as handle:
             handle.write(rendered)
             handle.flush()
@@ -815,7 +872,7 @@ def _run_native_repair(
                     raise _Refusal("internal_error") from None
                 _check_stage(deadline, cancellation)
 
-                first = _observed(deps.classify)
+                first = _observed(lambda: deps.classify(None))
                 target = first
                 _check_stage(deadline, cancellation)
                 state_dir = deps.prepare_state_dir()
@@ -825,7 +882,7 @@ def _run_native_repair(
                     state_dir.close()
                 held.assert_held(run_id=request.run_id)
                 # The second read-only classification refuses anything that changed while the lock was taken.
-                if _observed(deps.classify) != first:
+                if _observed(lambda: deps.classify(request.run_id)) != first:
                     raise _Refusal("unknown_state")
                 held.assert_held(run_id=request.run_id)
 
@@ -977,7 +1034,7 @@ def _repair_production_deps(
     """Bind every seam to its real step for one run and its verified artifacts."""
     private = native_installer._PrivateRun()
     tool_dirs: list[tuple[Path, Path]] = []
-    selected: list[dict[str, Any]] = []
+    selected: list[tuple[dict[str, Any], HostOwnership | None]] = []
 
     def dirs() -> tuple[Path, Path]:
         if not tool_dirs:
@@ -995,7 +1052,7 @@ def _repair_production_deps(
                 raise
         return tool_dirs[0]
 
-    def classify() -> RepairTarget:
+    def classify(own_run_id: str | None) -> RepairTarget:
         tool_dir, bin_dir = dirs()
         return _classify_repair(
             environ=os.environ,
@@ -1003,6 +1060,7 @@ def _repair_production_deps(
             bin_dir=bin_dir,
             job_absent=macos_service.server_job_absent,
             override_disabled=macos_service.launchd_override_disabled,
+            own_run_id=own_run_id,
         )
 
     def prepare_state_dir() -> NativeStateDir:
@@ -1019,8 +1077,8 @@ def _repair_production_deps(
             raise
 
     def plan_host() -> HostPlan:
-        plan, entry = _plan_host(artifacts)
-        selected[:] = [entry]
+        plan, entry, verified = _plan_host(artifacts)
+        selected[:] = [(entry, verified)]
         return plan
 
     def probe_engine() -> str | None:
@@ -1036,7 +1094,8 @@ def _repair_production_deps(
     def ensure_host(lock: NativeRunLock, run_id: str, plan: HostPlan) -> HostOwnership:
         if not selected:
             raise NativeCoordinatorError("plan_missing", "internal_error")
-        return _ensure_host(lock, run_id, plan, selected[0], artifacts)
+        entry, verified = selected[0]
+        return _ensure_host(lock, run_id, plan, entry, artifacts, verified)
 
     def reinstall_engine(remaining: float) -> None:
         tool_dir, bin_dir = dirs()
@@ -1089,7 +1148,7 @@ def _repair_production_deps(
         plan_host=plan_host,
         probe_engine=probe_engine,
         receipt_version=_receipt_version,
-        stop_service=_stop_service,
+        stop_service=lambda remaining: _stop_service(remaining, cancellation),
         ensure_host=ensure_host,
         reinstall_engine=reinstall_engine,
         ensure_receipt=ensure_receipt,
