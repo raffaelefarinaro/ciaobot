@@ -2793,6 +2793,7 @@ def _coordinator_deps(tmp_path: Path, **overrides: object) -> object:
         "read_handoff": lambda run_id: _handoff(run_id),
         "activate": lambda run_id, remaining: _handoff(run_id),
         "wizard_listener": lambda port, child_pid: frozenset({child_pid}),
+        "port_listeners": lambda port: frozenset(),
         "prove_ready": lambda host, handoff, remaining: NativeReadinessProof(
             ready=False,
             failure="startup_status_invalid",
@@ -3534,13 +3535,16 @@ def test_a_second_preflight_refuses_a_service_that_appeared_before_host_install(
     assert events[-1]["code"] == "existing_install"
 
 
+@pytest.mark.parametrize("field", ["run_timeout", "port_release_timeout"])
 @pytest.mark.parametrize(
     "value",
     [0, -1, float("inf"), float("nan"), native.COORDINATOR_MAX_TIMEOUT_SECONDS + 1],
 )
-def test_every_coordinator_deadline_is_finite_and_bounded(value: float) -> None:
+def test_every_coordinator_deadline_is_finite_and_bounded(
+    field: str, value: float
+) -> None:
     with pytest.raises(native.NativeCoordinatorError) as caught:
-        native._CoordinatorPolicy(run_timeout=value)
+        native._CoordinatorPolicy(**{field: value})  # type: ignore[arg-type]
     assert caught.value.reason == "invalid_timeout"
     assert caught.value.failure_code == "internal_error"
 
@@ -3568,6 +3572,196 @@ def test_an_expired_run_deadline_refuses_before_any_mutation(
     assert outcome.host_step_completed is False
     assert not (tmp_path / "state").exists()
     assert [event["type"] for event in events] == ["failed"]
+
+
+def _pid_alive(pid: int) -> bool:
+    # A zombie has no pgid on macOS, so this also reads an exited-but-unreaped
+    # grandchild as gone, the way a closed listening socket would be.
+    try:
+        os.getpgid(pid)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _group_wizard_command(
+    tmp_path: Path, child_code: str, fd: int
+) -> tuple[str, ...]:
+    """A wizard that binds, waits for the release, starts a grandchild in its own
+    process group (the wizard's, since it does not start a session), writes the
+    grandchild pid to ``grandchild.pid``, then exits 0 without waiting for it."""
+    script = (
+        "import os, subprocess, sys, time\n"
+        "fd, release, pid_path, child_code = (\n"
+        "    int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4])\n"
+        "os.write(fd, b'{\"schema\":1,\"port\":54321}\\n')\n"
+        "os.close(fd)\n"
+        "give_up = time.monotonic() + 30\n"
+        "while not os.path.exists(release) and time.monotonic() < give_up:\n"
+        "    time.sleep(0.01)\n"
+        "grandchild = subprocess.Popen([sys.executable, '-c', child_code])\n"
+        "with open(pid_path, 'w', encoding='utf-8') as handle:\n"
+        "    handle.write(str(grandchild.pid))\n"
+        "sys.exit(0)\n"
+    )
+    return (
+        sys.executable,
+        "-c",
+        script,
+        str(fd),
+        str(tmp_path / WIZARD_RELEASE_NAME),
+        str(tmp_path / "grandchild.pid"),
+        child_code,
+    )
+
+
+def _grandchild_pid(tmp_path: Path) -> int | None:
+    try:
+        return int((tmp_path / "grandchild.pid").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+@contextlib.contextmanager
+def _reaped_grandchild(tmp_path: Path):
+    try:
+        yield
+    finally:
+        pid = _grandchild_pid(tmp_path)
+        if pid is not None and _pid_alive(pid):
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_activation_waits_for_the_wizard_group_and_the_setup_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    order: list[str] = []
+    alive_at_activation: list[bool] = []
+
+    def port_listeners(port: int) -> frozenset[int]:
+        pid = _grandchild_pid(tmp_path)
+        if pid is not None and _pid_alive(pid):
+            order.append("port busy")
+            return frozenset({pid})
+        order.append("port free")
+        return frozenset()
+
+    def activate(run_id: str, remaining: float) -> native.NativeHandoffResult:
+        pid = _grandchild_pid(tmp_path)
+        alive_at_activation.append(pid is not None and _pid_alive(pid))
+        order.append("activate")
+        return _handoff(run_id)
+
+    with _reaped_grandchild(tmp_path):
+        outcome, _events, _raw = _run_coordinator(
+            tmp_path,
+            wizard_command=lambda fd: _group_wizard_command(
+                tmp_path, "import time; time.sleep(0.5)", fd
+            ),
+            port_listeners=port_listeners,
+            activate=activate,
+        )
+
+    assert outcome.activation_completed is True
+    assert alive_at_activation == [False]
+    assert order.count("activate") == 1
+    assert "port busy" in order[: order.index("activate")]
+    assert order[order.index("activate") - 1] == "port free"
+
+
+def test_a_stubborn_wizard_group_is_terminated_before_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    alive_at_activation: list[bool] = []
+
+    def port_listeners(port: int) -> frozenset[int]:
+        pid = _grandchild_pid(tmp_path)
+        if pid is not None and _pid_alive(pid):
+            return frozenset({pid})
+        return frozenset()
+
+    def activate(run_id: str, remaining: float) -> native.NativeHandoffResult:
+        pid = _grandchild_pid(tmp_path)
+        alive_at_activation.append(pid is not None and _pid_alive(pid))
+        return _handoff(run_id)
+
+    policy = native._CoordinatorPolicy(port_release_timeout=0.3, poll_interval=0.02)
+    with _reaped_grandchild(tmp_path):
+        outcome, _events, _raw = _run_coordinator(
+            tmp_path,
+            wizard_command=lambda fd: _group_wizard_command(
+                tmp_path, "import time; time.sleep(60)", fd
+            ),
+            port_listeners=port_listeners,
+            activate=activate,
+            policy=policy,
+        )
+
+    assert alive_at_activation == [False]
+    assert outcome.activation_completed is True
+    assert outcome.failure_code != "activation_refused"
+
+
+def test_a_foreign_listener_on_the_setup_port_refuses_before_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    signalled: list[tuple[int, int]] = []
+    real_killpg = native._KILLPG
+    assert real_killpg is not None
+
+    def recording_killpg(pgid: int, signum: int) -> None:
+        if signum:
+            signalled.append((pgid, signum))
+        real_killpg(pgid, signum)
+
+    monkeypatch.setattr(native, "_KILLPG", recording_killpg)
+    activated: list[str] = []
+
+    def activate(run_id: str, remaining: float) -> native.NativeHandoffResult:
+        activated.append(run_id)
+        return _handoff(run_id)
+
+    outcome, _events, _raw = _run_coordinator(
+        tmp_path,
+        port_listeners=lambda port: frozenset({os.getpid()}),
+        activate=activate,
+    )
+
+    assert outcome.failure_code == "activation_refused"
+    assert outcome.terminal == "failed"
+    assert outcome.activation_attempted is False
+    assert activated == []
+    assert signalled == []
+
+
+@pytest.mark.parametrize("answer", ["raises", "none"])
+def test_an_unreadable_port_listener_answer_refuses_before_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def port_listeners(port: int) -> object:
+        if answer == "raises":
+            raise OSError("lsof failed")
+        return None
+
+    activated: list[str] = []
+
+    def activate(run_id: str, remaining: float) -> native.NativeHandoffResult:
+        activated.append(run_id)
+        return _handoff(run_id)
+
+    outcome, _events, _raw = _run_coordinator(
+        tmp_path, port_listeners=port_listeners, activate=activate
+    )
+
+    assert outcome.failure_code == "activation_refused"
+    assert outcome.activation_attempted is False
+    assert activated == []
 
 
 def test_the_public_coordinator_exposes_no_injection_seams() -> None:

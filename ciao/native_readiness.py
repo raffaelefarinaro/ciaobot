@@ -1274,15 +1274,19 @@ def _run_adapter(
         return None
 
 
-def _lsof_listeners(port: int, runner: BoundedRunner) -> str | None:
-    """The bounded ``lsof`` listener query's stdout, or ``None`` when it failed."""
+def _lsof_query(port: int, runner: BoundedRunner) -> subprocess.CompletedProcess[str] | None:
     if type(port) is not int or not (1 <= port <= 65535):
         return None
-    completed = _run_adapter(
+    return _run_adapter(
         runner,
         (LSOF, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"),
         ADAPTER_TIMEOUT_SECONDS,
     )
+
+
+def _lsof_listeners(port: int, runner: BoundedRunner) -> str | None:
+    """The bounded ``lsof`` listener query's stdout, or ``None`` when it failed."""
+    completed = _lsof_query(port, runner)
     if completed is None or completed.returncode != 0:
         return None
     return completed.stdout or ""
@@ -1320,9 +1324,27 @@ def wizard_listener_pids(port: int) -> frozenset[int]:
     and read-only like the rest of this module. An empty set means the query
     failed or found nothing, and the coordinator refuses an empty answer.
     """
-    stdout = _lsof_listeners(port, _bounded_run)
-    pids = None if stdout is None else parse_listener_pids(stdout)
-    return frozenset() if pids is None else pids
+    answer = wizard_listener_answer(port)
+    return frozenset() if answer is None else answer
+
+
+def wizard_listener_answer(port: int) -> frozenset[int] | None:
+    """Every pid listening on ``port``, or ``None`` when that cannot be known.
+
+    Unlike :func:`wizard_listener_pids`, a failed query, unreadable output or an
+    invalid port is ``None``, never an empty set, so a caller cannot read a
+    failed lookup as a free port. ``lsof`` exits 1 with no output when nothing
+    listens; that one case is ``frozenset()``.
+    """
+    completed = _lsof_query(port, _bounded_run)
+    if completed is None:
+        return None
+    stdout = completed.stdout or ""
+    if completed.returncode == 1 and not stdout.strip():
+        return frozenset()
+    if completed.returncode != 0:
+        return None
+    return parse_listener_pids(stdout)
 
 
 def _launchd_job(label: str, runner: BoundedRunner) -> LaunchdJob | None:

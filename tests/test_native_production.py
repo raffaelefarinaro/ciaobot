@@ -1549,6 +1549,36 @@ def test_wizard_listener_pids_never_queries_a_bad_port(
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    ("completed", "expected"),
+    [
+        (_completed("111\n222\n"), frozenset({111, 222})),
+        (_completed("", 1), frozenset()),
+        (_completed("", 2), None),
+        (_completed("", 0), None),
+        (_completed("x\n"), None),
+    ],
+    ids=["listeners", "none", "lsof-error", "empty-ok", "junk"],
+)
+def test_wizard_listener_answer_separates_free_from_unknown(
+    monkeypatch: pytest.MonkeyPatch, completed: object, expected: object
+) -> None:
+    monkeypatch.setattr(
+        native_readiness, "_bounded_run", lambda argv, timeout: completed
+    )
+    assert native_readiness.wizard_listener_answer(54321) == expected
+
+
+def test_wizard_listener_answer_is_unknown_when_the_query_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raising(argv: object, timeout: object) -> None:
+        raise OSError("no lsof")
+
+    monkeypatch.setattr(native_readiness, "_bounded_run", raising)
+    assert native_readiness.wizard_listener_answer(54321) is None
+
+
 # ── shell and readiness wiring facts ─────────────────────────────────────────
 
 
