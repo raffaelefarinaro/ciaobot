@@ -2311,6 +2311,29 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+  it('closes an open model list on Escape before the sheet', async () => {
+    useTaskStore().models = {
+      models: ['opus', 'sonnet'], default: 'opus',
+      provider_models: { claude: ['opus', 'sonnet'] },
+      provider_defaults: { claude: 'opus' },
+    }
+    const wrapper = await mountWithBody([plainTask({ project_id: 'p1' })])
+
+    await openPreview(wrapper, 'Draft the runbook')
+    await wrapper.get('.task-delegate-model').trigger('click')
+    await flushPromises()
+    expect(document.querySelectorAll('[role="option"]').length).toBeGreaterThan(0)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    // The list is gone, the sheet is not, and nothing was sent.
+    expect(document.querySelectorAll('[role="option"]').length).toBe(0)
+    expect(wrapper.find('.task-delegate-sheet').exists()).toBe(true)
+    expect(apiPost).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('sends a named project only when one was chosen', async () => {
     apiPost.mockResolvedValue(delegateAnswer())
     const wrapper = await mountWithBody([plainTask()])

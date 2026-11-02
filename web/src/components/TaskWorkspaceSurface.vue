@@ -4689,6 +4689,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 .task-delegate-sheet { max-width: 1120px; }
 .task-delegate-sheet .task-form textarea { min-height: 12rem; }
 .task-delegate-model-wrap { position: relative; display: inline-flex; }
+.task-delegate-model { white-space: nowrap; }
 .task-form textarea {
   width: 100%;
   min-width: 0;
