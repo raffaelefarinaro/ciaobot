@@ -138,6 +138,17 @@ one side's changes vanished wholesale. A delta is not automatically a bug — re
 conflicts must be resolved by hand — but no test will do it for you. Report
 what you find; do not resolve it here.
 
+### Record the task-eval results
+
+Run `ciao eval tasks` on the release candidate, following
+[docs/evals/README.md](../../docs/evals/README.md): the whole suite, three
+repeats, on claude/haiku and on the opencode model the previous results file
+used. Add `docs/evals/vX.Y.Z.md` to the release PR, and compare it with the
+previous file. A pass rate that drops on any task is a finding for Step 3:
+read that run's `trace` before calling it noise. When the results change the
+summary on `site/evals.html`, update the table there too. The site deploys from
+`main`, so it ships with the release.
+
 ## Step 3 — Review the release surface
 
 Read the range as a reviewer, not the author:

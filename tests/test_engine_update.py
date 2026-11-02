@@ -523,6 +523,36 @@ def test_find_uv_prefers_receipt_then_path(
         find_uv(str(tmp_path / "absent" / "uv"))
 
 
+@mac_update_host
+def test_find_uv_refuses_a_missing_or_unusable_receipt_uv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    _write_executable(home / ".local" / "bin" / "uv")
+    which_uv = _write_executable(tmp_path / "from-path" / "uv")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(shutil, "which", lambda name: which_uv if name == "uv" else None)
+    not_executable = tmp_path / "noexec" / "uv"
+    not_executable.parent.mkdir(parents=True)
+    not_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    not_executable.chmod(0o644)
+    directory = tmp_path / "a-directory"
+    directory.mkdir()
+
+    # A recorded uv that is gone, not executable or not a file is an error
+    # naming it, never a fall-through to PATH or ~/.local/bin/uv.
+    for receipt_uv in (tmp_path / "gone" / "uv", not_executable, directory):
+        with pytest.raises(UpdateError, match="install receipt names uv at"):
+            find_uv(str(receipt_uv))
+
+
+def _write_executable(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
 def test_default_fetch_retries_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

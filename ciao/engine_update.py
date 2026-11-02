@@ -367,20 +367,29 @@ def python_request() -> str:
 def find_uv(receipt_uv: str = "", *, host: UpdateHost | None = None) -> str:
     """Locate a ``uv`` executable, preferring the one that built this engine.
 
-    The receipt's value is first because it is the binary that produced the
-    running environment, so staging with it cannot mismatch a toolchain. Then
-    ``PATH``, then the location the installer used on this platform. Not being
-    able to stage without uv is a hard, clearly-explained failure rather than a
-    fallback that would install a differently-built env.
+    The receipt's value, when the installer recorded one, is the only candidate:
+    it is the binary that produced the running environment, so staging with
+    anything else could mismatch a toolchain. A recorded uv that is missing or
+    not executable is an error naming it, never a fall-through to another uv.
+    Without one, ``PATH``, then the location the installer used on this
+    platform. Not being able to stage without uv is a hard, clearly-explained
+    failure rather than a fallback that would install a differently-built env.
     """
+    if receipt_uv:
+        if os.path.isfile(receipt_uv) and os.access(receipt_uv, os.X_OK):
+            return receipt_uv
+        raise UpdateError(
+            f"the install receipt names uv at {receipt_uv}, but it is missing or "
+            "not executable; reinstall Ciaobot to restore it"
+        )
     platform = host or default_update_host()
-    candidates = [receipt_uv]
+    candidates: list[str] = []
     which = shutil.which("uv")
     if which:
         candidates.append(which)
     candidates.extend(platform.uv_candidates())
     for candidate in candidates:
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     raise UpdateError("could not find the uv executable to stage the update with")
 
