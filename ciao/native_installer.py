@@ -107,7 +107,7 @@ The module also contains the native coordinator lifecycle (#2340).
 ``python -I -m ciao.native_installer run`` (:func:`main`) is its only entry
 point, started by ``install.sh --native-install``. The coordinator owns the run
 lock, both canonical classifications, the host install and the engine install
-(``uv tool install`` plus the one install receipt). It runs before any of those
+(``uv tool install``, the persisted verified uv the updater stages with, and the one install receipt). It runs before any of those
 mutations, from a private venv the shell builds out of the wheel it digest-pinned; the coordinator re-hashes its private copies.
 :func:`run_native_install` validates the request and the shell's verified
 artifacts, then builds the real steps with :func:`_production_deps` and runs
@@ -176,6 +176,7 @@ from ciao import install_receipt, native_handoff, native_lock, native_readiness
 from ciao.app_settings import DEFAULT_PWA_HOST
 from ciao.port_in_use import port_is_available
 from ciao.install_discovery import NativeInstallState, classify_native_install
+from ciao.os_support.private import make_private_dir
 from ciao.native_handoff import NativeHandoffError, NativeHandoffResult
 from ciao.native_lock import NativeLockError, NativeRunLock, NativeStateDir
 from ciao.native_readiness import (
@@ -2527,6 +2528,77 @@ def _verified_copy(
         raise NativeCoordinatorError("artifact_digest_mismatch", "verification_failed")
 
 
+#: Where the native coordinator keeps its verified uv so the updater can
+#: stage with it (#2484): a private directory beside the install receipt,
+#: outside the tool environment an update replaces and outside the shared
+#: ~/.local/bin.
+PERSISTED_UV_DIR_NAME: Final[str] = "uv"
+PERSISTED_UV_NAME: Final[str] = "uv"
+
+
+def persisted_uv_path(state_dir: Path | None = None) -> Path:
+    """The absolute path the native install records as the receipt's ``uv``."""
+    root = state_dir or install_receipt.default_receipt_path().parent
+    return root / PERSISTED_UV_DIR_NAME / PERSISTED_UV_NAME
+
+
+def _persist_uv(source: Path, digest: str, *, state_dir: Path | None = None) -> Path:
+    """Keep the run's verified uv where the updater finds it; return its path.
+
+    ``source`` is copied with :func:`_verified_copy` (no-follow, owner and
+    mode checked, hashed during and after the copy against ``digest``) into a
+    unique temp sibling, then renamed over ``uv/uv`` so an existing copy is
+    replaced atomically. The ``uv`` directory must be a 0700 directory owned
+    by this user; an existing one is judged, never chmod'ed or replaced.
+    Native repair (#2485) calls this to re-provision uv.
+    """
+    uid = _uid()
+    target = persisted_uv_path(state_dir)
+    directory = target.parent
+    failed = NativeCoordinatorError("uv_persist_failed", "install_failed")
+    try:
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        make_private_dir(directory.parent)
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(directory)
+    except OSError:
+        raise failed from None
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != uid
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise failed
+    tmp = directory / f".{PERSISTED_UV_NAME}.{uuid.uuid4().hex}.tmp"
+    try:
+        _verified_copy(source, tmp, digest, mode=0o755, expected_uid=uid)
+        try:
+            os.replace(tmp, target)
+        except OSError:
+            raise failed from None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    try:
+        final = os.lstat(target)
+    except OSError:
+        raise failed from None
+    if (
+        not stat.S_ISREG(final.st_mode)
+        or final.st_uid != uid
+        or stat.S_IMODE(final.st_mode) != 0o755
+    ):
+        raise failed
+    if _file_identity(target).sha256 != digest:
+        raise NativeCoordinatorError("artifact_digest_mismatch", "verification_failed")
+    return target
+
+
 def _same_file(path: Path, expected: Path) -> bool:
     try:
         seen = os.stat(path)
@@ -2785,7 +2857,7 @@ def _install_engine(
     env: Mapping[str, str],
     cwd: Path,
 ) -> _EngineInstall:
-    """Install the staged wheel with the staged uv, probe it, then write the one receipt.
+    """Install the staged wheel with the staged uv, probe it, keep the uv, then write the one receipt.
 
     There is no ``--force``: the classifications proved there is no tool
     environment and no shim. The index is pinned, and the call runs with the
@@ -2847,6 +2919,9 @@ def _install_engine(
     except NativeCoordinatorError:
         raise _engine_failed() from None
 
+    # The run's private uv is deleted when the run ends; the updater stages
+    # with this persisted copy, which the receipt names (#2484).
+    uv_path = _persist_uv(artifacts.uv, artifacts.uv_sha256)
     receipt = install_receipt.InstallReceipt(
         version=artifacts.version,
         executable=str(ciao_path),
@@ -2854,6 +2929,7 @@ def _install_engine(
         service_backend="launchd",
         service_label=macos_service.SERVER_LABEL,
         installed_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        uv=str(uv_path),
     )
     try:
         install_receipt.write_receipt(receipt)
@@ -2865,6 +2941,7 @@ def _install_engine(
         or written.version != artifacts.version
         or Path(written.executable) != ciao_path
         or Path(written.python) != tool_python
+        or written.uv != str(uv_path)
     ):
         raise _engine_failed()
     shim, _target = _shim_identity(bin_dir, tool_dir)
