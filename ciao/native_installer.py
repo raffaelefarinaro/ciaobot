@@ -259,6 +259,8 @@ FAILURE_CODES: Final[tuple[str, ...]] = (
     "cancelled",
     "event_channel_failed",
     "internal_error",
+    #: native repair (#2485): nothing installed to repair; the client offers native install.
+    "not_installed",
 )
 #: Every event type this module can write.
 EVENT_TYPES: Final[tuple[str, ...]] = (
@@ -368,7 +370,11 @@ def _set_descriptor_flags(fd: int, flags: int) -> None:
 
 
 class EventWriter:
-    """Write one run's bounded events to an inherited writable descriptor."""
+    """Write one run's bounded events to an inherited writable descriptor.
+
+    ``repair=True`` is native repair (#2485): it has no wizard, so ``service_ready``
+    follows the ``readiness`` phase instead of ``setup_saved``.
+    """
 
     def __init__(
         self,
@@ -379,8 +385,11 @@ class EventWriter:
         prior_events: int = 0,
         write_timeout: float = WRITE_TIMEOUT_SECONDS,
         after_phase: str | None = None,
+        repair: bool = False,
     ) -> None:
         self._run_id = _canonical_run_id(run_id)
+        if type(repair) is not bool:
+            raise EventError("invalid_mode")
         if type(first_seq) is not int or first_seq < 1:
             raise EventError("invalid_seq")
         if type(prior_events) is not int or prior_events < 0:
@@ -442,6 +451,7 @@ class EventWriter:
         self._last_phase = last_phase
         self._wizard_ready = False
         self._setup_saved = False
+        self._repair = repair
         self._terminal: str | None = None
         self._emitting = False
         self._lock = threading.RLock()
@@ -465,6 +475,8 @@ class EventWriter:
         with self._lock:
             self._require_open()
             index = _phase_index(name)
+            if self._repair and name == "wizard":
+                raise EventError("repair_has_no_wizard")
             if name in self._phases:
                 raise EventError("duplicate_phase")
             if index <= self._last_phase:
@@ -477,6 +489,8 @@ class EventWriter:
         """This run's wizard bound ``port``; emits its canonical origin."""
         with self._lock:
             self._require_open()
+            if self._repair:
+                raise EventError("repair_has_no_wizard")
             if "wizard" not in self._phases:
                 raise EventError("wizard_not_started")
             if self._wizard_ready:
@@ -489,6 +503,8 @@ class EventWriter:
         """The guarded wizard save completed; carries no data at all."""
         with self._lock:
             self._require_open()
+            if self._repair:
+                raise EventError("repair_has_no_wizard")
             if not self._wizard_ready:
                 raise EventError("wizard_not_ready")
             if self._setup_saved:
@@ -500,7 +516,10 @@ class EventWriter:
         """Verified activation and live readiness succeeded; terminal."""
         with self._lock:
             self._require_open()
-            if not self._setup_saved:
+            if self._repair:
+                if "readiness" not in self._phases:
+                    raise EventError("readiness_not_started")
+            elif not self._setup_saved:
                 raise EventError("setup_not_saved")
             origin = _loopback_origin(port)
             self._emit_locked("service_ready", {"origin": origin})
@@ -2856,13 +2875,16 @@ def _install_engine(
     cancellation: NativeCancellation,
     env: Mapping[str, str],
     cwd: Path,
+    force: bool = False,
 ) -> _EngineInstall:
     """Install the staged wheel with the staged uv, probe it, keep the uv, then write the one receipt.
 
-    There is no ``--force``: the classifications proved there is no tool
-    environment and no shim. The index is pinned, and the call runs with the
-    scrubbed environment in its own session. The probed interpreter and the shim
-    identity are returned so later steps can be bound to them.
+    The classifications normally prove there is no tool environment and no
+    shim, so install mode passes no ``--force``. The index is pinned, and the
+    call runs with the scrubbed environment in its own session. The probed
+    interpreter and the shim identity are returned so later steps can be bound
+    to them. ``force`` is native repair's reinstall of a tool environment that
+    failed verification; native install never passes it.
     """
     from ciao import macos_service
 
@@ -2872,6 +2894,7 @@ def _install_engine(
                 str(artifacts.uv),
                 "tool",
                 "install",
+                *(("--force", "--reinstall") if force else ()),
                 "--no-config",
                 "--default-index",
                 DEFAULT_INDEX_URL,
