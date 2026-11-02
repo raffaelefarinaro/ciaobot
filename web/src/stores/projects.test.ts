@@ -193,7 +193,7 @@ describe('pending comment updates through the guarded write', () => {
     const store = useProjectStore()
     const chatId = 'chat-guarded-chat-comments'
     store.activeChatId = chatId
-    const id = store.addPendingChatComment({ messageId: 'msg-123', selection: 'quote', comment: 'note' })
+    const id = store.addPendingChatComment(store.activeChatId!, { messageId: 'msg-123', selection: 'quote', comment: 'note' })
 
     store.updatePendingChatComment(id, 'edited')
     expect(store.pendingChatComments[0].comment).toBe('edited')

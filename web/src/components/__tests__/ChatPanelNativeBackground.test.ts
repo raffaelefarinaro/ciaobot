@@ -126,6 +126,7 @@ async function mountPanel(): Promise<{ wrapper: VueWrapper; store: ReturnType<ty
   })
 
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     global: {
       plugins: [pinia],
       stubs: {

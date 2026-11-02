@@ -17,7 +17,7 @@ import { readChatDraft, readSentPromptHistory, writeChatDraft } from '../lib/cha
 export interface ComposerAttachmentStore {
   uploadImages(chatId: string, files: File[]): Promise<string[]>
   addPendingImageRefs(chatId: string, refs: string[]): void
-  removePendingImage(index: number): void
+  removePendingImage(chatId: string, index: number): void
   pushErrorToast(title: string, errorText: string): unknown
 }
 
@@ -216,7 +216,7 @@ export function useChatComposer(options: ChatComposerOptions): ChatComposer {
   }
 
   function removePendingImage(index: number): void {
-    store.removePendingImage(index)
+    store.removePendingImage(chatId(), index)
   }
 
   async function importNativeFileDrop(detail: NativeFileDropDetail): Promise<void> {

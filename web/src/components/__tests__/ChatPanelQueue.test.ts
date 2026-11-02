@@ -115,6 +115,7 @@ async function mountPanel(
   })
 
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     attachTo: document.body,
     global: {
       plugins: [pinia],

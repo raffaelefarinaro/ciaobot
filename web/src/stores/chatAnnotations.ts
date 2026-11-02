@@ -153,6 +153,15 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
       persistPendingChatComments()
     },
   })
+  /** Per-chat readers: a pane shows its own chat's staged material, not the active chat's. */
+  function pendingImagesFor(chatId: string): string[] { return getPendingBucket(pendingImagesByChat.value, chatId) }
+  function pendingCommentsFor(chatId: string): PendingComment[] { return getPendingBucket(pendingCommentsByChat.value, chatId) }
+  function pendingChatCommentsFor(chatId: string): PendingChatComment[] { return getPendingBucket(pendingChatCommentsByChat.value, chatId) }
+  /** The chat whose bucket holds this staged item, so id-keyed edits need no chat id. */
+  function ownerOfPending<T extends { id: string }>(buckets: Record<string, T[]>, id: string): string | null {
+    for (const [chatId, list] of Object.entries(buckets)) if (list.some(c => c.id === id)) return chatId
+    return null
+  }
   // Server-owned chat pins, keyed by chat_id. This is authoritative truth and
   // is the ONLY source `pinnedFileFor` reads for a chat id: it is hydrated
   // from `ChatInfo` payloads, the `chat_pin_changed` event and the snapshot,
@@ -255,10 +264,9 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
     persistPendingImages()
   }
 
-  function removePendingImage(index: number) {
-    if (!activeChatId.value) return
-    const next = pendingImages.value.filter((_, i) => i !== index)
-    setPendingBucket(pendingImagesByChat.value, activeChatId.value, next)
+  function removePendingImage(chatId: string, index: number) {
+    if (!chatId) return
+    setPendingBucket(pendingImagesByChat.value, chatId, pendingImagesFor(chatId).filter((_, i) => i !== index))
     persistPendingImages()
   }
 
@@ -321,7 +329,9 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
     return id
   }
   function removePendingComment(id: string): void {
-    pendingComments.value = pendingComments.value.filter(c => c.id !== id)
+    const owner = ownerOfPending(pendingCommentsByChat.value, id)
+    if (!owner) return
+    setPendingBucket(pendingCommentsByChat.value, owner, pendingCommentsFor(owner).filter(c => c.id !== id))
     persistPendingComments()
   }
   function clearPendingComments(): void {
@@ -498,14 +508,13 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
   }
 
   // ── Pending chat comments ─────────────────────────────────────────
-  function addPendingChatComment(c: Omit<PendingChatComment, 'id'>): string {
+  function addPendingChatComment(chatId: string, c: Omit<PendingChatComment, 'id'>): string {
     const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
       ? (crypto as { randomUUID: () => string }).randomUUID()
       : `cc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-    if (activeChatId.value) {
-      const existing = getPendingBucket(pendingChatCommentsByChat.value, activeChatId.value)
-      setPendingBucket(pendingChatCommentsByChat.value, activeChatId.value, [
-        ...existing,
+    if (chatId) {
+      setPendingBucket(pendingChatCommentsByChat.value, chatId, [
+        ...pendingChatCommentsFor(chatId),
         { id, ...c },
       ])
       persistPendingChatComments()
@@ -513,35 +522,37 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
     return id
   }
   function removePendingChatComment(id: string): void {
-    pendingChatComments.value = pendingChatComments.value.filter(c => c.id !== id)
+    const owner = ownerOfPending(pendingChatCommentsByChat.value, id)
+    if (!owner) return
+    setPendingBucket(pendingChatCommentsByChat.value, owner, pendingChatCommentsFor(owner).filter(c => c.id !== id))
     persistPendingChatComments()
   }
   function clearPendingChatComments(): void {
     pendingChatComments.value = []
     persistPendingChatComments()
   }
-  function updatePendingChatComment(id: string, comment: string): void {
-    const idx = pendingChatComments.value.findIndex(c => c.id === id)
-    if (idx === -1) return
-    setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], comment })
+  /** Rewrites one staged chat comment in whichever chat's bucket owns it. */
+  function editPendingChatComment(id: string, edit: (c: PendingChatComment) => PendingChatComment | null): void {
+    const owner = ownerOfPending(pendingChatCommentsByChat.value, id)
+    if (!owner) return
+    const next = pendingChatCommentsFor(owner).map(c => (c.id === id ? edit(c) ?? c : c))
+    setPendingBucket(pendingChatCommentsByChat.value, owner, next)
     persistPendingChatComments()
+  }
+  function updatePendingChatComment(id: string, comment: string): void {
+    editPendingChatComment(id, c => ({ ...c, comment }))
   }
   function addPendingChatCommentImage(id: string, imageRef: string): void {
-    const idx = pendingChatComments.value.findIndex(c => c.id === id)
-    if (idx === -1) return
-    const existing = pendingChatComments.value[idx].images || []
-    if (!existing.includes(imageRef)) {
-      setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], images: [...existing, imageRef] })
-      persistPendingChatComments()
-    }
+    editPendingChatComment(id, c => {
+      const existing = c.images || []
+      return existing.includes(imageRef) ? null : { ...c, images: [...existing, imageRef] }
+    })
   }
   function removePendingChatCommentImage(id: string, imageRef: string): void {
-    const idx = pendingChatComments.value.findIndex(c => c.id === id)
-    if (idx === -1) return
-    const existing = pendingChatComments.value[idx].images || []
-    const next = existing.filter(img => img !== imageRef)
-    setListIndex(pendingChatComments.value, idx, { ...pendingChatComments.value[idx], images: next.length ? next : undefined })
-    persistPendingChatComments()
+    editPendingChatComment(id, c => {
+      const next = (c.images || []).filter(img => img !== imageRef)
+      return { ...c, images: next.length ? next : undefined }
+    })
   }
   function addFileCommentImage(path: string, id: string, imageRef: string): void {
     const list = fileComments.value[path]
@@ -672,6 +683,9 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
     dropChatPinState,
     pruneChatPins,
     isChatPinPending,
+    pendingImagesFor,
+    pendingCommentsFor,
+    pendingChatCommentsFor,
     addPendingChatComment,
     removePendingChatComment,
     clearPendingChatComments,

@@ -127,7 +127,7 @@ async function mountPanel(opts: { realRepoSection?: boolean; plainHeader?: boole
   })
 
   const wrapper = shallowMount(ChatPanel, {
-    ...(opts.plainHeader ? { props: { plainHeader: true } } : {}),
+    props: { chatId: 'chat-1', ...(opts.plainHeader ? { plainHeader: true } : {}) },
     global: {
       plugins: [pinia],
       stubs: {

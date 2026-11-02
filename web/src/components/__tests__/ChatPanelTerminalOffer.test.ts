@@ -101,6 +101,7 @@ async function mountPanel(chatId = CHAT_ID, existing?: ReturnType<typeof createP
   // Attached to the document: the card hands the focus to the composer when
   // it goes, and focus only exists in a document.
   wrapper = mount(ChatPanel, {
+      props: { chatId: chatId },
     attachTo: document.body,
     global: { plugins: [pinia], stubs: { RouterLink: RouterLinkStub } },
   })

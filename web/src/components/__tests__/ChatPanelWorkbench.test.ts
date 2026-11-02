@@ -114,6 +114,7 @@ async function mountPanel(messages: ChatMessage[] = [], chatOverrides: Partial<C
     return Promise.resolve([]) as never
   })
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     attachTo: document.body,
     global: {
       plugins: [pinia],

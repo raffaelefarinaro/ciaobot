@@ -49,7 +49,7 @@ async function mountPanel(setup: (store: ReturnType<typeof useProjectStore>) => 
     if (path === '/api/commands') return Promise.resolve({ commands: [] }) as never
     return Promise.resolve([]) as never
   })
-  const wrapper = shallowMount(ChatPanel, { attachTo: document.body, global: { plugins: [pinia], stubs: {
+  const wrapper = shallowMount(ChatPanel, { props: { chatId: 'chat-1' }, attachTo: document.body, global: { plugins: [pinia], stubs: {
     PaneHeader: PaneHeaderStub, ModelSelector: ChildStub, SubagentPanel: ChildStub,
     ChatCommentPopover: ChatCommentPopoverStub, CommentComposePopover: ChildStub, RouterLink: RouterLinkStub,
   } } })

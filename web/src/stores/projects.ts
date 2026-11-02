@@ -228,6 +228,9 @@ export const useProjectStore = defineStore('projects', () => {
     pendingImages,
     pendingComments,
     pendingChatComments,
+    pendingImagesFor,
+    pendingCommentsFor,
+    pendingChatCommentsFor,
     fileComments,
     addPendingImageRefs,
     removePendingImage,
@@ -1038,54 +1041,63 @@ export const useProjectStore = defineStore('projects', () => {
     chats.value.find(c => c.chat_id === activeChatId.value) || null
   )
 
+  function chatById(chatId: string): ChatInfo | null { return chats.value.find(c => c.chat_id === chatId) || null }
+  function messagesFor(chatId: string): ChatMessage[] { return messages.value[chatId] || [] }
+  function isMessageHistoryLoading(chatId: string): boolean { return Boolean(loadingMessages.value[chatId]) }
+  function subagentsFor(chatId: string): SubagentTranscript[] { return subagents.value[chatId] || [] }
+  function isChatWakeStreaming(chatId: string): boolean { return Boolean(wakeStreaming.value[chatId]) }
+  function streamingTextFor(chatId: string): string { return streamingText.value[chatId] || '' }
+  function streamingThinkingFor(chatId: string): string { return streamingThinking.value[chatId] || '' }
+  function queuedFor(chatId: string): QueuedMessage[] { return queuedMessages.value[chatId] || [] }
+  function backgroundAgentsFor(chatId: string): number { return backgroundAgents.value[chatId] || 0 }
+  function timelineFor(chatId: string): StreamEntry[] { return streamingTimeline.value[chatId] || [] }
+  function deniedToolUseIdsFor(chatId: string): string[] { return deniedToolUseIds.value[chatId] || [] }
+  function streamStartedAtFor(chatId: string): number { return streamStartedAt.value[chatId] || 0 }
+
+  /** The chat open beside the active one in ChatLayout's split, or null. Live viewing state only:
+   *  ChatLayout owns when it is shown and where the choice is remembered (lib/chatSplit.ts). */
+  const besideChatId = ref<string | null>(null)
+  /** On screen: the active chat, or the one beside it. */
+  function isViewedChat(chatId: string): boolean {
+    return !!chatId && (chatId === activeChatId.value || chatId === besideChatId.value)
+  }
+  function viewedChatIds(): string[] {
+    const ids = [activeChatId.value, besideChatId.value].filter((id): id is string => !!id)
+    return [...new Set(ids)]
+  }
+
   const activeProject = computed(() => {
     const chat = activeChat.value
     if (!chat) return null
     return projects.value.find(p => p.project_id === chat.project_id) || null
   })
 
-  const activeMessages = computed(() =>
-    messages.value[activeChatId.value || ''] || []
-  )
+  const activeMessages = computed(() => messagesFor(activeChatId.value || ''))
 
-  const messageHistoryLoading = computed(() =>
-    Boolean(loadingMessages.value[activeChatId.value || ''])
-  )
+  const messageHistoryLoading = computed(() => isMessageHistoryLoading(activeChatId.value || ''))
 
-  const activeSubagents = computed<SubagentTranscript[]>(() =>
-    subagents.value[activeChatId.value || ''] || []
-  )
+  const activeSubagents = computed<SubagentTranscript[]>(() => subagentsFor(activeChatId.value || ''))
 
   // True while the active chat has a live turn. Includes `projectStreaming`
   // (events-WS server truth) so a mid-turn `/messages` poll that hydrates
   // progress text cannot tear down the Working... Activity and promote a
   // half-written note into the reply bubble.
-  const isStreaming = computed(() => {
-    const chatId = activeChatId.value || ''
-    return Boolean(streaming.value[chatId] || projectStreaming.value[chatId])
-  })
+  const isStreaming = computed(() => isChatStreaming(activeChatId.value || ''))
 
-  const isWakeStreaming = computed(() => Boolean(wakeStreaming.value[activeChatId.value || '']))
+  const isWakeStreaming = computed(() => isChatWakeStreaming(activeChatId.value || ''))
 
-  const currentStreamingText = computed(() =>
-    streamingText.value[activeChatId.value || ''] || ''
-  )
+  const currentStreamingText = computed(() => streamingTextFor(activeChatId.value || ''))
 
-  const currentStreamingThinking = computed(() =>
-    streamingThinking.value[activeChatId.value || ''] || ''
-  )
+  const currentStreamingThinking = computed(() => streamingThinkingFor(activeChatId.value || ''))
 
-  const currentQueued = computed(() =>
-    queuedMessages.value[activeChatId.value || ''] || []
-  )
+  const currentQueued = computed(() => queuedFor(activeChatId.value || ''))
 
-  const activeBackgroundAgents = computed(() =>
-    backgroundAgents.value[activeChatId.value || ''] || 0
-  )
+  const activeBackgroundAgents = computed(() => backgroundAgentsFor(activeChatId.value || ''))
 
   const backgroundableCalls = ref<Record<string, BackgroundableCalls>>({})
+  function backgroundableCallsFor(chatId: string): BackgroundableCalls { return backgroundableCalls.value[chatId] || {} }
   const activeBackgroundableCalls = computed<BackgroundableCalls>(() =>
-    backgroundableCalls.value[activeChatId.value || ''] || {}
+    backgroundableCallsFor(activeChatId.value || '')
   )
 
   // Paused while the read-only subagent view is open for this chat: that
@@ -1815,7 +1827,7 @@ export const useProjectStore = defineStore('projects', () => {
     // also closes a race in `chat_result_ready` where api.get('/api/chats')
     // can resolve before POST /read is processed and briefly roll back the
     // optimistic last_read_at update.
-    if (chatId === activeChatId.value && documentVisible.value) return 0
+    if (isViewedChat(chatId) && documentVisible.value) return 0
     if (unread.value[chatId]) return 1
     if (!chat) return 0
     const activity = chat.last_activity_at || ''
@@ -2947,7 +2959,7 @@ export const useProjectStore = defineStore('projects', () => {
     })
     replaceChat(c, readStart)
     await loadMessages(chatId)
-    if (activeChatId.value === chatId) {
+    if (isViewedChat(chatId)) {
       disconnectWs(chatId)
       connectWs(chatId)
     }
@@ -3232,7 +3244,7 @@ export const useProjectStore = defineStore('projects', () => {
   // If this tab is already on the chat, reconnect so the per-chat WS attaches
   // to a broker stream an HTTP action just started.
   function reattachActiveChatSocket(chatId: string) {
-    if (activeChatId.value === chatId) {
+    if (isViewedChat(chatId)) {
       disconnectWs(chatId)
       connectWs(chatId)
     }
@@ -4009,7 +4021,7 @@ export const useProjectStore = defineStore('projects', () => {
       delete lateReplyTimers[chatId]
       // Another chat is open, or a new turn owns the timeline: its own result
       // reconciles it, and the next open of this chat fetches afresh.
-      if (activeChatId.value !== chatId || streaming.value[chatId] || projectStreaming.value[chatId]) return
+      if (!isViewedChat(chatId) || streaming.value[chatId] || projectStreaming.value[chatId]) return
       await loadMessages(chatId, { background: true })
       if (!hasSettledHistory(chatId)) awaitLateReply(chatId, attempt + 1)
     }, LATE_REPLY_DELAYS_MS[attempt])
@@ -4243,6 +4255,8 @@ export const useProjectStore = defineStore('projects', () => {
       void markRead(chatId)
       return
     }
+    // The second chat becomes the main one. Its socket stays: connectWs no-ops when one exists.
+    if (besideChatId.value === chatId) besideChatId.value = null
     // Disconnect old
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeChatId.value = chatId
@@ -4263,6 +4277,22 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs(chatId)
     void loadSubagents(chatId)
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
+  }
+
+  /** Keep a second chat live beside the active one (or stop, with null). Mirrors switchChat's
+   *  open path without touching the route or the active selection. */
+  async function attachBesideChat(chatId: string | null): Promise<void> {
+    const next = chatId && chatId !== activeChatId.value && canOpenChat(chatId) ? chatId : null
+    const previous = besideChatId.value
+    if (previous === next) return
+    if (previous && previous !== activeChatId.value) disconnectWs(previous)
+    besideChatId.value = next
+    if (!next) return
+    void markRead(next)
+    if (isArchivedChat(next)) { await loadMessages(next); return }
+    connectWs(next)
+    void loadSubagents(next)
+    await loadMessages(next, { waitForSettledReply: true })
   }
 
   // Set by the open Settings workspace editor so a switch away from unsaved
@@ -4318,6 +4348,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (options?.isCurrent && !options.isCurrent()) return false
     if (activeWorkspace.value === ws) return true
     if (activeChatId.value) disconnectWs(activeChatId.value)
+    if (besideChatId.value) { disconnectWs(besideChatId.value); besideChatId.value = null }
     activeWorkspace.value = ws
     // A workspace switch expresses scope, not a request to open an arbitrary
     // conversation. Selecting the first chat here also made the switch (and
@@ -4337,7 +4368,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   function _currentFocused(chatId: string): boolean {
     if (typeof document === 'undefined') return true
-    return activeChatId.value === chatId
+    return isViewedChat(chatId)
       && document.visibilityState === 'visible'
       && document.hasFocus()
   }
@@ -4419,7 +4450,7 @@ export const useProjectStore = defineStore('projects', () => {
       // waiting for the 15s poll or a manual reload. Intentional closes
       // (disconnectWs, e.g. switching chats) are skipped.
       if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return
-      if (activeChatId.value !== chatId) return
+      if (!isViewedChat(chatId)) return
 
       // Handshake never completed (auth 403 / origin reject). Do not spin
       // reloadAndReconnectChat — that also hammers /messages and fills logs.
@@ -4433,7 +4464,7 @@ export const useProjectStore = defineStore('projects', () => {
         cancelTimer(chatReconnectTimers[chatId])
         chatReconnectTimers[chatId] = scheduleTimer(() => {
           delete chatReconnectTimers[chatId]
-          if (activeChatId.value === chatId && !sockets.value[chatId]) {
+          if (isViewedChat(chatId) && !sockets.value[chatId]) {
             connectWs(chatId)
           }
         }, delay)
@@ -4450,7 +4481,7 @@ export const useProjectStore = defineStore('projects', () => {
       chatReconnectTimers[chatId] = scheduleTimer(() => {
         delete chatReconnectTimers[chatId]
         // Only if still the viewed chat and not reconnected in the meantime.
-        if (activeChatId.value === chatId && !sockets.value[chatId]) {
+        if (isViewedChat(chatId) && !sockets.value[chatId]) {
           void reloadAndReconnectChat(chatId)
         }
       }, delay)
@@ -4525,8 +4556,7 @@ export const useProjectStore = defineStore('projects', () => {
       lastEventsFrameAt = now // don't re-fire before the reconnect lands
       try { ews.close() } catch { /* ignore */ }
     }
-    const chatId = activeChatId.value
-    if (chatId) {
+    for (const chatId of viewedChatIds()) {
       const cws = sockets.value[chatId]
       const seen = lastChatFrameAt[chatId]
       if (cws && cws.readyState === WebSocket.OPEN && seen && now - seen > WS_STALE_MS) {
@@ -4548,10 +4578,7 @@ export const useProjectStore = defineStore('projects', () => {
     // objects to hoisting a declaration out of this block, and both callers
     // below run from listeners, well after this line.
     const resumeActiveChat = async () => {
-      const chatId = activeChatId.value
-      if (chatId) {
-        await reloadAndReconnectChat(chatId)
-      }
+      await Promise.all(viewedChatIds().map(id => reloadAndReconnectChat(id)))
       const ews = eventsSocket.value
       if (ews && ews.readyState === WebSocket.OPEN) {
         try { ews.close() } catch { /* ignore */ }
@@ -4576,10 +4603,10 @@ export const useProjectStore = defineStore('projects', () => {
     // browser focus transitions so the engine does not suppress a native
     // notification for a chat the user cannot currently see.
     listen(window, 'focus', () => {
-      if (activeChatId.value) sendFocus(activeChatId.value)
+      for (const id of viewedChatIds()) sendFocus(id)
     })
     listen(window, 'blur', () => {
-      if (activeChatId.value) sendFocus(activeChatId.value)
+      for (const id of viewedChatIds()) sendFocus(id)
     })
 
     // A phone resumed from a push can wake before its network does, so the
@@ -4606,9 +4633,9 @@ export const useProjectStore = defineStore('projects', () => {
           return window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
         })()
         if (chatId) void openChatFromDeepLink(chatId)
-      } else if (activeChatId.value) {
+      } else {
         // Visibility → hidden: just notify the server of focus state.
-        sendFocus(activeChatId.value)
+        for (const id of viewedChatIds()) sendFocus(id)
       }
     })
 
@@ -4637,8 +4664,7 @@ export const useProjectStore = defineStore('projects', () => {
   /** Reconnect every live socket immediately (engine just recovered); resets the backoff so nothing waits out a 64 s delay. */
   function reconnectNow(): void {
     eventsWsFailureStreak = 0
-    const chatId = activeChatId.value
-    if (chatId) {
+    for (const chatId of viewedChatIds()) {
       chatReconnectAttempts[chatId] = 0
       void reloadAndReconnectChat(chatId)
     }
@@ -4880,9 +4906,8 @@ export const useProjectStore = defineStore('projects', () => {
         // per-chat WS likely also missed the result). Refetch /messages
         // so the UI doesn't stay stuck on the prior turn / "Working..."
         // until a manual reload.
-        const activeForSnap = activeChatId.value
-        if (activeForSnap && streaming.value[activeForSnap] && !projectStreaming.value[activeForSnap]) {
-          void reconcileAfterResult(activeForSnap)
+        for (const viewed of viewedChatIds()) {
+          if (streaming.value[viewed] && !projectStreaming.value[viewed]) void reconcileAfterResult(viewed)
         }
         // A `tasks_changed` published while the socket was down is gone (the
         // hub keeps no replay), so every (re)connect re-reads the board.
@@ -4912,7 +4937,7 @@ export const useProjectStore = defineStore('projects', () => {
         // re-announces the count at every turn end (including 0), and the
         // events snapshot heals stale counts on reconnect.
         if (
-          msg.chat_id === activeChatId.value &&
+          isViewedChat(msg.chat_id) &&
           shouldReconnectActiveChatOnStreamingStarted(sockets.value[msg.chat_id])
         ) {
           disconnectWs(msg.chat_id)
@@ -4933,7 +4958,7 @@ export const useProjectStore = defineStore('projects', () => {
         // against /messages so the new assistant bubble shows up without
         // requiring a manual refresh. Limit to the active chat — inactive
         // chats refetch on their next open via switchChat → loadMessages.
-        if (msg.chat_id === activeChatId.value) {
+        if (isViewedChat(msg.chat_id)) {
           const localMsgs = messages.value[msg.chat_id]
           const last = localMsgs && localMsgs.length > 0 ? localMsgs[localMsgs.length - 1] : null
           // A trailing trace row is not the turn's answer: with the spinner
@@ -4957,7 +4982,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'chat_result_ready': {
         const resultChat = chats.value.find(c => c.chat_id === msg.chat_id)
-        const isFocused = activeChatId.value === msg.chat_id &&
+        const isFocused = isViewedChat(msg.chat_id) &&
           (typeof document === 'undefined' || document.visibilityState === 'visible')
         if (isFocused) {
           // User is looking at this chat right now. Advance server read state
@@ -5011,7 +5036,7 @@ export const useProjectStore = defineStore('projects', () => {
         // Ensure the active chat's transcript refreshes even when the tab is
         // hidden — otherwise the answer stays invisible until the user opens
         // the Activity view (which fires a visibilitychange).
-        if (msg.chat_id === activeChatId.value) {
+        if (isViewedChat(msg.chat_id)) {
           void reconcileAfterResult(msg.chat_id)
         }
         break
@@ -5033,12 +5058,12 @@ export const useProjectStore = defineStore('projects', () => {
         // agent is visible without waiting up to 4s for the poll watcher's
         // first tick. Pull subagents once (focused only) then return.
         if (msg.remaining >= prevAgents && msg.remaining > 0) {
-          const focusedNow = activeChatId.value === msg.chat_id &&
+          const focusedNow = isViewedChat(msg.chat_id) &&
             (typeof document === 'undefined' || document.visibilityState === 'visible')
           if (focusedNow) void loadSubagents(msg.chat_id)
           break
         }
-        const isFocused = activeChatId.value === msg.chat_id &&
+        const isFocused = isViewedChat(msg.chat_id) &&
           (typeof document === 'undefined' || document.visibilityState === 'visible')
         if (isFocused) {
           // Subagent transcripts land after the parent turn's result. Refresh
@@ -6119,16 +6144,14 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Event handling ──────────────────────────────────────────────────
 
   /** Currently accumulated timeline entries for the active turn (tools + intermediate text). */
-  const currentTimeline = computed<StreamEntry[]>(() => streamingTimeline.value[activeChatId.value || ''] || [])
-  const currentDeniedToolUseIds = computed<string[]>(() => deniedToolUseIds.value[activeChatId.value || ''] || [])
+  const currentTimeline = computed<StreamEntry[]>(() => timelineFor(activeChatId.value || ''))
+  const currentDeniedToolUseIds = computed<string[]>(() => deniedToolUseIdsFor(activeChatId.value || ''))
   /** Live token totals for the active turn, or null when none reported yet. */
   const currentLiveUsage = computed<{ input: number; output: number } | null>(
     () => liveUsage.value[activeChatId.value || ''] || null
   )
   /** Epoch millis when the active turn started streaming, or 0 if unknown. */
-  const currentStreamStartedAt = computed<number>(
-    () => streamStartedAt.value[activeChatId.value || ''] || 0
-  )
+  const currentStreamStartedAt = computed<number>(() => streamStartedAtFor(activeChatId.value || ''))
   /** Legacy: flat list of just the tool lines (for callers that only care about tool activity). */
   const currentActivity = computed(() => {
     const lines: string[] = []
@@ -6928,7 +6951,7 @@ export const useProjectStore = defineStore('projects', () => {
             duration_ms: event.duration_ms,
             phase: 'final_answer',
           })
-          const isActive = activeChatId.value === chatId &&
+          const isActive = isViewedChat(chatId) &&
             (typeof document === 'undefined' || document.visibilityState === 'visible')
           // A turn the user stopped is not an answer. Its partial text still
           // renders so the transcript matches what they watched arrive, but
@@ -7121,13 +7144,16 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
+    projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, besideChatId, bootstrapped, chatsHealth, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, wakeStreaming, isWakeStreaming, backgroundAgents, runningSubagents, stoppingTasks, stopTaskErrors, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     terminalOffers,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
+    isViewedChat, viewedChatIds, chatById, messagesFor, isMessageHistoryLoading, subagentsFor, isChatWakeStreaming,
+    streamingTextFor, streamingThinkingFor, queuedFor, backgroundAgentsFor, backgroundableCallsFor, timelineFor,
+    deniedToolUseIdsFor, streamStartedAtFor, pendingImagesFor, pendingCommentsFor, pendingChatCommentsFor,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, stopBackgroundTask, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
@@ -7145,7 +7171,7 @@ export const useProjectStore = defineStore('projects', () => {
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
+    switchChat, attachBesideChat, switchWorkspace, setWorkspaceSwitchGuard, clearWorkspaceSwitchGuard, registerWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,

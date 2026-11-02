@@ -60,6 +60,7 @@ async function mountPanel() {
     return Promise.resolve([]) as never
   })
   const wrapper = shallowMount(ChatPanel, {
+      props: { chatId: 'chat-1' },
     global: {
       plugins: [pinia],
       stubs: { PaneHeader: PaneHeaderStub, SubagentPanel: ChildStub, RouterLink: ChildStub, ChatCommentPopover: ChatCommentPopoverStub, CommentComposePopover: ChildStub },
