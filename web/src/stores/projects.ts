@@ -3001,6 +3001,7 @@ export const useProjectStore = defineStore('projects', () => {
     options?: { selectNext?: boolean; onlyIfEmpty?: boolean },
   ): Promise<boolean> {
     disconnectWs(chatId)
+    dropBesideChat(chatId)
     // `only_if_empty` makes the server apply its own `_is_empty_chat` rule and
     // decline otherwise, so closing a draft can never delete a real chat.
     const query = options?.onlyIfEmpty ? '?only_if_empty=1' : ''
@@ -3146,6 +3147,7 @@ export const useProjectStore = defineStore('projects', () => {
     const chatBefore = chats.value.find(ch => ch.chat_id === chatId)
     const prevArchived = chatBefore ? chatBefore.archived : false
     const wasActive = activeChatId.value === chatId
+    const wasBeside = besideChatId.value === chatId
     // Optimistic UI: hide from active lists immediately and show in the
     // home "archiving…" queue so the panel can close without waiting for
     // the server's disk work (the transcript write).
@@ -3162,6 +3164,7 @@ export const useProjectStore = defineStore('projects', () => {
       }).catch(() => {})
     }
     disconnectWs(chatId)
+    dropBesideChat(chatId)
 
     let res: ArchiveChatResponse
     try {
@@ -3174,6 +3177,7 @@ export const useProjectStore = defineStore('projects', () => {
       delete archivingChats.value[chatId]
       pendingArchived.value.delete(chatId)
       if (hadSocket) connectWs(chatId)
+      if (wasBeside) void attachBesideChat(chatId)
       if (wasActive && activeChatId.value === null) {
         activeChatId.value = chatId
         persistState()
@@ -4279,6 +4283,14 @@ export const useProjectStore = defineStore('projects', () => {
     if (!opts?.skipHistory) await loadMessages(chatId, { waitForSettledReply: true })
   }
 
+  /** The second chat is gone (deleted or archived): close its socket and free the slot. */
+  function dropBesideChat(chatId: string): void {
+    if (besideChatId.value === chatId) {
+      disconnectWs(chatId)
+      besideChatId.value = null
+    }
+  }
+
   /** Keep a second chat live beside the active one (or stop, with null). Mirrors switchChat's
    *  open path without touching the route or the active selection. */
   async function attachBesideChat(chatId: string | null): Promise<void> {
@@ -5140,6 +5152,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'chat_archived': {
         disconnectWs(msg.chat_id)
+        dropBesideChat(msg.chat_id)
         const chat = chats.value.find(c => c.chat_id === msg.chat_id)
         if (chat) {
           chat.archived = true
@@ -5215,6 +5228,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
         }
+        dropBesideChat(msg.chat_id)
         // The chat is gone, and so is the command it offered.
         setTerminalOffer(msg.chat_id, null)
         dropChatPinState(msg.chat_id)

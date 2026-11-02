@@ -3972,7 +3972,8 @@ onBeforeUnmount(() => {
 
 // Tell the service worker which chat is in focus so it can clear the badge
 function notifyChatFocused(chatId: string | undefined) {
-  if (!chatId) return
+  // Only the pane with the keyboard is the chat in focus.
+  if (!chatId || props.inactive) return
   if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
     navigator.serviceWorker.controller.postMessage({ type: 'chat-focused', chat_id: chatId })
   }

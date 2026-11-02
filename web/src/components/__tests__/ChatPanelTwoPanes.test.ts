@@ -3,12 +3,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
-import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
+import ChatRepoSection from '../ChatRepoSection.vue'
+import TaskOriginNote from '../TaskOriginNote.vue'
+import { useTaskSignalsStore } from '../../stores/taskSignals'
+import type { ProjectRepo, Task } from '../../lib/types'
 
 const PaneHeaderStub = defineComponent({
   name: 'PaneHeaderStub',
@@ -130,6 +134,29 @@ describe('two ChatPanels on screen', () => {
     expect(document.activeElement).toBe(a.find('textarea.chat-input').element)
   })
 
+  it('an inactive pane does not tell the service worker which chat is focused', async () => {
+    const postMessage = vi.fn()
+    Object.defineProperty(navigator, 'serviceWorker', {
+      value: {
+        controller: { postMessage }, ready: Promise.resolve(),
+        addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      },
+      configurable: true,
+    })
+    try {
+      mountTwoPanes()
+      await flushPromises()
+      await mounted[1].setProps({ chatId: 'chat-2' })
+      await flushPromises()
+
+      const focused = postMessage.mock.calls.map(([m]) => (m as { chat_id: string }).chat_id)
+      expect(focused).toContain('chat-1')
+      expect(focused).not.toContain('chat-2')
+    } finally {
+      Reflect.deleteProperty(navigator, 'serviceWorker')
+    }
+  })
+
   it('a staged chat comment lands in its own chat', () => {
     const { store } = mountTwoPanes()
 
@@ -137,5 +164,48 @@ describe('two ChatPanels on screen', () => {
 
     expect(store.pendingChatCommentsFor('chat-2')).toHaveLength(1)
     expect(store.pendingChatCommentsFor('chat-1')).toHaveLength(0)
+  })
+})
+
+describe('the rails of two panes', () => {
+  afterEach(() => { document.body.innerHTML = '' })
+
+  it('no element id repeats when both panes render their repo and task-origin sections open', async () => {
+    setActivePinia(createPinia())
+    vi.spyOn(api, 'get').mockResolvedValue({ workspace: 'personal', tasks: [] } as never)
+    const repo: ProjectRepo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+    const signals = useTaskSignalsStore()
+    signals.tasks = [{
+      id: 'ship', title: 'Ship', status: 'in_progress', project_id: '', due: '', assignee: 'agent',
+      chat_id: 'chat-1', attempt_id: 'att-1', linked_chats: [], created_at: '', updated_at: '',
+      revision: 'a'.repeat(64), relative_path: 'Tasks/ship.md', attempt_state: 'needs_you',
+      attempt_outcome: 'needs_input', attempt_summary: '', attempt_detail: '', live_attempt_id: 'att-1',
+      completed_at: null, has_resolution: false,
+    } as Task]
+    signals.loadedWorkspace = 'personal'
+    const delegated = { chat_id: 'chat-1', helper: { kind: 'task_delegation', task_id: 'ship', task_revision: 'a'.repeat(64), attempt_id: 'att-1' } }
+
+    // Both panes live in one app, as they do in ChatLayout: useId is per app, so
+    // two separate mounts would repeat its generated ids and prove nothing.
+    const bothPanes = defineComponent({
+      setup: () => () => h('div', [0, 1].flatMap(() => [
+        h(ChatRepoSection, { repo, location: null, chatId: 'chat-1', codeMode: false, archived: false }),
+        h(TaskOriginNote, { chat: delegated as never }),
+      ])),
+    })
+    const wrapper = mount(bothPanes, { attachTo: document.body, global: { stubs: { RouterLink: true } } })
+    try {
+      for (const openNote of wrapper.findAll('button').filter(b => b.text() === 'Mark done…')) {
+        await openNote.trigger('click')
+      }
+      await flushPromises()
+      expect(document.querySelectorAll('textarea.task-origin-note')).toHaveLength(2)
+
+      const ids = Array.from(document.querySelectorAll('[id]')).map(el => el.id)
+      const repeated = ids.filter((id, i) => ids.indexOf(id) !== i)
+      expect(repeated).toEqual([])
+    } finally {
+      wrapper.unmount()
+    }
   })
 })

@@ -159,3 +159,81 @@ describe('attachBesideChat', () => {
     expect(chatB.close).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('the second chat ends with its chat', () => {
+  async function attachAndOpenEvents() {
+    const store = seed()
+    await store.attachBesideChat('chat-b')
+    store.connectEventsWs()
+    const chatB = socketFor('/ws/chat/chat-b')!
+    const events = socketFor('/ws/events')!
+    return { store, chatB, events }
+  }
+
+  it('a deleted second chat is dropped and its socket closed', async () => {
+    const { store, chatB, events } = await attachAndOpenEvents()
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'chat_deleted', chat_id: 'chat-b' }) })
+
+    expect(store.besideChatId).toBeNull()
+    expect(store.isViewedChat('chat-b')).toBe(false)
+    expect(chatB.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('an archived second chat is dropped and its socket closed', async () => {
+    const { store, chatB, events } = await attachAndOpenEvents()
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'chat_archived', chat_id: 'chat-b' }) })
+
+    expect(store.besideChatId).toBeNull()
+    expect(store.isViewedChat('chat-b')).toBe(false)
+    expect(chatB.close).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('second-chat socket lifecycle', () => {
+  it('moving the second slot closes the old socket and opens exactly one for the new chat', async () => {
+    const store = seed()
+    await store.attachBesideChat('chat-b')
+    const chatB = socketFor('/ws/chat/chat-b')!
+
+    await store.attachBesideChat('chat-c')
+
+    expect(chatB.close).toHaveBeenCalledTimes(1)
+    expect(store.besideChatId).toBe('chat-c')
+    const chatCSockets = sockets.filter(s => s.url.endsWith('/ws/chat/chat-c'))
+    expect(chatCSockets).toHaveLength(1)
+    expect(chatCSockets[0].close).not.toHaveBeenCalled()
+  })
+
+  it('attaching the same second chat twice opens one socket', async () => {
+    const store = seed()
+
+    await store.attachBesideChat('chat-b')
+    await store.attachBesideChat('chat-b')
+
+    expect(sockets.filter(s => s.url.endsWith('/ws/chat/chat-b'))).toHaveLength(1)
+    expect(socketFor('/ws/chat/chat-b')!.close).not.toHaveBeenCalled()
+    expect(store.besideChatId).toBe('chat-b')
+  })
+})
+
+describe('a failed archive restores the second chat', () => {
+  it('re-attaches the second chat with a fresh socket when the archive POST fails', async () => {
+    const store = seed()
+    await store.attachBesideChat('chat-b')
+    const firstSocket = socketFor('/ws/chat/chat-b')!
+    apiPost.mockImplementation((url: string) =>
+      url.endsWith('/archive') ? Promise.reject(new Error('disk full')) : Promise.resolve({}),
+    )
+
+    await expect(store.archiveChat('chat-b')).rejects.toThrow()
+
+    expect(firstSocket.close).toHaveBeenCalledTimes(1)
+    expect(store.besideChatId).toBe('chat-b')
+    expect(store.isViewedChat('chat-b')).toBe(true)
+    const chatBSockets = sockets.filter(s => s.url.endsWith('/ws/chat/chat-b'))
+    expect(chatBSockets).toHaveLength(2)
+    expect(chatBSockets[1].close).not.toHaveBeenCalled()
+  })
+})
