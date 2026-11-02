@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.9.0 - 2026-11-02
+
+**Heads up:** Macs set up by the Ciaobot Mac app's native installer on 1.8.x cannot update from Settings → Update (the updater cannot find uv). Run **Repair** in the Mac app once it offers it; Repair re-provisions uv and the update path works from then on. Installs made with the one-line `install.sh` are not affected.
+
+### New features
+- **Repair for Mac app installs:** the Mac app can repair a broken engine install (tool environment, service, server host, install record) without touching your workspace, chats or vault, and brings the service back on its configured port.
+- **Pick the model when delegating a task:** the task board's Delegate sheet now lets you choose the provider and model the new chat runs on.
+
+### Improvements
+- The signed release manifest now lists the installer scripts, so the Mac app can verify and install the latest engine itself instead of a pinned version.
+- New "How we measure" page on the website with the task-eval results for each release.
+
+### Bug fixes
+- Engines installed by the Mac app could not stage an update from Settings or `ciao update` ([#2484](https://github.com/raffaelefarinaro/ciaobot/issues/2484))
+- A Mac app install could finish with a service that never started when another process (such as `tailscale serve`) held the service port; it now stops and reports the port instead ([#2480](https://github.com/raffaelefarinaro/ciaobot/pull/2480))
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.8.1...v1.9.0)
+
 ## v1.8.1 - 2026-11-02
 
 ### Bug fixes

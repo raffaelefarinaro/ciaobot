@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "ciaobot": "1.8.1",
+  "ciaobot": "1.9.0",
   "recorded": "2026-11-02",
   "providers": {
     "opencode": {
