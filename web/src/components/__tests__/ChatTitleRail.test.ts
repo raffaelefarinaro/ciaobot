@@ -152,6 +152,21 @@ describe('ChatTitleRail', () => {
     expect(wrapper.emitted('select')).toEqual([['a'], ['c']])
   })
 
+  // A browser chord such as Alt+ArrowLeft is Back: the rail must leave it alone.
+  it('ignores an arrow key pressed with a modifier', () => {
+    seed(['a', 'b', 'c'])
+    const wrapper = mount(ChatTitleRail, {
+      props: { items: [item('a'), item('b'), item('c')], currentId: 'b' },
+    })
+    const current = wrapper.get('.title-rail-item[aria-current="page"]').element as HTMLElement
+    const event = new KeyboardEvent('keydown', { key: 'ArrowRight', altKey: true, bubbles: true, cancelable: true })
+
+    current.dispatchEvent(event)
+
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(event.defaultPrevented).toBe(false)
+  })
+
   it('does nothing for an arrow key at either end of the rail', async () => {
     seed(['a', 'b'])
     const first = mount(ChatTitleRail, { props: { items: [item('a'), item('b')], currentId: 'a' } })

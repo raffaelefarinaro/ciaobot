@@ -117,6 +117,8 @@ function onItemDblclick(chatId: string): void {
 // Keyboard path for phones, where the arrow buttons are hidden: the arrow keys step from the current item.
 function onItemKeydown(e: KeyboardEvent, chatId: string): void {
   if (chatId !== props.currentId) return
+  // Browser chords (Alt+ArrowLeft is Back) are not rail gestures.
+  if (e.altKey || e.ctrlKey || e.metaKey) return
   const target = e.key === 'ArrowLeft' ? neighbours.value.previous : e.key === 'ArrowRight' ? neighbours.value.next : null
   if (!target) return
   e.preventDefault()
