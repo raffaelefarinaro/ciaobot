@@ -3192,11 +3192,19 @@ def test_the_public_event_fd_is_never_inherited_by_the_wizard_child(
         "    json.dump(sorted(int(name) for name in os.listdir('/dev/fd')), handle)\n"
         "os.write(int(sys.argv[1]), b'{\"schema\":1,\"port\":54321}\\n')\n"
         "os.close(int(sys.argv[1]))\n"
+        # Held until the real listener-ownership check has run (the autouse
+        # fixture releases it), so the check never races the child's exit.
+        "give_up = __import__('time').monotonic() + 30\n"
+        "while not os.path.exists(sys.argv[3]) and __import__('time').monotonic() < give_up:\n"
+        "    __import__('time').sleep(0.01)\n"
     )
 
     def wizard_command(fd: int) -> tuple[str, ...]:
         notification_fds.append(fd)
-        return (sys.executable, "-c", script, str(fd), str(child_fds_path))
+        return (
+            sys.executable, "-c", script, str(fd), str(child_fds_path),
+            str(tmp_path / WIZARD_RELEASE_NAME),
+        )
 
     with _public_event_pipe() as (read_fd, write_fd):
         outcome = native._run_native_install(
@@ -4130,6 +4138,11 @@ def test_the_private_notification_fd_is_not_inherited_by_a_wizard_grandchild(
         "grandchild = subprocess.Popen([sys.executable, '-c', lister, sys.argv[2]])\n"
         "grandchild.wait()\n"
         "os.close(fd)\n"
+        # Held until the real listener-ownership check has run (the autouse
+        # fixture releases it), so the check never races the child's exit.
+        "give_up = __import__('time').monotonic() + 30\n"
+        "while not os.path.exists(sys.argv[3]) and __import__('time').monotonic() < give_up:\n"
+        "    __import__('time').sleep(0.01)\n"
     )
     notification_fds: list[int] = []
 
@@ -4141,6 +4154,7 @@ def test_the_private_notification_fd_is_not_inherited_by_a_wizard_grandchild(
             script,
             str(fd),
             str(grandchild_fds_path),
+            str(tmp_path / WIZARD_RELEASE_NAME),
         )
 
     outcome, _events, _raw = _run_coordinator(
