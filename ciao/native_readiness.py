@@ -104,6 +104,7 @@ on macOS.
 from __future__ import annotations
 
 import ctypes
+import errno
 import ipaddress
 import json
 import os
@@ -175,6 +176,9 @@ MAX_PID: Final[int] = 2**31 - 1
 #: A single read-only adapter query. The whole proof's deadline still governs
 #: the sum; this only stops one stuck command from outliving the caller.
 ADAPTER_TIMEOUT_SECONDS: Final[float] = 5.0
+#: One loopback connect in the setup-port free check. Loopback answers at once,
+#: so this only bounds a stuck kernel call.
+LOOPBACK_PROBE_TIMEOUT_SECONDS: Final[float] = 1.0
 JOB_PROBE_TIMEOUT_SECONDS: Final[float] = 10.0
 
 SERVER_LOCK_NAME: Final[str] = "server.lock"
@@ -1159,34 +1163,39 @@ def _reap_bounded(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def _read_bounded_stdout(
+def _read_bounded_pipes(
     process: subprocess.Popen[bytes], deadline: float, limit: int
-) -> bytes | None:
-    """Read stdout only up to ``limit`` while the child runs, or ``None``.
+) -> tuple[bytes, bytes] | None:
+    """Read stdout and stderr to EOF, each up to ``limit``, or ``None``.
 
-    ``selectors.DefaultSelector`` waits for readability against the *absolute*
-    deadline (using poll/kqueue where available, so it does not hit
-    ``FD_SETSIZE``) and ``os.read`` never asks for more than one byte past the
-    cap, so an endlessly-writing child is killed instead of filling memory. A
-    pipe that drips is bounded by the same deadline rather than one timeout per
-    read.
+    Both pipes are drained together against one absolute deadline, so a child
+    that fills stderr while stdout is still open cannot block the run.
+    ``selectors.DefaultSelector`` waits for readability (poll/kqueue where
+    available, so it does not hit ``FD_SETSIZE``) and ``os.read`` never asks for
+    more than one byte past the cap, so an endlessly-writing child is killed
+    instead of filling memory. Overflow of either stream, a timeout, or any read
+    error fails the whole read.
     """
-    stream = process.stdout
-    if stream is None:
+    streams = {"out": process.stdout, "err": process.stderr}
+    if streams["out"] is None or streams["err"] is None:
         return None
-    descriptor = stream.fileno()
-    chunks: list[bytes] = []
-    total = 0
+    chunks: dict[str, list[bytes]] = {"out": [], "err": []}
+    totals = {"out": 0, "err": 0}
     try:
         selector = selectors.DefaultSelector()
     except (OSError, ValueError):
         return None
     try:
+        names: dict[int, str] = {}
         try:
-            selector.register(descriptor, selectors.EVENT_READ)
+            for name, stream in streams.items():
+                if stream is None:
+                    return None
+                names[stream.fileno()] = name
+                selector.register(stream.fileno(), selectors.EVENT_READ)
         except (OSError, KeyError, ValueError):
             return None
-        while True:
+        while names:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
@@ -1196,17 +1205,21 @@ def _read_bounded_stdout(
                 return None
             if not events:
                 return None
-            try:
-                chunk = os.read(descriptor, min(4096, limit + 1 - total))
-            except OSError:
-                return None
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > limit:
-                return None
-        return b"".join(chunks)
+            for key, _mask in events:
+                name = names[key.fd]
+                try:
+                    chunk = os.read(key.fd, min(4096, limit + 1 - totals[name]))
+                except OSError:
+                    return None
+                if not chunk:
+                    selector.unregister(key.fd)
+                    del names[key.fd]
+                    continue
+                totals[name] += len(chunk)
+                if totals[name] > limit:
+                    return None
+                chunks[name].append(chunk)
+        return b"".join(chunks["out"]), b"".join(chunks["err"])
     finally:
         selector.close()
 
@@ -1216,10 +1229,12 @@ def _bounded_run(
 ) -> subprocess.CompletedProcess[str] | None:
     """Run one fixed, shell-free query and capture at most the output cap.
 
-    Output is bounded *during* capture: the child's stdout is drained through a
-    readability loop capped at :data:`MAX_ADAPTER_OUTPUT_BYTES`, and the child is
-    killed when the absolute deadline or the cap is reached. ``subprocess.run``'s
-    unbounded ``capture_output`` is deliberately not used.
+    Output is bounded *during* capture: stdout and stderr are drained together
+    through a readability loop, each capped at :data:`MAX_ADAPTER_OUTPUT_BYTES`,
+    and the child is killed when the absolute deadline or a cap is reached.
+    ``subprocess.run``'s unbounded ``capture_output`` is deliberately not used.
+    Stderr is returned as text (undecodable bytes replaced) so a caller can tell
+    a silent answer from a warned one.
     """
     if sys.platform != "darwin":
         return None
@@ -1233,7 +1248,7 @@ def _bounded_run(
             list(argv),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             close_fds=True,
             shell=False,
             env=dict(_SAFE_ENV),
@@ -1241,9 +1256,10 @@ def _bounded_run(
     except OSError:
         return None
     try:
-        raw = _read_bounded_stdout(process, deadline, MAX_ADAPTER_OUTPUT_BYTES)
-        if raw is None:
+        pipes = _read_bounded_pipes(process, deadline, MAX_ADAPTER_OUTPUT_BYTES)
+        if pipes is None:
             return None
+        raw_stdout, raw_stderr = pipes
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
@@ -1252,16 +1268,18 @@ def _bounded_run(
         except subprocess.TimeoutExpired:
             return None
         try:
-            stdout = raw.decode("utf-8")
+            stdout = raw_stdout.decode("utf-8")
         except UnicodeDecodeError:
             return None
-        return subprocess.CompletedProcess(list(argv), returncode, stdout, "")
+        stderr = raw_stderr.decode("utf-8", errors="replace")
+        return subprocess.CompletedProcess(list(argv), returncode, stdout, stderr)
     finally:
-        if process.stdout is not None:
-            try:
-                process.stdout.close()
-            except OSError:
-                pass
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
         _reap_bounded(process)
 
 
@@ -1274,15 +1292,19 @@ def _run_adapter(
         return None
 
 
-def _lsof_listeners(port: int, runner: BoundedRunner) -> str | None:
-    """The bounded ``lsof`` listener query's stdout, or ``None`` when it failed."""
+def _lsof_query(port: int, runner: BoundedRunner) -> subprocess.CompletedProcess[str] | None:
     if type(port) is not int or not (1 <= port <= 65535):
         return None
-    completed = _run_adapter(
+    return _run_adapter(
         runner,
         (LSOF, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"),
         ADAPTER_TIMEOUT_SECONDS,
     )
+
+
+def _lsof_listeners(port: int, runner: BoundedRunner) -> str | None:
+    """The bounded ``lsof`` listener query's stdout, or ``None`` when it failed."""
+    completed = _lsof_query(port, runner)
     if completed is None or completed.returncode != 0:
         return None
     return completed.stdout or ""
@@ -1320,9 +1342,81 @@ def wizard_listener_pids(port: int) -> frozenset[int]:
     and read-only like the rest of this module. An empty set means the query
     failed or found nothing, and the coordinator refuses an empty answer.
     """
-    stdout = _lsof_listeners(port, _bounded_run)
-    pids = None if stdout is None else parse_listener_pids(stdout)
-    return frozenset() if pids is None else pids
+    answer = wizard_listener_answer(port)
+    return frozenset() if answer is None else answer
+
+
+def wizard_listener_answer(port: int) -> frozenset[int] | None:
+    """Every pid listening on ``port``, or ``None`` when that cannot be known.
+
+    Unlike :func:`wizard_listener_pids`, a failed query, unreadable output or an
+    invalid port is ``None``, never an empty set, so a caller cannot read a
+    failed lookup as a free port. ``lsof`` exits 1 with no output when nothing
+    listens; that one case is ``frozenset()``.
+    """
+    completed = _lsof_query(port, _bounded_run)
+    if completed is None:
+        return None
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    # Exit 1 with no output and no warning is lsof's "nothing listens". Exit 1
+    # with a warning on stderr is a failed query that printed nothing to stdout.
+    if completed.returncode == 1 and not stdout.strip() and not stderr.strip():
+        return frozenset()
+    if completed.returncode != 0:
+        return None
+    return parse_listener_pids(stdout)
+
+
+def loopback_port_refused(port: int, timeout: float) -> bool | None:
+    """Whether loopback connects to ``port`` are refused on IPv4 and IPv6.
+
+    True only when a connect to 127.0.0.1 and one to ::1 are both refused. A
+    connect that succeeds means something is listening, so False. Any other
+    outcome, including a timeout, is None. ::1 also counts as refused when IPv6
+    is unavailable on this host (EADDRNOTAVAIL or EAFNOSUPPORT), since then no
+    IPv6 listener can exist.
+    """
+    if type(port) is not int or not (1 <= port <= 65535):
+        return None
+    if type(timeout) not in (int, float) or not (
+        0 < float(timeout) <= LOOPBACK_PROBE_TIMEOUT_SECONDS
+    ):
+        return None
+    outcomes = (
+        _connect_outcome(socket.AF_INET, "127.0.0.1", port, float(timeout), ()),
+        _connect_outcome(
+            socket.AF_INET6,
+            "::1",
+            port,
+            float(timeout),
+            (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT),
+        ),
+    )
+    if False in outcomes:
+        return False
+    if None in outcomes:
+        return None
+    return True
+
+
+def _connect_outcome(
+    family: int, host: str, port: int, timeout: float, unavailable: tuple[int, ...]
+) -> bool | None:
+    """True if refused, False if a connect succeeded, None if unknown."""
+    try:
+        probe = socket.socket(family, socket.SOCK_STREAM)
+    except OSError as exc:
+        return True if exc.errno in unavailable else None
+    with probe:
+        probe.settimeout(timeout)
+        try:
+            probe.connect((host, port))
+        except ConnectionRefusedError:
+            return True
+        except OSError as exc:
+            return True if exc.errno in unavailable else None
+        return False
 
 
 def _launchd_job(label: str, runner: BoundedRunner) -> LaunchdJob | None:

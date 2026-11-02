@@ -1264,6 +1264,9 @@ def _e2e(
         recheck_host=lambda host: None,
         prepare_scratch=lambda: tmp_path / "scratch",
         wizard_listener=lambda port, child_pid: frozenset({child_pid}),
+        # The real setup-port check runs /usr/sbin/lsof and loopback probes;
+        # this end-to-end test fakes the readiness steps, so it fakes this one too.
+        port_listeners=lambda port: frozenset(),
         prove_ready=lambda host, handoff_, remaining: NativeReadinessProof(
             ready=True, failure=None, port=54321, version=artifacts.version
         ),
@@ -1502,10 +1505,10 @@ def test_the_private_copies_are_removed_when_the_run_ends(tmp_path: Path) -> Non
 # ── the wizard listener ──────────────────────────────────────────────────────
 
 
-def _completed(stdout: str, returncode: int = 0):  # type: ignore[no-untyped-def]
+def _completed(stdout: str, returncode: int = 0, stderr: str = ""):  # type: ignore[no-untyped-def]
     import subprocess
 
-    return subprocess.CompletedProcess(["lsof"], returncode, stdout, "")
+    return subprocess.CompletedProcess(["lsof"], returncode, stdout, stderr)
 
 
 def test_wizard_listener_pids_names_every_listener(
@@ -1547,6 +1550,88 @@ def test_wizard_listener_pids_never_queries_a_bad_port(
     )
     assert native_readiness.wizard_listener_pids(0) == frozenset()
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("completed", "expected"),
+    [
+        (_completed("111\n222\n"), frozenset({111, 222})),
+        (_completed("", 1), frozenset()),
+        (_completed("", 2), None),
+        (_completed("", 0), None),
+        (_completed("x\n"), None),
+        (_completed("", 1, "lsof: WARNING: cannot read"), None),
+    ],
+    ids=["listeners", "none", "lsof-error", "empty-ok", "junk", "stderr"],
+)
+def test_wizard_listener_answer_separates_free_from_unknown(
+    monkeypatch: pytest.MonkeyPatch, completed: object, expected: object
+) -> None:
+    monkeypatch.setattr(
+        native_readiness, "_bounded_run", lambda argv, timeout: completed
+    )
+    assert native_readiness.wizard_listener_answer(54321) == expected
+
+
+def test_wizard_listener_answer_is_unknown_when_the_query_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raising(argv: object, timeout: object) -> None:
+        raise OSError("no lsof")
+
+    monkeypatch.setattr(native_readiness, "_bounded_run", raising)
+    assert native_readiness.wizard_listener_answer(54321) is None
+
+
+def test_a_real_loopback_listener_fails_the_connect_probe() -> None:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        assert native_readiness.loopback_port_refused(port, 1.0) is False
+
+
+def test_a_closed_loopback_port_is_refused_by_the_connect_probe() -> None:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    assert native_readiness.loopback_port_refused(port, 1.0) is True
+
+
+def test_the_connect_probe_refuses_an_invalid_port() -> None:
+    assert native_readiness.loopback_port_refused(0, 1.0) is None
+
+
+@pytest.mark.parametrize(
+    ("answer", "refused", "expected"),
+    [
+        (frozenset({4242}), True, frozenset({4242})),
+        (frozenset(), True, frozenset()),
+        (frozenset(), False, "raises"),
+        (frozenset(), None, "raises"),
+        (None, True, "raises"),
+    ],
+    ids=["busy", "free", "unattributed", "probe-unknown", "lsof-unknown"],
+)
+def test_the_setup_port_is_free_only_on_two_proofs(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: frozenset[int] | None,
+    refused: bool | None,
+    expected: object,
+) -> None:
+    monkeypatch.setattr(native_readiness, "wizard_listener_answer", lambda port: answer)
+    monkeypatch.setattr(
+        native_readiness, "loopback_port_refused", lambda port, timeout: refused
+    )
+    if expected == "raises":
+        with pytest.raises(OSError):
+            native._setup_port_listeners(54321)
+    else:
+        assert native._setup_port_listeners(54321) == expected
 
 
 # ── shell and readiness wiring facts ─────────────────────────────────────────

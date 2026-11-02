@@ -1732,7 +1732,7 @@ uv_call() {
             shift
             /usr/bin/env -i PATH="$NATIVE_PATH" HOME="$HOME" TMPDIR="$tmp" LANG=C \
                 "$uv" pip install --no-config --managed-python --default-index https://pypi.org/simple \
-                --only-binary :all: "$@"
+                --only-binary :all: --no-binary http-ece "$@"
             ;;
         *) return 1 ;;
     esac
