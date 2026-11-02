@@ -73,7 +73,8 @@ export function useChatRail(currentChatId: () => string): {
   function step(direction: -1 | 1): boolean {
     const target = direction < 0 ? neighbours.value.previous : neighbours.value.next
     if (!target) return false
-    void select(target)
+    // select clears its snapshot on failure, and the store surfaces switch errors itself.
+    select(target).catch(() => {})
     return true
   }
 
