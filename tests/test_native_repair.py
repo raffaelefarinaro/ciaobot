@@ -46,6 +46,22 @@ from tests.test_native_installer import (
     _public_event_pipe,
 )
 
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="native repair is a macOS path; Windows keeps the legacy installer",
+)
+
+
+@pytest.fixture(autouse=True)
+def _as_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The coordinator refuses off macOS; Linux CI runs these tests as darwin.
+
+    Every macOS boundary (launchctl, codesign, libproc) is faked per test, as in
+    tests/test_native_installer.py, so only the platform gate needs forcing.
+    """
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
 VERSION = ciao.__version__
 PORT = 9123
 FAST = _RepairPolicy(readiness_interval=0.01, poll_interval=0.01)
