@@ -33,6 +33,7 @@ from ciao.release_manifest import (
     RELEASE_PUBLIC_KEY,
     SERVER_HOST_FILENAME,
     build_manifest,
+    installer_artifact_entry,
 )
 from tests.test_release_manifest import _keypair, _sign
 
@@ -143,6 +144,38 @@ def _host_manifest_bytes(
                     "size": len(WHEEL_BYTES),
                 },
                 entry,
+            ],
+            created="2026-09-25T10:00:00+00:00",
+        )
+    ).encode()
+
+
+def _installer_manifest_bytes(tmp_path: Path) -> bytes:
+    """A schema-1 manifest naming the wheel and the three installer scripts (#2483)."""
+    installers = tmp_path / "installers"
+    installers.mkdir()
+    sh = installers / "install.sh"
+    sh.write_bytes(b"#!/bin/sh\necho sh\n")
+    engine_sh = installers / "install-engine.sh"
+    engine_sh.write_bytes(b"#!/bin/sh\necho engine\n")
+    ps1 = installers / "install.ps1"
+    ps1.write_bytes(b"Write-Host ps1\n")
+    return json.dumps(
+        build_manifest(
+            VERSION,
+            [
+                # The installers come first, so the wheel is found by kind, not position.
+                installer_artifact_entry(sh),
+                installer_artifact_entry(engine_sh),
+                installer_artifact_entry(ps1),
+                {
+                    "filename": WHEEL_NAME,
+                    "kind": "wheel",
+                    "platform": "any",
+                    "arch": "any",
+                    "sha256": hashlib.sha256(WHEEL_BYTES).hexdigest(),
+                    "size": len(WHEEL_BYTES),
+                },
             ],
             created="2026-09-25T10:00:00+00:00",
         )
@@ -8221,3 +8254,20 @@ def test_existing_uv_legacy_selection_is_unchanged(tmp_path: Path) -> None:
     assert (home / "bootstrap.log").read_text(encoding="utf-8") == (
         "bootstrap-called\npublish-called\n"
     )
+
+
+def test_embedded_verifier_ignores_installer_artifacts(tmp_path: Path) -> None:
+    # The installers are signed alongside the wheel for the client's own check;
+    # the one-line installer's verifier must still pick only the wheel out of them.
+    raw = _installer_manifest_bytes(tmp_path)
+    private_key, public_key, key_id = _keypair()
+    signature = _sign(raw, private_key, key_id)
+
+    result = _run_verifier(tmp_path, raw, signature, VERSION, public_key)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [
+        WHEEL_NAME,
+        hashlib.sha256(WHEEL_BYTES).hexdigest(),
+        str(len(WHEEL_BYTES)),
+    ]
