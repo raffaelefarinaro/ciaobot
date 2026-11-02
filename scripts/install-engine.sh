@@ -165,6 +165,11 @@ settled_mismatch=
 # Nothing below is read unless --native-install was given. The shell writes events
 # only until the handover, and only fixed literals; see native_main.
 native_install=0
+# Native repair mode (#2485) reuses every native-mode helper; these pick its preflight and coordinator.
+native_repair=0
+native_modes=0
+native_flag=--native-install
+native_module=ciao.native_installer
 events_fd=
 native_run_id=
 native_channel_open=0
@@ -191,6 +196,7 @@ native_verify_want_size=
 NATIVE_WRITE_TIMEOUT=5
 NATIVE_TIMER=/bin/sleep
 NATIVE_COORDINATOR_PROTOCOL=1
+NATIVE_REPAIR_PROTOCOL=1
 # Native mode resolves every command through this fixed path, so the public
 # descriptor is never handed to a program found on a caller's PATH. The test
 # harness rewrites this line to put its fake tools first.
@@ -964,7 +970,7 @@ native_report_failure() {
     # so the client never sees a second terminal event.
     native_terminal=1
     case "$native_code" in
-        invalid_arguments|existing_install|partial_install|unknown_state|install_in_progress) ;;
+        invalid_arguments|existing_install|partial_install|unknown_state|install_in_progress|not_installed) ;;
         download_failed|verification_failed|install_failed|cancelled) ;;
         *) native_code=install_failed ;;
     esac
@@ -1086,27 +1092,27 @@ native_validate_arguments() {
     export PATH
     case "$events_fd" in
         [3-9]) ;;
-        *) fail "--native-install requires --events-fd with a descriptor from 3 to 9" ;;
+        *) fail "$native_flag requires --events-fd with a descriptor from 3 to 9" ;;
     esac
     native_fd_is_open || fail "the --events-fd descriptor is not open"
     if [ /dev/fd/"$events_fd" -ef /dev/fd/1 ] || [ /dev/fd/"$events_fd" -ef /dev/fd/2 ]; then
         fail "the --events-fd descriptor must not be standard output or standard error"
     fi
     native_valid_run_id "$native_run_id" \
-        || fail "--native-install requires --run-id with a canonical lowercase UUID"
+        || fail "$native_flag requires --run-id with a canonical lowercase UUID"
     native_channel_open=1
     native_code=invalid_arguments
     case "$release_base" in
         "$NATIVE_RELEASE_SCHEME"://*) ;;
-        *) fail "--native-install needs a $NATIVE_RELEASE_SCHEME release base" ;;
+        *) fail "$native_flag needs a $NATIVE_RELEASE_SCHEME release base" ;;
     esac
     uv_curl_q=-q
     uv_curl_limits="--max-time 600 --max-filesize 536870912"
-    [ -n "$version" ] || fail "--native-install requires --version"
-    [ "$migrate" -eq 0 ] || fail "--migrate cannot be combined with --native-install"
-    [ "$as_host" -eq 0 ] || fail "--as-host cannot be combined with --native-install"
-    [ -z "$as_client" ] || fail "--as-client cannot be combined with --native-install"
-    [ "$no_start" -eq 0 ] || fail "--no-start cannot be combined with --native-install"
+    [ -n "$version" ] || fail "$native_flag requires --version"
+    [ "$migrate" -eq 0 ] || fail "--migrate cannot be combined with $native_flag"
+    [ "$as_host" -eq 0 ] || fail "--as-host cannot be combined with $native_flag"
+    [ -z "$as_client" ] || fail "--as-client cannot be combined with $native_flag"
+    [ "$no_start" -eq 0 ] || fail "--no-start cannot be combined with $native_flag"
     if [ -n "$workspace" ]; then
         native_valid_workspace "$workspace" \
             || fail "--workspace must be an absolute path with no . or .. component"
@@ -1115,6 +1121,11 @@ native_validate_arguments() {
         ''|*[!0-9A-Za-z.-]*) fail "invalid version: $version" ;;
     esac
     native_emit_phase preflight || { native_channel_open=0; fail "the --events-fd descriptor is not writable"; }
+    # Refused after the preflight phase, so the events are phase preflight then failed.
+    [ "$native_modes" -le 1 ] || fail "--native-install and --native-repair are mutually exclusive"
+    if [ "$native_repair" -eq 1 ] && [ -n "$workspace" ]; then
+        fail "--workspace cannot be combined with --native-repair"
+    fi
     native_code=install_failed
 }
 
@@ -1212,7 +1223,8 @@ while [ "$#" -gt 0 ]; do
             as_client=$2
             shift 2
             ;;
-        --native-install) native_install=1; shift ;;
+        --native-install) native_install=1; native_modes=$((native_modes + 1)); shift ;;
+        --native-repair) native_install=1; native_repair=1; native_modes=$((native_modes + 1)); native_flag=--native-repair; native_module=ciao.native_repair; shift ;;
         --events-fd)
             [ "$#" -ge 2 ] || fail "--events-fd requires a value"
             events_fd=$2
@@ -2966,6 +2978,75 @@ native_preflight() {
     return 0
 }
 
+native_repair_preflight() {
+    # Returns 13 install in progress, 12 unknown, 14 not installed, 0 repairable.
+    # Precedence is in progress > unknown > not installed. Read-only: nothing found is changed.
+    nr_installed=0
+    nr_lock=0
+    nr_unknown=0
+    native_state="$HOME/.local/state/ciaobot"
+    np_env_pattern='^[[:space:]]*CIAO_WORKSPACES[[:space:]]*=[[:space:]]*["'"'"']?[^[:space:]"'"'"']'
+
+    if [ "$native_redirect" -eq 1 ]; then
+        nr_unknown=1
+    fi
+    if [ -L "$native_state" ] || { [ -e "$native_state" ] && [ ! -d "$native_state" ]; }; then
+        nr_unknown=1
+    fi
+
+    # Installed evidence: the LaunchAgent, a loaded job, or the one workspace repair reads.
+    nr_plist="$HOME/Library/LaunchAgents/com.ciao.server.plist"
+    if [ -L "$nr_plist" ]; then
+        nr_unknown=1
+    else
+        nr_rc=0
+        native_present "$nr_plist" || nr_rc=$?
+        case "$nr_rc" in
+            0) if [ -f "$nr_plist" ]; then nr_installed=1; else nr_unknown=1; fi ;;
+            2) nr_unknown=1 ;;
+        esac
+    fi
+    nr_rc=0
+    native_host_job_state || nr_rc=$?
+    case "$nr_rc" in
+        0) nr_installed=1 ;;
+        2) nr_unknown=1 ;;
+    esac
+    nr_ws="$HOME/Ciaobot"
+    nr_rc=0
+    native_present "$nr_ws/.runtime/workspaces.json" || nr_rc=$?
+    case "$nr_rc" in
+        0) nr_installed=1 ;;
+        2) nr_unknown=1 ;;
+    esac
+    nr_rc=0
+    native_present "$nr_ws/.env" || nr_rc=$?
+    case "$nr_rc" in
+        0)
+            # A .env that is not a readable regular file is never read blind.
+            if [ -f "$nr_ws/.env" ] && [ ! -L "$nr_ws/.env" ] && [ -r "$nr_ws/.env" ]; then
+                if grep -Eq "$np_env_pattern" "$nr_ws/.env"; then nr_installed=1; fi
+            else
+                nr_unknown=1
+            fi
+            ;;
+        2) nr_unknown=1 ;;
+    esac
+
+    # A lock is never removed here: the run that holds it has to finish or be recovered.
+    nr_rc=0
+    native_present "$native_state/native-install.lock" || nr_rc=$?
+    case "$nr_rc" in
+        0) nr_lock=1; native_lock_report ;;
+        2) nr_unknown=1 ;;
+    esac
+
+    [ "$nr_lock" -eq 0 ] || return 13
+    [ "$nr_unknown" -eq 0 ] || return 12
+    [ "$nr_installed" -eq 1 ] || return 14
+    return 0
+}
+
 native_verify_file() {
     # PATH SHA256 SIZE: the digest and size the signed manifest names.
     native_verify_want_sha=$2
@@ -2998,7 +3079,7 @@ native_handover() {
         --host-archive "$host"
     [ -z "$workspace" ] || set -- "$@" --workspace "$workspace"
     native_handed_over=1
-    "$native_python" -I -m ciao.native_installer "$@" &
+    "$native_python" -I -m "$native_module" "$@" &
     native_coordinator_pid=$!
     native_close_public_fd
     [ "$native_cancel_requested" -eq 0 ] || kill -TERM "$native_coordinator_pid" 2>/dev/null || true
@@ -3012,15 +3093,26 @@ native_handover() {
 
 native_main() {
     native_redirect_check
-    np_rc=0
-    native_isolated native_preflight || np_rc=$?
-    case "$np_rc" in
-        0) ;;
-        10) native_code=existing_install; fail "this Mac already has a Ciaobot install; native install only installs on a fresh Mac" ;;
-        11) native_code=partial_install; fail "this Mac has a partial Ciaobot install; native install never repairs one" ;;
-        13) native_code=install_in_progress; fail "another native install is in progress or left its lock" ;;
-        *) native_code=unknown_state; fail "this Mac's Ciaobot state could not be established" ;;
-    esac
+    if [ "$native_repair" -eq 1 ]; then
+        np_rc=0
+        native_isolated native_repair_preflight || np_rc=$?
+        case "$np_rc" in
+            0) ;;
+            13) native_code=install_in_progress; fail "another native install or repair is in progress or left its lock" ;;
+            14) native_code=not_installed; fail "this Mac has no Ciaobot install to repair; use --native-install" ;;
+            *) native_code=unknown_state; fail "this Mac's Ciaobot state could not be established" ;;
+        esac
+    else
+        np_rc=0
+        native_isolated native_preflight || np_rc=$?
+        case "$np_rc" in
+            0) ;;
+            10) native_code=existing_install; fail "this Mac already has a Ciaobot install; native install only installs on a fresh Mac" ;;
+            11) native_code=partial_install; fail "this Mac has a partial Ciaobot install; native install never repairs one" ;;
+            13) native_code=install_in_progress; fail "another native install is in progress or left its lock" ;;
+            *) native_code=unknown_state; fail "this Mac's Ciaobot state could not be established" ;;
+        esac
+    fi
 
     native_emit_phase bootstrap || { native_channel_open=0; fail "the --events-fd descriptor stopped accepting events"; }
     native_code=download_failed
@@ -3071,10 +3163,17 @@ native_main() {
         || fail "could not prepare the installer environment"
     [ -x "$native_python" ] || fail "the installer environment has no python"
     native_code=invalid_arguments
-    native_isolated native_py -I -c 'import sys
+    if [ "$native_repair" -eq 1 ]; then
+        native_isolated native_py -I -c 'import sys
+from ciao.native_repair import NATIVE_REPAIR_PROTOCOL as p
+sys.exit(0 if p == int(sys.argv[1]) else 3)' "$NATIVE_REPAIR_PROTOCOL" >/dev/null 2>&1 \
+            || fail "release $version does not support --native-repair"
+    else
+        native_isolated native_py -I -c 'import sys
 from ciao.native_installer import NATIVE_COORDINATOR_PROTOCOL as p
 sys.exit(0 if p == int(sys.argv[1]) else 3)' "$NATIVE_COORDINATOR_PROTOCOL" >/dev/null 2>&1 \
-        || fail "release $version does not support --native-install"
+            || fail "release $version does not support --native-install"
+    fi
 
     native_code=verification_failed
     native_isolated native_py -I -m ciao.server_host_install select --describe \

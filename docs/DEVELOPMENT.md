@@ -803,7 +803,7 @@ Exit semantics: exit 0 means `service_ready` was emitted, and any other exit is 
 
 Cancellation: SIGINT, SIGTERM or SIGHUP to the shell (or its process group) before the handover is reported as `failed(cancelled)`. After the handover the shell forwards SIGTERM to the coordinator, which stops the wizard. An activated service is never stopped by cancellation.
 
-Lock and partial state: the coordinator owns the run lock and both canonical classifications. The shell's system-only preflight refuses an existing, partial, unknown or locked Mac before any network work and changes nothing it found. The native installer never repairs, retries or reinstalls; see the recovery paragraph above.
+Lock and partial state: the coordinator owns the run lock and both canonical classifications. The shell's system-only preflight refuses an existing, partial, unknown or locked Mac before any network work and changes nothing it found. The native installer never repairs, retries or reinstalls; see the recovery paragraph above. Native repair (below) takes the same lock.
 
 Trust chain: the pinned uv digest table authenticates the uv archive. The shell's own sha256 of the extracted uv executable is passed to the coordinator as `--uv-sha256`. The signed manifest authenticates the wheel and the server host, and both are checked before the handover (the client has already checked `install.sh` against the same manifest); the wheel's manifest sha256 is passed as `--wheel-sha256`. The coordinator re-hashes its private copies, and it re-verifies the host archive (`verify_host_archive`) before it installs anything.
 
@@ -819,6 +819,47 @@ Limits:
 - `install.sh` is authenticated only by the client's own check against the signed manifest's `installer` entry (see "Authenticating `install.sh`" above). A release up to and including v1.8.1 has no such entry, so a client that verifies this way cannot install it.
 
 Tests: `tests/test_native_install_sh.py` (shell, fake tools) and `tests/test_native_installer.py` (coordinator).
+
+**Native repair mode (`install.sh --native-repair`)**
+
+Not present in engine 1.7.0 or earlier; ships with the release that contains #2485. The Mac client offers **Repair** when it finds an installed engine that does not answer or start.
+
+```sh
+sh install.sh --version VERSION --native-repair --events-fd N --run-id UUID [--no-modify-path]
+```
+
+Arguments, descriptor rules, the release download and verification, the environment native mode gives its commands, cancellation and exit semantics are exactly those of native install mode above. `--native-install` and `--native-repair` are mutually exclusive. Repair takes no `--workspace` (it is `invalid_arguments`): the workspace is the one the LaunchAgent serves, or `~/Ciaobot` when there is no LaunchAgent. `--help` prints the same legacy text and does not list this flag.
+
+Events: the same NDJSON contract (schema 1, keys `schema`/`run_id`/`seq`/`type`, at most 1024 bytes per line, at most 32 events, strictly increasing `seq`). There is no wizard: the shell writes `phase preflight`, `phase bootstrap`, `phase download`; the coordinator (`python -I -m ciao.native_repair run`, same arguments as `ciao.native_installer run`) writes `phase install`, `phase activation`, `phase readiness` and then `service_ready` (the only success, origin `http://127.0.0.1:<configured port>`) or `failed`. `wizard_ready` and `setup_saved` never appear.
+
+Refusals change nothing (no file, lock or service):
+
+| Code | Emitted by | Meaning |
+| --- | --- | --- |
+| `not_installed` | shell or coordinator | No LaunchAgent, no loaded job and no completed workspace at `~/Ciaobot`. Also covers a workspace whose install shows no native evidence: none of the install receipt, our LaunchAgent, or the server host ownership record exists (for example a user's own `uv tool install ciaobot`). Offer native install instead. |
+| `install_in_progress` | shell or coordinator | A native install or repair holds `~/.local/state/ciaobot/native-install.lock`, or a killed run left it. See "Recovering a native-install lock". |
+| `unknown_state` | shell or coordinator | A redirect variable or `CIAO_CHAT_ID`; an unsafe state directory, plist, `.env`, receipt or shim; a LaunchAgent with another label, runtime root or program (for example a developer checkout); a loaded job without a LaunchAgent; a disabled launchd override; a migration transaction, host-upgrade journal or legacy menubar agent; a symlink at the host path, or a LaunchAgent whose host lies outside `~/Applications/Ciaobot Server.app`; an invalid `PWA_PORT`; a classification that changed after the lock was taken. |
+| `invalid_arguments` | shell or coordinator | As in install mode, plus both native flags given, `--workspace` given, a release without `ciao.native_repair`, a `--version` that is not `X.Y.Z[-pre]`, or a `--version` older than the installed engine (SemVer precedence; nothing is touched). |
+
+The other codes (`download_failed`, `verification_failed`, `install_failed`, `activation_refused`, `service_not_ready`, `cancelled`, `event_channel_failed`, `internal_error`) mean what they mean in install mode.
+
+What repair checks and replaces. Every check runs before the first change, and only a component that fails its check is replaced:
+
+| Component | Checked | Replaced when |
+| --- | --- | --- |
+| Workspace: `.env`, `.runtime/`, vault, chats | read only: `.env` for `PWA_PORT` (default 8443), the registry for "set up" | never |
+| Server host `~/Applications/Ciaobot Server.app` and its ownership record | owned and current for this release's manifest-verified host policy | absent (`create_fresh_host`), or anything else that is not the current verified host: superseded, ad-hoc when the release ships signed, unprovable, another policy, orphan record. It is replaced in one step after the staged bundle is verified (`repair_server_host`), and the old bundle and record come back if the swap fails. Replacing the host can reset macOS privacy grants such as Full Disk Access |
+| uv tool environment and `~/.local/bin/ciao` | the tool python lies inside the tool env or uv's managed Python, the shim resolves into the tool env, and `import ciao, ciao.main` reports `--version` | any check fails, or the installed version is older than `--version`: `uv tool install --force --reinstall` of the verified wheel. A newer version runs its startup migrations, as any update does |
+| Persisted uv `~/.local/state/ciaobot/uv/uv` (#2484) | — | always re-copied from the verified uv |
+| Install receipt | version, executable, python, `launchd`, `com.ciao.server`, `uv` | missing, corrupt or a field differs (`installed_at` is kept) |
+| LaunchAgent `~/Library/LaunchAgents/com.ciao.server.plist` | bytes equal the canonical hosted render for the workspace, its `.runtime`, the configured port and the existing plist's `PATH` | missing or different (atomic replace, `0600`) |
+| Service `com.ciao.server` | — | always: `launchctl bootout` when loaded, wait until launchd reports it absent, then bootstrap through `load_fresh_agent`, then the native readiness proof |
+
+Every check, including the host archive, runs before the service is stopped. A bad host archive ends `failed(verification_failed)` with the service untouched.
+
+A healthy install is idempotent: nothing but the persisted uv and the service restart changes, and the run ends with `service_ready` on the same port. Repair never edits a shell profile, opens a browser, prints a sign-in URL, clears a launchd override, removes a lock or rolls back. Because it replaces only what already failed its check, a failure part-way leaves no component worse than it found it, but a failure after the service is stopped leaves it stopped: repair does not roll back, and the client should offer Repair again. The engine the run starts writes its normal runtime state under `.runtime/`, as every start does.
+
+Tests: `tests/test_native_repair_sh.py` (shell) and `tests/test_native_repair.py` (coordinator).
 
 The native bootstrap child side is now explicit but internal. When the native
 coordinator starts it with the private `--installer-native-fd` (hidden, and
