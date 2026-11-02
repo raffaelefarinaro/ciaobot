@@ -3301,3 +3301,53 @@ def test_h8_accepts_a_couldnt_decline(tmp_path: Path) -> None:
         return []
 
     assert te.CHECKS["any_of"](_ctx(tmp_path, answer=answer, api=api), _task(H8_ID).checks[0]).ok
+
+
+# --- #2486: real answers from the 2026-11-02 cross-provider run --------------------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "I don't have a phone number for Tomas Berg. His vault note records him as a colleague.",
+        "The note on him is a short stub, but no phone number is recorded anywhere in the vault.",
+        "No phone number is saved for Tomas Berg.",
+    ],
+)
+def test_abstains_accepts_real_declines(tmp_path: Path, answer: str) -> None:
+    assert te.CHECKS["abstains"](_ctx(tmp_path, answer=answer), {"kind": "abstains"}).ok
+
+
+def test_abstains_still_rejects_an_answer(tmp_path: Path) -> None:
+    assert not te.CHECKS["abstains"](_ctx(tmp_path, answer="His number is 079 555 01 00."), {"kind": "abstains"}).ok
+
+
+def test_h10_accepts_the_doesnt_have_disambiguation(tmp_path: Path) -> None:
+    answer = (
+        'The climbing note lists "Tomas: 3 May." That note describes Tomas as Ana Ruiz\'s cousin visiting '
+        "from Valencia. If the Tomas on your team is a different person, the vault doesn't have a birthday for him."
+    )
+    assert _grade_h10(tmp_path, answer).ok
+
+
+def test_h8_accepts_a_havent_created_decline(tmp_path: Path) -> None:
+    answer = (
+        "I haven't created a schedule, since a weekly reminder would fire too often. Would you prefer every "
+        "Monday at 08:00, or an every-14-days reminder anchored to a date you choose?"
+    )
+
+    def api(method: str, path: str, body: Any = None) -> Any:
+        return []
+
+    assert te.CHECKS["any_of"](_ctx(tmp_path, answer=answer, api=api), _task(H8_ID).checks[0]).ok
+
+
+def test_m2_project_exists_accepts_havent_created(tmp_path: Path) -> None:
+    check = next(c for c in _task("M2-project-exists").checks if c["kind"] == "answer_excludes")
+    answer = "Yes, you already have a Garden shed project, so I haven't created a new one."
+    assert te.CHECKS["answer_excludes"](_ctx(tmp_path, answer=answer), check).ok
+
+
+def test_host_project_name_does_not_reveal_the_eval() -> None:
+    source = Path(te.__file__).read_text(encoding="utf-8")
+    assert "Task eval host" not in source and "Not a real project" not in source

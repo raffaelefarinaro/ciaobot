@@ -76,7 +76,7 @@ on every row.
    Steps 1 and 2 are `prepare_workspace`, which runs without booting an engine.
 3. The engine is started with `ciao run` (cwd `T/ws`, the same environment
    scrub), and the harness waits until `/api/status` answers 401. It then
-   signs in with the run's own token and creates a "Task eval host" project
+   signs in with the run's own token and creates a neutrally named "Personal" host project (a name that says "eval" made one model refuse the task)
    to hold the eval chat.
 4. Setup steps run (`task`, `project`), then the harness takes a snapshot:
    task ids, schedule ids, project ids, the relative paths of every file under

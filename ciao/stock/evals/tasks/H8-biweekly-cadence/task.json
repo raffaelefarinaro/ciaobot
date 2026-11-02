@@ -55,7 +55,12 @@
               "isn't possible",
               "doesn't offer",
               "doesn’t offer",
-              "no way"
+              "no way",
+              "haven't created",
+              "haven’t created",
+              "didn't create",
+              "didn’t create",
+              "have not created"
             ]
           },
           {
@@ -71,7 +76,11 @@
               "every 2",
               "2nd monday",
               "second monday",
-              "other monday"
+              "other monday",
+              "14 days",
+              "14-day",
+              "every-14",
+              "every 14"
             ]
           }
         ],
